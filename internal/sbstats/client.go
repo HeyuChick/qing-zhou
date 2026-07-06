@@ -1,0 +1,277 @@
+// Package sbstats reads per-user traffic from sing-box's v2ray_api gRPC
+// StatsService (B2 integration model). It speaks gRPC-over-h2c by hand (just
+// x/net/http2 + a tiny hand-rolled protobuf codec for the two messages we
+// need) so 轻舟 takes neither a grpc-go dependency nor any sing-box import —
+// keeping the binary lean and the license independent.
+//
+// sing-box tracks per-user counters named:
+//
+//	user>>>NAME>>>traffic>>>uplink
+//	user>>>NAME>>>traffic>>>downlink
+//
+// We QueryStats with reset=true, so each poll returns the DELTA since the last
+// poll and zeroes the counter — 轻舟 just accumulates the deltas into each
+// user's usage (counters also reset whenever sing-box restarts).
+package sbstats
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"golang.org/x/net/http2"
+)
+
+// Traffic is a user's up/down delta in bytes.
+type Traffic struct {
+	Up   int64
+	Down int64
+}
+
+const fullMethod = "/v2ray.core.app.stats.command.StatsService/QueryStats"
+
+// Client queries a sing-box v2ray_api gRPC endpoint over cleartext HTTP/2.
+type Client struct {
+	addr string // host:port of experimental.v2ray_api.listen
+	hc   *http.Client
+}
+
+// New builds a client for the given v2ray_api listen address (e.g.
+// 127.0.0.1:18080).
+func New(addr string) *Client {
+	tr := &http2.Transport{
+		AllowHTTP: true, // h2c: prior-knowledge HTTP/2 over plaintext TCP
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		},
+	}
+	return &Client{addr: addr, hc: &http.Client{Transport: tr, Timeout: 10 * time.Second}}
+}
+
+// QueryUserTraffic returns each user's up/down delta since the previous call
+// (reset=true). Keys are the user names registered in
+// experimental.v2ray_api.stats.users.
+func (c *Client) QueryUserTraffic(ctx context.Context) (map[string]*Traffic, error) {
+	// Request: patterns=["user>>>"], reset=true → only user counters, reset them.
+	req := encodeQueryRequest("user>>>", true)
+	frame := frameMessage(req)
+
+	url := "http://" + c.addr + fullMethod
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(frame))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("content-type", "application/grpc")
+	httpReq.Header.Set("te", "trailers")
+
+	resp, err := c.hc.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// gRPC status lives in trailers; non-zero = error.
+	if st := resp.Trailer.Get("grpc-status"); st != "" && st != "0" {
+		return nil, fmt.Errorf("grpc-status %s: %s", st, resp.Trailer.Get("grpc-message"))
+	}
+	msg, err := unframeMessage(body)
+	if err != nil {
+		return nil, err
+	}
+	stats, err := decodeQueryResponse(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	out := map[string]*Traffic{}
+	for name, val := range stats {
+		// name = user>>>NAME>>>traffic>>>uplink|downlink
+		parts := splitName(name)
+		if len(parts) != 4 || parts[0] != "user" || parts[2] != "traffic" {
+			continue
+		}
+		t := out[parts[1]]
+		if t == nil {
+			t = &Traffic{}
+			out[parts[1]] = t
+		}
+		switch parts[3] {
+		case "uplink":
+			t.Up += val
+		case "downlink":
+			t.Down += val
+		}
+	}
+	return out, nil
+}
+
+// splitName splits a v2ray stat name on the ">>>" separator.
+func splitName(name string) []string { return strings.Split(name, ">>>") }
+
+// ---- gRPC length-prefixed framing ----
+
+func frameMessage(msg []byte) []byte {
+	buf := make([]byte, 5+len(msg))
+	buf[0] = 0 // not compressed
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(msg)))
+	copy(buf[5:], msg)
+	return buf
+}
+
+func unframeMessage(body []byte) ([]byte, error) {
+	if len(body) < 5 {
+		return nil, fmt.Errorf("grpc frame too short (%d bytes)", len(body))
+	}
+	n := binary.BigEndian.Uint32(body[1:5])
+	if int(n) > len(body)-5 {
+		return nil, fmt.Errorf("grpc frame length %d exceeds body %d", n, len(body)-5)
+	}
+	return body[5 : 5+n], nil
+}
+
+// ---- minimal protobuf for StatsService ----
+//
+// QueryStatsRequest { string pattern=1; bool reset=2; repeated string patterns=3; bool regexp=4 }
+// QueryStatsResponse { repeated Stat stat=1 }   Stat { string name=1; int64 value=2 }
+
+func encodeQueryRequest(pattern string, reset bool) []byte {
+	var b []byte
+	// field 3 (patterns), wire type 2 (length-delimited)
+	b = append(b, 0x1A)
+	b = appendVarint(b, uint64(len(pattern)))
+	b = append(b, pattern...)
+	if reset {
+		// field 2 (reset), wire type 0 (varint)
+		b = append(b, 0x10, 0x01)
+	}
+	return b
+}
+
+// decodeQueryResponse parses repeated Stat (field 1) → name:value.
+func decodeQueryResponse(b []byte) (map[string]int64, error) {
+	out := map[string]int64{}
+	for len(b) > 0 {
+		tag, n := readVarint(b)
+		if n == 0 {
+			return nil, fmt.Errorf("bad response tag")
+		}
+		b = b[n:]
+		field := tag >> 3
+		wire := tag & 7
+		if field == 1 && wire == 2 { // Stat message
+			l, n := readVarint(b)
+			if n == 0 || int(l) > len(b)-n {
+				return nil, fmt.Errorf("bad Stat length")
+			}
+			b = b[n:]
+			name, value := decodeStat(b[:l])
+			if name != "" {
+				out[name] = value
+			}
+			b = b[l:]
+		} else {
+			var err error
+			b, err = skipField(b, wire)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
+}
+
+func decodeStat(b []byte) (name string, value int64) {
+	for len(b) > 0 {
+		tag, n := readVarint(b)
+		if n == 0 {
+			return
+		}
+		b = b[n:]
+		switch field, wire := tag>>3, tag&7; {
+		case field == 1 && wire == 2: // name
+			l, n := readVarint(b)
+			if n == 0 || int(l) > len(b)-n {
+				return
+			}
+			b = b[n:]
+			name = string(b[:l])
+			b = b[l:]
+		case field == 2 && wire == 0: // value
+			v, n := readVarint(b)
+			if n == 0 {
+				return
+			}
+			value = int64(v)
+			b = b[n:]
+		default:
+			var err error
+			b, err = skipField(b, wire)
+			if err != nil {
+				return
+			}
+		}
+	}
+	return
+}
+
+func appendVarint(b []byte, v uint64) []byte {
+	for v >= 0x80 {
+		b = append(b, byte(v)|0x80)
+		v >>= 7
+	}
+	return append(b, byte(v))
+}
+
+func readVarint(b []byte) (uint64, int) {
+	var v uint64
+	for i := 0; i < len(b); i++ {
+		v |= uint64(b[i]&0x7F) << (7 * i)
+		if b[i] < 0x80 {
+			return v, i + 1
+		}
+		if i >= 9 {
+			break
+		}
+	}
+	return 0, 0
+}
+
+func skipField(b []byte, wire uint64) ([]byte, error) {
+	switch wire {
+	case 0: // varint
+		_, n := readVarint(b)
+		if n == 0 {
+			return nil, fmt.Errorf("bad varint")
+		}
+		return b[n:], nil
+	case 1: // 64-bit
+		if len(b) < 8 {
+			return nil, fmt.Errorf("short 64-bit")
+		}
+		return b[8:], nil
+	case 2: // length-delimited
+		l, n := readVarint(b)
+		if n == 0 || int(l) > len(b)-n {
+			return nil, fmt.Errorf("bad length-delimited")
+		}
+		return b[n+int(l):], nil
+	case 5: // 32-bit
+		if len(b) < 4 {
+			return nil, fmt.Errorf("short 32-bit")
+		}
+		return b[4:], nil
+	default:
+		return nil, fmt.Errorf("unknown wire type %d", wire)
+	}
+}

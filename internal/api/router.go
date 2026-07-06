@@ -1,0 +1,198 @@
+package api
+
+import (
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
+	"qingzhou/internal/mailer"
+	"qingzhou/internal/sbctl"
+	"qingzhou/internal/store"
+	"qingzhou/web"
+)
+
+type API struct {
+	st       *store.Store
+	secret   []byte
+	mailer   *mailer.Mailer // may be nil if SMTP is not configured
+	authRL   *rateLimiter
+	resendRL *rateLimiter
+
+	sbctl *sbctl.Controller // native sing-box orchestrator; nil if not enabled
+
+	linkMu    sync.Mutex
+	linkCache map[int64]linkCacheEntry
+}
+
+// SetSbController attaches the native sing-box controller so admin changes to
+// inbounds/TLS/users can trigger a config rebuild. Safe to leave unset.
+func (a *API) SetSbController(c *sbctl.Controller) { a.sbctl = c }
+
+// sbRebuild regenerates and applies the sing-box config if the native
+// controller is attached; a no-op otherwise. Errors are returned to the caller.
+func (a *API) sbRebuild() error {
+	if a.sbctl == nil {
+		return nil
+	}
+	return a.sbctl.Rebuild()
+}
+
+func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
+	return &API{
+		st: st, secret: secret, mailer: mail,
+		authRL:    newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
+		resendRL:  newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
+		linkCache: make(map[int64]linkCacheEntry),
+	}
+}
+
+func (a *API) Router() http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(30 * time.Second))
+
+	// Public
+	r.Get("/api/health", a.handleHealth)
+	r.Get("/api/config", a.handleConfig)
+	r.Get("/api/auth/verify", a.handleVerify)
+	r.Get("/sub/{token}", a.handleSub)
+
+	// Auth POST endpoints — rate limited per IP (brute-force / email-bomb).
+	r.Group(func(pub chi.Router) {
+		pub.Use(a.limit(a.authRL))
+		pub.Post("/api/auth/login", a.handleLogin)
+		pub.Post("/api/auth/register", a.handleRegister)
+		pub.Post("/api/auth/forgot", a.handleForgot)
+		pub.Post("/api/auth/reset", a.handleReset)
+	})
+
+	// Authenticated (any logged-in user)
+	r.Group(func(pr chi.Router) {
+		pr.Use(a.authMiddleware)
+		pr.Get("/api/auth/me", a.handleMe)
+		pr.Post("/api/auth/logout", a.handleLogout)
+		pr.Get("/api/user/dashboard", a.handleDashboard)
+		pr.Get("/api/user/plans", a.handleUserPlans)
+		pr.Get("/api/user/subscription", a.handleSubscription)
+		pr.Post("/api/user/reset-sub", a.handleResetSub)
+		pr.Get("/api/user/packages", a.handleUserPackages)
+		pr.Post("/api/user/purchase", a.handlePurchase)
+		pr.Get("/api/user/orders", a.handleUserOrders)
+		pr.Get("/api/user/points", a.handleUserPoints)
+		pr.Get("/api/user/stats/traffic", a.handleUserTrafficStats)
+		pr.Post("/api/user/password", a.handleChangePassword)
+		pr.Post("/api/user/resend-verify", a.handleResendVerify)
+		pr.Post("/api/user/email", a.handleBindEmail)
+		pr.Get("/api/user/announcements", a.handleUserAnnouncements)
+		pr.Post("/api/user/announcements/read", a.handleUserMarkAnnouncementsRead)
+		pr.Get("/api/help", a.handleHelpDocs)
+		pr.Get("/api/user/sessions", a.handleUserSessions)
+		pr.Post("/api/user/sessions/{id}/revoke", a.handleUserRevokeSession)
+		pr.Get("/api/user/nodes", a.handleUserNodes)
+		pr.Get("/api/user/nodes/ping", a.handleUserNodesPing)
+		pr.Post("/api/user/nodes/toggle", a.handleUserToggleNode)
+		pr.Post("/api/user/nodes/bulk", a.handleUserBulkNodes)
+		pr.Post("/api/user/nodes/disable-all", a.handleUserDisableAllNodes)
+		pr.Post("/api/user/nodes/enable-all", a.handleUserEnableAllNodes)
+	})
+
+	// Admin only
+	r.Group(func(ar chi.Router) {
+		ar.Use(a.authMiddleware)
+		ar.Use(a.requireAdmin)
+		ar.Get("/api/admin/settings", a.handleGetSettings)
+		ar.Put("/api/admin/settings", a.handlePutSettings)
+		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
+		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
+		ar.Get("/api/admin/help", a.handleAdminHelpDocs)
+		ar.Post("/api/admin/help", a.handleAdminCreateHelpDoc)
+		ar.Put("/api/admin/help/{id}", a.handleAdminUpdateHelpDoc)
+		ar.Delete("/api/admin/help/{id}", a.handleAdminDeleteHelpDoc)
+		ar.Delete("/api/admin/users/{id}", a.handleAdminDeleteUser)
+		ar.Post("/api/admin/users/{id}/points", a.handleAdminRecharge)
+		ar.Post("/api/admin/users/{id}/assign-plan", a.handleAdminAssignPlan)
+		ar.Get("/api/admin/packages", a.handleAdminListPackages)
+		ar.Post("/api/admin/packages", a.handleAdminCreatePackage)
+		ar.Put("/api/admin/packages/{id}", a.handleAdminUpdatePackage)
+		ar.Post("/api/admin/packages/{id}/retire", a.handleAdminRetirePackage)
+		ar.Post("/api/admin/packages/{id}/enable", a.handleAdminEnablePackage)
+		ar.Delete("/api/admin/packages/{id}", a.handleAdminDeletePackage)
+		ar.Get("/api/admin/orders", a.handleAdminListOrders)
+		ar.Get("/api/admin/users/{id}/orders", a.handleAdminUserOrders)
+		ar.Get("/api/admin/users/{id}/plans", a.handleAdminUserPlans)
+		ar.Post("/api/admin/orders/{id}/refund", a.handleAdminRefundOrder)
+		ar.Delete("/api/admin/orders/{id}", a.handleAdminDeleteOrder)
+
+		// native sing-box (B2): TLS/Reality profiles, inbounds, config preview
+		ar.Post("/api/admin/sb/reality-keypair", a.handleAdminRealityKeypair)
+		ar.Get("/api/admin/sb/tls", a.handleAdminListSbTls)
+		ar.Post("/api/admin/sb/tls", a.handleAdminSaveSbTls)
+		ar.Post("/api/admin/sb/tls/reality", a.handleAdminCreateRealityTls)
+		ar.Put("/api/admin/sb/tls/reality/{id}", a.handleAdminUpdateRealityTls)
+		ar.Post("/api/admin/sb/tls/cert", a.handleAdminSaveCertTls)
+		ar.Put("/api/admin/sb/tls/cert/{id}", a.handleAdminSaveCertTls)
+		ar.Put("/api/admin/sb/tls/{id}", a.handleAdminSaveSbTls)
+		ar.Delete("/api/admin/sb/tls/{id}", a.handleAdminDeleteSbTls)
+		ar.Get("/api/admin/sb/inbounds", a.handleAdminListSbInbounds)
+		ar.Post("/api/admin/sb/inbounds", a.handleAdminSaveSbInbound)
+		ar.Put("/api/admin/sb/inbounds/{id}", a.handleAdminSaveSbInbound)
+		ar.Delete("/api/admin/sb/inbounds/{id}", a.handleAdminDeleteSbInbound)
+		ar.Get("/api/admin/sb/preview", a.handleAdminSbPreview)
+		ar.Get("/api/admin/sb/import-remote/list-files", a.handleAdminImportRemoteListFiles)
+		ar.Get("/api/admin/sb/import-remote/preview", a.handleAdminImportRemotePreview)
+
+		// server management (multi-server sing-box orchestration)
+		ar.Get("/api/admin/servers", a.handleAdminListServers)
+		ar.Post("/api/admin/servers", a.handleAdminCreateServer)
+		ar.Put("/api/admin/servers/{id}", a.handleAdminUpdateServer)
+		ar.Delete("/api/admin/servers/{id}", a.handleAdminDeleteServer)
+		ar.Post("/api/admin/servers/{id}/test", a.handleAdminTestServer)
+		ar.Post("/api/admin/servers/{id}/rebuild", a.handleAdminRebuildServer)
+
+		// nodes / groups / sources (Phase 4.5)
+		ar.Get("/api/admin/inbounds", a.handleAdminInbounds)
+		ar.Get("/api/admin/nodes", a.handleAdminListNodes)
+		ar.Post("/api/admin/nodes", a.handleAdminCreateNode)
+		ar.Post("/api/admin/nodes/import", a.handleAdminImportNodes)
+		ar.Put("/api/admin/nodes/{id}", a.handleAdminUpdateNode)
+		ar.Delete("/api/admin/nodes/{id}", a.handleAdminDeleteNode)
+		ar.Get("/api/admin/node-groups", a.handleAdminListGroups)
+		ar.Post("/api/admin/node-groups", a.handleAdminCreateGroup)
+		ar.Put("/api/admin/node-groups/{id}", a.handleAdminUpdateGroup)
+		ar.Delete("/api/admin/node-groups/{id}", a.handleAdminDeleteGroup)
+		ar.Get("/api/admin/node-sources", a.handleAdminListSources)
+		ar.Post("/api/admin/node-sources", a.handleAdminCreateSource)
+		ar.Put("/api/admin/node-sources/{id}", a.handleAdminUpdateSource)
+		ar.Post("/api/admin/node-sources/{id}/fetch", a.handleAdminFetchSource)
+		ar.Delete("/api/admin/node-sources/{id}", a.handleAdminDeleteSource)
+
+		// users + stats (Phase 5)
+		ar.Get("/api/admin/users", a.handleAdminListUsers)
+		ar.Post("/api/admin/users", a.handleAdminCreateUser)
+		ar.Put("/api/admin/users/{id}", a.handleAdminUpdateUser)
+		ar.Get("/api/admin/stats/overview", a.handleAdminOverview)
+		ar.Get("/api/admin/stats/traffic", a.handleAdminTrafficStats)
+		ar.Get("/api/admin/stats/top", a.handleAdminTopStats)
+		ar.Get("/api/admin/stats/distribution", a.handleAdminDistribution)
+
+		ar.Get("/api/admin/reg-codes", a.handleAdminListRegCodes)
+		ar.Post("/api/admin/reg-codes/generate", a.handleAdminGenerateRegCodes)
+		ar.Put("/api/admin/reg-codes/{id}", a.handleAdminUpdateRegCode)
+		ar.Delete("/api/admin/reg-codes/{id}", a.handleAdminDeleteRegCode)
+
+		ar.Get("/api/admin/announcements", a.handleAdminListAnnouncements)
+		ar.Post("/api/admin/announcements", a.handleAdminCreateAnnouncement)
+		ar.Put("/api/admin/announcements/{id}", a.handleAdminUpdateAnnouncement)
+		ar.Delete("/api/admin/announcements/{id}", a.handleAdminDeleteAnnouncement)
+	})
+
+	// Embedded SPA (must be last; specific routes above take precedence).
+	r.Handle("/*", web.Handler())
+
+	return r
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=QingZhou subscription panel
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qingzhou
+EnvironmentFile=/opt/qingzhou/qingzhou.env
+ExecStart=/opt/qingzhou/qingzhou
+Restart=on-failure
+RestartSec=5s
+# Harden a little
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

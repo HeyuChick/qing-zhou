@@ -1,0 +1,345 @@
+package store
+
+// schema is applied idempotently on every boot. Tables for later phases
+// (packages, orders, nodes, groups, ...) are added in their own phases.
+const schema = `
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  username        TEXT    NOT NULL UNIQUE,
+  email           TEXT    UNIQUE,
+  password_hash   TEXT    NOT NULL,
+  role            TEXT    NOT NULL DEFAULT 'user',
+  status          TEXT    NOT NULL DEFAULT 'active',
+  email_verified  INTEGER NOT NULL DEFAULT 0,
+  points          INTEGER NOT NULL DEFAULT 0,
+  client_id     INTEGER,
+  client_name   TEXT,
+  client_uuid   TEXT,
+  client_secret TEXT,
+  sub_token       TEXT    UNIQUE,
+  current_plan_id INTEGER,
+  traffic_limit   INTEGER NOT NULL DEFAULT 0,
+  device_limit    INTEGER NOT NULL DEFAULT 3,
+  used_up         INTEGER NOT NULL DEFAULT 0,
+  used_down       INTEGER NOT NULL DEFAULT 0,
+  expiry_at       INTEGER NOT NULL DEFAULT 0,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+CREATE TABLE IF NOT EXISTS packages (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  type          TEXT    NOT NULL,            -- traffic | plan | device
+  name          TEXT    NOT NULL,
+  description   TEXT    NOT NULL DEFAULT '',
+  price_points  INTEGER NOT NULL DEFAULT 0,
+  traffic_bytes INTEGER NOT NULL DEFAULT 0,
+  device_add    INTEGER NOT NULL DEFAULT 0,
+  duration_days INTEGER NOT NULL DEFAULT 0,
+  stock         INTEGER NOT NULL DEFAULT -1, -- -1 = unlimited
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  sort_order    INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id          INTEGER NOT NULL,
+  package_id       INTEGER NOT NULL,
+  package_snapshot TEXT    NOT NULL DEFAULT '',
+  price_points     INTEGER NOT NULL,
+  status           TEXT    NOT NULL,
+  created_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
+
+CREATE TABLE IF NOT EXISTS point_transactions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL,
+  amount        INTEGER NOT NULL,            -- + credit, - debit
+  type          TEXT    NOT NULL,            -- admin_recharge | purchase | signup_bonus | refund | adjust
+  balance_after INTEGER NOT NULL,
+  ref_id        INTEGER NOT NULL DEFAULT 0,  -- order id when type=purchase
+  note          TEXT    NOT NULL DEFAULT '',
+  operator_id   INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ptx_user ON point_transactions(user_id);
+
+CREATE TABLE IF NOT EXISTS device_addons (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL,
+  slots        INTEGER NOT NULL,
+  order_id     INTEGER NOT NULL DEFAULT 0,
+  purchased_at INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_device_addons_user ON device_addons(user_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS email_tokens (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL,
+  token      TEXT    NOT NULL UNIQUE,
+  purpose    TEXT    NOT NULL,            -- verify | reset
+  expires_at INTEGER NOT NULL,
+  used       INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_tokens_token ON email_tokens(token);
+
+CREATE TABLE IF NOT EXISTS nodes (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  type            TEXT    NOT NULL,          -- self_built | external
+  name            TEXT    NOT NULL,
+  protocol        TEXT    NOT NULL DEFAULT '',
+  inbound_tag TEXT    NOT NULL DEFAULT '', -- self_built: matches sing-box inbound tag
+  share_link      TEXT    NOT NULL DEFAULT '', -- external: raw share URI
+  source_id       INTEGER NOT NULL DEFAULT 0,
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  sort_order      INTEGER NOT NULL DEFAULT 0,
+  created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
+
+CREATE TABLE IF NOT EXISTS node_groups (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    NOT NULL,
+  description TEXT    NOT NULL DEFAULT '',
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS node_group_members (
+  node_id  INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  PRIMARY KEY (node_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ngm_group ON node_group_members(group_id);
+CREATE INDEX IF NOT EXISTS idx_ngm_node  ON node_group_members(node_id);
+
+CREATE TABLE IF NOT EXISTS plan_groups (
+  package_id INTEGER NOT NULL,
+  group_id   INTEGER NOT NULL,
+  PRIMARY KEY (package_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_groups_pkg ON plan_groups(package_id);
+
+CREATE TABLE IF NOT EXISTS reg_codes (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  code       TEXT    NOT NULL UNIQUE,
+  max_uses   INTEGER NOT NULL DEFAULT 1,  -- 0 = unlimited
+  used       INTEGER NOT NULL DEFAULT 0,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  note       TEXT    NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+
+-- who consumed a reg code (username/email snapshotted so it survives user delete)
+CREATE TABLE IF NOT EXISTS reg_code_uses (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_id  INTEGER NOT NULL,
+  user_id  INTEGER NOT NULL DEFAULT 0,
+  username TEXT    NOT NULL DEFAULT '',
+  email    TEXT    NOT NULL DEFAULT '',
+  used_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rcu_code ON reg_code_uses(code_id);
+
+-- per-user node blocklist: a node_key present here is hidden from that user's
+-- subscription output (only affects the owning user). node_key = subconv.NodeKey.
+CREATE TABLE IF NOT EXISTS user_disabled_nodes (
+  user_id  INTEGER NOT NULL,
+  node_key TEXT    NOT NULL,
+  PRIMARY KEY (user_id, node_key)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL,
+  jti        TEXT    NOT NULL UNIQUE,
+  ip         TEXT    NOT NULL DEFAULT '',
+  user_agent TEXT    NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  last_seen  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_jti  ON sessions(jti);
+
+CREATE TABLE IF NOT EXISTS announcements (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  title      TEXT    NOT NULL,
+  content    TEXT    NOT NULL DEFAULT '',
+  pinned     INTEGER NOT NULL DEFAULT 0,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  start_at   INTEGER NOT NULL DEFAULT 0,
+  end_at     INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS announcement_reads (
+  user_id         INTEGER NOT NULL,
+  announcement_id INTEGER NOT NULL,
+  read_at         INTEGER NOT NULL,
+  PRIMARY KEY (user_id, announcement_id)
+);
+
+CREATE TABLE IF NOT EXISTS node_sources (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT    NOT NULL,
+  url          TEXT    NOT NULL,
+  type         TEXT    NOT NULL DEFAULT 'base64', -- base64 | clash
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  last_fetched INTEGER NOT NULL DEFAULT 0,
+  last_count   INTEGER NOT NULL DEFAULT 0,
+  last_error   TEXT    NOT NULL DEFAULT '',
+  group_ids    TEXT    NOT NULL DEFAULT '',   -- JSON array of group ids applied to imported nodes
+  created_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS help_docs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  title      TEXT    NOT NULL,
+  content    TEXT    NOT NULL DEFAULT '',   -- markdown
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  published  INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- ===== Native sing-box management (B2: 轻舟 replaces sing-box) =====
+-- TLS / Reality profiles attached to inbounds. server_json holds the sing-box
+-- inbound "tls" block (with the Reality private_key) and is stored ENCRYPTED.
+-- client_json holds the client-side params (sni/pbk/sid/alpn/fp) used to build
+-- share links.
+CREATE TABLE IF NOT EXISTS sb_tls (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    NOT NULL,
+  mode        TEXT    NOT NULL DEFAULT 'reality', -- reality | tls
+  server_json TEXT    NOT NULL DEFAULT '',        -- encrypted sing-box tls block
+  client_json TEXT    NOT NULL DEFAULT '',        -- client params for links
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+
+-- sing-box server inbounds owned by 轻舟. options holds extra inbound fields
+-- (transport, congestion_control, masquerade, ...) as JSON. A self_built node's
+-- inbound_tag links to sb_inbounds.tag, so grouping/subscription keep working.
+CREATE TABLE IF NOT EXISTS sb_inbounds (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  type        TEXT    NOT NULL,                   -- vless | hysteria2 | tuic | trojan | vmess
+  tag         TEXT    NOT NULL UNIQUE,
+  listen      TEXT    NOT NULL DEFAULT '::',
+  listen_port INTEGER NOT NULL,
+  tls_id      INTEGER NOT NULL DEFAULT 0,         -- -> sb_tls.id (0 = none)
+  options     TEXT    NOT NULL DEFAULT '{}',      -- extra inbound fields (JSON)
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+
+-- A "bucket" = an independently-metered unit a user holds: either a purchased
+-- subscription plan or the shared traffic-package pool. Each bucket has its OWN
+-- sing-box identity (client_name/uuid/secret) so sing-box's per-identity traffic
+-- stats give per-bucket usage, its own quota, and its own expiry. Replaces the
+-- single users.current_plan_id/traffic_limit/expiry_at model so a user can hold
+-- several plans that expire and run out independently.
+--   kind='plan': package_id → plan_groups; has expiry. kind='pool': package_id=0,
+--   no expiry, covers the union of the user's plan groups + free group, drained
+--   last. traffic_limit 0 = unlimited (plans only); pool with 0 limit is inert.
+CREATE TABLE IF NOT EXISTS user_plans (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id        INTEGER NOT NULL,
+  kind           TEXT    NOT NULL DEFAULT 'plan',  -- plan | pool
+  package_id     INTEGER NOT NULL DEFAULT 0,
+  name           TEXT    NOT NULL DEFAULT '',       -- snapshot, survives pkg delete
+  client_name    TEXT    NOT NULL,                  -- sing-box stats identity (unique)
+  client_uuid    TEXT    NOT NULL DEFAULT '',
+  client_secret  TEXT    NOT NULL DEFAULT '',
+  traffic_limit  INTEGER NOT NULL DEFAULT 0,
+  used_up        INTEGER NOT NULL DEFAULT 0,
+  used_down      INTEGER NOT NULL DEFAULT 0,
+  expiry_at      INTEGER NOT NULL DEFAULT 0,        -- 0 = never
+  last_online_at INTEGER NOT NULL DEFAULT 0,
+  order_id       INTEGER NOT NULL DEFAULT 0,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_client ON user_plans(client_name);
+CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id);
+
+-- Per-user traffic time-series, one row per stats poll that saw traffic. Feeds
+-- the daily charts in the native sing-box era (sing-box kept its own stat table);
+-- pruned to a rolling window. up/down are per-poll deltas, not cumulative.
+CREATE TABLE IF NOT EXISTS traffic_samples (
+  user_id INTEGER NOT NULL,
+  ts      INTEGER NOT NULL,
+  up      INTEGER NOT NULL DEFAULT 0,
+  down    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_samples_user_ts ON traffic_samples(user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_traffic_samples_ts ON traffic_samples(ts);
+
+CREATE TABLE IF NOT EXISTS servers (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  name            TEXT    NOT NULL,
+  host            TEXT    NOT NULL,
+  port            INTEGER NOT NULL DEFAULT 22,
+  ssh_user        TEXT    NOT NULL DEFAULT 'root',
+  ssh_key         TEXT    NOT NULL DEFAULT '',
+  ssh_key_pass    TEXT    NOT NULL DEFAULT '',
+  config_path     TEXT    NOT NULL DEFAULT '/etc/sing-box/config.json',
+  systemd_unit    TEXT    NOT NULL DEFAULT 'sing-box',
+  v2ray_listen    TEXT    NOT NULL DEFAULT '127.0.0.1:18080',
+  sing_box_bin    TEXT    NOT NULL DEFAULT '/usr/local/bin/sing-box',
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  status          TEXT    NOT NULL DEFAULT 'unknown',
+  last_seen       INTEGER NOT NULL DEFAULT 0,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+`
+
+func (s *Store) Migrate() error {
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Additive column migrations for DBs created before these columns existed.
+	// Errors (e.g. "duplicate column name") are expected on up-to-date DBs.
+	for _, stmt := range []string{
+		`ALTER TABLE announcements ADD COLUMN start_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE announcements ADD COLUMN end_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE node_sources ADD COLUMN group_ids TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sb_inbounds ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE servers ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sb_tls ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,
+		// Rename legacy columns to neutral names on DBs created before the
+		// rename. Errors ("no such column") are expected on fresh/up-to-date DBs
+		// where CREATE TABLE already used the new names.
+		`ALTER TABLE users RENAME COLUMN sui_client_id TO client_id`,
+		`ALTER TABLE users RENAME COLUMN sui_client_name TO client_name`,
+		`ALTER TABLE users RENAME COLUMN sui_client_uuid TO client_uuid`,
+		`ALTER TABLE users RENAME COLUMN sui_client_secret TO client_secret`,
+		`ALTER TABLE nodes RENAME COLUMN sui_inbound_tag TO inbound_tag`,
+		`DROP INDEX IF EXISTS idx_users_sui_client_name`,
+		// Hot-path indexes. client_name backs AddUsageByClientName's
+		// per-user UPDATE on every stats poll and UsersWithClient; source_id
+		// backs ReplaceSourceNodes' delete-by-source; server_id backs the
+		// per-server inbound filter.
+		`CREATE INDEX IF NOT EXISTS idx_users_client_name ON users(client_name)`,
+		`CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sb_inbounds_server ON sb_inbounds(server_id)`,
+	} {
+		_, _ = s.db.Exec(stmt)
+	}
+	// Seed the bucket model from legacy single-plan columns (idempotent).
+	return s.backfillUserPlans()
+}

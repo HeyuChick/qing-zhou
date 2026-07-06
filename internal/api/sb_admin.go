@@ -1,0 +1,545 @@
+package api
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"qingzhou/internal/singbox"
+	"qingzhou/internal/sshctl"
+	"qingzhou/internal/store"
+)
+
+// ===== native sing-box (B2) admin: TLS/Reality profiles & inbounds =====
+
+// POST /api/admin/sb/reality-keypair — fresh x25519 keypair + short_id.
+func (a *API) handleAdminRealityKeypair(w http.ResponseWriter, r *http.Request) {
+	priv, pub, err := singbox.GenerateRealityKeypair()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "生成密钥失败")
+		return
+	}
+	sid, _ := singbox.GenerateShortID(8)
+	ok(w, J{"private_key": priv, "public_key": pub, "short_id": sid})
+}
+
+// ---- sb_tls ----
+
+func (a *API) handleAdminListSbTls(w http.ResponseWriter, r *http.Request) {
+	list, err := a.st.ListSbTls()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "读取失败")
+		return
+	}
+	ok(w, list)
+}
+
+func (a *API) handleAdminSaveSbTls(w http.ResponseWriter, r *http.Request) {
+	var t store.SbTls
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if strings.TrimSpace(t.Name) == "" {
+		fail(w, http.StatusBadRequest, "名称必填")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if id != "" {
+		t.ID = atoi(id)
+	}
+	newID, err := a.st.SaveSbTls(&t)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "保存失败")
+		return
+	}
+	if err := a.sbRebuild(); err != nil {
+		fail(w, http.StatusBadGateway, "已保存，但应用到 sing-box 失败："+err.Error())
+		return
+	}
+	saved, _ := a.st.GetSbTls(newID)
+	ok(w, saved)
+}
+
+func (a *API) handleAdminDeleteSbTls(w http.ResponseWriter, r *http.Request) {
+	if err := a.st.DeleteSbTls(atoi(chi.URLParam(r, "id"))); err != nil {
+		if errors.Is(err, store.ErrInUse) {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		fail(w, http.StatusInternalServerError, "删除失败")
+		return
+	}
+	_ = a.sbRebuild()
+	ok(w, nil)
+}
+
+// POST /api/admin/sb/tls/reality — convenience: build a complete Reality TLS
+// profile (server + client JSON) with a freshly generated keypair.
+func (a *API) handleAdminCreateRealityTls(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name            string `json:"name"`
+		ServerID        int64  `json:"server_id"`
+		ServerName      string `json:"server_name"`      // SNI shown to clients, e.g. www.tesla.com
+		HandshakeServer string `json:"handshake_server"` // real TLS dest, defaults to ServerName
+		HandshakePort   int    `json:"handshake_port"`   // defaults 443
+		Fingerprint     string `json:"fingerprint"`      // utls fp, defaults chrome
+		// Pre-generated keys from frontend (optional; backend generates if empty)
+		PrivateKey string `json:"private_key"`
+		PublicKey  string `json:"public_key"`
+		ShortID    string `json:"short_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.ServerName = strings.TrimSpace(req.ServerName)
+	if req.Name == "" || req.ServerName == "" {
+		fail(w, http.StatusBadRequest, "名称和 SNI 必填")
+		return
+	}
+	if req.HandshakeServer == "" {
+		req.HandshakeServer = req.ServerName
+	}
+	if req.HandshakePort == 0 {
+		req.HandshakePort = 443
+	}
+
+	priv, pub := req.PrivateKey, req.PublicKey
+	sid := req.ShortID
+	// Generate keys only if not provided by frontend
+	if priv == "" || pub == "" {
+		var err error
+		priv, pub, err = singbox.GenerateRealityKeypair()
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "生成密钥失败")
+			return
+		}
+	}
+	if sid == "" {
+		sid, _ = singbox.GenerateShortID(8)
+	}
+
+	server := map[string]interface{}{
+		"enabled":     true,
+		"server_name": req.ServerName,
+		"reality": map[string]interface{}{
+			"enabled":     true,
+			"handshake":   map[string]interface{}{"server": req.HandshakeServer, "server_port": req.HandshakePort},
+			"private_key": priv,
+			"short_id":    []string{sid},
+		},
+	}
+	client := map[string]interface{}{
+		"server_name": req.ServerName,
+		"public_key":  pub,
+		"short_id":    sid,
+		"reality":     map[string]interface{}{"public_key": pub},
+		"utls":        map[string]interface{}{"enabled": true, "fingerprint": fpOrDefault(req.Fingerprint)},
+	}
+	sj, _ := json.Marshal(server)
+	cj, _ := json.Marshal(client)
+	id, err := a.st.SaveSbTls(&store.SbTls{ServerID: req.ServerID, Name: req.Name, Mode: "reality", ServerJSON: string(sj), ClientJSON: string(cj)})
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "保存失败")
+		return
+	}
+	saved, _ := a.st.GetSbTls(id)
+	ok(w, saved)
+}
+
+var validFingerprints = map[string]bool{
+	"chrome": true, "firefox": true, "safari": true, "ios": true, "android": true,
+	"edge": true, "360": true, "qq": true, "random": true, "randomized": true,
+}
+
+func fpOrDefault(fp string) string {
+	if validFingerprints[fp] {
+		return fp
+	}
+	return "chrome"
+}
+
+// tlsVersion normalizes a TLS version string to sing-box's form ("1.2"/"1.3").
+func tlsVersion(v string) string {
+	switch v {
+	case "1.2", "1.3":
+		return v
+	}
+	return ""
+}
+
+// PUT /api/admin/sb/tls/reality/{id} — edit a Reality profile's name/SNI/
+// handshake from structured fields, preserving the existing keypair & short_id.
+func (a *API) handleAdminUpdateRealityTls(w http.ResponseWriter, r *http.Request) {
+	id := atoi(chi.URLParam(r, "id"))
+	cur, _ := a.st.GetSbTls(id)
+	if cur == nil {
+		fail(w, http.StatusNotFound, "配置不存在")
+		return
+	}
+	var req struct {
+		Name            string `json:"name"`
+		ServerID        int64  `json:"server_id"`
+		ServerName      string `json:"server_name"`
+		HandshakeServer string `json:"handshake_server"`
+		HandshakePort   int    `json:"handshake_port"`
+		Fingerprint     string `json:"fingerprint"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.ServerName = strings.TrimSpace(req.ServerName)
+	if req.Name == "" || req.ServerName == "" {
+		fail(w, http.StatusBadRequest, "名称和 SNI 必填")
+		return
+	}
+	if req.HandshakeServer == "" {
+		req.HandshakeServer = req.ServerName
+	}
+	if req.HandshakePort == 0 {
+		req.HandshakePort = 443
+	}
+	var server, client map[string]interface{}
+	_ = json.Unmarshal([]byte(cur.ServerJSON), &server)
+	_ = json.Unmarshal([]byte(cur.ClientJSON), &client)
+	if server == nil {
+		server = map[string]interface{}{"enabled": true}
+	}
+	server["server_name"] = req.ServerName
+	reality, _ := server["reality"].(map[string]interface{})
+	if reality == nil {
+		reality = map[string]interface{}{"enabled": true}
+		server["reality"] = reality
+	}
+	reality["handshake"] = map[string]interface{}{"server": req.HandshakeServer, "server_port": req.HandshakePort}
+	if client == nil {
+		client = map[string]interface{}{}
+	}
+	client["server_name"] = req.ServerName
+	client["utls"] = map[string]interface{}{"enabled": true, "fingerprint": fpOrDefault(req.Fingerprint)}
+	sj, _ := json.Marshal(server)
+	cj, _ := json.Marshal(client)
+	if _, err := a.st.SaveSbTls(&store.SbTls{ID: id, ServerID: req.ServerID, Name: req.Name, Mode: "reality", ServerJSON: string(sj), ClientJSON: string(cj)}); err != nil {
+		fail(w, http.StatusInternalServerError, "保存失败")
+		return
+	}
+	_ = a.sbRebuild()
+	saved, _ := a.st.GetSbTls(id)
+	ok(w, saved)
+}
+
+// POST /api/admin/sb/tls/cert  and  PUT /api/admin/sb/tls/cert/{id} — create or
+// edit a regular (non-Reality) TLS profile from structured fields. On edit, a
+// blank certificate/key keeps the existing one (so the cert needn't be re-pasted).
+func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name        string   `json:"name"`
+		ServerID    int64    `json:"server_id"`
+		ServerName  string   `json:"server_name"`
+		Certificate string   `json:"certificate"`
+		Key         string   `json:"key"`
+		Insecure    bool     `json:"insecure"`
+		ALPN        []string `json:"alpn"`
+		Fingerprint string   `json:"fingerprint"`
+		MinVersion  string   `json:"min_version"`
+		MaxVersion  string   `json:"max_version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.ServerName = strings.TrimSpace(req.ServerName)
+	if req.Name == "" || req.ServerName == "" {
+		fail(w, http.StatusBadRequest, "名称和 SNI 必填")
+		return
+	}
+	var id int64
+	if p := chi.URLParam(r, "id"); p != "" {
+		id = atoi(p)
+	}
+	// On edit, keep existing cert/key when the form leaves them blank.
+	if id != 0 && (req.Certificate == "" || req.Key == "") {
+		if cur, _ := a.st.GetSbTls(id); cur != nil {
+			var s map[string]interface{}
+			_ = json.Unmarshal([]byte(cur.ServerJSON), &s)
+			if req.Certificate == "" {
+				req.Certificate, _ = s["certificate"].(string)
+			}
+			if req.Key == "" {
+				req.Key, _ = s["key"].(string)
+			}
+		}
+	}
+	if req.Certificate == "" || req.Key == "" {
+		fail(w, http.StatusBadRequest, "证书和私钥必填")
+		return
+	}
+	server := map[string]interface{}{
+		"enabled":     true,
+		"server_name": req.ServerName,
+		"certificate": req.Certificate,
+		"key":         req.Key,
+	}
+	if len(req.ALPN) > 0 {
+		server["alpn"] = req.ALPN
+	}
+	if v := tlsVersion(req.MinVersion); v != "" {
+		server["min_version"] = v
+	}
+	if v := tlsVersion(req.MaxVersion); v != "" {
+		server["max_version"] = v
+	}
+	client := map[string]interface{}{
+		"insecure": req.Insecure,
+		"utls":     map[string]interface{}{"enabled": true, "fingerprint": fpOrDefault(req.Fingerprint)},
+	}
+	sj, _ := json.Marshal(server)
+	cj, _ := json.Marshal(client)
+	newID, err := a.st.SaveSbTls(&store.SbTls{ID: id, ServerID: req.ServerID, Name: req.Name, Mode: "tls", ServerJSON: string(sj), ClientJSON: string(cj)})
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "保存失败")
+		return
+	}
+	_ = a.sbRebuild()
+	saved, _ := a.st.GetSbTls(newID)
+	ok(w, saved)
+}
+
+// ---- sb_inbounds ----
+
+func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) {
+	list, err := a.st.ListSbInbounds()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "读取失败")
+		return
+	}
+	ok(w, list)
+}
+
+var sbInboundTypes = map[string]bool{"vless": true, "hysteria2": true, "tuic": true, "trojan": true, "vmess": true, "shadowsocks": true, "anytls": true, "hysteria": true}
+
+func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
+	var n store.SbInbound
+	if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	n.Type = strings.TrimSpace(n.Type)
+	n.Tag = strings.TrimSpace(n.Tag)
+	if !sbInboundTypes[n.Type] {
+		fail(w, http.StatusBadRequest, "不支持的协议类型")
+		return
+	}
+	if n.Tag == "" || n.ListenPort <= 0 || n.ListenPort > 65535 {
+		fail(w, http.StatusBadRequest, "tag 必填、端口需在 1-65535")
+		return
+	}
+	// Tags must not contain whitespace: the subscription layer matches a node's
+	// remark as "<tag> <traffic-info>", so a space inside a tag would let one
+	// node's link be mis-attributed to a different tag's group.
+	if strings.ContainsAny(n.Tag, " \t\r\n") {
+		fail(w, http.StatusBadRequest, "tag 不能包含空格")
+		return
+	}
+	if n.Options != "" {
+		var opts map[string]interface{}
+		if err := json.Unmarshal([]byte(n.Options), &opts); err != nil {
+			fail(w, http.StatusBadRequest, "options 不是合法 JSON")
+			return
+		}
+		// Shadowsocks-2022 needs a server PSK; generate one if absent.
+		if n.Type == "shadowsocks" {
+			method, _ := opts["method"].(string)
+			if pw, _ := opts["password"].(string); pw == "" {
+				key := make([]byte, singbox.SSKeyLen(method))
+				if _, err := rand.Read(key); err != nil {
+					fail(w, http.StatusInternalServerError, "生成密钥失败")
+					return
+				}
+				opts["password"] = base64.StdEncoding.EncodeToString(key)
+				if b, err := json.Marshal(opts); err == nil {
+					n.Options = string(b)
+				}
+			}
+		}
+	}
+	if id := chi.URLParam(r, "id"); id != "" {
+		n.ID = atoi(id)
+	}
+	newID, err := a.st.SaveSbInbound(&n)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "保存失败（tag 可能重复）")
+		return
+	}
+	if err := a.sbRebuild(); err != nil {
+		fail(w, http.StatusBadGateway, "已保存，但应用到 sing-box 失败："+err.Error())
+		return
+	}
+	saved, _ := a.st.GetSbInbound(newID)
+	ok(w, saved)
+}
+
+func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request) {
+	if err := a.st.DeleteSbInbound(atoi(chi.URLParam(r, "id"))); err != nil {
+		fail(w, http.StatusInternalServerError, "删除失败")
+		return
+	}
+	_ = a.sbRebuild()
+	ok(w, nil)
+}
+
+// GET /api/admin/sb/preview?server_id=N — render the sing-box config for a
+// specific server (server_id=0 or omitted = local).
+func (a *API) handleAdminSbPreview(w http.ResponseWriter, r *http.Request) {
+	byTag, err := a.st.BuildUsersByTag(nowUnix())
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "构建用户映射失败")
+		return
+	}
+	base, _ := a.st.GetSetting("sb_base_config")
+	if base == "" {
+		base = singbox.DefaultBaseConfig
+	}
+	listen, _ := a.st.GetSetting("sb_v2ray_listen")
+	if listen == "" {
+		listen = "127.0.0.1:18080"
+	}
+	serverID := atoi(r.URL.Query().Get("server_id"))
+	var cfg []byte
+	if serverID > 0 {
+		cfg, err = a.st.BuildSingboxConfigForServer(serverID, base, listen, byTag)
+	} else {
+		cfg, err = a.st.BuildSingboxConfig(base, listen, byTag)
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "生成配置失败")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(cfg)
+}
+
+func nowUnix() int64 { return time.Now().Unix() }
+
+// GET /api/admin/sb/import-remote/list-files?server_id=N — SSH into the remote
+// server and list .json config files in common sing-box directories.
+func (a *API) handleAdminImportRemoteListFiles(w http.ResponseWriter, r *http.Request) {
+	serverID := atoi(r.URL.Query().Get("server_id"))
+	if serverID <= 0 {
+		fail(w, http.StatusBadRequest, "server_id 必填")
+		return
+	}
+	sv, err := a.st.GetServer(serverID)
+	if err != nil || sv == nil {
+		fail(w, http.StatusNotFound, "服务器不存在")
+		return
+	}
+
+	rm := sshctl.New(sshctl.WithTimeout(15 * time.Second))
+	cfg := &sshctl.ServerConfig{
+		Host: sv.Host, Port: sv.Port,
+		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
+		ConfigPath: sv.ConfigPath, SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin,
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	files, err := rm.ListRemoteConfigFiles(ctx, cfg)
+	if err != nil {
+		fail(w, http.StatusBadGateway, "扫描远程文件失败: "+err.Error())
+		return
+	}
+
+	ok(w, J{"files": files})
+}
+
+// GET /api/admin/sb/import-remote/preview?server_id=N&config_path=xxx — SSH
+// into the remote server, read the specified config file, and return the
+// inbounds array for the admin to review before importing.
+func (a *API) handleAdminImportRemotePreview(w http.ResponseWriter, r *http.Request) {
+	serverID := atoi(r.URL.Query().Get("server_id"))
+	configPath := strings.TrimSpace(r.URL.Query().Get("config_path"))
+	if serverID <= 0 {
+		fail(w, http.StatusBadRequest, "server_id 必填")
+		return
+	}
+	if configPath == "" {
+		fail(w, http.StatusBadRequest, "config_path 必填")
+		return
+	}
+	sv, err := a.st.GetServer(serverID)
+	if err != nil || sv == nil {
+		fail(w, http.StatusNotFound, "服务器不存在")
+		return
+	}
+
+	rm := sshctl.New(sshctl.WithTimeout(15 * time.Second))
+	cfg := &sshctl.ServerConfig{
+		Host: sv.Host, Port: sv.Port,
+		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
+		ConfigPath: sv.ConfigPath, SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin,
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	raw, err := rm.ReadRemoteConfigAtPath(ctx, cfg, configPath)
+	if err != nil {
+		fail(w, http.StatusBadGateway, "读取远程配置失败: "+err.Error())
+		return
+	}
+
+	// Parse the inbounds from the raw config
+	var full struct {
+		Inbounds []json.RawMessage `json:"inbounds"`
+	}
+	if err := json.Unmarshal(raw, &full); err != nil {
+		fail(w, http.StatusBadGateway, "远程配置 JSON 解析失败: "+err.Error())
+		return
+	}
+	if len(full.Inbounds) == 0 {
+		fail(w, http.StatusBadGateway, "远程配置中未找到入站协议")
+		return
+	}
+
+	// Extract type, tag, listen_port from each inbound for display
+	type inboundInfo struct {
+		Type        string          `json:"type"`
+		Tag         string          `json:"tag"`
+		ListenPort  int             `json:"listen_port"`
+		Raw         json.RawMessage `json:"raw"`
+	}
+	var inbounds []inboundInfo
+	for _, ib := range full.Inbounds {
+		var meta struct {
+			Type       string `json:"type"`
+			Tag        string `json:"tag"`
+			Listen     string `json:"listen"`
+			ListenPort int    `json:"listen_port"`
+		}
+		_ = json.Unmarshal(ib, &meta)
+		inbounds = append(inbounds, inboundInfo{
+			Type: meta.Type, Tag: meta.Tag, ListenPort: meta.ListenPort, Raw: ib,
+		})
+	}
+
+	ok(w, J{
+		"server_id":   serverID,
+		"server_name": sv.Name,
+		"config_path": configPath,
+		"inbounds":    inbounds,
+	})
+}
