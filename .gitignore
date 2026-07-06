@@ -7,5 +7,6 @@
 *.db-shm
 *.db-wal
 /dist/
-/qingzhou-linux-amd64
+/qingzhou-linux-*
 /qingzhou.new
+SHA256SUMS.txt
