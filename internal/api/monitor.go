@@ -290,6 +290,130 @@ func (a *API) handleMonitorAlerts(w http.ResponseWriter, r *http.Request) {
 	ok(w, alerts)
 }
 
+// handleMonitorHeatmap returns a server×time-bucket status matrix for the
+// availability heatmap. Y axis = servers, X axis = time buckets (48 columns).
+// Each cell value: 0=正常, 1=高负载, 2=离线/无数据.
+// Query: range=1h|6h|24h|7d (default 24h).
+func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
+	rangeStr := r.URL.Query().Get("range")
+	if rangeStr == "" {
+		rangeStr = "24h"
+	}
+	var dur time.Duration
+	switch rangeStr {
+	case "1h":
+		dur = time.Hour
+	case "6h":
+		dur = 6 * time.Hour
+	case "24h":
+		dur = 24 * time.Hour
+	case "7d":
+		dur = 7 * 24 * time.Hour
+	default:
+		dur = 24 * time.Hour
+	}
+
+	const cols = 48
+	now := time.Now()
+	startTs := now.Add(-dur).Unix()
+	bucketSec := int64(dur.Seconds()) / cols
+	if bucketSec < 1 {
+		bucketSec = 1
+	}
+
+	// Probe-enabled servers (rows), in stable order.
+	servers, err := a.st.ListServers()
+	if err != nil {
+		fail(w, 500, "查询失败")
+		return
+	}
+	type srvInfo struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	var rows []srvInfo
+	idx := map[int64]int{} // server_id -> row index
+	for _, sv := range servers {
+		if !sv.ProbeEnabled {
+			continue
+		}
+		idx[sv.ID] = len(rows)
+		rows = append(rows, srvInfo{ID: sv.ID, Name: sv.Name})
+	}
+	if len(rows) == 0 {
+		ok(w, J{"servers": []srvInfo{}, "buckets": []int64{}, "matrix": [][]int{}, "range": rangeStr, "bucket_sec": bucketSec})
+		return
+	}
+
+	// Bucket start timestamps (oldest first).
+	buckets := make([]int64, cols)
+	for i := 0; i < cols; i++ {
+		buckets[i] = startTs + int64(i)*bucketSec
+	}
+
+	// Matrix init: 3=无数据(sentinel). Real classes: 0=正常,1=高负载,2=离线级负载.
+	// At the end sentinel 3 is collapsed to 2 (离线/无数据 都显示红色).
+	matrix := make([][]int, len(rows))
+	for i := range matrix {
+		matrix[i] = make([]int, cols)
+		for j := range matrix[i] {
+			matrix[i][j] = 3
+		}
+	}
+
+	// Bucketed aggregation: track per-bucket worst (max) load class per server.
+	all, err := a.st.ListAllMetricsSince(startTs)
+	if err != nil {
+		fail(w, 500, "查询指标失败")
+		return
+	}
+	for _, m := range all {
+		ri, ok := idx[m.ServerID]
+		if !ok {
+			continue
+		}
+		b := int((m.Ts - startTs) / bucketSec)
+		if b < 0 || b >= cols {
+			continue
+		}
+		cpu := m.CPUPercent
+		var memPct, diskPct float64
+		if m.MemTotal > 0 {
+			memPct = float64(m.MemUsed) / float64(m.MemTotal) * 100
+		}
+		if m.DiskTotal > 0 {
+			diskPct = float64(m.DiskUsed) / float64(m.DiskTotal) * 100
+		}
+		class := 0
+		if cpu >= 70 || memPct >= 70 || diskPct >= 70 {
+			class = 1
+		}
+		if cpu >= 90 || memPct >= 90 || diskPct >= 90 {
+			class = 2
+		}
+		cur := matrix[ri][b]
+		if cur == 3 || class > cur {
+			matrix[ri][b] = class
+		}
+	}
+	// Collapse no-data sentinel to 2 (离线/无数据 → 红).
+	for i := range matrix {
+		for j := range matrix[i] {
+			if matrix[i][j] == 3 {
+				matrix[i][j] = 2
+			}
+		}
+	}
+
+	ok(w, J{
+		"servers":    rows,
+		"buckets":    buckets,
+		"matrix":     matrix,
+		"range":      rangeStr,
+		"bucket_sec": bucketSec,
+	})
+}
+
 func (a *API) handleMarkAlertRead(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	if err := a.st.MarkAlertRead(id); err != nil {

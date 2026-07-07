@@ -96,6 +96,25 @@ func (s *Store) PruneMetrics(keepDays int) error {
 	return err
 }
 
+// ListAllMetricsSince returns all metrics rows across all servers with ts>=since,
+// ordered by server_id then ts. Used by the heatmap aggregator.
+func (s *Store) ListAllMetricsSince(since int64) ([]*ServerMetrics, error) {
+	rows, err := s.db.Query(`SELECT ` + metricsCols + ` FROM server_metrics WHERE ts>=? ORDER BY server_id, ts`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ServerMetrics
+	for rows.Next() {
+		m, err := scanMetrics(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // CountProbeServers returns total, online (last_seen within 2min), and expiring
 // (within 3 days) counts for probe-enabled servers.
 func (s *Store) CountProbeServers() (total, online, expiring int, err error) {

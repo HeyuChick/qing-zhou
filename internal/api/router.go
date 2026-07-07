@@ -144,6 +144,7 @@ func (a *API) Router() http.Handler {
 
 		// native sing-box (B2): TLS/Reality profiles, inbounds, config preview
 		ar.Post("/api/admin/sb/reality-keypair", a.handleAdminRealityKeypair)
+		ar.Get("/api/admin/sb/sni-test", a.handleAdminSniTest)
 		ar.Get("/api/admin/sb/tls", a.handleAdminListSbTls)
 		ar.Post("/api/admin/sb/tls", a.handleAdminSaveSbTls)
 		ar.Post("/api/admin/sb/tls/reality", a.handleAdminCreateRealityTls)
@@ -173,6 +174,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/monitor/dashboard", a.handleMonitorDashboard)
 		ar.Get("/api/admin/monitor/servers", a.handleMonitorServers)
 		ar.Get("/api/admin/monitor/servers/{id}/metrics", a.handleServerMetrics)
+		ar.Get("/api/admin/monitor/heatmap", a.handleMonitorHeatmap)
 		ar.Get("/api/admin/monitor/alerts", a.handleMonitorAlerts)
 		ar.Post("/api/admin/monitor/alerts/{id}/read", a.handleMarkAlertRead)
 

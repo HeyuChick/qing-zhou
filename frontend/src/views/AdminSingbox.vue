@@ -81,7 +81,23 @@
           </n-form-item>
           <n-form-item label="名称"><n-input v-model:value="te.name" /></n-form-item>
           <n-form-item label="所属服务器"><n-select v-model:value="te.server_id" :options="serverOpts" placeholder="本机" clearable /></n-form-item>
-          <n-form-item label="SNI 伪装域名"><n-input v-model:value="te.server_name" placeholder="www.microsoft.com" /></n-form-item>
+          <n-form-item label="SNI 伪装域名">
+            <n-input-group>
+              <n-input v-model:value="te.server_name" placeholder="www.microsoft.com" style="flex:1;" />
+              <n-button :loading="sniTesting" @click="testSni">测试延迟</n-button>
+            </n-input-group>
+          </n-form-item>
+          <n-form-item v-if="sniResult" label=" ">
+            <div class="sni-result" :class="sniResult.status">
+              <span v-if="sniResult.status === 'ok'" class="ok">
+                <b>连通</b> · 平均 {{ sniResult.avg_ms.toFixed(0) }}ms · 最小 {{ sniResult.min_ms.toFixed(0) }}ms · 最大 {{ sniResult.max_ms.toFixed(0) }}ms ({{ sniResult.ok }}/{{ sniResult.total }})
+              </span>
+              <span v-else-if="sniResult.status === 'partial'" class="warn">
+                <b>不稳定</b> · 平均 {{ sniResult.avg_ms.toFixed(0) }}ms · {{ sniResult.ok }}/{{ sniResult.total }} 次成功
+              </span>
+              <span v-else class="err"><b>不可达</b> · {{ sniResult.samples?.[0]?.error || '连接失败' }}</span>
+            </div>
+          </n-form-item>
           <n-form-item label="uTLS 指纹"><n-select v-model:value="te.fingerprint" :options="fpOpts" /></n-form-item>
           <template v-if="te.mode === 'reality'">
             <n-form-item label="握手目标"><n-input v-model:value="te.handshake_server" placeholder="留空=同 SNI" /></n-form-item>
@@ -156,7 +172,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import {
-  NTabs, NTabPane, NDrawer, NDrawerContent, NButton, NForm, NFormItem, NInput, NInputNumber,
+  NTabs, NTabPane, NDrawer, NDrawerContent, NButton, NForm, NFormItem, NInput, NInputNumber, NInputGroup,
   NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCode, useMessage
 } from 'naive-ui'
 import { apiList, apiGet, apiPost, apiPut, apiDelete } from '@/api'
@@ -208,6 +224,7 @@ const te = reactive({
 })
 
 function openTls(t?: any) {
+  sniResult.value = null
   if (t) {
     const s = jp(t.server_json), c = jp(t.client_json), r = s.reality || {}, hs = r.handshake || {}
     Object.assign(te, {
@@ -229,6 +246,23 @@ function openTls(t?: any) {
     })
   }
   showTls.value = true
+}
+
+// --- SNI 延迟测试 ---
+const sniTesting = ref(false)
+const sniResult = ref<any>(null)
+async function testSni() {
+  const host = (te.server_name || '').trim()
+  if (!host) { message.warning('请输入 SNI 域名'); return }
+  sniTesting.value = true
+  sniResult.value = null
+  try {
+    sniResult.value = await apiGet<any>(`/api/admin/sb/sni-test?host=${encodeURIComponent(host)}`)
+  } catch (e: any) {
+    message.error(e.message || '测试失败')
+  } finally {
+    sniTesting.value = false
+  }
 }
 
 async function genKeys() {
@@ -347,4 +381,30 @@ async function load() {
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 16px; }
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
+
+.sni-result {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid var(--n-border-color, #e0e0e6);
+  background: var(--n-color, #f7f7fa);
+}
+.sni-result.ok {
+  border-color: #18a058;
+  background: rgba(24, 160, 88, 0.08);
+  color: #18a058;
+}
+.sni-result.partial {
+  border-color: #f0a020;
+  background: rgba(240, 160, 32, 0.08);
+  color: #b88200;
+}
+.sni-result.unreachable {
+  border-color: #d03050;
+  background: rgba(208, 48, 80, 0.08);
+  color: #d03050;
+}
+.sni-result b { margin-right: 4px; }
 </style>

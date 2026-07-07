@@ -47,14 +47,13 @@
     <n-card size="small" style="margin-bottom:16px;">
       <template #header><span class="card-h">可用性热力图</span></template>
       <template #header-extra>
-        <span class="hm-legend"><i class="hm-dot ok" />正常 <i class="hm-dot warn" />高负载 <i class="hm-dot crit" />离线</span>
+        <n-space :size="4" align="center">
+          <n-button v-for="r in heatRanges" :key="r.value" size="tiny" :type="heatRange===r.value?'primary':'default'" @click="loadHeatmap(r.value)">{{ r.label }}</n-button>
+          <span class="hm-legend"><i class="hm-dot ok" />正常 <i class="hm-dot warn" />高负载 <i class="hm-dot crit" />离线/无数据</span>
+        </n-space>
       </template>
-      <div class="heat-grid">
-        <div v-for="s in servers" :key="'h'+s.id" class="heat-cell" :class="heatClass(s)" :title="`${s.name} · ${heatTip(s)}`" @click="goDetail(s)">
-          <span class="heat-name">{{ s.name }}</span>
-        </div>
-        <div v-if="!servers.length" class="heat-empty">暂无服务器</div>
-      </div>
+      <div ref="heatEl" class="heat-chart" />
+      <n-empty v-if="!heatLoading && !heatData?.servers?.length" size="small" description="暂无探针服务器" style="padding:16px 0;" />
     </n-card>
 
     <!-- 告警条 -->
@@ -130,7 +129,7 @@
           <n-space :size="4" style="margin-bottom:6px;">
             <n-button v-for="r in ranges" :key="r.value" size="tiny" :type="chartRange[s.id]===r.value?'primary':'default'" @click="loadChart(s.id, r.value)">{{ r.label }}</n-button>
           </n-space>
-          <div :ref="(el:any) => { if (el) chartRefs[s.id] = el }" class="mini-chart" />
+          <div :ref="(el:any) => setChartRef(s.id, el)" class="mini-chart" />
         </div>
       </n-card>
     </div>
@@ -155,7 +154,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, shallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   NCard, NButton, NSpace, NTag, NProgress, NDrawer, NDrawerContent, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSelect, NEmpty, useMessage
@@ -214,22 +213,92 @@ function diskPct(s: any) { return s.metrics ? pct(s.metrics.disk_used, s.metrics
 function pctColor(v: number) { return v >= 90 ? '#c2685c' : v >= 70 ? '#bf9540' : '#6f8f76' }
 
 // 热力图分类：绿/黄/红
-function heatClass(s: any): string {
-  if (s.status !== 'online') return 'crit'
-  if (!s.metrics) return 'crit'
-  const cpu = s.metrics.cpu_percent || 0
-  const mem = memPct(s)
-  const disk = diskPct(s)
-  if (cpu >= 90 || mem >= 90 || disk >= 90) return 'crit'
-  if (cpu >= 70 || mem >= 70 || disk >= 70) return 'warn'
-  return 'ok'
-}
-function heatTip(s: any): string {
-  if (s.status !== 'online') return '离线'
-  if (!s.metrics) return '无数据'
-  return `CPU ${s.metrics.cpu_percent.toFixed(0)}% / 内存 ${memPct(s).toFixed(0)}% / 磁盘 ${diskPct(s).toFixed(0)}%`
-}
+// 旧版 cell 热力图已替换为 ECharts 时间热力图（Y=机器, X=时间桶），见 loadHeatmap。
 function goDetail(s: any) { router.push({ name: 'admin-monitor-detail', params: { id: s.id } }) }
+
+// --- 可用性热力图（ECharts heatmap：Y=服务器, X=时间）---
+const heatEl = ref<HTMLElement | null>(null)
+const heatChart = shallowRef<echarts.ECharts | null>(null)
+const heatData = ref<any>(null)
+const heatRange = ref('24h')
+const heatLoading = ref(false)
+const heatRanges = [
+  { label: '1h', value: '1h' }, { label: '6h', value: '6h' },
+  { label: '24h', value: '24h' }, { label: '7d', value: '7d' },
+]
+function fmtHeatTime(ts: number, range: string): string {
+  const d = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  if (range === '7d' || range === '24h') return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+async function loadHeatmap(range: string) {
+  heatRange.value = range
+  heatLoading.value = true
+  try {
+    const data = await apiGet<any>(`/api/admin/monitor/heatmap?range=${range}`)
+    heatData.value = data
+    await nextTick()
+    renderHeatmap()
+  } catch {} finally { heatLoading.value = false }
+}
+function renderHeatmap() {
+  const data = heatData.value
+  if (!heatEl.value || !data) return
+  const servers: any[] = data.servers || []
+  if (!servers.length) {
+    // 无探针服务器：清空已有图表
+    heatChart.value?.clear()
+    return
+  }
+  if (!heatChart.value) heatChart.value = echarts.init(heatEl.value)
+  const chart = heatChart.value
+  const buckets: number[] = data.buckets || []
+  const matrix: number[][] = data.matrix || []
+  const range = data.range || '24h'
+  // 组装 ECharts heatmap data: [xIndex, yIndex, value]
+  const pts: [number, number, number][] = []
+  for (let y = 0; y < servers.length; y++) {
+    const row = matrix[y] || []
+    for (let x = 0; x < buckets.length; x++) {
+      pts.push([x, y, row[x] ?? 2])
+    }
+  }
+  const xLabels = buckets.map((t: number) => fmtHeatTime(t, range))
+  const yLabels = servers.map((s: any) => s.name)
+  chart.setOption({
+    tooltip: {
+      formatter: (p: any) => {
+        const [x, y, v] = p.value
+        const sname = yLabels[y] || ''
+        const t = xLabels[x] || ''
+        const tag = v === 0 ? '<span style="color:#10b981">正常</span>' : v === 1 ? '<span style="color:#fbbf24">高负载</span>' : '<span style="color:#ef4444">离线/无数据</span>'
+        return `${sname}<br/>${t}<br/>${tag}`
+      },
+    },
+    grid: { left: 8, right: 8, top: 12, bottom: 4, containLabel: true },
+    xAxis: {
+      type: 'category', data: xLabels, splitArea: { show: true },
+      axisLabel: { fontSize: 10, hideOverlap: true },
+      axisTick: { show: false }, axisLine: { show: false },
+    },
+    yAxis: {
+      type: 'category', data: yLabels, splitArea: { show: true },
+      axisLabel: { fontSize: 11 },
+      axisTick: { show: false }, axisLine: { show: false },
+    },
+    visualMap: {
+      min: 0, max: 2, calculable: false, show: false,
+      inRange: { color: ['#10b981', '#fbbf24', '#ef4444'] },
+    },
+    series: [{
+      type: 'heatmap', data: pts, progressive: 0,
+      itemStyle: { borderColor: '#fff', borderWidth: 1, borderRadius: 2 },
+      emphasis: { itemStyle: { borderColor: '#333', borderWidth: 1 } },
+    }],
+  })
+  chart.resize()
+}
 
 // --- Asset editing ---
 const showAsset = ref(false)
@@ -264,6 +333,29 @@ function copyInstall(s: any) {
 }
 
 // --- ECharts（懒加载 + resize）---
+// chartRefs 在卡片卸载时清空引用，便于检测失效实例
+function setChartRef(id: number, el: any) {
+  if (el) chartRefs.value[id] = el
+  else delete chartRefs.value[id]
+}
+
+// 安全 resize：跳过/清理已脱离 DOM 的孤儿实例，避免 ECharts 内部 model 损坏报错
+function safeResizeAll() {
+  for (const id of Object.keys(chartInstances.value)) {
+    const sid = Number(id)
+    const chart = chartInstances.value[sid]
+    if (!chart) continue
+    const el = chartRefs.value[sid]
+    // 容器已被移除（筛选/卸载）：dispose 掉孤儿实例
+    if (!el || !(el as HTMLElement).isConnected) {
+      try { chart.dispose() } catch {}
+      delete chartInstances.value[sid]
+      continue
+    }
+    try { chart.resize() } catch {}
+  }
+}
+
 async function loadChart(serverId: number, range: string) {
   chartRange.value[serverId] = range
   chartLoaded.value[serverId] = true
@@ -273,10 +365,17 @@ async function loadChart(serverId: number, range: string) {
     await nextTick()
     const el = chartRefs.value[serverId]
     if (!el) return
-    if (!chartInstances.value[serverId]) {
-      chartInstances.value[serverId] = echarts.init(el)
+    // 若旧实例绑定到已脱离 DOM 的容器，先 dispose 重建
+    let chart = chartInstances.value[serverId]
+    if (chart && !(el as HTMLElement).isConnected) {
+      try { chart.dispose() } catch {}
+      chart = undefined
+      delete chartInstances.value[serverId]
     }
-    const chart = chartInstances.value[serverId]
+    if (!chart) {
+      chart = echarts.init(el)
+      chartInstances.value[serverId] = chart
+    }
     const times = metrics.map((m: any) => {
       const d = new Date(m.ts * 1000)
       return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -329,16 +428,17 @@ onMounted(async () => {
   for (const sv of initial) {
     loadChart(sv.id, chartRange.value[sv.id] || '24h')
   }
+  // 热力图
+  loadHeatmap('24h')
   refreshTimer = setInterval(load, 30000)
   // 定期 resize 图表以适配抽屉开合
-  resizeTimer = setInterval(() => {
-    Object.values(chartInstances.value).forEach(c => c.resize())
-  }, 5000)
+  resizeTimer = setInterval(() => { safeResizeAll(); heatChart.value?.resize() }, 5000)
 })
 
 function onWinResize() {
   checkMobile()
-  Object.values(chartInstances.value).forEach(c => c.resize())
+  safeResizeAll()
+  heatChart.value?.resize()
 }
 
 onUnmounted(() => {
@@ -346,6 +446,7 @@ onUnmounted(() => {
   if (resizeTimer) clearInterval(resizeTimer)
   window.removeEventListener('resize', onWinResize)
   Object.values(chartInstances.value).forEach(c => c.dispose())
+  heatChart.value?.dispose()
 })
 </script>
 
@@ -363,19 +464,14 @@ onUnmounted(() => {
 .sum-lab { font-size: 11px; color: var(--text-3); }
 
 /* 热力图 */
-.hm-legend { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); }
+.hm-legend { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); margin-left: 8px; }
 .hm-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-left: 6px; }
 .hm-dot.ok { background: #10b981; } .hm-dot.warn { background: #fbbf24; } .hm-dot.crit { background: #ef4444; }
-.heat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
-.heat-cell {
-  padding: 10px 8px; border-radius: 8px; cursor: pointer; text-align: center;
-  font-size: 12px; font-weight: 600; color: #fff; transition: transform .15s; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.heat-chart { width: 100%; height: 360px; min-height: 180px; }
+.heat-chart:empty { display: none; }
+@media (max-width: 768px) {
+  .heat-chart { height: 280px; }
 }
-.heat-cell:hover { transform: scale(1.05); }
-.heat-cell.ok { background: linear-gradient(135deg, #10b981, #34d399); }
-.heat-cell.warn { background: linear-gradient(135deg, #d97706, #fbbf24); }
-.heat-cell.crit { background: linear-gradient(135deg, #dc2626, #f87171); }
-.heat-empty { grid-column: 1/-1; text-align: center; color: var(--text-3); padding: 20px; }
 
 /* 告警 */
 .alert-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border-soft, #f1efe8); }
@@ -411,6 +507,5 @@ onUnmounted(() => {
 @media (max-width: 768px) {
   .card-grid { grid-template-columns: 1fr; }
   .sum-grid { grid-template-columns: repeat(2, 1fr); }
-  .heat-grid { grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); }
 }
 </style>
