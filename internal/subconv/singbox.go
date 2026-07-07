@@ -2,6 +2,7 @@ package subconv
 
 import (
 	"encoding/json"
+	"net"
 	"strings"
 )
 
@@ -181,7 +182,10 @@ func sbWS(path, host string) map[string]any {
 func injectSingboxTunExclude(doc map[string]any, proxies []*Proxy) {
 	seen := map[string]bool{}
 	for _, p := range proxies {
-		if p.Server != "" && !isPrivateIP(p.Server) {
+		// exclude_address entries must be CIDR prefixes; only real public IPs
+		// qualify. Bare domains (net.ParseIP == nil) would be invalid and break
+		// the client config, so they are skipped here (see injectRouteExclude).
+		if ip := net.ParseIP(p.Server); ip != nil && !ip.IsPrivate() {
 			seen[p.Server] = true
 		}
 	}
@@ -197,17 +201,15 @@ func injectSingboxTunExclude(doc map[string]any, proxies []*Proxy) {
 			continue
 		}
 		existing, _ := ib["exclude_address"].([]string)
-		for ip := range seen {
+		present := map[string]bool{}
+		for _, e := range existing {
+			present[e] = true
+		}
+		for _, ip := range sortedKeys(seen) {
 			cidr := ensureCIDR(ip)
-			dup := false
-			for _, e := range existing {
-				if e == cidr {
-					dup = true
-					break
-				}
-			}
-			if !dup {
+			if !present[cidr] {
 				existing = append(existing, cidr)
+				present[cidr] = true
 			}
 		}
 		ib["exclude_address"] = existing

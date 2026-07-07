@@ -2,6 +2,7 @@ package subconv
 
 import (
 	"net"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -53,6 +54,11 @@ func Clash(proxies []*Proxy, template string) (string, error) {
 	// routing loop. These IPs are server-side data (the nodes we define), not
 	// client-side config — the server knows its own node addresses.
 	injectRouteExclude(doc, proxies)
+	// Domain-based nodes can't be excluded by IP (route-exclude is CIDR-only, and
+	// we don't know the resolved IP here). Instead pin their hostnames into
+	// dns.fake-ip-filter so they always resolve to a real IP and stay outside the
+	// tunnel via proxy-server-nameserver + auto-detect-interface.
+	injectNodeDomains(doc, proxies)
 
 	b, err := yaml.Marshal(doc)
 	return string(b), err
@@ -215,7 +221,11 @@ func clashWS(m map[string]any, p *Proxy, network, path, host string) {
 func injectRouteExclude(doc map[string]any, proxies []*Proxy) {
 	seen := map[string]bool{}
 	for _, p := range proxies {
-		if p.Server != "" && !isPrivateIP(p.Server) {
+		// Only real, public IPs belong in route-exclude-address: mihomo parses
+		// every entry as a CIDR, so a bare domain (net.ParseIP == nil) would be
+		// an invalid entry that breaks config loading and kills TUN entirely.
+		// Domain nodes are handled by injectNodeDomains instead.
+		if ip := net.ParseIP(p.Server); ip != nil && !ip.IsPrivate() {
 			seen[p.Server] = true
 		}
 	}
@@ -226,33 +236,71 @@ func injectRouteExclude(doc map[string]any, proxies []*Proxy) {
 	if !ok {
 		return
 	}
-	var existing []string
-	if list, ok := tun["route-exclude-address"].([]any); ok {
-		for _, v := range list {
-			if s, ok := v.(string); ok {
-				existing = append(existing, s)
-			}
-		}
-	}
-	for ip := range seen {
+	existing, present := stringList(tun["route-exclude-address"])
+	for _, ip := range sortedKeys(seen) {
 		cidr := ensureCIDR(ip)
-		dup := false
-		for _, e := range existing {
-			if e == cidr {
-				dup = true
-				break
-			}
-		}
-		if !dup {
+		if !present[cidr] {
 			existing = append(existing, cidr)
+			present[cidr] = true
 		}
 	}
 	tun["route-exclude-address"] = existing
 }
 
-func isPrivateIP(ip string) bool {
-	parsed := net.ParseIP(ip)
-	return parsed != nil && parsed.IsPrivate()
+// injectNodeDomains pins domain-based node hostnames into dns.fake-ip-filter so
+// the client always resolves the proxy server's own domain to a real IP (never a
+// 198.18.x fake-ip). A fake-ip'd server address would make mihomo dial the proxy
+// through the tunnel it is trying to establish — the routing loop that surfaces
+// as "TUN on → no network".
+func injectNodeDomains(doc map[string]any, proxies []*Proxy) {
+	seen := map[string]bool{}
+	for _, p := range proxies {
+		if p.Server != "" && net.ParseIP(p.Server) == nil {
+			seen[p.Server] = true
+		}
+	}
+	if len(seen) == 0 {
+		return
+	}
+	dns, ok := doc["dns"].(map[string]any)
+	if !ok {
+		return
+	}
+	filter, present := stringList(dns["fake-ip-filter"])
+	for _, host := range sortedKeys(seen) {
+		if !present[host] {
+			filter = append(filter, host)
+			present[host] = true
+		}
+	}
+	dns["fake-ip-filter"] = filter
+}
+
+// stringList extracts the []string form of a YAML list value plus a membership
+// set of what it already contains, so callers can append without duplicating.
+func stringList(v any) ([]string, map[string]bool) {
+	out := []string{}
+	present := map[string]bool{}
+	if list, ok := v.([]any); ok {
+		for _, item := range list {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+				present[s] = true
+			}
+		}
+	}
+	return out, present
+}
+
+// sortedKeys returns a set's keys in a stable order so the rendered subscription
+// is deterministic across requests (important for client-side caching/diffing).
+func sortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ensureCIDR appends "/32" (IPv4) or "/128" (IPv6) to bare IP addresses.
