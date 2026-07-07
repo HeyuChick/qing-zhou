@@ -60,3 +60,67 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestDefaultClashTemplateDNS verifies the built-in anti-leak template has a
+// sane DNS configuration: fallback resolvers span multiple vendors,
+// fake-ip-filter covers common edge cases, and fallback-filter ipcidr catches
+// polluted responses.
+func TestDefaultClashTemplateDNS(t *testing.T) {
+	var doc struct {
+		DNS struct {
+			FakeIPFilter []string `yaml:"fake-ip-filter"`
+			Fallback     []string `yaml:"fallback"`
+			FallbackFilter struct {
+				GeoIP     bool     `yaml:"geoip"`
+				GeoIPCode string   `yaml:"geoip-code"`
+				IPCIDR    []string `yaml:"ipcidr"`
+			} `yaml:"fallback-filter"`
+		} `yaml:"dns"`
+	}
+	if err := yaml.Unmarshal([]byte(DefaultClashTemplate), &doc); err != nil {
+		t.Fatalf("parse DefaultClashTemplate: %v", err)
+	}
+
+	// --- fallback DNS: must not be dominated by a single vendor ---
+	cf, google := 0, 0
+	for _, s := range doc.DNS.Fallback {
+		if strings.Contains(s, "cloudflare") || strings.Contains(s, "1.1.1.1") {
+			cf++
+		}
+		if strings.Contains(s, "google") || strings.Contains(s, "8.8.8.8") {
+			google++
+		}
+	}
+	if cf > 2 {
+		t.Errorf("fallback has %d Cloudflare entries (should be ≤2 to avoid single-vendor risk): %v", cf, doc.DNS.Fallback)
+	}
+	if google == 0 {
+		t.Errorf("fallback has no Google DNS entries — missing vendor diversity: %v", doc.DNS.Fallback)
+	}
+
+	// --- fake-ip-filter: essential entries must be present ---
+	mustHave := []string{
+		"*.lan",
+		"*.local",
+		"+.msftconnecttest.com",
+		"+.stun.*.*",
+		"+.ntp.org.cn",
+		"+.srv.nintendo.net",
+		"+.stun.playstation.net",
+		"+.xboxlive.com",
+		"localhost.ptlogin2.qq.com",
+	}
+	for _, want := range mustHave {
+		if !contains(doc.DNS.FakeIPFilter, want) {
+			t.Errorf("fake-ip-filter missing %q", want)
+		}
+	}
+
+	// --- fallback-filter.ipcidr: must catch common polluted ranges ---
+	mustCIDR := []string{"240.0.0.0/4", "0.0.0.0/32", "127.0.0.0/8", "198.18.0.0/15"}
+	for _, cidr := range mustCIDR {
+		if !contains(doc.DNS.FallbackFilter.IPCIDR, cidr) {
+			t.Errorf("fallback-filter.ipcidr missing %q", cidr)
+		}
+	}
+}

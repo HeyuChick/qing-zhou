@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -28,6 +29,80 @@ func (a *API) handleAdminRealityKeypair(w http.ResponseWriter, r *http.Request) 
 	}
 	sid, _ := singbox.GenerateShortID(8)
 	ok(w, J{"private_key": priv, "public_key": pub, "short_id": sid})
+}
+
+// GET /api/admin/sb/sni-test?host=www.microsoft.com[:port]
+// Tests TCP handshake latency to an SNI host (default port 443). Takes 3
+// samples and reports min/avg/max + resolve info. Used by the TLS editor to
+// preview how well a candidate SNI domain performs before saving.
+func (a *API) handleAdminSniTest(w http.ResponseWriter, r *http.Request) {
+	host := strings.TrimSpace(r.URL.Query().Get("host"))
+	if host == "" {
+		fail(w, http.StatusBadRequest, "缺少 host 参数")
+		return
+	}
+	// Split host:port if present, default 443.
+	addr := host
+	if !strings.Contains(host, ":") {
+		addr = host + ":443"
+	}
+	// Validate hostname: reject obviously bad input.
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil || h == "" {
+		fail(w, http.StatusBadRequest, "host 格式错误")
+		return
+	}
+
+	type sample struct {
+		MS    float64 `json:"ms"`
+		Error string  `json:"error,omitempty"`
+	}
+	const probes = 3
+	samples := make([]sample, 0, probes)
+	var sum, okCount float64
+	var min, max float64
+	for i := 0; i < probes; i++ {
+		t0 := time.Now()
+		conn, derr := net.DialTimeout("tcp", addr, 3*time.Second)
+		dt := time.Since(t0).Seconds() * 1000
+		if derr != nil {
+			samples = append(samples, sample{MS: dt, Error: derr.Error()})
+			continue
+		}
+		_ = conn.Close()
+		samples = append(samples, sample{MS: dt})
+		sum += dt
+		okCount++
+		if min == 0 || dt < min {
+			min = dt
+		}
+		if dt > max {
+			max = dt
+		}
+		time.Sleep(80 * time.Millisecond)
+	}
+
+	avg := 0.0
+	status := "ok"
+	if okCount > 0 {
+		avg = sum / okCount
+	} else {
+		status = "unreachable"
+	}
+	if okCount > 0 && okCount < float64(probes) {
+		status = "partial" // some probes failed
+	}
+	ok(w, J{
+		"host":    h,
+		"addr":    addr,
+		"status":  status,
+		"ok":      int(okCount),
+		"total":   probes,
+		"min_ms":  min,
+		"avg_ms":  avg,
+		"max_ms":  max,
+		"samples": samples,
+	})
 }
 
 // ---- sb_tls ----

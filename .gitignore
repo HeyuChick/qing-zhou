@@ -10,3 +10,8 @@
 /qingzhou-linux-*
 /qingzhou.new
 SHA256SUMS.txt
+/cmd/probe/dist/
+
+# New frontend
+/frontend/node_modules/
+/frontend/dist/

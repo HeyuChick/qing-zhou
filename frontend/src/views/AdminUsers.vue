@@ -1,0 +1,227 @@
+<template>
+  <div>
+    <h2 class="page-title">用户管理</h2>
+    <div class="page-toolbar">
+      <n-input v-model:value="search" placeholder="搜索用户名/邮箱" style="width:260px;max-width:60%;" clearable />
+      <span class="spacer" />
+      <n-button type="primary" @click="openCreate">创建用户</n-button>
+    </div>
+    <n-spin :show="loading">
+      <div v-if="filtered.length" class="card-grid">
+        <div v-for="u in filtered" :key="u.id" class="list-card">
+          <div class="lc-head">
+            <span class="lc-title">{{ u.username }}</span>
+            <n-tag :type="u.status === 'banned' ? 'error' : 'success'" size="tiny" bordered="false">{{ u.status === 'banned' ? '封禁' : '正常' }}</n-tag>
+          </div>
+          <div class="lc-meta">
+            <span class="kv">邮箱 <b>{{ u.email || '—' }}</b></span>
+            <span class="kv">积分 <b>{{ u.points }}</b></span>
+            <span class="kv">流量 <b>{{ fmtBytes(u.used) }} / {{ fmtTotal(u.traffic_limit) }}</b></span>
+            <span class="kv">到期 <b>{{ fmtDate(u.expiry_at) }}</b></span>
+          </div>
+          <div class="lc-foot" style="flex-wrap:wrap;">
+            <n-button size="tiny" @click="openEdit(u)">编辑</n-button>
+            <n-button size="tiny" type="info" @click="openRecharge(u)">充值</n-button>
+            <n-button size="tiny" type="warning" @click="openAssign(u)">分配</n-button>
+            <n-button size="tiny" @click="openOrders(u)">订单</n-button>
+            <n-button size="tiny" type="error" @click="handleDelete(u.id)">删除</n-button>
+          </div>
+        </div>
+      </div>
+      <n-empty v-else-if="!loading" description="暂无用户" style="padding:40px 0;" />
+    </n-spin>
+
+    <!-- 创建用户 -->
+    <n-modal v-model:show="showCreate" preset="card" title="创建用户" style="max-width:400px;">
+      <n-form label-placement="left" label-width="60">
+        <n-form-item label="用户名"><n-input v-model:value="newUser.username" /></n-form-item>
+        <n-form-item label="邮箱"><n-input v-model:value="newUser.email" /></n-form-item>
+        <n-form-item label="密码"><n-input v-model:value="newUser.password" type="password" /></n-form-item>
+        <n-form-item label="积分"><n-input-number v-model:value="newUser.points" :min="0" style="width:100%;" /></n-form-item>
+      </n-form>
+      <n-button type="primary" block :loading="saving" @click="handleCreate">创建</n-button>
+    </n-modal>
+
+    <!-- 编辑用户 -->
+    <n-modal v-model:show="showEdit" preset="card" title="编辑用户" style="max-width:500px;">
+      <n-form v-if="editUser" label-placement="left" label-width="80">
+        <n-form-item label="用户名"><n-input :value="editUser.username" disabled /></n-form-item>
+        <n-form-item label="不限流量"><n-switch v-model:value="unlimitedTraffic" /></n-form-item>
+        <n-form-item v-if="!unlimitedTraffic" label="流量 (GB)"><n-input-number v-model:value="editTrafficGB" :min="0" style="width:100%;" /></n-form-item>
+        <n-form-item label="到期时间"><n-input v-model:value="editExpiry" type="datetime-local" style="width:100%;" /></n-form-item>
+        <n-form-item label="封禁"><n-switch v-model:value="editBanned" /></n-form-item>
+        <n-form-item label="重置密码"><n-input v-model:value="resetPw" type="password" placeholder="留空不重置" /></n-form-item>
+        <n-form-item label="重置流量"><n-switch v-model:value="resetTraffic" /></n-form-item>
+      </n-form>
+      <n-button type="primary" block :loading="saving" @click="handleSave">保存</n-button>
+    </n-modal>
+
+    <!-- 积分充值 -->
+    <n-modal v-model:show="showRecharge" preset="card" title="积分充值" style="max-width:400px;">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">用户：{{ rechargeUser?.username }}</p>
+      <n-form label-placement="left" label-width="60">
+        <n-form-item label="积分"><n-input-number v-model:value="rechargeAmount" style="width:100%;" /></n-form-item>
+        <n-form-item label="说明"><n-input v-model:value="rechargeNote" placeholder="正数充值，负数扣除" /></n-form-item>
+      </n-form>
+      <n-button type="primary" block :loading="saving" @click="handleRecharge">确认</n-button>
+    </n-modal>
+
+    <!-- 分配计划 -->
+    <n-modal v-model:show="showAssign" preset="card" title="分配计划" style="max-width:400px;">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">用户：{{ assignUser?.username }}</p>
+      <n-form label-placement="left" label-width="60">
+        <n-form-item label="套餐">
+          <n-select v-model:value="assignPkgId" :options="pkgOptions" placeholder="选择套餐" />
+        </n-form-item>
+      </n-form>
+      <n-button type="primary" block :loading="saving" @click="handleAssign">分配（不扣积分）</n-button>
+    </n-modal>
+
+    <!-- 订单历史 -->
+    <n-modal v-model:show="showOrders" preset="card" title="用户订单" style="max-width:700px;">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">用户：{{ ordersUser?.username }}</p>
+      <n-spin :show="loadingOrders">
+        <div v-if="userOrders.length" class="card-grid compact">
+          <div v-for="o in userOrders" :key="o.id" class="list-card">
+            <div class="lc-head">
+              <span class="lc-title">{{ o.name || '—' }}</span>
+              <n-tag :type="o.status === 'success' ? 'success' : 'warning'" size="tiny" bordered="false">{{ o.status === 'success' ? '成功' : '已退款' }}</n-tag>
+            </div>
+            <div class="lc-meta">
+              <span class="kv">积分 <b>{{ o.price_points }}</b></span>
+              <span class="kv">{{ fmtDateTime(o.created_at) }}</span>
+            </div>
+            <div class="lc-foot">
+              <n-button v-if="o.status === 'success'" size="tiny" type="warning" @click="handleRefund(o.id)">退款</n-button>
+            </div>
+          </div>
+        </div>
+        <n-empty v-else-if="!loadingOrders" description="暂无订单" style="padding:30px 0;" />
+      </n-spin>
+    </n-modal>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, reactive, onMounted } from 'vue'
+import {
+  NSpin, NInput, NInputNumber, NButton, NModal, NForm, NFormItem,
+  NSwitch, NTag, NSelect, NEmpty, useMessage
+} from 'naive-ui'
+import { apiList, apiPost, apiPut, apiDelete } from '@/api'
+import { fmtBytes, fmtTotal, fmtDate, fmtDateTime } from '@/utils/format'
+
+const message = useMessage()
+const users = ref<any[]>([])
+const loading = ref(false)
+const saving = ref(false)
+const search = ref('')
+
+const filtered = computed(() => {
+  if (!search.value) return users.value
+  const q = search.value.toLowerCase()
+  return users.value.filter((u: any) => u.username?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q))
+})
+
+// --- Create ---
+const showCreate = ref(false)
+const newUser = reactive({ username: '', email: '', password: '', points: 0 })
+function openCreate() { Object.assign(newUser, { username: '', email: '', password: '', points: 0 }); showCreate.value = true }
+async function handleCreate() {
+  saving.value = true
+  try { await apiPost('/api/admin/users', newUser); message.success('创建成功'); showCreate.value = false; await load() } catch (e: any) { message.error(e.message) } finally { saving.value = false }
+}
+
+// --- Edit ---
+const showEdit = ref(false)
+const editUser = ref<any>(null)
+const unlimitedTraffic = ref(false)
+const editTrafficGB = ref(0)
+const editExpiry = ref('')
+const editBanned = ref(false)
+const resetPw = ref('')
+const resetTraffic = ref(false)
+function openEdit(u: any) {
+  editUser.value = { ...u }
+  unlimitedTraffic.value = !u.traffic_limit || u.traffic_limit <= 0
+  editTrafficGB.value = (u.traffic_limit || 0) / (1024 * 1024 * 1024)
+  editExpiry.value = u.expiry_at ? new Date(u.expiry_at * 1000).toISOString().slice(0, 16) : ''
+  editBanned.value = u.status === 'banned'
+  resetPw.value = ''; resetTraffic.value = false
+  showEdit.value = true
+}
+async function handleSave() {
+  if (!editUser.value) return
+  saving.value = true
+  try {
+    const body: any = {
+      traffic_limit: unlimitedTraffic.value ? 0 : editTrafficGB.value * 1024 * 1024 * 1024,
+      status: editBanned.value ? 'banned' : 'active',
+    }
+    if (editExpiry.value) body.expiry_at = Math.floor(new Date(editExpiry.value).getTime() / 1000)
+    if (resetPw.value) body.password = resetPw.value
+    if (resetTraffic.value) body.reset_traffic = true
+    await apiPut(`/api/admin/users/${editUser.value.id}`, body)
+    message.success('保存成功'); showEdit.value = false; await load()
+  } catch (e: any) { message.error(e.message) } finally { saving.value = false }
+}
+
+// --- Recharge ---
+const showRecharge = ref(false)
+const rechargeUser = ref<any>(null)
+const rechargeAmount = ref(0)
+const rechargeNote = ref('')
+function openRecharge(u: any) { rechargeUser.value = u; rechargeAmount.value = 0; rechargeNote.value = ''; showRecharge.value = true }
+async function handleRecharge() {
+  saving.value = true
+  try {
+    await apiPost(`/api/admin/users/${rechargeUser.value.id}/points`, { amount: rechargeAmount.value, note: rechargeNote.value })
+    message.success(rechargeAmount.value >= 0 ? '充值成功' : '扣除成功'); showRecharge.value = false; await load()
+  } catch (e: any) { message.error(e.message) } finally { saving.value = false }
+}
+
+// --- Assign plan ---
+const showAssign = ref(false)
+const assignUser = ref<any>(null)
+const assignPkgId = ref<number | null>(null)
+const pkgOptions = ref<any[]>([])
+function openAssign(u: any) { assignUser.value = u; assignPkgId.value = null; showAssign.value = true; loadPackages() }
+async function loadPackages() {
+  try {
+    const pkgs = await apiList<any>('/api/admin/packages')
+    pkgOptions.value = pkgs.map((p: any) => ({ label: `${p.name} (${p.type})`, value: p.id }))
+  } catch {}
+}
+async function handleAssign() {
+  if (!assignPkgId.value) { message.warning('请选择套餐'); return }
+  saving.value = true
+  try {
+    await apiPost(`/api/admin/users/${assignUser.value.id}/assign-plan`, { package_id: assignPkgId.value })
+    message.success('分配成功'); showAssign.value = false; await load()
+  } catch (e: any) { message.error(e.message) } finally { saving.value = false }
+}
+
+// --- Orders ---
+const showOrders = ref(false)
+const ordersUser = ref<any>(null)
+const userOrders = ref<any[]>([])
+const loadingOrders = ref(false)
+async function openOrders(u: any) {
+  ordersUser.value = u; showOrders.value = true; loadingOrders.value = true
+  try { userOrders.value = await apiList(`/api/admin/users/${u.id}/orders`) } catch {} finally { loadingOrders.value = false }
+}
+async function handleRefund(orderId: number) {
+  try { await apiPost(`/api/admin/orders/${orderId}/refund`); message.success('退款成功'); userOrders.value = userOrders.value.map(o => o.id === orderId ? { ...o, status: 'refunded' } : o) } catch (e: any) { message.error(e.message) }
+}
+
+// --- Delete ---
+async function handleDelete(id: number) {
+  try { await apiDelete(`/api/admin/users/${id}`); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) }
+}
+
+async function load() {
+  loading.value = true
+  try { users.value = await apiList('/api/admin/users') } catch {} finally { loading.value = false }
+}
+onMounted(load)
+</script>

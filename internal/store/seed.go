@@ -32,6 +32,10 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		"default_device_limit":  "3",
 		"points_per_cny":        "10",
 		"signup_bonus_points":   "0",
+		// Monitor alert thresholds (percentages). CheckProbeAlerts reads these.
+		"alert_cpu_threshold":   "90",
+		"alert_mem_threshold":   "90",
+		"alert_disk_threshold":  "85",
 	}
 	for k, v := range defaults {
 		if err := s.setSettingIfAbsent(k, v); err != nil {

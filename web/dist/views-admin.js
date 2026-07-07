@@ -1007,7 +1007,7 @@ A.component('view-admin-orders', {
 
 /* ===== ADMIN SERVERS ===== */
 A.component('view-admin-servers', {
-  data() { return { servers: [], form: null, testing: 0, busy: false, rebuilding: 0, ir: null, irLoading: 0, irFiles: [], irPath: '', irServerId: 0, irServerName: '' }; },
+  data() { return { servers: [], form: null, testing: 0, busy: false, rebuilding: 0, ir: null, irLoading: -1, irFiles: [], irPath: '', irServerId: 0, irServerName: '' }; },
   async mounted() { await this.load(); },
   methods: {
     async load() { this.servers = await this.$api('/api/admin/servers') || []; },
@@ -1074,7 +1074,7 @@ A.component('view-admin-servers', {
       this.irLoading = 0;
     },
     onFileSelect(e) { this.irPath = e.target.value; },
-    closeImportRemote() { this.ir = null; this.irFiles = []; this.irPath = ''; this.irServerId = 0; },
+    closeImportRemote() { this.ir = null; this.irFiles = []; this.irPath = ''; this.irServerId = 0; this.irLoading = -1; },
   },
   template: `
   <div>
@@ -1146,4 +1146,201 @@ A.component('view-admin-servers', {
       </div>
     </div>
   </div>`,
+});
+
+/* ===== ADMIN MONITOR DASHBOARD ===== */
+A.component('view-admin-monitor', {
+  data() { return { servers: [], alerts: [], loading: true, editServer: null, expandedId: 0, detailRange: '24h', detailData: null, echLoaded: false, echCharts: {}, showAllIP: false, timer: null }; },
+  async mounted() { await this.load(); this.timer = setInterval(() => this.loadQuiet(), 30000); },
+  beforeUnmount() { Object.values(this.echCharts).forEach(c => c && c.dispose()); if (this.timer) clearInterval(this.timer); },
+  computed: {
+    online() { return this.servers.filter(s => this.up(s)).length; },
+    expiring() { return this.servers.filter(s => s.days_left !== null && s.days_left <= 7).length; },
+  },
+  methods: {
+    async load() {
+      this.loading = true;
+      try { const [s, a] = await Promise.all([this.$api('/api/admin/monitor/servers'), this.$api('/api/admin/monitor/alerts?unread=1')]); this.servers = s || []; this.alerts = a || []; } catch (e) { this.$toast(e.message, true); }
+      this.loading = false;
+    },
+    async loadQuiet() { try { const [s, a] = await Promise.all([this.$api('/api/admin/monitor/servers'), this.$api('/api/admin/monitor/alerts?unread=1')]); this.servers = s || []; this.alerts = a || []; } catch (e) {} },
+    up(s) { return s.status === 'online' || (s.metrics && s.last_seen && Date.now()/1000 - s.last_seen < 120); },
+    pct(u, t) { return t > 0 ? Math.round(u / t * 100) : 0; },
+    ago(ts) { if (!ts) return ''; const s = Math.max(0, Math.floor(Date.now()/1000) - ts); if (s < 60) return s + '秒前'; if (s < 3600) return Math.floor(s/60) + '分钟前'; if (s < 86400) return Math.floor(s/3600) + '小时前'; return Math.floor(s/86400) + '天前'; },
+    fmtUp(sec) { if (!sec) return '--'; const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600); return d > 0 ? d + '天' + h + '时' : h + '时' + Math.floor(sec%3600/60) + '分'; },
+    sc(s) { return this.up(s) ? '#10b981' : '#ef4444'; },
+    maskIP(h) { if (!h || this.showAllIP) return h || '--'; const p = h.split('.'); return p.length === 4 ? p[0]+'.'+p[1]+'.*.**' : h; },
+    meta(s) { return [s.provider, s.location, s.spec].filter(Boolean).join(' / '); },
+    expText(s) { if (!s.expiry_date) return ''; if (s.days_left !== null && s.days_left <= 0) return '已过期'; return this.$date(s.expiry_date) + (s.days_left !== null ? ' (' + s.days_left + '天)' : ''); },
+    barColor(v) { return v > 90 ? 'linear-gradient(90deg,#ef4444,#dc2626)' : v > 75 ? 'linear-gradient(90deg,#f59e0b,#d97706)' : 'linear-gradient(90deg,#10b981,#059669)'; },
+    async toggleProbe(s) { try { const r = await this.$api('/api/admin/servers/'+s.id+'/monitor', { method:'PUT', body:{ probe_enabled: !s.probe_enabled } }); s.probe_enabled=r.probe_enabled; s.probe_token=r.probe_token; this.$toast(r.probe_enabled?'已启用':'已停用'); } catch(e) { this.$toast(e.message, true); } },
+    async dismissAlert(a) { await this.$api('/api/admin/monitor/alerts/'+a.id+'/read', { method:'POST' }); this.alerts=this.alerts.filter(x=>x.id!==a.id); },
+    openEdit(s) { this.editServer = { id:s.id, provider:s.provider||'', location:s.location||'', spec:s.spec||'', price:s.price||0, expiryStr:s.expiry_date?new Date(s.expiry_date*1000).toISOString().slice(0,10):'', notes:s.notes||'' }; },
+    async saveMonitor() { const e=this.editServer, body={provider:e.provider,location:e.location,spec:e.spec,price:Number(e.price)||0,notes:e.notes,expiry_date:e.expiryStr?Math.floor(new Date(e.expiryStr).getTime()/1000):0}; try{await this.$api('/api/admin/servers/'+e.id+'/monitor',{method:'PUT',body});this.$toast('已保存');this.editServer=null;await this.load();}catch(err){this.$toast(err.message,true);} },
+    copyCmd(s) { this.$copy('bash <(curl -sL '+location.origin+'/api/monitor/install.sh) '+s.probe_token, '已复制'); },
+    copyIP(s) { this.$copy(s.host, 'IP已复制'); },
+    async expandRow(s) {
+      if (this.expandedId===s.id) { this.expandedId=0; return; }
+      this.expandedId=s.id; this.detailRange='24h'; this.detailData=null;
+      if (!s.probe_enabled||!this.up(s)) return;
+      try { const r=await this.$api('/api/admin/monitor/servers/'+s.id+'/metrics?range='+this.detailRange); this.detailData=r?r.data:[]; this.$nextTick(()=>this.renderCharts()); } catch(e) {}
+    },
+    async switchRange(r) {
+      this.detailRange=r;
+      try { const res=await this.$api('/api/admin/monitor/servers/'+this.expandedId+'/metrics?range='+r); this.detailData=res?res.data:[]; this.$nextTick(()=>this.renderCharts()); } catch(e) {}
+    },
+    ensureEcharts() { return new Promise(resolve => { if (window.echarts) { this.echLoaded=true; resolve(); return; } const s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js'; s.onload=()=>{this.echLoaded=true;resolve();}; s.onerror=()=>resolve(); document.head.appendChild(s); }); },
+    async renderCharts() {
+      await this.ensureEcharts(); if (!window.echarts||!this.detailData||!this.detailData.length) return;
+      // Dispose old charts
+      Object.values(this.echCharts).forEach(c => c && c.dispose());
+      this.echCharts = {};
+      const d=this.detailData, t=d.map(x=>new Date(x.ts*1000).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}));
+      const ls={type:'line',smooth:true,symbol:'none',lineStyle:{width:2}};
+      const base={ tooltip:{trigger:'axis',backgroundColor:'rgba(255,255,255,0.96)',borderColor:'#ece9e1',borderRadius:8,textStyle:{color:'#322f2a',fontSize:11},shadowBlur:8,shadowColor:'rgba(0,0,0,0.05)'}, grid:{left:40,right:10,top:8,bottom:16}, xAxis:{type:'category',data:t,show:false}, yAxis:{type:'value',axisLabel:{fontSize:9,color:'#9c978d'},splitLine:{lineStyle:{color:'#f1efe8',type:'dashed'}},axisLine:{show:false}}, animation:true, animationDuration:500, animationEasing:'cubicOut' };
+      const charts=[
+        ['chCpu',{...base,title:{text:'CPU',textStyle:{fontSize:11,color:'var(--text-3)',fontWeight:'500'},left:8,top:2},series:[{...ls,data:d.map(x=>+x.cpu_percent.toFixed(1)),color:'#10b981',areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(16,185,129,0.15)'},{offset:1,color:'rgba(16,185,129,0)'}]}}}],yAxis:{...base.yAxis,axisLabel:{...base.yAxis.axisLabel,formatter:'{value}%'}}}],
+        ['chMem',{...base,title:{text:'内存',textStyle:{fontSize:11,color:'var(--text-3)',fontWeight:'500'},left:8,top:2},series:[{...ls,data:d.map(x=>+(x.mem_used/1073741824).toFixed(2)),color:'#6366f1',areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(99,102,241,0.15)'},{offset:1,color:'rgba(99,102,241,0)'}]}}}],yAxis:{...base.yAxis,axisLabel:{...base.yAxis.axisLabel,formatter:'{value}G'}}}],
+        ['chNet',{...base,title:{text:'网络 KB/s',textStyle:{fontSize:11,color:'var(--text-3)',fontWeight:'500'},left:8,top:2},series:[{...ls,name:'收',data:d.map(x=>Math.round(x.net_rx/1024)),color:'#3b82f6',areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(59,130,246,0.12)'},{offset:1,color:'rgba(59,130,246,0)'}]}}},{...ls,name:'发',data:d.map(x=>Math.round(x.net_tx/1024)),color:'#f59e0b',areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:'rgba(245,158,11,0.12)'},{offset:1,color:'rgba(245,158,11,0)'}]}}}],legend:{show:false}}],
+        ['chLoad',{...base,title:{text:'负载',textStyle:{fontSize:11,color:'var(--text-3)',fontWeight:'500'},left:8,top:2},series:[{...ls,name:'1m',data:d.map(x=>+x.load1.toFixed(2)),color:'#10b981'},{...ls,name:'5m',data:d.map(x=>+x.load5.toFixed(2)),color:'#f59e0b'}]}],
+      ];
+      for (const [id, opt] of charts) {
+        const el=document.getElementById(id);
+        if(!el) continue;
+        const c=echarts.init(el); c.setOption(opt); this.echCharts[id]=c;
+      }
+    },
+  },
+  template: `
+  <div>
+    <div class="between mb" style="align-items:center">
+      <div class="flex" style="gap:10px;align-items:center">
+        <h1 class="page-title" style="margin:0;font-size:20px">服务器监控</h1>
+        <span class="mo-pill" style="background:#ecfdf5;color:#065f46"><span class="mo-dot on" style="background:#10b981"></span>{{online}}/{{servers.length}} 在线</span>
+        <span v-if="expiring" class="mo-pill" style="background:#fffbeb;color:#92400e"><span class="mo-dot" style="background:#f59e0b"></span>{{expiring}} 到期</span>
+        <span v-if="alerts.length" class="mo-pill" style="background:#fef2f2;color:#991b1b"><span class="mo-dot mo-pulse" style="background:#ef4444"></span>{{alerts.length}} 告警</span>
+      </div>
+      <div class="flex" style="gap:6px">
+        <button class="mo-btn" @click="showAllIP=!showAllIP">{{showAllIP?'隐藏IP':'显示IP'}}</button>
+        <button class="mo-btn" @click="load">刷新</button>
+      </div>
+    </div>
+
+    <div v-if="alerts.length" style="margin-bottom:10px">
+      <div v-for="a in alerts" :key="a.id" style="display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#fef2f2,#fff1f2);border:1px solid #fecdd3;border-radius:10px;padding:8px 14px;margin-bottom:4px">
+        <span style="font-size:12px;color:#9f1239"><span class="mo-pill" style="background:#fee2e2;color:#b91c1c;font-size:9px;padding:1px 6px">{{a.type}}</span> {{a.message}}</span>
+        <button style="background:none;border:none;cursor:pointer;color:#e11d48;font-size:14px;opacity:.5" @click="dismissAlert(a)">&times;</button>
+      </div>
+    </div>
+
+    <div v-if="loading && !servers.length" class="center" style="padding:50px"><span class="spin"></span></div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
+      <div v-for="s in servers" :key="s.id" class="mo-card" :style="{'border-top':'3px solid '+sc(s)}">
+        <div style="padding:16px 16px 14px;cursor:pointer" @click="expandRow(s)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <div class="flex" style="align-items:center;gap:8px">
+              <span class="mo-dot" :class="up(s)?'on':'off'" :style="{background:sc(s)}"></span>
+              <span style="font-size:15px;font-weight:700;color:var(--text)">{{s.name}}</span>
+            </div>
+            <span class="mo-pill" :style="{background:up(s)?'#ecfdf5':'#fef2f2',color:up(s)?'#065f46':'#991b1b'}">{{up(s)?'在线':'离线'}}</span>
+          </div>
+          <div style="font-size:12px;color:var(--text-2);margin-bottom:2px"><span style="font-family:monospace" @click.stop="copyIP(s)" title="点击复制">{{maskIP(s.host)}}</span></div>
+          <div v-if="meta(s)" style="font-size:11px;color:var(--text-3);margin-bottom:2px">{{meta(s)}}</div>
+          <div style="font-size:11px;color:var(--text-3)">
+            <span v-if="s.expiry_date" :style="{color:s.days_left<=3?'#ef4444':s.days_left<=7?'#f59e0b':'inherit'}">{{expText(s)}}</span>
+            <span v-if="s.price" style="margin-left:8px">月费 &yen;{{s.price}}</span>
+          </div>
+        </div>
+        <div class="mo-sep"></div>
+        <div v-if="s.probe_enabled && s.metrics" class="mo-body">
+          <div class="mo-grid" style="margin-bottom:12px">
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:var(--text-3)">CPU</span><span style="font-weight:700;font-size:13px;color:var(--text)">{{s.metrics.cpu_percent.toFixed(1)}}%</span></div>
+              <div class="mo-bar"><div class="mo-bar-fill" :style="{width:pct(s.metrics.cpu_percent,100)+'%',background:barColor(pct(s.metrics.cpu_percent,100))}"></div></div>
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:var(--text-3)">内存</span><span style="font-weight:700;font-size:13px;color:var(--text)">{{pct(s.metrics.mem_used,s.metrics.mem_total)}}%</span></div>
+              <div class="mo-bar"><div class="mo-bar-fill" :style="{width:pct(s.metrics.mem_used,s.metrics.mem_total)+'%',background:barColor(pct(s.metrics.mem_used,s.metrics.mem_total))}"></div></div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:3px">{{$fmt(s.metrics.mem_used)}} / {{$fmt(s.metrics.mem_total)}}</div>
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:var(--text-3)">磁盘</span><span style="font-weight:700;font-size:13px;color:var(--text)">{{pct(s.metrics.disk_used,s.metrics.disk_total)}}%</span></div>
+              <div class="mo-bar"><div class="mo-bar-fill" :style="{width:pct(s.metrics.disk_used,s.metrics.disk_total)+'%',background:barColor(pct(s.metrics.disk_used,s.metrics.disk_total))}"></div></div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:3px">{{$fmt(s.metrics.disk_used)}} / {{$fmt(s.metrics.disk_total)}}</div>
+            </div>
+          </div>
+          <div class="mo-info">
+            <span>网络 <b>&uarr;{{$fmt(s.metrics.net_tx)}}/s</b> <b>&darr;{{$fmt(s.metrics.net_rx)}}/s</b></span>
+            <span>负载 <b>{{s.metrics.load1.toFixed(2)}}</b></span>
+            <span>进程 <b>{{s.metrics.process_count}}</b></span>
+            <span>TCP <b>{{s.metrics.tcp_connections}}</b></span>
+            <span>运行 <b>{{fmtUp(s.metrics.uptime)}}</b></span>
+          </div>
+        </div>
+        <div v-else-if="s.probe_enabled" class="mo-body" style="text-align:center;font-size:12px;color:var(--text-3)">等待数据上报 {{ago(s.last_seen)}}</div>
+        <div v-else class="mo-body" style="text-align:center;font-size:12px;color:var(--text-3)">未启用探针</div>
+        <div class="mo-acts">
+          <button class="mo-btn" :class="s.probe_enabled?'mo-btn-d':'mo-btn-p'" @click.stop="toggleProbe(s)">{{s.probe_enabled?'停用探针':'启用探针'}}</button>
+          <button class="mo-btn" @click.stop="openEdit(s)">编辑</button>
+          <button v-if="s.probe_token" class="mo-btn" @click.stop="copyCmd(s)">复制安装命令</button>
+          <button v-if="s.probe_enabled" class="mo-btn" style="margin-left:auto" @click.stop="expandRow(s)">{{expandedId===s.id?'收起':'图表'}}</button>
+        </div>
+
+        <!-- Expanded charts -->
+        <div v-if="expandedId===s.id" class="mo-exp">
+          <template v-if="s.probe_enabled && (up(s)||s.metrics)">
+            <div class="flex" style="gap:4px;margin-bottom:10px">
+              <div style="display:flex;gap:2px;background:var(--bg);border-radius:8px;padding:3px">
+                <button v-for="r in ['1h','6h','24h','7d','30d']" :key="r" style="border:none;cursor:pointer;padding:4px 12px;border-radius:6px;font-size:11px;transition:all .2s" :style="{background:detailRange===r?'var(--accent)':'transparent',color:detailRange===r?'#fff':'var(--text-2)'}" @click="switchRange(r)">{{r}}</button>
+              </div>
+            </div>
+            <div v-if="!detailData" class="center" style="padding:20px"><span class="spin"></span></div>
+            <div v-else-if="!detailData.length" style="text-align:center;padding:20px;color:var(--text-3);font-size:12px">暂无数据</div>
+            <template v-else>
+              <!-- 4 charts in 2x2 grid -->
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+                <div style="height:120px;background:var(--bg-soft);border-radius:8px;position:relative" :id="'chCpu'+s.id"></div>
+                <div style="height:120px;background:var(--bg-soft);border-radius:8px;position:relative" :id="'chMem'+s.id"></div>
+                <div style="height:120px;background:var(--bg-soft);border-radius:8px;position:relative" :id="'chNet'+s.id"></div>
+                <div style="height:120px;background:var(--bg-soft);border-radius:8px;position:relative" :id="'chLoad'+s.id"></div>
+              </div>
+              <!-- System info chips -->
+              <div class="mo-info" style="margin-top:6px">
+                <span v-if="s.metrics.platform">{{s.metrics.platform}}</span>
+                <span v-if="s.metrics.kernel">内核 {{s.metrics.kernel}}</span>
+                <span>架构 {{s.metrics.arch}}</span>
+                <span>负载 {{s.metrics.load1.toFixed(2)}}/{{s.metrics.load5.toFixed(2)}}/{{s.metrics.load15.toFixed(2)}}</span>
+              </div>
+            </template>
+          </template>
+          <div v-else-if="!s.probe_enabled" style="text-align:center;padding:14px">
+            <div style="font-size:12px;color:var(--text-2);margin-bottom:8px">启用探针后在目标服务器执行安装命令</div>
+            <button class="mo-btn mo-btn-p" @click.stop="toggleProbe(s)">启用探针</button>
+          </div>
+          <div v-else style="text-align:center;padding:14px">
+            <div style="font-size:12px;color:var(--text-2);margin-bottom:8px">离线 · 请确认探针已安装并运行</div>
+            <button v-if="s.probe_token" class="mo-btn mo-btn-p" @click.stop="copyCmd(s)">复制安装命令</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="!loading && !servers.length" style="text-align:center;padding:50px;color:var(--text-3);font-size:13px">请先在「服务器管理」中添加服务器</div>
+
+    <modal v-if="editServer" title="编辑资产信息" @close="editServer=null">
+      <div class="row"><div class="field"><label>供应商</label><input class="input" v-model="editServer.provider" placeholder="如 DMIT"></div><div class="field"><label>位置</label><input class="input" v-model="editServer.location" placeholder="如 美国洛杉矶"></div></div>
+      <div class="row"><div class="field"><label>规格</label><input class="input" v-model="editServer.spec" placeholder="如 1C1G20G"></div><div class="field"><label>月费</label><input class="input" type="number" step="0.01" v-model.number="editServer.price"></div></div>
+      <div class="field"><label>到期</label><input class="input" type="date" v-model="editServer.expiryStr"></div>
+      <div class="field"><label>备注</label><input class="input" v-model="editServer.notes"></div>
+      <button class="btn primary block" @click="saveMonitor">保存</button>
+    </modal>
+  </div>`,
 });})();
+
+
+
+
+
+
+

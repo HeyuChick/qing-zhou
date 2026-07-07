@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -20,6 +21,7 @@ type API struct {
 	mailer   *mailer.Mailer // may be nil if SMTP is not configured
 	authRL   *rateLimiter
 	resendRL *rateLimiter
+	probeRL  *rateLimiter // rate limit for agent report endpoint
 
 	sbctl *sbctl.Controller // native sing-box orchestrator; nil if not enabled
 
@@ -45,6 +47,7 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		st: st, secret: secret, mailer: mail,
 		authRL:    newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
 		resendRL:  newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
+		probeRL:   newRateLimiter(60, time.Minute),    // 60 probe reports / IP / min
 		linkCache: make(map[int64]linkCacheEntry),
 	}
 }
@@ -70,6 +73,18 @@ func (a *API) Router() http.Handler {
 		pub.Post("/api/auth/forgot", a.handleForgot)
 		pub.Post("/api/auth/reset", a.handleReset)
 	})
+
+	// Probe agent endpoints — rate limited, token-authenticated (no JWT).
+	r.Group(func(pub chi.Router) {
+		pub.Use(a.limit(a.probeRL))
+		pub.Post("/api/monitor/report", a.handleMonitorReport)
+	})
+	r.Get("/api/monitor/agent/{arch}", a.handleDownloadAgent)
+	r.Get("/api/monitor/install.sh", a.handleDownloadInstallScript)
+
+	// Public monitoring dashboard (no auth required).
+	r.Get("/api/monitor/public", a.handleMonitorPublic)
+	r.Get("/api/monitor/heatmap", a.handleMonitorPublicHeatmap)
 
 	// Authenticated (any logged-in user)
 	r.Group(func(pr chi.Router) {
@@ -130,6 +145,7 @@ func (a *API) Router() http.Handler {
 
 		// native sing-box (B2): TLS/Reality profiles, inbounds, config preview
 		ar.Post("/api/admin/sb/reality-keypair", a.handleAdminRealityKeypair)
+		ar.Get("/api/admin/sb/sni-test", a.handleAdminSniTest)
 		ar.Get("/api/admin/sb/tls", a.handleAdminListSbTls)
 		ar.Post("/api/admin/sb/tls", a.handleAdminSaveSbTls)
 		ar.Post("/api/admin/sb/tls/reality", a.handleAdminCreateRealityTls)
@@ -153,6 +169,15 @@ func (a *API) Router() http.Handler {
 		ar.Delete("/api/admin/servers/{id}", a.handleAdminDeleteServer)
 		ar.Post("/api/admin/servers/{id}/test", a.handleAdminTestServer)
 		ar.Post("/api/admin/servers/{id}/rebuild", a.handleAdminRebuildServer)
+		ar.Put("/api/admin/servers/{id}/monitor", a.handleUpdateServerMonitor)
+
+		// monitor probe
+		ar.Get("/api/admin/monitor/dashboard", a.handleMonitorDashboard)
+		ar.Get("/api/admin/monitor/servers", a.handleMonitorServers)
+		ar.Get("/api/admin/monitor/servers/{id}/metrics", a.handleServerMetrics)
+		ar.Get("/api/admin/monitor/heatmap", a.handleMonitorHeatmap)
+		ar.Get("/api/admin/monitor/alerts", a.handleMonitorAlerts)
+		ar.Post("/api/admin/monitor/alerts/{id}/read", a.handleMarkAlertRead)
 
 		// nodes / groups / sources (Phase 4.5)
 		ar.Get("/api/admin/inbounds", a.handleAdminInbounds)
@@ -192,7 +217,19 @@ func (a *API) Router() http.Handler {
 	})
 
 	// Embedded SPA (must be last; specific routes above take precedence).
-	r.Handle("/*", web.Handler())
+	// Set QZ_USE_NEW_FRONTEND=1 to serve the new Vue 3 frontend from the
+	// frontend/ package. Otherwise, the original web/ frontend is used.
+	r.Handle("/*", frontendHandler())
 
 	return r
+}
+
+// frontendHandler returns the appropriate SPA handler based on environment.
+// QZ_USE_NEW_FRONTEND=1 selects the new Vue 3 frontend (frontend package).
+// QZ_WEB_DIR can point to either frontend/dist (new) or web/dist (old) for dev.
+func frontendHandler() http.Handler {
+	if os.Getenv("QZ_USE_NEW_FRONTEND") == "1" {
+		return newFrontendHandler()
+	}
+	return web.Handler()
 }

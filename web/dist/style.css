@@ -217,4 +217,32 @@ textarea{resize:vertical;min-height:84px}
   .table th,.table td{padding:8px 8px}
 }
 /* never let a stray wide element scroll the whole page sideways */
+html{overflow-x:hidden}
+
+/* ===== Monitor Dashboard ===== */
+.mo-card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;transition:all .25s ease;box-shadow:var(--shadow-sm)}
+.mo-card:hover{box-shadow:var(--shadow);transform:translateY(-1px)}
+.mo-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:20px;font-size:10px;font-weight:600}
+.mo-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block}
+.mo-dot.on{box-shadow:0 0 6px rgba(16,185,129,.4)}
+.mo-dot.off{box-shadow:0 0 6px rgba(239,68,68,.35)}
+.mo-pulse{animation:mopulse 2s ease-in-out infinite}
+@keyframes mopulse{0%,100%{opacity:1}50%{opacity:.4}}
+.mo-bar{height:5px;background:#eef0f4;border-radius:3px;overflow:hidden}
+.mo-bar-fill{height:100%;border-radius:3px;transition:width .6s cubic-bezier(.4,0,.2,1)}
+.mo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.mo-info{display:flex;flex-wrap:wrap;font-size:11px;color:var(--text-2)}
+.mo-info span{white-space:nowrap;margin-right:14px;margin-bottom:4px;padding:3px 8px;background:var(--bg-soft);border-radius:5px}
+.mo-info b{color:var(--text);font-weight:600}
+.mo-sep{border-top:1px solid var(--border-soft);margin:0}
+.mo-body{padding:16px}
+.mo-acts{display:flex;gap:5px;padding:10px 16px 14px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--border-soft)}
+.mo-btn{border:none;cursor:pointer;padding:5px 11px;border-radius:7px;font-size:11px;background:var(--bg-soft);color:var(--text-2);transition:all .15s}
+.mo-btn:hover{background:var(--border);color:var(--text)}
+.mo-btn-p{background:var(--accent);color:#fff}
+.mo-btn-p:hover{background:var(--accent-strong)}
+.mo-btn-d{background:#fef2f2;color:#991b1b}
+.mo-btn-d:hover{background:#fee2e2}
+.mo-exp{padding:14px 16px;border-top:1px solid var(--border-soft);animation:moslide .25s ease}
+@keyframes moslide{from{opacity:0}to{opacity:1}}
 .main{overflow-x:hidden}

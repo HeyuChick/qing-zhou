@@ -1,0 +1,58 @@
+// Package frontend embeds and serves the new Vue 3 SPA frontend.
+//
+// In development, set QZ_WEB_DIR=frontend/dist to serve from disk.
+// In production, the dist/ directory is embedded in the binary.
+// To build: run "npm run build" in frontend/, then rebuild the Go binary.
+package frontend
+
+import (
+	"embed"
+	"io/fs"
+	"net/http"
+	"os"
+	"path"
+	"strings"
+)
+
+//go:embed all:dist
+var distFS embed.FS
+
+// assetFS returns the frontend filesystem.
+func assetFS() fs.FS {
+	if dir := os.Getenv("QZ_WEB_DIR"); dir != "" {
+		return os.DirFS(dir)
+	}
+	sub, err := fs.Sub(distFS, "dist")
+	if err != nil {
+		panic(err)
+	}
+	return sub
+}
+
+// Handler serves static assets, falling back to index.html for SPA routes.
+// Requests under /assets/ that don't match a real file get a 404 instead of
+// the SPA fallback, so the browser doesn't receive HTML when it expects JS/CSS.
+func Handler() http.Handler {
+	sub := assetFS()
+	fileServer := http.FileServer(http.FS(sub))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+
+		p := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if p != "" && p != "index.html" {
+			if st, err := fs.Stat(sub, p); err == nil && !st.IsDir() {
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+			// Static assets that don't exist → 404, not SPA fallback.
+			if strings.HasPrefix(p, "assets/") {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		index, _ := fs.ReadFile(sub, "index.html")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(index)
+	})
+}
