@@ -114,6 +114,11 @@ dns:
     - "+.stun.*.*.*"
     - "+.stun.*.*.*.*"
     - "+.stun.*.*.*.*.*"
+    - "+.ntp.org.cn"
+    - "+.srv.nintendo.net"
+    - "+.stun.playstation.net"
+    - "+.xboxlive.com"
+    - "localhost.ptlogin2.qq.com"
   ipv6: false
   default-nameserver:
     - 223.5.5.5
@@ -125,7 +130,7 @@ dns:
     - https://dns.alidns.com/dns-query
   fallback:
     - https://1.1.1.1/dns-query
-    - https://dns.cloudflare.com/dns-query
+    - https://dns.google/dns-query
     - tls://1.1.1.1:853
     - tls://8.8.8.8:853
   fallback-filter:
@@ -134,6 +139,8 @@ dns:
     ipcidr:
       - 240.0.0.0/4
       - 0.0.0.0/32
+      - 127.0.0.0/8
+      - 198.18.0.0/15
   proxy-server-nameserver:
     - 223.5.5.5
     - 119.29.29.29
