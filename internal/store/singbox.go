@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -234,6 +235,21 @@ func (s *Store) ListSbInboundsByServer(serverID int64) ([]*SbInbound, error) {
 	return out, rows.Err()
 }
 
+// SbInboundPortConflict 检测同服务器同端口是否已被其他入站占用。
+// excludeID 用于编辑时排除自身。返回 (conflict, existingTag, error)。
+func (s *Store) SbInboundPortConflict(serverID int64, port int, excludeID int64) (bool, string, error) {
+	var tag string
+	err := s.db.QueryRow(`SELECT tag FROM sb_inbounds WHERE server_id=? AND listen_port=? AND id!=? LIMIT 1`,
+		serverID, port, excludeID).Scan(&tag)
+	if err == sql.ErrNoRows {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	return true, tag, nil
+}
+
 // SetUserPlan sets a user's current plan (for entitlement); planID 0 clears it.
 func (s *Store) SetUserPlan(userID, planID int64) error {
 	if planID == 0 {
@@ -459,7 +475,8 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
 		if r, ok := server["reality"].(map[string]interface{}); ok {
 			p.PublicKey = nestedStr(client, "reality", "public_key")
 			p.ShortID = firstShortID(r["short_id"])
-			if ib.Type == "vless" {
+			// VLESS flow: 默认 vision，但 options.flow="none" 时关闭
+			if ib.Type == "vless" && mapStr(opts, "flow") != "none" {
 				p.Flow = true
 			}
 		}

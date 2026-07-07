@@ -3,9 +3,12 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -31,19 +34,22 @@ func (a *API) handleAdminRealityKeypair(w http.ResponseWriter, r *http.Request) 
 	ok(w, J{"private_key": priv, "public_key": pub, "short_id": sid})
 }
 
-// GET /api/admin/sb/sni-test?host=www.microsoft.com[:port]
-// Tests TCP handshake latency to an SNI host (default port 443). Takes 3
-// samples and reports min/avg/max + resolve info. Used by the TLS editor to
-// preview how well a candidate SNI domain performs before saving.
+// GET /api/admin/sb/sni-test?host=www.microsoft.com[:port]&port=8443
+// Tests TCP handshake latency to an SNI host (default port 443, or ?port=). Takes
+// 3 samples and reports min/avg/max + resolve info. Used by the TLS editor to
+// preview how well a candidate SNI domain performs before saving, and by the
+// Reality handshake target test (which may use a non-443 port).
 func (a *API) handleAdminSniTest(w http.ResponseWriter, r *http.Request) {
 	host := strings.TrimSpace(r.URL.Query().Get("host"))
 	if host == "" {
 		fail(w, http.StatusBadRequest, "缺少 host 参数")
 		return
 	}
-	// Split host:port if present, default 443.
+	// 显式 port 参数优先；否则从 host:port 解析；都没有则默认 443
 	addr := host
-	if !strings.Contains(host, ":") {
+	if port := strings.TrimSpace(r.URL.Query().Get("port")); port != "" && !strings.Contains(host, ":") {
+		addr = host + ":" + port
+	} else if !strings.Contains(host, ":") {
 		addr = host + ":443"
 	}
 	// Validate hostname: reject obviously bad input.
@@ -107,13 +113,62 @@ func (a *API) handleAdminSniTest(w http.ResponseWriter, r *http.Request) {
 
 // ---- sb_tls ----
 
+// certInfoFromPEM 解析 PEM 证书，返回有效期信息（用于列表展示过期提醒）。
+func certInfoFromPEM(pemStr string) map[string]interface{} {
+	if pemStr == "" {
+		return nil
+	}
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return map[string]interface{}{"error": "PEM 解析失败"}
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return map[string]interface{}{"error": "证书解析失败: " + err.Error()}
+	}
+	now := time.Now()
+	daysLeft := int(cert.NotAfter.Sub(now).Hours() / 24)
+	return map[string]interface{}{
+		"subject":     cert.Subject.CommonName,
+		"issuer":      cert.Issuer.CommonName,
+		"not_before":  cert.NotBefore.Unix(),
+		"not_after":   cert.NotAfter.Unix(),
+		"days_left":   daysLeft,
+		"expired":     now.After(cert.NotAfter),
+		"expiring":    daysLeft >= 0 && daysLeft <= 14,
+	}
+}
+
 func (a *API) handleAdminListSbTls(w http.ResponseWriter, r *http.Request) {
 	list, err := a.st.ListSbTls()
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "读取失败")
 		return
 	}
-	ok(w, list)
+	// 为每个证书 TLS 模式的配置附带证书有效期信息
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, t := range list {
+		m := map[string]interface{}{
+			"id":          t.ID,
+			"server_id":   t.ServerID,
+			"name":        t.Name,
+			"mode":        t.Mode,
+			"server_json": t.ServerJSON,
+			"client_json": t.ClientJSON,
+			"created_at":  t.CreatedAt,
+			"updated_at":  t.UpdatedAt,
+		}
+		if t.Mode == "tls" {
+			var sj map[string]interface{}
+			if json.Unmarshal([]byte(t.ServerJSON), &sj) == nil {
+				if cert, ok := sj["certificate"].(string); ok && cert != "" {
+					m["cert_info"] = certInfoFromPEM(cert)
+				}
+			}
+		}
+		out = append(out, m)
+	}
+	ok(w, out)
 }
 
 func (a *API) handleAdminSaveSbTls(w http.ResponseWriter, r *http.Request) {
@@ -160,16 +215,17 @@ func (a *API) handleAdminDeleteSbTls(w http.ResponseWriter, r *http.Request) {
 // profile (server + client JSON) with a freshly generated keypair.
 func (a *API) handleAdminCreateRealityTls(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name            string `json:"name"`
-		ServerID        int64  `json:"server_id"`
-		ServerName      string `json:"server_name"`      // SNI shown to clients, e.g. www.tesla.com
-		HandshakeServer string `json:"handshake_server"` // real TLS dest, defaults to ServerName
-		HandshakePort   int    `json:"handshake_port"`   // defaults 443
-		Fingerprint     string `json:"fingerprint"`      // utls fp, defaults chrome
+		Name            string   `json:"name"`
+		ServerID        int64    `json:"server_id"`
+		ServerName      string   `json:"server_name"`      // SNI shown to clients, e.g. www.tesla.com
+		HandshakeServer string   `json:"handshake_server"` // real TLS dest, defaults to ServerName
+		HandshakePort   int      `json:"handshake_port"`   // defaults 443
+		Fingerprint     string   `json:"fingerprint"`      // utls fp, defaults chrome
 		// Pre-generated keys from frontend (optional; backend generates if empty)
-		PrivateKey string `json:"private_key"`
-		PublicKey  string `json:"public_key"`
-		ShortID    string `json:"short_id"`
+		PrivateKey string   `json:"private_key"`
+		PublicKey  string   `json:"public_key"`
+		ShortID    string   `json:"short_id"`     // 单个（向后兼容）
+		ShortIDs   []string `json:"short_ids"`    // 多个（优先）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -189,7 +245,6 @@ func (a *API) handleAdminCreateRealityTls(w http.ResponseWriter, r *http.Request
 	}
 
 	priv, pub := req.PrivateKey, req.PublicKey
-	sid := req.ShortID
 	// Generate keys only if not provided by frontend
 	if priv == "" || pub == "" {
 		var err error
@@ -199,8 +254,19 @@ func (a *API) handleAdminCreateRealityTls(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	if sid == "" {
-		sid, _ = singbox.GenerateShortID(8)
+	// 构建 short_id 列表：优先用 short_ids 数组，否则用单个 short_id
+	sids := make([]string, 0, len(req.ShortIDs))
+	for _, s := range req.ShortIDs {
+		if s = strings.TrimSpace(s); s != "" {
+			sids = append(sids, s)
+		}
+	}
+	if len(sids) == 0 {
+		sid := strings.TrimSpace(req.ShortID)
+		if sid == "" {
+			sid, _ = singbox.GenerateShortID(8)
+		}
+		sids = []string{sid}
 	}
 
 	server := map[string]interface{}{
@@ -210,13 +276,13 @@ func (a *API) handleAdminCreateRealityTls(w http.ResponseWriter, r *http.Request
 			"enabled":     true,
 			"handshake":   map[string]interface{}{"server": req.HandshakeServer, "server_port": req.HandshakePort},
 			"private_key": priv,
-			"short_id":    []string{sid},
+			"short_id":    sids,
 		},
 	}
 	client := map[string]interface{}{
 		"server_name": req.ServerName,
 		"public_key":  pub,
-		"short_id":    sid,
+		"short_id":    sids[0],
 		"reality":     map[string]interface{}{"public_key": pub},
 		"utls":        map[string]interface{}{"enabled": true, "fingerprint": fpOrDefault(req.Fingerprint)},
 	}
@@ -253,7 +319,7 @@ func tlsVersion(v string) string {
 }
 
 // PUT /api/admin/sb/tls/reality/{id} — edit a Reality profile's name/SNI/
-// handshake from structured fields, preserving the existing keypair & short_id.
+// handshake/short_ids from structured fields, preserving the existing keypair.
 func (a *API) handleAdminUpdateRealityTls(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	cur, _ := a.st.GetSbTls(id)
@@ -262,12 +328,13 @@ func (a *API) handleAdminUpdateRealityTls(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		Name            string `json:"name"`
-		ServerID        int64  `json:"server_id"`
-		ServerName      string `json:"server_name"`
-		HandshakeServer string `json:"handshake_server"`
-		HandshakePort   int    `json:"handshake_port"`
-		Fingerprint     string `json:"fingerprint"`
+		Name            string   `json:"name"`
+		ServerID        int64    `json:"server_id"`
+		ServerName      string   `json:"server_name"`
+		HandshakeServer string   `json:"handshake_server"`
+		HandshakePort   int      `json:"handshake_port"`
+		Fingerprint     string   `json:"fingerprint"`
+		ShortIDs        []string `json:"short_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -298,6 +365,22 @@ func (a *API) handleAdminUpdateRealityTls(w http.ResponseWriter, r *http.Request
 		server["reality"] = reality
 	}
 	reality["handshake"] = map[string]interface{}{"server": req.HandshakeServer, "server_port": req.HandshakePort}
+	// 更新 short_id 列表（如果前端提供了）
+	if len(req.ShortIDs) > 0 {
+		sids := make([]string, 0, len(req.ShortIDs))
+		for _, s := range req.ShortIDs {
+			if s = strings.TrimSpace(s); s != "" {
+				sids = append(sids, s)
+			}
+		}
+		if len(sids) > 0 {
+			reality["short_id"] = sids
+			if client == nil {
+				client = map[string]interface{}{}
+			}
+			client["short_id"] = sids[0]
+		}
+	}
 	if client == nil {
 		client = map[string]interface{}{}
 	}
@@ -400,7 +483,28 @@ func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) 
 		fail(w, http.StatusInternalServerError, "读取失败")
 		return
 	}
-	ok(w, list)
+	// 为每个入站附带当前用户数（按 tag 统计有权限的用户）
+	usersByTag, _ := a.st.BuildUsersByTag(time.Now().Unix())
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, n := range list {
+		m := map[string]interface{}{
+			"id":          n.ID,
+			"server_id":   n.ServerID,
+			"type":        n.Type,
+			"tag":         n.Tag,
+			"listen":      n.Listen,
+			"listen_port": n.ListenPort,
+			"tls_id":      n.TlsID,
+			"options":     n.Options,
+			"enabled":     n.Enabled,
+			"sort_order":  n.SortOrder,
+			"created_at":  n.CreatedAt,
+			"updated_at":  n.UpdatedAt,
+			"user_count":  len(usersByTag[n.Tag]),
+		}
+		out = append(out, m)
+	}
+	ok(w, out)
 }
 
 var sbInboundTypes = map[string]bool{"vless": true, "hysteria2": true, "tuic": true, "trojan": true, "vmess": true, "shadowsocks": true, "anytls": true, "hysteria": true}
@@ -428,6 +532,17 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "tag 不能包含空格")
 		return
 	}
+	// 端口冲突检测：同服务器同端口不允许重复
+	if id := chi.URLParam(r, "id"); id != "" {
+		n.ID = atoi(id)
+	}
+	if conflict, existingTag, err := a.st.SbInboundPortConflict(n.ServerID, n.ListenPort, n.ID); err != nil {
+		fail(w, http.StatusInternalServerError, "端口冲突检测失败")
+		return
+	} else if conflict {
+		fail(w, http.StatusBadRequest, fmt.Sprintf("端口 %d 已被入站「%s」占用", n.ListenPort, existingTag))
+		return
+	}
 	if n.Options != "" {
 		var opts map[string]interface{}
 		if err := json.Unmarshal([]byte(n.Options), &opts); err != nil {
@@ -449,9 +564,6 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-	}
-	if id := chi.URLParam(r, "id"); id != "" {
-		n.ID = atoi(id)
 	}
 	newID, err := a.st.SaveSbInbound(&n)
 	if err != nil {
@@ -507,6 +619,41 @@ func (a *API) handleAdminSbPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func nowUnix() int64 { return time.Now().Unix() }
+
+// GET /api/admin/sb/port-check?server_id=N&port=443
+// 测试入站端口是否对外开放（TCP 握手）。server_id=0 表示本机（测 127.0.0.1），
+// 远程服务器测其 host:port。
+func (a *API) handleAdminPortCheck(w http.ResponseWriter, r *http.Request) {
+	port := atoi(r.URL.Query().Get("port"))
+	if port <= 0 || port > 65535 {
+		fail(w, http.StatusBadRequest, "端口需在 1-65535")
+		return
+	}
+	serverID := atoi(r.URL.Query().Get("server_id"))
+	host := "127.0.0.1"
+	if serverID > 0 {
+		sv, err := a.st.GetServer(serverID)
+		if err != nil || sv == nil {
+			fail(w, http.StatusNotFound, "服务器不存在")
+			return
+		}
+		host = sv.Host
+		if host == "" {
+			fail(w, http.StatusBadRequest, "该服务器未配置主机地址")
+			return
+		}
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	t0 := time.Now()
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	ms := time.Since(t0).Seconds() * 1000
+	if err != nil {
+		ok(w, J{"reachable": false, "addr": addr, "ms": ms, "error": err.Error()})
+		return
+	}
+	_ = conn.Close()
+	ok(w, J{"reachable": true, "addr": addr, "ms": ms})
+}
 
 // GET /api/admin/sb/import-remote/list-files?server_id=N — SSH into the remote
 // server and list .json config files in common sing-box directories.

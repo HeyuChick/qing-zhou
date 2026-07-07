@@ -52,6 +52,8 @@ type Inbound struct {
 // expects. hasTLS/hasTransport gate the VLESS flow: xtls-rprx-vision is only
 // valid on raw-TLS (Reality) VLESS — it must be dropped when there is no TLS or
 // when a transport (ws/grpc/...) is present (matches sing-box's stripVision rule).
+// The flow preference is read from ib["flow"]: "none" disables it, "vision" or
+// empty (default) enables xtls-rprx-vision for backward compatibility.
 func renderUser(t string, u User, ib map[string]interface{}) map[string]interface{} {
 	_, hasTLS := ib["tls"]
 	hasTransport := false
@@ -62,7 +64,13 @@ func renderUser(t string, u User, ib map[string]interface{}) map[string]interfac
 	case "vless":
 		m := map[string]interface{}{"name": u.Name, "uuid": u.UUID}
 		if hasTLS && !hasTransport {
-			m["flow"] = "xtls-rprx-vision"
+			flow, _ := ib["flow"].(string)
+			if flow == "" {
+				flow = "xtls-rprx-vision" // 默认 vision，向后兼容
+			}
+			if flow != "none" {
+				m["flow"] = flow
+			}
 		}
 		return m
 	case "vmess":
@@ -145,6 +153,8 @@ func GenerateConfig(base json.RawMessage, inbounds []Inbound, v2rayListen string
 			}
 		}
 		m["users"] = users
+		// flow 是 per-user 字段，从 inbound 级别移除，否则 sing-box check 会报错
+		delete(m, "flow")
 		ibList = append(ibList, m)
 	}
 	cfg["inbounds"] = ibList
