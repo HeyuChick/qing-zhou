@@ -266,6 +266,15 @@ function renderHeatmap() {
   }
   const xLabels = buckets.map((t: number) => fmtHeatTime(t, range))
   const yLabels = servers.map((s: any) => s.name)
+  // 计算正方形单元格：根据容器宽度和列数推算 cellSize，再设置容器高度
+  const cw = heatEl.value.clientWidth || 600
+  const maxNameLen = Math.max(...yLabels.map((n: string) => String(n).length), 4)
+  const yLabelW = Math.min(maxNameLen * 7 + 16, 150)
+  const padL = 8, padR = 8, padT = 12, padB = 4, xLabelH = 22
+  const gridW = Math.max(cw - padL - padR - yLabelW, 100)
+  const cellSize = Math.max(6, Math.floor(gridW / buckets.length))
+  const chartH = servers.length * cellSize + padT + padB + xLabelH
+  heatEl.value.style.height = chartH + 'px'
   chart.setOption({
     tooltip: {
       formatter: (p: any) => {
@@ -276,7 +285,7 @@ function renderHeatmap() {
         return `${sname}<br/>${t}<br/>${tag}`
       },
     },
-    grid: { left: 8, right: 8, top: 12, bottom: 4, containLabel: true },
+    grid: { left: padL, right: padR, top: padT, bottom: padB, containLabel: true },
     xAxis: {
       type: 'category', data: xLabels, splitArea: { show: true },
       axisLabel: { fontSize: 10, hideOverlap: true },
@@ -438,7 +447,8 @@ onMounted(async () => {
 function onWinResize() {
   checkMobile()
   safeResizeAll()
-  heatChart.value?.resize()
+  // 窗口尺寸变化时重算正方形格子并重渲染
+  if (heatData.value) renderHeatmap()
 }
 
 onUnmounted(() => {
@@ -467,11 +477,8 @@ onUnmounted(() => {
 .hm-legend { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); margin-left: 8px; }
 .hm-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-left: 6px; }
 .hm-dot.ok { background: #10b981; } .hm-dot.warn { background: #fbbf24; } .hm-dot.crit { background: #ef4444; }
-.heat-chart { width: 100%; height: 360px; min-height: 180px; }
+.heat-chart { width: 100%; height: 360px; min-height: 120px; }
 .heat-chart:empty { display: none; }
-@media (max-width: 768px) {
-  .heat-chart { height: 280px; }
-}
 
 /* 告警 */
 .alert-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border-soft, #f1efe8); }

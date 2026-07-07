@@ -291,6 +291,15 @@ function renderHeatmap() {
   }
   const xLabels = buckets.map((t: number) => fmtHeatTime(t, range))
   const yLabels = servers.map((s: any) => s.name)
+  // 计算正方形单元格：根据容器宽度和列数推算 cellSize，再设置容器高度
+  const cw = heatEl.value.clientWidth || 600
+  const maxNameLen = Math.max(...yLabels.map((n: string) => String(n).length), 4)
+  const yLabelW = Math.min(maxNameLen * 7 + 16, 150)
+  const padL = 8, padR = 8, padT = 12, padB = 4, xLabelH = 22
+  const gridW = Math.max(cw - padL - padR - yLabelW, 100)
+  const cellSize = Math.max(6, Math.floor(gridW / buckets.length))
+  const chartH = servers.length * cellSize + padT + padB + xLabelH
+  heatEl.value.style.height = chartH + 'px'
   chart.setOption({
     tooltip: {
       formatter: (p: any) => {
@@ -301,7 +310,7 @@ function renderHeatmap() {
         return `${sname}<br/>${t}<br/>${tag}`
       },
     },
-    grid: { left: 8, right: 8, top: 12, bottom: 4, containLabel: true },
+    grid: { left: padL, right: padR, top: padT, bottom: padB, containLabel: true },
     xAxis: {
       type: 'category', data: xLabels, splitArea: { show: true },
       axisLabel: { fontSize: 10, hideOverlap: true },
@@ -324,7 +333,10 @@ function renderHeatmap() {
   })
   chart.resize()
 }
-function onWinResize() { heatChart.value?.resize() }
+function onWinResize() {
+  // 窗口尺寸变化时重算正方形格子并重渲染
+  if (heatData.value) renderHeatmap()
+}
 
 onMounted(async () => {
   loading.value = true
@@ -469,11 +481,10 @@ onUnmounted(() => {
   box-shadow: var(--shadow-sm); padding: 16px 18px; margin-bottom: 18px;
 }
 .heatmap-title { font-weight: 680; font-size: 14px; margin-bottom: 10px; }
-.heat-chart { width: 100%; height: 340px; min-height: 180px; }
+.heat-chart { width: 100%; height: 340px; min-height: 120px; }
 .heat-chart:empty { display: none; }
 .heat-empty { text-align: center; color: var(--text-3); padding: 24px; font-size: 13px; }
 @media (max-width: 768px) {
-  .heat-chart { height: 260px; }
   .refresh-bar { flex-wrap: wrap; gap: 10px; }
   .heat-legend { display: none; }
 }
