@@ -84,6 +84,7 @@ func (a *API) Router() http.Handler {
 
 	// Public monitoring dashboard (no auth required).
 	r.Get("/api/monitor/public", a.handleMonitorPublic)
+	r.Get("/api/monitor/heatmap", a.handleMonitorPublicHeatmap)
 
 	// Authenticated (any logged-in user)
 	r.Group(func(pr chi.Router) {

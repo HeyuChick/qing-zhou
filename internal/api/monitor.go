@@ -295,7 +295,66 @@ func (a *API) handleMonitorAlerts(w http.ResponseWriter, r *http.Request) {
 // Each cell value: 0=正常, 1=高负载, 2=离线/无数据.
 // Query: range=1h|6h|24h|7d (default 24h).
 func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
-	rangeStr := r.URL.Query().Get("range")
+	servers, buckets, matrix, rangeStr, bucketSec, good := a.buildHeatmap(w, r)
+	if !good {
+		return
+	}
+	type srvInfo struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	rows := make([]srvInfo, len(servers))
+	for i, s := range servers {
+		rows[i] = srvInfo{ID: s.ID, Name: s.Name}
+	}
+	if rows == nil {
+		rows = []srvInfo{}
+	}
+	ok(w, J{
+		"servers":    rows,
+		"buckets":    buckets,
+		"matrix":     matrix,
+		"range":      rangeStr,
+		"bucket_sec": bucketSec,
+	})
+}
+
+// handleMonitorPublicHeatmap is the public (no-auth) version: returns only
+// server names (no IDs) for the public monitoring dashboard.
+func (a *API) handleMonitorPublicHeatmap(w http.ResponseWriter, r *http.Request) {
+	servers, buckets, matrix, rangeStr, bucketSec, good := a.buildHeatmap(w, r)
+	if !good {
+		return
+	}
+	type srvInfo struct {
+		Name string `json:"name"`
+	}
+	rows := make([]srvInfo, len(servers))
+	for i, s := range servers {
+		rows[i] = srvInfo{Name: s.Name}
+	}
+	if rows == nil {
+		rows = []srvInfo{}
+	}
+	ok(w, J{
+		"servers":    rows,
+		"buckets":    buckets,
+		"matrix":     matrix,
+		"range":      rangeStr,
+		"bucket_sec": bucketSec,
+	})
+}
+
+// heatRow is an internal row representation shared by admin/public heatmap.
+type heatRow struct {
+	ID   int64
+	Name string
+}
+
+// buildHeatmap computes the server×time-bucket matrix shared by the admin and
+// public heatmap endpoints. On error it writes the response and returns ok=false.
+func (a *API) buildHeatmap(w http.ResponseWriter, r *http.Request) (rows []heatRow, buckets []int64, matrix [][]int, rangeStr string, bucketSec int64, success bool) {
+	rangeStr = r.URL.Query().Get("range")
 	if rangeStr == "" {
 		rangeStr = "24h"
 	}
@@ -316,7 +375,7 @@ func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
 	const cols = 48
 	now := time.Now()
 	startTs := now.Add(-dur).Unix()
-	bucketSec := int64(dur.Seconds()) / cols
+	bucketSec = int64(dur.Seconds()) / cols
 	if bucketSec < 1 {
 		bucketSec = 1
 	}
@@ -325,35 +384,29 @@ func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
 	servers, err := a.st.ListServers()
 	if err != nil {
 		fail(w, 500, "查询失败")
-		return
+		return nil, nil, nil, "", 0, false
 	}
-	type srvInfo struct {
-		ID   int64  `json:"id"`
-		Name string `json:"name"`
-	}
-	var rows []srvInfo
 	idx := map[int64]int{} // server_id -> row index
 	for _, sv := range servers {
 		if !sv.ProbeEnabled {
 			continue
 		}
 		idx[sv.ID] = len(rows)
-		rows = append(rows, srvInfo{ID: sv.ID, Name: sv.Name})
+		rows = append(rows, heatRow{ID: sv.ID, Name: sv.Name})
 	}
 	if len(rows) == 0 {
-		ok(w, J{"servers": []srvInfo{}, "buckets": []int64{}, "matrix": [][]int{}, "range": rangeStr, "bucket_sec": bucketSec})
-		return
+		return rows, []int64{}, [][]int{}, rangeStr, bucketSec, true
 	}
 
 	// Bucket start timestamps (oldest first).
-	buckets := make([]int64, cols)
+	buckets = make([]int64, cols)
 	for i := 0; i < cols; i++ {
 		buckets[i] = startTs + int64(i)*bucketSec
 	}
 
 	// Matrix init: 3=无数据(sentinel). Real classes: 0=正常,1=高负载,2=离线级负载.
 	// At the end sentinel 3 is collapsed to 2 (离线/无数据 都显示红色).
-	matrix := make([][]int, len(rows))
+	matrix = make([][]int, len(rows))
 	for i := range matrix {
 		matrix[i] = make([]int, cols)
 		for j := range matrix[i] {
@@ -365,7 +418,7 @@ func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
 	all, err := a.st.ListAllMetricsSince(startTs)
 	if err != nil {
 		fail(w, 500, "查询指标失败")
-		return
+		return nil, nil, nil, "", 0, false
 	}
 	for _, m := range all {
 		ri, ok := idx[m.ServerID]
@@ -404,14 +457,7 @@ func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
-	ok(w, J{
-		"servers":    rows,
-		"buckets":    buckets,
-		"matrix":     matrix,
-		"range":      rangeStr,
-		"bucket_sec": bucketSec,
-	})
+	return rows, buckets, matrix, rangeStr, bucketSec, true
 }
 
 func (a *API) handleMarkAlertRead(w http.ResponseWriter, r *http.Request) {

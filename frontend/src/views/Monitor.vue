@@ -69,10 +69,21 @@
             <span class="auto-dot" :class="{ active: refreshing }"></span>
             自动刷新 · 每 30 秒
           </div>
+          <div class="heat-range">
+            <button v-for="r in heatRanges" :key="r.value" class="heat-range-btn" :class="{ active: heatRange === r.value }" @click="loadHeatmap(r.value)">{{ r.label }}</button>
+            <span class="heat-legend"><i class="hm-dot ok"></i>正常 <i class="hm-dot warn"></i>高负载 <i class="hm-dot crit"></i>离线/无数据</span>
+          </div>
           <button class="refresh-btn" :class="{ spinning: refreshing }" @click="doRefresh" :disabled="refreshing">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             {{ refreshing ? '刷新中...' : '刷新' }}
           </button>
+        </div>
+
+        <!-- 可用性热力图 -->
+        <div class="heatmap-card">
+          <div class="heatmap-title">可用性热力图</div>
+          <div ref="heatEl" class="heat-chart"></div>
+          <div v-if="!heatData?.servers?.length" class="heat-empty">暂无探针服务器</div>
         </div>
 
         <!-- 空状态 -->
@@ -171,12 +182,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, shallowRef } from 'vue'
 import { NEmpty } from 'naive-ui'
 import { apiGet } from '@/api'
 import { useConfigStore } from '@/stores/config'
 import { fmtBytes, fmtUptime, timeAgo, pct } from '@/utils/format'
 import AppHeader from '@/components/AppHeader.vue'
+import * as echarts from 'echarts'
 
 interface ServerMetrics {
   cpu_percent: number; mem_used: number; mem_total: number
@@ -233,13 +245,100 @@ async function doRefresh() {
   setTimeout(() => { refreshing.value = false }, 600)
 }
 
+// --- 可用性热力图（Y=机器, X=时间桶）---
+const heatEl = ref<HTMLElement | null>(null)
+const heatChart = shallowRef<echarts.ECharts | null>(null)
+const heatData = ref<any>(null)
+const heatRange = ref('24h')
+const heatRanges = [
+  { label: '1h', value: '1h' }, { label: '6h', value: '6h' },
+  { label: '24h', value: '24h' }, { label: '7d', value: '7d' },
+]
+function fmtHeatTime(ts: number, range: string): string {
+  const d = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  if (range === '7d' || range === '24h') return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+async function loadHeatmap(range: string) {
+  heatRange.value = range
+  try {
+    const data = await apiGet<any>(`/api/monitor/heatmap?range=${range}`)
+    heatData.value = data
+    await nextTick()
+    renderHeatmap()
+  } catch {}
+}
+function renderHeatmap() {
+  const data = heatData.value
+  if (!heatEl.value || !data) return
+  const servers: any[] = data.servers || []
+  if (!servers.length) {
+    heatChart.value?.clear()
+    return
+  }
+  if (!heatChart.value) heatChart.value = echarts.init(heatEl.value)
+  const chart = heatChart.value
+  const buckets: number[] = data.buckets || []
+  const matrix: number[][] = data.matrix || []
+  const range = data.range || '24h'
+  const pts: [number, number, number][] = []
+  for (let y = 0; y < servers.length; y++) {
+    const row = matrix[y] || []
+    for (let x = 0; x < buckets.length; x++) {
+      pts.push([x, y, row[x] ?? 2])
+    }
+  }
+  const xLabels = buckets.map((t: number) => fmtHeatTime(t, range))
+  const yLabels = servers.map((s: any) => s.name)
+  chart.setOption({
+    tooltip: {
+      formatter: (p: any) => {
+        const [x, y, v] = p.value
+        const sname = yLabels[y] || ''
+        const t = xLabels[x] || ''
+        const tag = v === 0 ? '<span style="color:#10b981">正常</span>' : v === 1 ? '<span style="color:#fbbf24">高负载</span>' : '<span style="color:#ef4444">离线/无数据</span>'
+        return `${sname}<br/>${t}<br/>${tag}`
+      },
+    },
+    grid: { left: 8, right: 8, top: 12, bottom: 4, containLabel: true },
+    xAxis: {
+      type: 'category', data: xLabels, splitArea: { show: true },
+      axisLabel: { fontSize: 10, hideOverlap: true },
+      axisTick: { show: false }, axisLine: { show: false },
+    },
+    yAxis: {
+      type: 'category', data: yLabels, splitArea: { show: true },
+      axisLabel: { fontSize: 11 },
+      axisTick: { show: false }, axisLine: { show: false },
+    },
+    visualMap: {
+      min: 0, max: 2, calculable: false, show: false,
+      inRange: { color: ['#10b981', '#fbbf24', '#ef4444'] },
+    },
+    series: [{
+      type: 'heatmap', data: pts, progressive: 0,
+      itemStyle: { borderColor: '#fff', borderWidth: 1, borderRadius: 2 },
+      emphasis: { itemStyle: { borderColor: '#333', borderWidth: 1 } },
+    }],
+  })
+  chart.resize()
+}
+function onWinResize() { heatChart.value?.resize() }
+
 onMounted(async () => {
   loading.value = true
   await fetchData()
   loading.value = false
   timer = setInterval(fetchData, 30000)
+  loadHeatmap('24h')
+  window.addEventListener('resize', onWinResize)
 })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+  window.removeEventListener('resize', onWinResize)
+  heatChart.value?.dispose()
+})
 </script>
 
 <style scoped>
@@ -351,4 +450,31 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 .card-footer { padding: 8px 18px; border-top: 1px solid var(--border-soft, #f1efe8); }
 .footer-time { font-size: 11px; color: var(--text-3); }
+
+/* ===== 热力图 ===== */
+.heat-range { display: flex; align-items: center; gap: 4px; }
+.heat-range-btn {
+  padding: 4px 10px; border-radius: 7px; border: 1px solid var(--border);
+  background: var(--card); color: var(--text-3); font-size: 12px; font-weight: 600;
+  cursor: pointer; transition: all .15s; font-family: inherit;
+}
+.heat-range-btn:hover { color: var(--text); }
+.heat-range-btn.active { background: var(--accent-soft); color: var(--accent-strong); border-color: transparent; }
+.heat-legend { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); margin-left: 10px; }
+.hm-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-left: 6px; }
+.hm-dot.ok { background: #10b981; } .hm-dot.warn { background: #fbbf24; } .hm-dot.crit { background: #ef4444; }
+
+.heatmap-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: var(--shadow-sm); padding: 16px 18px; margin-bottom: 18px;
+}
+.heatmap-title { font-weight: 680; font-size: 14px; margin-bottom: 10px; }
+.heat-chart { width: 100%; height: 340px; min-height: 180px; }
+.heat-chart:empty { display: none; }
+.heat-empty { text-align: center; color: var(--text-3); padding: 24px; font-size: 13px; }
+@media (max-width: 768px) {
+  .heat-chart { height: 260px; }
+  .refresh-bar { flex-wrap: wrap; gap: 10px; }
+  .heat-legend { display: none; }
+}
 </style>
