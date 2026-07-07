@@ -124,16 +124,72 @@ func readMemInfo() (memUsed, memTotal, swapUsed, swapTotal int64, err error) {
 	return
 }
 
-// readDiskUsage uses statfs on "/" to get disk usage.
+// readDiskUsage sums disk usage across all real mounted filesystems.
+// Pseudo filesystems (proc, sysfs, tmpfs, devtmpfs, overlay, squashfs, etc.)
+// are excluded so the reported numbers match `df` total for real disks.
 func readDiskUsage() (used, total int64, err error) {
-	var stat syscall.Statfs_t
-	if err = syscall.Statfs("/", &stat); err != nil {
-		return
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		// Fallback: root partition only
+		var stat syscall.Statfs_t
+		if e := syscall.Statfs("/", &stat); e != nil {
+			return 0, 0, e
+		}
+		total = int64(stat.Blocks) * int64(stat.Bsize)
+		used = int64(stat.Blocks-stat.Bfree) * int64(stat.Bsize)
+		return used, total, nil
 	}
-	total = int64(stat.Blocks) * int64(stat.Bsize)
-	free := int64(stat.Bavail) * int64(stat.Bsize)
-	used = total - free
-	return
+
+	seen := make(map[string]bool) // dedup by device to avoid double-counting bind mounts
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 3 {
+			continue
+		}
+		dev := fields[0]
+		mount := fields[1]
+		fstype := fields[2]
+
+		// Skip pseudo / virtual filesystems and loop/squashfs images.
+		if isPseudoFS(fstype) || strings.HasPrefix(dev, "/dev/loop") {
+			continue
+		}
+		// Only consider block devices (skip tmpfs, cgroup, etc. even if not caught above).
+		if !strings.HasPrefix(dev, "/dev/") {
+			continue
+		}
+		// Dedup by device: a bind mount shares the same underlying device,
+		// so counting it again would double-count the disk.
+		if seen[dev] {
+			continue
+		}
+		seen[dev] = true
+
+		var stat syscall.Statfs_t
+		if e := syscall.Statfs(mount, &stat); e != nil {
+			continue
+		}
+		t := int64(stat.Blocks) * int64(stat.Bsize)
+		u := int64(stat.Blocks-stat.Bfree) * int64(stat.Bsize)
+		total += t
+		used += u
+	}
+	return used, total, nil
+}
+
+// isPseudoFS reports whether the filesystem type is virtual/pseudo and should
+// be excluded from disk-usage aggregation.
+func isPseudoFS(fstype string) bool {
+	switch fstype {
+	case "proc", "sysfs", "tmpfs", "devtmpfs", "devpts", "cgroup", "cgroup2",
+		"pstore", "bpf", "mqueue", "hugetlbfs", "fuse", "fusectl", "fuse.gvfsd-fuse",
+		"autofs", "rpc_pipefs", "securityfs", "debugfs", "tracefs", "configfs",
+		"selinuxfs", "binfmt_misc", "efivarfs", "none", "overlay", "squashfs",
+		"iso9660", "nsfs", "anon_inode":
+		return true
+	}
+	return false
 }
 
 // netIfaceSample holds rx/tx byte counters for physical interfaces.

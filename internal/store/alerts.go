@@ -134,6 +134,19 @@ func (s *Store) CheckProbeAlerts() error {
 	}
 
 	// Check metric-based alerts for servers with recent data.
+	// Thresholds are configurable via settings (alert_cpu/mem/disk_threshold).
+	cpuThreshold, _ := s.GetSettingInt64("alert_cpu_threshold", 90)
+	memThreshold, _ := s.GetSettingInt64("alert_mem_threshold", 90)
+	diskThreshold, _ := s.GetSettingInt64("alert_disk_threshold", 85)
+	if cpuThreshold <= 0 {
+		cpuThreshold = 90
+	}
+	if memThreshold <= 0 {
+		memThreshold = 90
+	}
+	if diskThreshold <= 0 {
+		diskThreshold = 85
+	}
 	for _, sv := range servers {
 		if !sv.ProbeEnabled {
 			continue
@@ -142,21 +155,21 @@ func (s *Store) CheckProbeAlerts() error {
 		if m == nil || m.Ts < twoMinAgo {
 			continue // no recent data
 		}
-		if m.CPUPercent > 90 {
+		if m.CPUPercent > float64(cpuThreshold) {
 			_ = s.InsertAlert(ServerAlert{
 				ServerID: sv.ID,
 				Type:     "high_cpu",
 				Message:  fmt.Sprintf("服务器「%s」CPU 使用率 %.1f%%", sv.Name, m.CPUPercent),
 			})
 		}
-		if m.MemTotal > 0 && float64(m.MemUsed)/float64(m.MemTotal)*100 > 90 {
+		if m.MemTotal > 0 && float64(m.MemUsed)/float64(m.MemTotal)*100 > float64(memThreshold) {
 			_ = s.InsertAlert(ServerAlert{
 				ServerID: sv.ID,
 				Type:     "high_mem",
 				Message:  fmt.Sprintf("服务器「%s」内存使用率 %.0f%%", sv.Name, float64(m.MemUsed)/float64(m.MemTotal)*100),
 			})
 		}
-		if m.DiskTotal > 0 && float64(m.DiskUsed)/float64(m.DiskTotal)*100 > 85 {
+		if m.DiskTotal > 0 && float64(m.DiskUsed)/float64(m.DiskTotal)*100 > float64(diskThreshold) {
 			_ = s.InsertAlert(ServerAlert{
 				ServerID: sv.ID,
 				Type:     "disk_full",

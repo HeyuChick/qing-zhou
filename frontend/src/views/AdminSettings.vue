@@ -63,6 +63,15 @@
         </n-form>
       </n-card>
 
+      <n-card title="监控告警阈值" size="small" style="margin-bottom:16px;">
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">超过以下百分比时触发告警（0-100）。修改后下次检查生效。</p>
+        <n-form label-placement="left" label-width="120">
+          <n-form-item label="CPU 告警 (%)"><n-input-number v-model:value="alertCpu" :min="1" :max="100" style="width:200px;" /></n-form-item>
+          <n-form-item label="内存告警 (%)"><n-input-number v-model:value="alertMem" :min="1" :max="100" style="width:200px;" /></n-form-item>
+          <n-form-item label="磁盘告警 (%)"><n-input-number v-model:value="alertDisk" :min="1" :max="100" style="width:200px;" /></n-form-item>
+        </n-form>
+      </n-card>
+
       <n-space>
         <n-button type="primary" :loading="saving" @click="handleSave">保存设置</n-button>
         <n-button @click="handleRebuild" :loading="rebuilding">重建 sing-box 配置</n-button>
@@ -88,6 +97,9 @@ const signupBonus = ref(0)
 const defaultTraffic = ref(0)
 const defaultExpiry = ref(0)
 const freeGroupId = ref<number | null>(null)
+const alertCpu = ref(90)
+const alertMem = ref(90)
+const alertDisk = ref(85)
 const testEmail = ref('')
 const groupOptions = ref<any[]>([])
 
@@ -102,6 +114,9 @@ async function handleSave() {
       default_traffic: String(defaultTraffic.value * 1024 * 1024 * 1024),
       default_expiry_days: String(defaultExpiry.value),
       free_group_id: freeGroupId.value ? String(freeGroupId.value) : '',
+      alert_cpu_threshold: String(alertCpu.value),
+      alert_mem_threshold: String(alertMem.value),
+      alert_disk_threshold: String(alertDisk.value),
     }
     await apiPut('/api/admin/settings', body)
     message.success('保存成功')
@@ -134,6 +149,9 @@ onMounted(async () => {
       defaultTraffic.value = (parseInt(data.default_traffic) || 0) / (1024 * 1024 * 1024)
       defaultExpiry.value = parseInt(data.default_expiry_days) || 0
       freeGroupId.value = parseInt(data.free_group_id) || null
+      alertCpu.value = parseInt(data.alert_cpu_threshold) || 90
+      alertMem.value = parseInt(data.alert_mem_threshold) || 90
+      alertDisk.value = parseInt(data.alert_disk_threshold) || 85
     }
     groupOptions.value = (groups || []).map((g: any) => ({ label: g.name, value: g.id }))
   } catch {} finally { loading.value = false }
