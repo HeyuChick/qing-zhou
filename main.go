@@ -80,6 +80,7 @@ func main() {
 
 	app.StartSourceSync(ctx, time.Hour)
 	app.StartMaintenance(ctx, time.Hour)
+	app.StartMonitorTasks(ctx)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

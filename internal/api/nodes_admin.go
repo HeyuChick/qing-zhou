@@ -113,7 +113,27 @@ func (a *API) handleAdminListGroups(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "读取分组失败")
 		return
 	}
-	ok(w, groups)
+	// Attach node_count: count how many nodes reference each group.
+	counts := map[int64]int64{}
+	if nodes, err := a.st.ListNodes(); err == nil {
+		for _, n := range nodes {
+			for _, gid := range n.GroupIDs {
+				counts[gid]++
+			}
+		}
+	}
+	out := make([]J, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, J{
+			"id":          g.ID,
+			"name":        g.Name,
+			"description": g.Description,
+			"sort_order":  g.SortOrder,
+			"created_at":  g.CreatedAt,
+			"node_count":  counts[g.ID],
+		})
+	}
+	ok(w, out)
 }
 
 func (a *API) handleAdminCreateGroup(w http.ResponseWriter, r *http.Request) {

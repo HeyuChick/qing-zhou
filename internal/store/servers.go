@@ -8,26 +8,35 @@ import (
 )
 
 type Server struct {
-	ID           int64  `json:"id"`
-	Name         string `json:"name"`
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	SSHUser      string `json:"ssh_user"`
-	SSHKey       string `json:"ssh_key"`
-	SSHKeyPass   string `json:"ssh_key_pass"`
-	SSHPassword  string `json:"ssh_password"`
-	ConfigPath   string `json:"config_path"`
-	SystemdUnit  string `json:"systemd_unit"`
-	SingBoxBin   string `json:"sing_box_bin"`
-	V2rayListen  string `json:"v2ray_listen"`
-	Enabled      bool   `json:"enabled"`
-	Status       string `json:"status"`
-	LastSeen     int64  `json:"last_seen"`
-	CreatedAt    int64  `json:"created_at"`
-	UpdatedAt    int64  `json:"updated_at"`
+	ID           int64   `json:"id"`
+	Name         string  `json:"name"`
+	Host         string  `json:"host"`
+	Port         int     `json:"port"`
+	SSHUser      string  `json:"ssh_user"`
+	SSHKey       string  `json:"ssh_key"`
+	SSHKeyPass   string  `json:"ssh_key_pass"`
+	SSHPassword  string  `json:"ssh_password"`
+	ConfigPath   string  `json:"config_path"`
+	SystemdUnit  string  `json:"systemd_unit"`
+	SingBoxBin   string  `json:"sing_box_bin"`
+	V2rayListen  string  `json:"v2ray_listen"`
+	Enabled      bool    `json:"enabled"`
+	Status       string  `json:"status"`
+	LastSeen     int64   `json:"last_seen"`
+	CreatedAt    int64   `json:"created_at"`
+	UpdatedAt    int64   `json:"updated_at"`
+	// Monitor probe fields
+	ProbeEnabled bool    `json:"probe_enabled"`
+	ProbeToken   string  `json:"probe_token"`
+	ExpiryDate   int64   `json:"expiry_date"`
+	Provider     string  `json:"provider"`
+	Location     string  `json:"location"`
+	Spec         string  `json:"spec"`
+	Price        float64 `json:"price"`
+	Notes        string  `json:"notes"`
 }
 
-const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at`
+const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, provider, location, spec, price, notes`
 
 func (s *Store) ListServers() ([]*Server, error) {
 	rows, err := s.db.Query(`SELECT ` + serverCols + ` FROM servers ORDER BY id`)
@@ -78,11 +87,12 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 	if sv.Status == "" {
 		sv.Status = "unknown"
 	}
-	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, provider, location, spec, price, notes)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
-		b2i(sv.Enabled), sv.Status, sv.LastSeen, now, now)
+		b2i(sv.Enabled), sv.Status, sv.LastSeen, now, now,
+		b2i(sv.ProbeEnabled), sv.ProbeToken, sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes)
 	if err != nil {
 		return 0, err
 	}
@@ -91,10 +101,10 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 
 func (s *Store) UpdateServer(sv Server) error {
 	now := time.Now().Unix()
-	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=? WHERE id=?`,
+	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, expiry_date=?, provider=?, location=?, spec=?, price=?, notes=? WHERE id=?`,
 	sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
-		b2i(sv.Enabled), now, sv.ID)
+		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), sv.ProbeToken, sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, sv.ID)
 	return err
 }
 
@@ -118,12 +128,30 @@ func (s *Store) UpdateServerStatus(id int64, status string) error {
 	return err
 }
 
+// GetServerByProbeToken finds a server by its probe token (used by the agent
+// report endpoint). Returns nil, nil if not found.
+func (s *Store) GetServerByProbeToken(token string) (*Server, error) {
+	sv, err := scanServer(s.db.QueryRow(`SELECT `+serverCols+` FROM servers WHERE probe_token=? AND probe_enabled=1`, token))
+	if sv != nil {
+		s.decryptServer(sv)
+	}
+	return sv, err
+}
+
+// TouchProbeSeen updates last_seen to now for a probe-enabled server.
+func (s *Store) TouchProbeSeen(id int64) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`UPDATE servers SET last_seen=?, updated_at=? WHERE id=?`, now, now, id)
+	return err
+}
+
 func scanServer(sc scanner) (*Server, error) {
 	var sv Server
-	var enabled int
+	var enabled, probeEnabled int
 	err := sc.Scan(&sv.ID, &sv.Name, &sv.Host, &sv.Port, &sv.SSHUser, &sv.SSHKey, &sv.SSHKeyPass, &sv.SSHPassword,
 		&sv.ConfigPath, &sv.SystemdUnit, &sv.SingBoxBin, &sv.V2rayListen,
-		&enabled, &sv.Status, &sv.LastSeen, &sv.CreatedAt, &sv.UpdatedAt)
+		&enabled, &sv.Status, &sv.LastSeen, &sv.CreatedAt, &sv.UpdatedAt,
+		&probeEnabled, &sv.ProbeToken, &sv.ExpiryDate, &sv.Provider, &sv.Location, &sv.Spec, &sv.Price, &sv.Notes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -131,6 +159,7 @@ func scanServer(sc scanner) (*Server, error) {
 		return nil, err
 	}
 	sv.Enabled = enabled == 1
+	sv.ProbeEnabled = probeEnabled == 1
 	return &sv, nil
 }
 

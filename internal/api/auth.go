@@ -71,12 +71,25 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 	verify, _ := a.st.GetSettingBool("email_verify_required")
 	rate, _ := a.st.GetSettingInt64("points_per_cny", 10)
 	mode := a.registerMode()
+	siteName, _ := a.st.GetSetting("site_name")
+	if siteName == "" {
+		siteName = "轻舟"
+	}
+	siteDesc, _ := a.st.GetSetting("site_description")
+	homeMode, _ := a.st.GetSetting("homepage_mode")
+	if homeMode == "" {
+		homeMode = "monitor"
+	}
+	homeURL, _ := a.st.GetSetting("homepage_url")
 	ok(w, J{
 		"register_mode":         mode,
 		"registration_open":     mode != "closed",
 		"email_verify_required": verify,
 		"points_per_cny":        rate,
-		"site_name":             "轻舟",
+		"site_name":             siteName,
+		"site_description":      siteDesc,
+		"homepage_mode":         homeMode,
+		"homepage_url":          homeURL,
 	})
 }
 
@@ -197,6 +210,7 @@ func userView(u *store.User) J {
 		"email":          email,
 		"email_verified": u.EmailVerified,
 		"role":           u.Role,
+		"is_admin":       u.Role == "admin",
 		"status":         u.Status,
 		"points":         u.Points,
 	}

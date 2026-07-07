@@ -305,6 +305,46 @@ CREATE TABLE IF NOT EXISTS servers (
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
+
+-- ===== Monitor probe (轻舟探针) =====
+-- Per-server system metrics time-series, one row per agent report.
+-- Pruned to a rolling window (default 30 days).
+CREATE TABLE IF NOT EXISTS server_metrics (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id       INTEGER NOT NULL,
+  ts              INTEGER NOT NULL,
+  cpu_percent     REAL    NOT NULL DEFAULT 0,
+  mem_used        INTEGER NOT NULL DEFAULT 0,
+  mem_total       INTEGER NOT NULL DEFAULT 0,
+  swap_used       INTEGER NOT NULL DEFAULT 0,
+  swap_total      INTEGER NOT NULL DEFAULT 0,
+  disk_used       INTEGER NOT NULL DEFAULT 0,
+  disk_total      INTEGER NOT NULL DEFAULT 0,
+  net_rx          INTEGER NOT NULL DEFAULT 0,
+  net_tx          INTEGER NOT NULL DEFAULT 0,
+  load1           REAL    NOT NULL DEFAULT 0,
+  load5           REAL    NOT NULL DEFAULT 0,
+  load15          REAL    NOT NULL DEFAULT 0,
+  tcp_connections INTEGER NOT NULL DEFAULT 0,
+  process_count   INTEGER NOT NULL DEFAULT 0,
+  uptime          INTEGER NOT NULL DEFAULT 0,
+  hostname        TEXT    NOT NULL DEFAULT '',
+  platform        TEXT    NOT NULL DEFAULT '',
+  kernel          TEXT    NOT NULL DEFAULT '',
+  arch            TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON server_metrics(server_id, ts);
+
+-- Server alerts: offline, high_cpu, high_mem, disk_full, expiring, expired.
+CREATE TABLE IF NOT EXISTS server_alerts (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id INTEGER NOT NULL,
+  type      TEXT    NOT NULL,
+  message   TEXT    NOT NULL,
+  ts        INTEGER NOT NULL,
+  read      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_server ON server_alerts(server_id, ts);
 `
 
 func (s *Store) Migrate() error {
@@ -337,6 +377,15 @@ func (s *Store) Migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_users_client_name ON users(client_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sb_inbounds_server ON sb_inbounds(server_id)`,
+		// Monitor probe: extend servers table with probe/asset fields.
+		`ALTER TABLE servers ADD COLUMN probe_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE servers ADD COLUMN probe_token TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE servers ADD COLUMN expiry_date INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE servers ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE servers ADD COLUMN location TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE servers ADD COLUMN spec TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE servers ADD COLUMN price REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE servers ADD COLUMN notes TEXT NOT NULL DEFAULT ''`,
 	} {
 		_, _ = s.db.Exec(stmt)
 	}
