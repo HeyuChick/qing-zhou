@@ -92,15 +92,37 @@ case $ARCH in
   aarch64) ARCH="arm64" ;;
   *) echo "不支持的架构: $ARCH"; exit 1 ;;
 esac
-echo "下载探针二进制 (${ARCH})..."
-curl -sL "` + panelURL + `/api/monitor/agent/linux-${ARCH}" -o /usr/local/bin/qingzhou-probe
-chmod +x /usr/local/bin/qingzhou-probe
-cat > /etc/qingzhou-probe.env << EOF
+BIN_URL="` + panelURL + `/api/monitor/agent/linux-${ARCH}"
+INSTALL_PATH="/usr/local/bin/qingzhou-probe"
+ENV_FILE="/etc/qingzhou-probe.env"
+SERVICE_FILE="/etc/systemd/system/qingzhou-probe.service"
+
+echo "[1/4] 下载探针二进制 (${ARCH})..."
+if command -v curl &> /dev/null; then
+  HTTP_CODE=$(curl -sL -w "%{http_code}" -o "$INSTALL_PATH" "$BIN_URL")
+  if [ "$HTTP_CODE" != "200" ]; then
+    echo "❌ 下载失败: HTTP $HTTP_CODE"
+    echo "   URL: $BIN_URL"
+    exit 1
+  fi
+elif command -v wget &> /dev/null; then
+  wget -qO "$INSTALL_PATH" "$BIN_URL" || { echo "❌ 下载失败"; exit 1; }
+else
+  echo "❌ 错误: 需要 curl 或 wget"
+  exit 1
+fi
+chmod +x "$INSTALL_PATH"
+echo "   已安装到 $INSTALL_PATH ($(du -h "$INSTALL_PATH" | cut -f1))"
+
+echo "[2/4] 创建环境配置文件..."
+cat > "$ENV_FILE" << EOF
 QZ_PROBE_SERVER=` + panelURL + `
 QZ_PROBE_TOKEN=${TOKEN}
 EOF
-chmod 600 /etc/qingzhou-probe.env
-cat > /etc/systemd/system/qingzhou-probe.service << 'EOF'
+chmod 600 "$ENV_FILE"
+
+echo "[3/4] 创建 systemd 服务..."
+cat > "$SERVICE_FILE" << 'EOF'
 [Unit]
 Description=Qingzhou Monitor Probe
 After=network.target
@@ -113,10 +135,24 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+
+echo "[4/4] 启动服务..."
 systemctl daemon-reload
-systemctl enable qingzhou-probe
+systemctl enable qingzhou-probe &>/dev/null
 systemctl restart qingzhou-probe
-echo "✅ 探针安装完成！"
+
+sleep 1
+if systemctl is-active --quiet qingzhou-probe; then
+  echo ""
+  echo "✅ 探针安装完成！"
+  echo "   服务状态: 运行中"
+  echo "   查看日志: journalctl -u qingzhou-probe -f"
+else
+  echo ""
+  echo "⚠️  服务启动失败，请检查日志:"
+  echo "   journalctl -u qingzhou-probe -n 20 --no-pager"
+  exit 1
+fi
 `
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=\"install-probe.sh\"")

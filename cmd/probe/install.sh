@@ -29,19 +29,25 @@ INSTALL_PATH="/usr/local/bin/qingzhou-probe"
 ENV_FILE="/etc/qingzhou-probe.env"
 SERVICE_FILE="/etc/systemd/system/qingzhou-probe.service"
 
-echo "下载探针二进制 (${ARCH})..."
+echo "[1/4] 下载探针二进制 (${ARCH})..."
 if command -v curl &> /dev/null; then
-  curl -sL "$BIN_URL" -o "$INSTALL_PATH"
+  HTTP_CODE=$(curl -sL -w "%{http_code}" -o "$INSTALL_PATH" "$BIN_URL")
+  if [ "$HTTP_CODE" != "200" ]; then
+    echo "❌ 下载失败: HTTP $HTTP_CODE"
+    echo "   URL: $BIN_URL"
+    exit 1
+  fi
 elif command -v wget &> /dev/null; then
-  wget -qO "$INSTALL_PATH" "$BIN_URL"
+  wget -qO "$INSTALL_PATH" "$BIN_URL" || { echo "❌ 下载失败"; exit 1; }
 else
-  echo "错误: 需要 curl 或 wget"
+  echo "❌ 错误: 需要 curl 或 wget"
   exit 1
 fi
 chmod +x "$INSTALL_PATH"
+echo "   已安装到 $INSTALL_PATH ($(du -h "$INSTALL_PATH" | cut -f1))"
 
 # Create secure environment file (not visible in /proc/*/cmdline).
-echo "创建环境配置文件..."
+echo "[2/4] 创建环境配置文件..."
 cat > "$ENV_FILE" << EOF
 QZ_PROBE_SERVER=${PANEL_URL}
 QZ_PROBE_TOKEN=${TOKEN}
@@ -49,7 +55,7 @@ EOF
 chmod 600 "$ENV_FILE"
 
 # Create systemd service.
-echo "创建 systemd 服务..."
+echo "[3/4] 创建 systemd 服务..."
 cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=Qingzhou Monitor Probe
@@ -70,12 +76,21 @@ ReadOnlyPaths=/proc /sys
 WantedBy=multi-user.target
 EOF
 
+echo "[4/4] 启动服务..."
 systemctl daemon-reload
-systemctl enable qingzhou-probe
+systemctl enable qingzhou-probe &>/dev/null
 systemctl restart qingzhou-probe
 
-echo ""
-echo "✅ 探针安装完成！"
-echo "   服务状态: systemctl status qingzhou-probe"
-echo "   查看日志: journalctl -u qingzhou-probe -f"
-echo "   卸载: systemctl disable --now qingzhou-probe && rm $INSTALL_PATH $ENV_FILE $SERVICE_FILE"
+sleep 1
+if systemctl is-active --quiet qingzhou-probe; then
+  echo ""
+  echo "✅ 探针安装完成！"
+  echo "   服务状态: 运行中"
+  echo "   查看日志: journalctl -u qingzhou-probe -f"
+  echo "   卸载: systemctl disable --now qingzhou-probe && rm $INSTALL_PATH $ENV_FILE $SERVICE_FILE"
+else
+  echo ""
+  echo "⚠️  服务启动失败，请检查日志:"
+  echo "   journalctl -u qingzhou-probe -n 20 --no-pager"
+  exit 1
+fi
