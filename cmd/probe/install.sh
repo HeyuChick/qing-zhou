@@ -71,7 +71,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now qingzhou-probe
+systemctl enable qingzhou-probe
+systemctl restart qingzhou-probe
 
 echo ""
 echo "✅ 探针安装完成！"

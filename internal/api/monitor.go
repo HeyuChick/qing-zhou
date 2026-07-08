@@ -114,7 +114,8 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now qingzhou-probe
+systemctl enable qingzhou-probe
+systemctl restart qingzhou-probe
 echo "✅ 探针安装完成！"
 `
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
