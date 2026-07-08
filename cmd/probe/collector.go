@@ -124,6 +124,13 @@ func readMemInfo() (memUsed, memTotal, swapUsed, swapTotal int64, err error) {
 	return
 }
 
+func bsize(stat syscall.Statfs_t) int64 {
+	if stat.Frsize > 0 {
+		return stat.Frsize
+	}
+	return stat.Bsize
+}
+
 // readDiskUsage sums disk usage across all real mounted filesystems.
 // Pseudo filesystems (proc, sysfs, tmpfs, devtmpfs, overlay, squashfs, etc.)
 // are excluded so the reported numbers match `df` total for real disks.
@@ -135,13 +142,16 @@ func readDiskUsage() (used, total int64, err error) {
 		if e := syscall.Statfs("/", &stat); e != nil {
 			return 0, 0, e
 		}
-		total = int64(stat.Blocks) * int64(stat.Bsize)
-		used = int64(stat.Blocks-stat.Bfree) * int64(stat.Bsize)
+		bs := bsize(stat)
+		total = int64(stat.Blocks) * bs
+		used = int64(stat.Blocks-stat.Bfree) * bs
 		return used, total, nil
 	}
 
 	seen := make(map[string]bool) // dedup by device to avoid double-counting bind mounts
 	scanner := bufio.NewScanner(bytes.NewReader(data))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 3 {
@@ -170,10 +180,14 @@ func readDiskUsage() (used, total int64, err error) {
 		if e := syscall.Statfs(mount, &stat); e != nil {
 			continue
 		}
-		t := int64(stat.Blocks) * int64(stat.Bsize)
-		u := int64(stat.Blocks-stat.Bfree) * int64(stat.Bsize)
+		bs := bsize(stat)
+		t := int64(stat.Blocks) * bs
+		u := int64(stat.Blocks-stat.Bfree) * bs
 		total += t
 		used += u
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, 0, err
 	}
 	return used, total, nil
 }
