@@ -152,6 +152,10 @@ func (s *Store) StatusDistribution() (map[string]int64, error) {
 		}
 		out["status_"+st] = c
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	rows.Close()
 
 	buckets := []struct {

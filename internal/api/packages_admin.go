@@ -13,6 +13,31 @@ import (
 
 var validPkgTypes = map[string]bool{"traffic": true, "plan": true}
 
+// validatePackage rejects nonsensical/negative package fields. A negative price
+// would credit points on "purchase"; a negative traffic would reduce quota while
+// charging; a plan with no duration never expires by accident.
+func validatePackage(p *store.Package) string {
+	if !validPkgTypes[p.Type] {
+		return "商品类型必须为 traffic / plan"
+	}
+	if p.Name == "" {
+		return "商品名称不能为空"
+	}
+	if p.PricePoints < 0 {
+		return "价格不能为负"
+	}
+	if p.TrafficBytes < 0 {
+		return "流量不能为负"
+	}
+	if p.DurationDays < 0 {
+		return "有效期不能为负"
+	}
+	if p.Type == "plan" && p.DurationDays <= 0 {
+		return "订阅套餐必须设置正的有效期（天）"
+	}
+	return ""
+}
+
 func (a *API) handleAdminListPackages(w http.ResponseWriter, r *http.Request) {
 	pkgs, err := a.st.ListPackages(false)
 	if err != nil {
@@ -35,12 +60,8 @@ func (a *API) handleAdminCreatePackage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	if !validPkgTypes[p.Type] {
-		fail(w, http.StatusBadRequest, "商品类型必须为 traffic / plan")
-		return
-	}
-	if p.Name == "" {
-		fail(w, http.StatusBadRequest, "商品名称不能为空")
+	if msg := validatePackage(&p); msg != "" {
+		fail(w, http.StatusBadRequest, msg)
 		return
 	}
 	if p.Stock == 0 {
@@ -72,8 +93,8 @@ func (a *API) handleAdminUpdatePackage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	if !validPkgTypes[p.Type] {
-		fail(w, http.StatusBadRequest, "商品类型必须为 traffic / plan")
+	if msg := validatePackage(&p); msg != "" {
+		fail(w, http.StatusBadRequest, msg)
 		return
 	}
 	p.ID = id

@@ -36,22 +36,39 @@ func publicBase(r *http.Request) string {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
-		scheme = xf
-	}
 	host := r.Host
-	if xh := r.Header.Get("X-Forwarded-Host"); xh != "" {
-		host = xh
+	// Only honor forwarded scheme/host from a trusted proxy. Otherwise a client
+	// could set X-Forwarded-Host to poison the password-reset / verify links that
+	// are emailed to a victim (→ account takeover). Set QZ_PUBLIC_BASE to pin it.
+	if peerTrusted(r) {
+		if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
+			scheme = xf
+		}
+		if xh := r.Header.Get("X-Forwarded-Host"); xh != "" {
+			host = xh
+		}
 	}
 	return scheme + "://" + host
 }
 
-func setAuthCookie(w http.ResponseWriter, tok string) {
+// setAuthCookie writes the auth cookie. secure marks it Secure (HTTPS-only) so
+// the 7-day session token is never sent over plaintext HTTP; the caller derives
+// secure from the effective external scheme (honoring a trusted proxy's
+// X-Forwarded-Proto), since TLS is usually terminated at the reverse proxy.
+// isHTTPS reports whether the externally-visible URL is HTTPS (used to gate the
+// Secure cookie flag). Honors QZ_PUBLIC_BASE and a trusted proxy's forwarded
+// scheme via publicBase.
+func isHTTPS(r *http.Request) bool {
+	return strings.HasPrefix(publicBase(r), "https://")
+}
+
+func setAuthCookie(w http.ResponseWriter, tok string, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    tok,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(tokenTTL),
 	})

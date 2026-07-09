@@ -24,11 +24,25 @@ const (
 	tokenTTL   = 7 * 24 * time.Hour
 )
 
+// clientIP returns the caller's source IP. Forwarded headers (set by a reverse
+// proxy) are only honored when the direct peer is a trusted proxy; otherwise the
+// real socket peer is used so an untrusted client cannot spoof its IP.
 func clientIP(r *http.Request) string {
+	peer := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+		peer = host
 	}
-	return r.RemoteAddr
+	if peerTrusted(r) {
+		if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+			return xr
+		}
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
+				return first
+			}
+		}
+	}
+	return peer
 }
 
 // issueLogin records a login session and returns a JWT bound to it (so it can
@@ -45,7 +59,7 @@ func (a *API) issueLogin(w http.ResponseWriter, r *http.Request, u *store.User) 
 	if err != nil {
 		return "", err
 	}
-	setAuthCookie(w, tok)
+	setAuthCookie(w, tok, isHTTPS(r))
 	return tok, nil
 }
 
@@ -108,7 +122,14 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "服务器错误")
 		return
 	}
-	if u == nil || !auth.CheckPassword(u.PasswordHash, req.Password) {
+	if u == nil {
+		// Spend comparable time so response timing doesn't reveal whether the
+		// username exists (user enumeration).
+		auth.DummyCompare(req.Password)
+		fail(w, http.StatusUnauthorized, "用户名或密码错误")
+		return
+	}
+	if !auth.CheckPassword(u.PasswordHash, req.Password) {
 		fail(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}

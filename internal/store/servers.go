@@ -1,11 +1,23 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 )
+
+// hashProbeToken returns the hex SHA-256 of a probe token, used as the lookup
+// key so the token itself can be stored encrypted at rest.
+func hashProbeToken(tok string) string {
+	if tok == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(h[:])
+}
 
 type Server struct {
 	ID           int64   `json:"id"`
@@ -34,9 +46,12 @@ type Server struct {
 	Spec         string  `json:"spec"`
 	Price        float64 `json:"price"`
 	Notes        string  `json:"notes"`
+	// HostKey is the pinned SSH host key (authorized_keys line). Empty until the
+	// first successful connection pins it (TOFU). Never exposed to the client.
+	HostKey string `json:"-"`
 }
 
-const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, provider, location, spec, price, notes`
+const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, provider, location, spec, price, notes, host_key`
 
 func (s *Store) ListServers() ([]*Server, error) {
 	rows, err := s.db.Query(`SELECT ` + serverCols + ` FROM servers ORDER BY id`)
@@ -87,12 +102,12 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 	if sv.Status == "" {
 		sv.Status = "unknown"
 	}
-	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, provider, location, spec, price, notes)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, probe_token_hash, expiry_date, provider, location, spec, price, notes)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
 		b2i(sv.Enabled), sv.Status, sv.LastSeen, now, now,
-		b2i(sv.ProbeEnabled), sv.ProbeToken, sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes)
+		b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes)
 	if err != nil {
 		return 0, err
 	}
@@ -101,10 +116,10 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 
 func (s *Store) UpdateServer(sv Server) error {
 	now := time.Now().Unix()
-	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, expiry_date=?, provider=?, location=?, spec=?, price=?, notes=? WHERE id=?`,
+	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, provider=?, location=?, spec=?, price=?, notes=? WHERE id=?`,
 	sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
-		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), sv.ProbeToken, sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, sv.ID)
+		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, sv.ID)
 	return err
 }
 
@@ -131,11 +146,20 @@ func (s *Store) UpdateServerStatus(id int64, status string) error {
 // GetServerByProbeToken finds a server by its probe token (used by the agent
 // report endpoint). Returns nil, nil if not found.
 func (s *Store) GetServerByProbeToken(token string) (*Server, error) {
-	sv, err := scanServer(s.db.QueryRow(`SELECT `+serverCols+` FROM servers WHERE probe_token=? AND probe_enabled=1`, token))
+	// Match on the token hash — the token is stored encrypted, so a DB leak no
+	// longer yields usable bearer tokens for the report endpoint.
+	sv, err := scanServer(s.db.QueryRow(`SELECT `+serverCols+` FROM servers WHERE probe_token_hash=? AND probe_enabled=1`, hashProbeToken(token)))
 	if sv != nil {
 		s.decryptServer(sv)
 	}
 	return sv, err
+}
+
+// SetServerHostKey pins (or updates) the SSH host key for a server. Called on
+// first successful connect (TOFU) so subsequent connects are verified against it.
+func (s *Store) SetServerHostKey(id int64, hostKey string) error {
+	_, err := s.db.Exec(`UPDATE servers SET host_key=? WHERE id=?`, hostKey, id)
+	return err
 }
 
 // TouchProbeSeen updates last_seen to now for a probe-enabled server.
@@ -151,7 +175,7 @@ func scanServer(sc scanner) (*Server, error) {
 	err := sc.Scan(&sv.ID, &sv.Name, &sv.Host, &sv.Port, &sv.SSHUser, &sv.SSHKey, &sv.SSHKeyPass, &sv.SSHPassword,
 		&sv.ConfigPath, &sv.SystemdUnit, &sv.SingBoxBin, &sv.V2rayListen,
 		&enabled, &sv.Status, &sv.LastSeen, &sv.CreatedAt, &sv.UpdatedAt,
-		&probeEnabled, &sv.ProbeToken, &sv.ExpiryDate, &sv.Provider, &sv.Location, &sv.Spec, &sv.Price, &sv.Notes)
+		&probeEnabled, &sv.ProbeToken, &sv.ExpiryDate, &sv.Provider, &sv.Location, &sv.Spec, &sv.Price, &sv.Notes, &sv.HostKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -167,4 +191,5 @@ func (s *Store) decryptServer(sv *Server) {
 	sv.SSHKey = s.decrypt(sv.SSHKey)
 	sv.SSHKeyPass = s.decrypt(sv.SSHKeyPass)
 	sv.SSHPassword = s.decrypt(sv.SSHPassword)
+	sv.ProbeToken = s.decrypt(sv.ProbeToken)
 }

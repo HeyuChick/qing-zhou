@@ -84,6 +84,26 @@ func removeBucketByOrder(ex execer, orderID int64) error {
 	return err
 }
 
+// recomputeUserAggregate rebuilds the legacy users.* aggregate columns from the
+// authoritative buckets after a bucket change (e.g. a refund), so the dashboard
+// totals stay consistent with what enforcement actually sees. traffic_limit /
+// used_up / used_down are summed across all buckets; expiry_at is the latest
+// plan-bucket expiry (0 when the user holds only the never-expiring pool).
+func recomputeUserAggregate(tx txLike, userID, now int64) (limit, up, down, expiry int64, err error) {
+	err = tx.QueryRow(`SELECT
+		COALESCE(SUM(traffic_limit),0),
+		COALESCE(SUM(used_up),0),
+		COALESCE(SUM(used_down),0),
+		COALESCE(MAX(CASE WHEN kind='plan' THEN expiry_at ELSE 0 END),0)
+		FROM user_plans WHERE user_id=?`, userID).Scan(&limit, &up, &down, &expiry)
+	if err != nil {
+		return
+	}
+	_, err = tx.Exec(`UPDATE users SET traffic_limit=?, used_up=?, used_down=?, expiry_at=?, updated_at=? WHERE id=?`,
+		limit, up, down, expiry, now, userID)
+	return
+}
+
 // EnsurePoolBucket creates the user's pool bucket with the given identity if it
 // has none yet (called when a new user is provisioned).
 func (s *Store) EnsurePoolBucket(userID int64, name, clientUUID, clientSecret string) error {
@@ -223,21 +243,41 @@ func (s *Store) AddBucketUsage(clientName string, up, down int64) error {
 		return nil
 	}
 	now := time.Now().Unix()
-	res, err := s.db.Exec(`UPDATE user_plans SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE client_name=?`,
+	// One transaction: the bucket counter, the mirrored user aggregate, and the
+	// time-series sample must all land together (they may otherwise run on
+	// different pooled connections and diverge if one fails).
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	res, err := tx.Exec(`UPDATE user_plans SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE client_name=?`,
 		up, down, now, now, clientName)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return nil // unknown identity (e.g. a just-removed bucket) — ignore
+		return nil // unknown identity (e.g. a just-removed bucket) — ignore, rolls back
 	}
-	if _, err = s.db.Exec(`UPDATE users SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=?
+	if _, err = tx.Exec(`UPDATE users SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=?
 		WHERE id=(SELECT user_id FROM user_plans WHERE client_name=?)`, up, down, now, now, clientName); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`INSERT INTO traffic_samples (user_id, ts, up, down)
-		SELECT user_id, ?, ?, ? FROM user_plans WHERE client_name=?`, now, up, down, clientName)
-	return err
+	if _, err = tx.Exec(`INSERT INTO traffic_samples (user_id, ts, up, down)
+		SELECT user_id, ?, ?, ? FROM user_plans WHERE client_name=?`, now, up, down, clientName); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // backfillUserPlans seeds the bucket model from the legacy single-plan columns

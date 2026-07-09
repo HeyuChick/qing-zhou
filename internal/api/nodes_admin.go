@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"io"
 	"log"
@@ -268,10 +267,12 @@ func (a *API) handleAdminFetchSource(w http.ResponseWriter, r *http.Request) {
 // fetchSource downloads a source URL, parses links, and replaces the source's
 // nodes. Returns the imported count and an error string (empty on success).
 func (a *API) fetchSource(src *store.NodeSource, groupIDs []int64) (int, string) {
-	client := &http.Client{
-		Timeout:   20 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	if msg := validFetchURL(src.URL); msg != "" {
+		_ = a.st.ReplaceSourceNodes(src.ID, nil, groupIDs, msg)
+		return 0, msg
 	}
+	// Verify TLS and block SSRF to internal addresses (metadata/LAN/localhost).
+	client := safeFetchClient()
 	resp, err := client.Get(src.URL)
 	if err != nil {
 		_ = a.st.ReplaceSourceNodes(src.ID, nil, groupIDs, err.Error())

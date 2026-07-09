@@ -193,6 +193,12 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
+	// Banning must terminate existing sessions — otherwise the user's already-
+	// issued JWT stays valid for up to 7 days (authMiddleware only checks the
+	// session exists, not the user's status). Re-login is blocked by handleLogin.
+	if status == "banned" {
+		_ = a.st.DeleteUserSessions(id)
+	}
 	a.invalidateLinks(id)
 	_ = a.sbRebuild()
 	out, _ := a.st.UserByID(id)

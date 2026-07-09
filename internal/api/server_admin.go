@@ -130,17 +130,25 @@ func (a *API) handleAdminDeleteServer(w http.ResponseWriter, r *http.Request) {
 	ok(w, nil)
 }
 
+// newRemoteManager builds an SSH manager that verifies host keys and pins them
+// on first successful connect (trust-on-first-use), for all remote SSH flows.
+func (a *API) newRemoteManager(timeout time.Duration) *sshctl.RemoteManager {
+	rm := sshctl.New(sshctl.WithTimeout(timeout))
+	rm.SetHostKeyPersister(func(id int64, key string) error { return a.st.SetServerHostKey(id, key) })
+	return rm
+}
+
 // POST /api/admin/servers/{id}/test — attempt an SSH connection and report
 // success or failure. The SSH key/pass from DB is used (not from request body).
 func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	sv, err := a.st.GetServer(id)
-	if sv == nil {
-		fail(w, http.StatusNotFound, "服务器不存在")
-		return
-	}
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "读取服务器失败")
+		return
+	}
+	if sv == nil {
+		fail(w, http.StatusNotFound, "服务器不存在")
 		return
 	}
 
@@ -152,11 +160,12 @@ func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
 
 	// Exercise the exact auth + connection path used for real config
 	// deployment, so a passing test guarantees deployment can connect too.
-	rm := sshctl.New(sshctl.WithTimeout(10 * time.Second))
+	// This is also the natural place to pin the host key (trust-on-first-use).
+	rm := a.newRemoteManager(10 * time.Second)
 	cfg := &sshctl.ServerConfig{
-		Host: sv.Host, Port: sv.Port, SSHUser: sv.SSHUser,
+		ID: sv.ID, Host: sv.Host, Port: sv.Port, SSHUser: sv.SSHUser,
 		SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
-		SingBoxBin: sv.SingBoxBin,
+		SingBoxBin: sv.SingBoxBin, HostKey: sv.HostKey,
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
