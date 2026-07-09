@@ -159,6 +159,9 @@
               <span v-if="s.location" class="tag loc">{{ s.location }}</span>
               <span v-if="s.provider" class="tag">{{ s.provider }}</span>
               <span v-if="s.spec" class="tag spec">{{ s.spec }}</span>
+              <span v-if="s.days_left != null" class="tag expiry" :class="expiryCls(s.days_left)" title="距离到期剩余天数">
+                <i class="exp-dot" />剩 {{ s.days_left }} 天
+              </span>
             </div>
 
             <template v-if="s.metrics">
@@ -270,7 +273,7 @@ interface ServerMetrics {
 interface Spark { name: string; cpu: number[]; net_up: number[]; net_down: number[] }
 interface Server {
   name: string; status: 'online' | 'offline'; location: string
-  provider: string; spec: string
+  provider: string; spec: string; days_left?: number | null
   metrics: ServerMetrics | null; last_seen: number; spark?: Spark | null
 }
 
@@ -344,6 +347,8 @@ function memPct(s: Server) { return s.metrics ? pct(s.metrics.mem_used, s.metric
 function diskPct(s: Server) { return s.metrics ? pct(s.metrics.disk_used, s.metrics.disk_total) : 0 }
 function swapPct(s: Server) { return s.metrics ? pct(s.metrics.swap_used, s.metrics.swap_total) : 0 }
 function lvl(v: number) { return v >= 90 ? 'crit' : v >= 70 ? 'warn' : 'ok' }
+// 到期倒计时着色：不足 3 天红、不足 7 天黄、其余绿
+function expiryCls(d: number) { return d < 3 ? 'crit' : d < 7 ? 'warn' : 'ok' }
 
 // 仪表盘几何
 const GAUGE_R = 26
@@ -603,6 +608,11 @@ onUnmounted(() => {
 .tag { padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 500; background: var(--bg-soft); color: var(--text-2); white-space: nowrap; }
 .tag.loc { background: var(--accent-soft); color: var(--accent-strong); }
 .tag.spec { font-variant-numeric: tabular-nums; }
+.tag.expiry { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+.tag.expiry .exp-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.tag.expiry.ok { background: var(--accent-soft); color: var(--accent-strong); }
+.tag.expiry.warn { background: #f6edd6; color: #a97e1f; }
+.tag.expiry.crit { background: var(--danger-soft); color: var(--danger); }
 
 /* 仪表盘 */
 .gauges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 2px 12px 12px; }

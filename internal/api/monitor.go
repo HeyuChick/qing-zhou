@@ -728,6 +728,7 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 		Location string      `json:"location"`
 		Provider string      `json:"provider"`
 		Spec     string      `json:"spec"`
+		DaysLeft *int        `json:"days_left"`
 		Metrics  *pubMetrics `json:"metrics"`
 		LastSeen int64       `json:"last_seen"`
 	}
@@ -763,12 +764,21 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 				Arch:           m.Arch,
 			}
 		}
+		var dl *int
+		if sv.ExpiryDate > 0 {
+			d := int(time.Unix(sv.ExpiryDate, 0).Sub(now).Hours() / 24)
+			if d < 0 {
+				d = 0
+			}
+			dl = &d
+		}
 		out = append(out, pubServer{
 			Name:     sv.Name,
 			Status:   status,
 			Location: sv.Location,
 			Provider: sv.Provider,
 			Spec:     sv.Spec,
+			DaysLeft: dl,
 			Metrics:  pm,
 			LastSeen: sv.LastSeen,
 		})
