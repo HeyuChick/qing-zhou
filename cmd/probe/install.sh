@@ -35,11 +35,22 @@ echo "[1/4] 下载探针二进制 (${ARCH})..."
 TMP_PATH="${INSTALL_PATH}.new"
 trap 'rm -f "$TMP_PATH"' EXIT
 if command -v curl &> /dev/null; then
+<<<<<<< Updated upstream
   CURL_RC=0
   HTTP_CODE=$(curl -sSL -w "%{http_code}" -o "$TMP_PATH" "$BIN_URL") || CURL_RC=$?
   if [ "$CURL_RC" != "0" ]; then
     echo "❌ 下载失败: curl 退出码 $CURL_RC"
     echo "   URL: $BIN_URL"
+=======
+  set +e
+  HTTP_CODE=$(curl -sL -w "%{http_code}" -o "$INSTALL_PATH" "$BIN_URL" 2>&1)
+  CURL_EXIT=$?
+  set -e
+  if [ $CURL_EXIT -ne 0 ]; then
+    echo "❌ 下载失败: curl 退出码 $CURL_EXIT"
+    echo "   URL: $BIN_URL"
+    echo "   请检查网络连接和DNS解析"
+>>>>>>> Stashed changes
     exit 1
   fi
   if [ "$HTTP_CODE" != "200" ]; then
@@ -48,7 +59,19 @@ if command -v curl &> /dev/null; then
     exit 1
   fi
 elif command -v wget &> /dev/null; then
+<<<<<<< Updated upstream
   wget -qO "$TMP_PATH" "$BIN_URL" || { echo "❌ 下载失败"; exit 1; }
+=======
+  set +e
+  wget -qO "$INSTALL_PATH" "$BIN_URL" 2>&1
+  WGET_EXIT=$?
+  set -e
+  if [ $WGET_EXIT -ne 0 ]; then
+    echo "❌ 下载失败: wget 退出码 $WGET_EXIT"
+    echo "   URL: $BIN_URL"
+    exit 1
+  fi
+>>>>>>> Stashed changes
 else
   echo "❌ 错误: 需要 curl 或 wget"
   exit 1
