@@ -11,6 +11,7 @@ import (
 	"qingzhou/internal/auth"
 	"qingzhou/internal/idgen"
 	"qingzhou/internal/store"
+	"qingzhou/internal/version"
 )
 
 type ctxKey string
@@ -64,7 +65,7 @@ func (a *API) issueLogin(w http.ResponseWriter, r *http.Request, u *store.User) 
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
-	ok(w, J{"status": "ok", "time": time.Now().Unix()})
+	ok(w, J{"status": "ok", "time": time.Now().Unix(), "version": version.Current()})
 }
 
 // registerMode is "open" (anyone) | "code" (needs reg code) | "closed".
@@ -104,6 +105,7 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"site_description":      siteDesc,
 		"homepage_mode":         homeMode,
 		"homepage_url":          homeURL,
+		"app_version":           version.Current(),
 	})
 }
 

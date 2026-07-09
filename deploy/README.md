@@ -29,11 +29,32 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 ```
 
 ## 更新
+
+### 面板内在线更新（推荐）
+管理后台 →「在线更新」页可一键升级：面板读取 GitHub 最新 release，显示变更日志，
+点「立即更新」后自动**下载对应架构二进制 → 校验 SHA-256 → 原子替换 → 进程自我重启**
+（同 PID，兼容 `Restart=on-failure`，约 1~2 秒短暂中断）。要能生效，二进制必须带内置
+版本号（见下方构建说明），且发布产物里有 `qingzhou-linux-<arch>` 资产——`.github/workflows/release.yml`
+会在你于 GitHub 上发布 release 时自动构建并上传（版本号自动注入 = release tag）。
+
+> 仅 Linux 部署支持自更新；其他平台请手动替换。可选环境变量：
+> `QZ_UPDATE_REPO`（默认 `mllt992/qing-zhou`）、`QZ_UPDATE_GITHUB_TOKEN`（提升 GitHub API 速率上限）。
+
+### 手动更新
 ```bash
 systemctl stop qingzhou        # 或直接覆盖后 restart
 install -m755 qingzhou /opt/qingzhou/qingzhou
 systemctl restart qingzhou
 ```
+
+### 从源码构建（必须注入版本号，否则在线更新无法比较版本）
+```bash
+# 1. 构建内嵌前端
+cd frontend && npm ci && npx vite build && cd ..
+# 2. 注入版本号（= 目标 release tag）构建面板
+go build -ldflags "-s -w -X qingzhou/internal/version.Version=v0.2.2" -o qingzhou .
+```
+不带 `-X ...version.Version` 时版本为 `dev`，在线更新页会把任意最新 release 视为「可更新」。
 
 ## 数据库备份（每日）
 ```bash
