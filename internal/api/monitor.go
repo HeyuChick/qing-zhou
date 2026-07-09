@@ -527,12 +527,12 @@ func (a *API) handleMarkAlertRead(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	sv, err := a.st.GetServer(id)
-	if sv == nil {
-		fail(w, 404, "服务器不存在")
-		return
-	}
 	if err != nil {
 		fail(w, 500, "读取服务器失败")
+		return
+	}
+	if sv == nil {
+		fail(w, 404, "服务器不存在")
 		return
 	}
 

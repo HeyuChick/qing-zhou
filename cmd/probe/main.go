@@ -52,11 +52,19 @@ func main() {
 		interval = 5
 	}
 
+	// A token passed on the command line is visible to any local user via
+	// ps / /proc/<pid>/cmdline. The installer uses QZ_PROBE_TOKEN (systemd
+	// EnvironmentFile, mode 600) instead — prefer that.
+	if *flagToken != "" {
+		log.Printf("WARNING: -token on the command line is visible via ps/proc; prefer the QZ_PROBE_TOKEN env var")
+	}
+
 	// Build HTTP client.
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 	}
 	if *flagInsecure {
+		log.Printf("WARNING: -insecure disables TLS certificate verification; the probe token and metrics are exposed to a man-in-the-middle. Use only for local testing.")
 		client.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}

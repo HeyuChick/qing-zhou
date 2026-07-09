@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -282,8 +283,14 @@ func splitColon(s string) (string, string) {
 }
 
 func splitHostPort(s string) (string, int) {
-	if i := strings.LastIndex(s, ":"); i >= 0 {
-		return s[:i], atoi(s[i+1:])
+	// net.SplitHostPort handles bracketed IPv6 ([::1]:8388) and strips the
+	// brackets; a naive LastIndex(":") would split a bare IPv6 at the wrong colon.
+	if host, port, err := net.SplitHostPort(s); err == nil {
+		return host, atoi(port)
+	}
+	// No port (or malformed): strip brackets from a bare IPv6 literal if present.
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		return s[1 : len(s)-1], 0
 	}
 	return s, 0
 }

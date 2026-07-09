@@ -57,6 +57,7 @@ func main() {
 	encKey := os.Getenv("QZ_SECRET_KEY")
 	if encKey == "" {
 		encKey = secret
+		log.Printf("WARNING: QZ_SECRET_KEY not set — encrypting secret settings with jwt_secret, which lives in the same DB. A DB leak then exposes both ciphertext and key. Set QZ_SECRET_KEY (openssl rand -hex 32) for real at-rest protection.")
 	}
 	st.SetSecretKey([]byte(encKey))
 
@@ -158,8 +159,10 @@ func buildSbController(st *store.Store, app *api.API) *sbctl.Controller {
 	mgr := sbproc.New(bin, configPath, sbproc.SystemdReload(unit))
 	stats := sbstats.New(v2rayListen)
 
-	// Remote manager for SSH-based servers.
+	// Remote manager for SSH-based servers. Pin each server's SSH host key on
+	// first connect (TOFU) so later connections are verified against it.
 	remoteMgr := sshctl.New()
+	remoteMgr.SetHostKeyPersister(func(id int64, key string) error { return st.SetServerHostKey(id, key) })
 
 	ctrl := sbctl.New(st, mgr, stats, base, v2rayListen)
 	ctrl.SetRemoteManager(remoteMgr)

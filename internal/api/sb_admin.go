@@ -643,7 +643,9 @@ func (a *API) handleAdminPortCheck(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	addr := fmt.Sprintf("%s:%d", host, port)
+	// net.JoinHostPort brackets IPv6 literals correctly ("[::1]:443"); a plain
+	// "%s:%d" would produce an unparseable address for an IPv6 host.
+	addr := net.JoinHostPort(host, itoa(port))
 	t0 := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	ms := time.Since(t0).Seconds() * 1000
@@ -669,11 +671,11 @@ func (a *API) handleAdminImportRemoteListFiles(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	rm := sshctl.New(sshctl.WithTimeout(15 * time.Second))
+	rm := a.newRemoteManager(15 * time.Second)
 	cfg := &sshctl.ServerConfig{
-		Host: sv.Host, Port: sv.Port,
+		ID: sv.ID, Host: sv.Host, Port: sv.Port,
 		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
-		ConfigPath: sv.ConfigPath, SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin,
+		ConfigPath: sv.ConfigPath, SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin, HostKey: sv.HostKey,
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -708,11 +710,11 @@ func (a *API) handleAdminImportRemotePreview(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	rm := sshctl.New(sshctl.WithTimeout(15 * time.Second))
+	rm := a.newRemoteManager(15 * time.Second)
 	cfg := &sshctl.ServerConfig{
-		Host: sv.Host, Port: sv.Port,
+		ID: sv.ID, Host: sv.Host, Port: sv.Port,
 		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
-		ConfigPath: sv.ConfigPath, SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin,
+		ConfigPath: sv.ConfigPath, SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin, HostKey: sv.HostKey,
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)

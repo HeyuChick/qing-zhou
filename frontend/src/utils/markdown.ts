@@ -3,7 +3,12 @@
  * 移植自原 web/dist/app.js 中的 mdToHtml
  */
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+// esc MUST escape quotes too: URLs from [text](url) / ![alt](img) are
+// interpolated into href="…" / src="…" attributes, so an unescaped double quote
+// would break out of the attribute and inject an event handler (e.g.
+// [x](http://a"onmouseover="alert(1)) → stored XSS). Escaping " and ' closes it.
+const esc = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 
 const safeUrl = (u: string) => /^(https?:\/\/|mailto:|\/)/i.test(u.replace(/&amp;/g, '&'))
 

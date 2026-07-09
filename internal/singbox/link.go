@@ -57,7 +57,7 @@ func (p LinkParams) transportQuery() []string {
 			q = append(q, "path="+url.QueryEscape(p.Path))
 		}
 		if p.WSHost != "" {
-			q = append(q, "host="+p.WSHost)
+			q = append(q, "host="+url.QueryEscape(p.WSHost))
 		}
 		return q
 	case "httpupgrade":
@@ -66,7 +66,7 @@ func (p LinkParams) transportQuery() []string {
 			q = append(q, "path="+url.QueryEscape(p.Path))
 		}
 		if p.WSHost != "" {
-			q = append(q, "host="+p.WSHost)
+			q = append(q, "host="+url.QueryEscape(p.WSHost))
 		}
 		return q
 	case "grpc":
@@ -90,6 +90,11 @@ func BuildShareLink(p LinkParams) string {
 	if fp == "" {
 		fp = "chrome"
 	}
+	// esc escapes a value interpolated into a query param or URI userinfo. The
+	// values are system-generated today (UUIDs / hex secrets), but escaping
+	// prevents a stray reserved char (#/?&@) from producing a malformed or
+	// ambiguous link.
+	esc := url.QueryEscape
 	hp := p.Host + ":" + strconv.Itoa(p.Port)
 	frag := "#" + url.QueryEscape(p.Tag)
 
@@ -98,52 +103,52 @@ func BuildShareLink(p LinkParams) string {
 	case "vless":
 		q := p.transportQuery()
 		if p.PublicKey != "" { // Reality
-			q = append(q, "security=reality", "pbk="+p.PublicKey, "sid="+p.ShortID, "fp="+fp, "sni="+p.SNI)
+			q = append(q, "security=reality", "pbk="+esc(p.PublicKey), "sid="+esc(p.ShortID), "fp="+esc(fp), "sni="+esc(p.SNI))
 			if p.Flow && tcp { // vision only on raw-TCP Reality
 				q = append(q, "flow=xtls-rprx-vision")
 			}
 		} else { // plain TLS
-			q = append(q, "security=tls", "fp="+fp, "sni="+p.SNI)
+			q = append(q, "security=tls", "fp="+esc(fp), "sni="+esc(p.SNI))
 			if p.Insecure {
 				q = append(q, "allowInsecure=1")
 			}
 		}
-		return "vless://" + p.UUID + "@" + hp + "?" + strings.Join(q, "&") + frag
+		return "vless://" + esc(p.UUID) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "trojan":
 		q := p.transportQuery()
-		q = append(q, "security=tls", "fp="+fp, "sni="+p.SNI)
+		q = append(q, "security=tls", "fp="+esc(fp), "sni="+esc(p.SNI))
 		if p.Insecure {
 			q = append(q, "allowInsecure=1")
 		}
-		return "trojan://" + p.Password + "@" + hp + "?" + strings.Join(q, "&") + frag
+		return "trojan://" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "tuic":
 		q := []string{"security=tls"}
 		if p.Insecure {
 			q = append(q, "insecure=1")
 		}
-		q = append(q, "fp="+fp, "sni="+p.SNI)
+		q = append(q, "fp="+esc(fp), "sni="+esc(p.SNI))
 		if p.ALPN != "" {
-			q = append(q, "alpn="+p.ALPN)
+			q = append(q, "alpn="+esc(p.ALPN))
 		}
 		if p.Congestion != "" {
-			q = append(q, "congestion_control="+p.Congestion)
+			q = append(q, "congestion_control="+esc(p.Congestion))
 		}
-		return "tuic://" + p.UUID + ":" + p.Password + "@" + hp + "?" + strings.Join(q, "&") + frag
+		return "tuic://" + esc(p.UUID) + ":" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "hysteria2":
 		q := []string{"security=tls"}
 		if p.Insecure {
 			q = append(q, "insecure=1")
 		}
-		q = append(q, "fp="+fp, "sni="+p.SNI, "fastopen=0")
+		q = append(q, "fp="+esc(fp), "sni="+esc(p.SNI), "fastopen=0")
 		// obfs must be advertised to clients, otherwise the handshake fails
 		// when the inbound has salamander obfs enabled.
 		if p.Obfs != "" {
-			q = append(q, "obfs="+p.Obfs)
+			q = append(q, "obfs="+esc(p.Obfs))
 			if p.ObfsPassword != "" {
 				q = append(q, "obfs-password="+url.QueryEscape(p.ObfsPassword))
 			}
 		}
-		return "hysteria2://" + p.Password + "@" + hp + "?" + strings.Join(q, "&") + frag
+		return "hysteria2://" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "vmess":
 		m := map[string]interface{}{
 			"v": "2", "ps": p.Tag, "add": p.Host, "port": strconv.Itoa(p.Port),
@@ -171,13 +176,13 @@ func BuildShareLink(p LinkParams) string {
 		userinfo := base64.RawURLEncoding.EncodeToString([]byte(p.Method + ":" + p.ServerKey + ":" + userKey))
 		return "ss://" + userinfo + "@" + hp + frag
 	case "anytls":
-		q := []string{"security=tls", "fp=" + fp, "sni=" + p.SNI}
+		q := []string{"security=tls", "fp=" + esc(fp), "sni=" + esc(p.SNI)}
 		if p.Insecure {
 			q = append(q, "insecure=1")
 		}
-		return "anytls://" + p.Password + "@" + hp + "?" + strings.Join(q, "&") + frag
+		return "anytls://" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "hysteria":
-		q := []string{"protocol=udp", "auth=" + p.Password, "peer=" + p.SNI}
+		q := []string{"protocol=udp", "auth=" + esc(p.Password), "peer=" + esc(p.SNI)}
 		if p.Insecure {
 			q = append(q, "insecure=1")
 		}
@@ -188,7 +193,7 @@ func BuildShareLink(p LinkParams) string {
 			q = append(q, "downmbps="+strconv.Itoa(p.DownMbps))
 		}
 		if p.ALPN != "" {
-			q = append(q, "alpn="+p.ALPN)
+			q = append(q, "alpn="+esc(p.ALPN))
 		}
 		return "hysteria://" + hp + "?" + strings.Join(q, "&") + frag
 	}

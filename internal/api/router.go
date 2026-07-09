@@ -55,9 +55,16 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 func (a *API) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// NOTE: middleware.RealIP is intentionally NOT used — it trusts client
+	// X-Forwarded-For/X-Real-IP unconditionally, which would let any client spoof
+	// its source IP and bypass the per-IP rate limiters. clientIP() honors those
+	// headers only from a trusted proxy peer (see trustedproxy.go).
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+	// Cap request bodies so an authenticated client can't drive the process into
+	// memory pressure with a multi-GB POST. 8 MiB comfortably covers the largest
+	// legitimate payload (pasted airport lists / sing-box config templates).
+	r.Use(maxBodyMiddleware(8 << 20))
 
 	// Public
 	r.Get("/api/health", a.handleHealth)

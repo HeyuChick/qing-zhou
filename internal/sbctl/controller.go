@@ -130,11 +130,16 @@ func (c *Controller) Rebuild() error {
 				SystemdUnit: sv.SystemdUnit,
 				SingBoxBin:  sv.SingBoxBin,
 				V2rayListen: sv.V2rayListen,
+				HostKey:     sv.HostKey,
 			}
 			wg.Add(1)
 			go func(sv *store.Server, serverCfg *sshctl.ServerConfig, cfg []byte) {
 				defer wg.Done()
-				if err := c.remoteMgr.ApplyConfig(context.Background(), serverCfg, cfg); err != nil {
+				// Bound the apply so one unreachable / half-open node can't block on
+				// session.Wait() indefinitely and wedge Rebuild (which holds c.mu).
+				applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+				defer cancel()
+				if err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg); err != nil {
 					log.Printf("sbctl: server %d (%s) apply error: %v", sv.ID, sv.Name, err)
 					setErr(fmt.Errorf("server %d apply: %w", sv.ID, err))
 				}
@@ -187,9 +192,11 @@ func (c *Controller) RebuildServer(serverID int64) error {
 		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass,
 		SSHPassword: sv.SSHPassword, ConfigPath: sv.ConfigPath,
 		SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin,
-		V2rayListen: sv.V2rayListen,
+		V2rayListen: sv.V2rayListen, HostKey: sv.HostKey,
 	}
-	if err := c.remoteMgr.ApplyConfig(context.Background(), serverCfg, cfg); err != nil {
+	applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg); err != nil {
 		return fmt.Errorf("server %d apply: %w", sv.ID, err)
 	}
 	return nil

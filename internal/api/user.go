@@ -314,19 +314,33 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	// Banned users get nothing — for external nodes the served link is the real
+	// upstream credential, which the panel cannot meter or cut off after the fact.
+	if u.Status == "banned" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// Over-quota / expired users are served an empty node list (still a valid,
+	// well-formed config) rather than working links. sing-box self-built access is
+	// enforced separately, but external-node links must be withheld here too.
+	now := time.Now().Unix()
+	serviceable := (u.ExpiryAt == 0 || u.ExpiryAt > now) &&
+		(u.TrafficLimit == 0 || u.UsedUp+u.UsedDown < u.TrafficLimit)
 
 	// Build the link list + a link→group map (drives the per-group auto-select
 	// groups), honoring the user's per-node blocklist.
 	disabled, _ := a.st.DisabledNodeKeys(u.ID)
 	var links []string
 	groups := map[string]string{}
-	for _, e := range a.collectEntries(u) {
-		if len(disabled) > 0 && disabled[subconv.NodeKey(e.Link)] {
-			continue
-		}
-		links = append(links, e.Link)
-		if e.GroupName != "" {
-			groups[e.Link] = e.GroupName
+	if serviceable {
+		for _, e := range a.collectEntries(u) {
+			if len(disabled) > 0 && disabled[subconv.NodeKey(e.Link)] {
+				continue
+			}
+			links = append(links, e.Link)
+			if e.GroupName != "" {
+				groups[e.Link] = e.GroupName
+			}
 		}
 	}
 
@@ -338,7 +352,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = subconv.FormatForUA(r.Header.Get("User-Agent"))
 	}
-	subURL := "https://" + r.Host + r.URL.Path
+	subURL := publicBase(r) + r.URL.Path
 	body, ctype, err := subconv.Render(format, links, groups, clashTpl, singboxTpl, subURL)
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)
