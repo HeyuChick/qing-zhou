@@ -114,6 +114,30 @@ func (m *Manager) Apply(config []byte) error {
 	return nil
 }
 
+// FindSingBoxBin auto-detects the sing-box binary path. It checks the
+// QZ_SINGBOX_BIN env var first, then probes common installation paths, and
+// finally falls back to `exec.LookPath("sing-box")`. Returns "" if not found.
+func FindSingBoxBin() string {
+	if v := os.Getenv("QZ_SINGBOX_BIN"); v != "" {
+		if _, err := os.Stat(v); err == nil {
+			return v
+		}
+	}
+	for _, p := range []string{
+		"/opt/qingzhou/sing-box",
+		"/usr/local/bin/sing-box",
+		"/usr/bin/sing-box",
+	} {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("sing-box"); err == nil {
+		return p
+	}
+	return ""
+}
+
 // SystemdReload returns a reload func that restarts a systemd unit.
 func SystemdReload(unit string) func() error {
 	return func() error {

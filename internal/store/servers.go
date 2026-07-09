@@ -93,9 +93,8 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 	if sv.SystemdUnit == "" {
 		sv.SystemdUnit = "sing-box"
 	}
-	if sv.SingBoxBin == "" {
-		sv.SingBoxBin = "/usr/local/bin/sing-box"
-	}
+	// SingBoxBin left empty when not specified — the applier will auto-detect
+	// the binary on the target host (local: FindSingBoxBin; remote: PATH lookup).
 	if sv.V2rayListen == "" {
 		sv.V2rayListen = "127.0.0.1:18080"
 	}

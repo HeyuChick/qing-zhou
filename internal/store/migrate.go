@@ -298,7 +298,7 @@ CREATE TABLE IF NOT EXISTS servers (
   config_path     TEXT    NOT NULL DEFAULT '/etc/sing-box/config.json',
   systemd_unit    TEXT    NOT NULL DEFAULT 'sing-box',
   v2ray_listen    TEXT    NOT NULL DEFAULT '127.0.0.1:18080',
-  sing_box_bin    TEXT    NOT NULL DEFAULT '/usr/local/bin/sing-box',
+  sing_box_bin    TEXT    NOT NULL DEFAULT '',
   enabled         INTEGER NOT NULL DEFAULT 1,
   status          TEXT    NOT NULL DEFAULT 'unknown',
   last_seen       INTEGER NOT NULL DEFAULT 0,

@@ -53,7 +53,10 @@ type Inbound struct {
 // valid on raw-TLS (Reality) VLESS — it must be dropped when there is no TLS or
 // when a transport (ws/grpc/...) is present (matches sing-box's stripVision rule).
 // The flow preference is read from ib["flow"]: "none" disables it, "vision" or
-// empty (default) enables xtls-rprx-vision for backward compatibility.
+// empty (default) enables xtls-rprx-vision. The value "vision" (sing-box 1.10+
+// new name) is normalized back to "xtls-rprx-vision" for maximum compatibility
+// with both the server (which accepts the legacy name) and client software
+// (which widely only recognizes the legacy name in subscription links).
 func renderUser(t string, u User, ib map[string]interface{}) map[string]interface{} {
 	_, hasTLS := ib["tls"]
 	hasTransport := false
@@ -65,8 +68,8 @@ func renderUser(t string, u User, ib map[string]interface{}) map[string]interfac
 		m := map[string]interface{}{"name": u.Name, "uuid": u.UUID}
 		if hasTLS && !hasTransport {
 			flow, _ := ib["flow"].(string)
-			if flow == "" {
-				flow = "xtls-rprx-vision" // 默认 vision，向后兼容
+			if flow == "" || flow == "vision" {
+				flow = "xtls-rprx-vision" // 统一用旧名，兼容客户端和服务端
 			}
 			if flow != "none" {
 				m["flow"] = flow

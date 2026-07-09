@@ -154,8 +154,12 @@ func buildSbController(st *store.Store, app *api.API) *sbctl.Controller {
 	unit := get("QZ_SINGBOX_UNIT", "sb_systemd_unit", "sing-box")
 	base := get("", "sb_base_config", singbox.DefaultBaseConfig)
 
-	// Local process manager (for this host). Use default path unless overridden.
-	bin := firstNonEmpty(os.Getenv("QZ_SINGBOX_BIN"), "/usr/local/bin/sing-box")
+	// Local process manager (for this host). Auto-detect the sing-box binary
+	// path: env var → common install paths → PATH lookup.
+	bin := sbproc.FindSingBoxBin()
+	if bin == "" {
+		bin = "sing-box" // last resort: rely on PATH at exec time
+	}
 	mgr := sbproc.New(bin, configPath, sbproc.SystemdReload(unit))
 	stats := sbstats.New(v2rayListen)
 

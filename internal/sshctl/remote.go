@@ -255,7 +255,9 @@ func (m *RemoteManager) TestConnection(ctx context.Context, cfg *ServerConfig) (
 	if bin == "" {
 		bin = "sing-box"
 	}
-	out, err := m.run(ctx, client, shellQuote(bin)+" version 2>/dev/null || echo unknown")
+	// Fall back to `sing-box` from PATH if the configured binary isn't executable.
+	cmd := fmt.Sprintf(`BIN=%s; [ -x "$BIN" ] || BIN=sing-box; "$BIN" version 2>/dev/null || echo unknown`, shellQuote(bin))
+	out, err := m.run(ctx, client, cmd)
 	if err != nil {
 		return "", fmt.Errorf("run version: %w", err)
 	}
@@ -481,7 +483,10 @@ func (m *RemoteManager) validateConfigPath(ctx context.Context, client *ssh.Clie
 	if bin == "" {
 		bin = "sing-box"
 	}
-	cmd := fmt.Sprintf("%s check -c %s 2>&1", shellQuote(bin), shellQuote(path))
+	// Shell logic: if the configured binary isn't executable, fall back to
+	// `sing-box` from PATH. This handles stale sing_box_bin values gracefully.
+	cmd := fmt.Sprintf(`BIN=%s; [ -x "$BIN" ] || BIN=sing-box; "$BIN" check -c %s 2>&1`,
+		shellQuote(bin), shellQuote(path))
 	out, err := m.run(ctx, client, cmd)
 	if err != nil {
 		return fmt.Errorf("sing-box check failed: %s: %w", out, err)

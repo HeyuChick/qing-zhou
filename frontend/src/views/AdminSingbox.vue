@@ -178,7 +178,10 @@
             <n-tag type="warning" size="small">未配置 TLS，建议为 VLESS/VMess/Trojan 绑定 TLS 或 Reality</n-tag>
           </n-form-item>
           <n-form-item v-if="ie.type === 'vless' && ie.tls_id" label="Flow">
-            <n-select v-model:value="ie.flow" :options="[{label:'xtls-rprx-vision（默认）',value:'vision'},{label:'关闭',value:'none'}]" />
+            <n-select v-model:value="ie.flow" :options="[
+              {label:'xtls-rprx-vision（推荐）',value:'xtls-rprx-vision'},
+              {label:'关闭',value:'none'}
+            ]" />
           </n-form-item>
           <n-form-item label="TCP Fast Open"><n-switch v-model:value="ie.tfo" /></n-form-item>
           <n-form-item label="MPTCP"><n-switch v-model:value="ie.mptcp" /></n-form-item>
@@ -422,12 +425,17 @@ async function deleteTls(id: number) { try { await apiDelete('/api/admin/sb/tls/
 // ========== Inbound ==========
 const showInb = ref(false)
 const presetType = ref<string | null>(null)
+// 归一化 flow 值：空或 vision 统一成 xtls-rprx-vision，兼容旧数据和 sing-box 1.10+ 新名
+function normFlow(v: any): string {
+  if (!v || v === 'vision') return 'xtls-rprx-vision'
+  return v
+}
 const ie = reactive({
   id: 0, type: 'vless', tag: '', listen: '::', listen_port: 443, tls_id: 0, server_id: 0, enabled: true,
   tfo: false, mptcp: false, cc: 'bbr', zero_rtt: false,
   up_mbps: 0, down_mbps: 0, obfs_password: '', masquerade: '',
   net: 'tcp', ws_path: '/', ws_host: '', ws_early_data: 0, grpc_service: '', grpc_multi: false,
-  ss_method: '2022-blake3-aes-128-gcm', flow: 'vision',
+  ss_method: '2022-blake3-aes-128-gcm', flow: 'xtls-rprx-vision',
   anytls_idle_check: 0, anytls_idle_timeout: 0, anytls_min_idle: 0,
   mux: false, brutal: false, brutal_up: 0, brutal_down: 0,
 })
@@ -438,7 +446,7 @@ function resetIe() {
     tfo: false, mptcp: false, cc: 'bbr', zero_rtt: false,
     up_mbps: 0, down_mbps: 0, obfs_password: '', masquerade: '',
     net: 'tcp', ws_path: '/', ws_host: '', ws_early_data: 0, grpc_service: '', grpc_multi: false,
-    ss_method: '2022-blake3-aes-128-gcm', flow: 'vision',
+    ss_method: '2022-blake3-aes-128-gcm', flow: 'xtls-rprx-vision',
     anytls_idle_check: 0, anytls_idle_timeout: 0, anytls_min_idle: 0,
     mux: false, brutal: false, brutal_up: 0, brutal_down: 0,
   })
@@ -455,7 +463,7 @@ function openInbound(n?: any, clone = false) {
       obfs_password: obfs.password || '', masquerade: typeof o.masquerade === 'string' ? o.masquerade : (o.masquerade?.url || ''),
       net: tr.type || 'tcp', ws_path: tr.path || '/', ws_host: tr.host || '', ws_early_data: tr.max_early_data || 0,
       grpc_service: tr.service_name || '', grpc_multi: !!tr.multi_mode,
-      ss_method: o.method || '2022-blake3-aes-128-gcm', flow: o.flow || 'vision',
+      ss_method: o.method || '2022-blake3-aes-128-gcm', flow: normFlow(o.flow),
       anytls_idle_check: o.idle_session_check_interval || 0, anytls_idle_timeout: o.idle_session_timeout || 0, anytls_min_idle: o.min_idle_session || 0,
       mux: !!mx.enabled, brutal: !!br.enabled, brutal_up: br.up_mbps || 0, brutal_down: br.down_mbps || 0,
     })
@@ -472,7 +480,7 @@ function applyPreset(v: string | null) {
   if (!v) return
   resetIe()
   const presets: Record<string, any> = {
-    'vless-reality': { type: 'vless', tag: 'vless-reality', listen_port: 443, flow: 'vision' },
+    'vless-reality': { type: 'vless', tag: 'vless-reality', listen_port: 443, flow: 'xtls-rprx-vision' },
     'vless-ws-tls': { type: 'vless', tag: 'vless-ws', listen_port: 443, net: 'ws', ws_path: '/ws', flow: 'none' },
     'hysteria2': { type: 'hysteria2', tag: 'hy2', listen_port: 8443, up_mbps: 100, down_mbps: 100 },
     'tuic': { type: 'tuic', tag: 'tuic', listen_port: 8443, cc: 'bbr' },
