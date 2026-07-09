@@ -701,7 +701,7 @@ A.component('view-admin-singbox', {
       this.te = {
         id: t.id, server_id: t.server_id || 0, mode: t.mode, name: t.name, server_name: s.server_name || '',
         handshake_server: hs.server || '', handshake_port: hs.server_port || 443,
-        certificate: s.certificate || '', key: s.key || '', insecure: !!c.insecure, alpn: s.alpn || [],
+        certificate: Array.isArray(s.certificate) ? s.certificate.join('\n') : (s.certificate || ''), key: Array.isArray(s.key) ? s.key.join('\n') : (s.key || ''), insecure: !!c.insecure, alpn: s.alpn || [],
         public_key: (c.reality && c.reality.public_key) || '',
         private_key: r.private_key || '',
         short_id: c.short_id || (Array.isArray(r.short_id) ? r.short_id[0] : r.short_id) || '',

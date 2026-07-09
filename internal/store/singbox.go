@@ -67,8 +67,13 @@ func (s *Store) GetSbTls(id int64) (*SbTls, error) {
 	var t SbTls
 	err := s.db.QueryRow(`SELECT id, server_id, name, mode, server_json, client_json, created_at, updated_at
 		FROM sb_tls WHERE id=?`, id).Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CreatedAt, &t.UpdatedAt)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
+	}
+	if err != nil {
+		// Don't mask a real DB error as "not found" — the config builder would
+		// otherwise silently drop this inbound's TLS block and emit it plaintext.
+		return nil, err
 	}
 	t.ServerJSON = s.decrypt(t.ServerJSON)
 	return &t, nil
@@ -135,8 +140,11 @@ func (s *Store) GetSbInbound(id int64) (*SbInbound, error) {
 	var enabled int
 	err := s.db.QueryRow(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, created_at, updated_at
 		FROM sb_inbounds WHERE id=?`, id).Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.CreatedAt, &n.UpdatedAt)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	n.Enabled = enabled == 1
 	return &n, nil

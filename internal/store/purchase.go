@@ -67,6 +67,26 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 	if u == nil {
 		return nil, ErrUserNotFound
 	}
+
+	// Re-read the package INSIDE the transaction. The pkg the handler passed was
+	// loaded before the tx and may be stale — disabled, repriced, or sold out by
+	// a concurrent buyer. Authoritative price/stock/traffic come from here; the
+	// BEGIN IMMEDIATE write lock keeps a competing buyer from racing the stock.
+	fresh, err := scanPackage(tx.QueryRow(`SELECT `+pkgCols+` FROM packages WHERE id=?`, pkg.ID))
+	if err != nil {
+		return nil, err
+	}
+	if fresh == nil {
+		return nil, ErrPackageDisabled
+	}
+	fresh.GroupIDs = pkg.GroupIDs // not a column; preserve caller-supplied bindings
+	pkg = fresh
+	if !pkg.Enabled {
+		return nil, ErrPackageDisabled
+	}
+	if pkg.Stock == 0 {
+		return nil, ErrOutOfStock
+	}
 	if u.Points < pkg.PricePoints {
 		return nil, ErrInsufficientFunds
 	}
@@ -148,10 +168,16 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 		}
 	}
 
-	// Decrement stock if limited.
+	// Decrement stock if limited. Verify a row was actually affected — a 0-row
+	// result means the item sold out between our in-tx read and here; abort so we
+	// never oversell or charge for an unavailable item.
 	if pkg.Stock > 0 {
-		if _, err = tx.Exec(`UPDATE packages SET stock=stock-1 WHERE id=? AND stock>0`, pkg.ID); err != nil {
+		res, err := tx.Exec(`UPDATE packages SET stock=stock-1 WHERE id=? AND stock>0`, pkg.ID)
+		if err != nil {
 			return nil, err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, ErrOutOfStock
 		}
 	}
 
@@ -357,11 +383,11 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 	}()
 
 	var (
-		userID, price, createdAt int64
-		snap, status             string
+		userID, pkgID, price, createdAt int64
+		snap, status                    string
 	)
-	err = tx.QueryRow(`SELECT user_id, package_snapshot, price_points, status, created_at
-		FROM orders WHERE id=?`, orderID).Scan(&userID, &snap, &price, &status, &createdAt)
+	err = tx.QueryRow(`SELECT user_id, package_id, package_snapshot, price_points, status, created_at
+		FROM orders WHERE id=?`, orderID).Scan(&userID, &pkgID, &snap, &price, &status, &createdAt)
 	if err != nil {
 		return nil, ErrOrderNotFound
 	}
@@ -386,22 +412,6 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 	}
 
 	now := time.Now().Unix()
-	// Reverse the entitlement this order granted, clamped to safe minimums.
-	newTraffic := u.TrafficLimit - sp.TrafficBytes
-	if newTraffic < 0 {
-		newTraffic = 0
-	}
-	newExpiry := u.ExpiryAt
-	if sp.Type == "plan" && sp.DurationDays > 0 {
-		newExpiry = u.ExpiryAt - sp.DurationDays*86400
-		if newExpiry < now {
-			newExpiry = now // becomes expired, not negative
-		}
-	}
-	if _, err = tx.Exec(`UPDATE users SET traffic_limit=?, expiry_at=?, updated_at=? WHERE id=?`,
-		newTraffic, newExpiry, now, userID); err != nil {
-		return nil, err
-	}
 
 	// Refund points (if any were charged) and write the ledger row.
 	newPoints := u.Points + price
@@ -423,20 +433,45 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 		if err = removeBucketByOrder(tx, orderID); err != nil {
 			return nil, err
 		}
+		// If the user's current-plan pointer referenced this package, clear it —
+		// its backing bucket no longer exists (otherwise the pointer dangles).
+		if _, err = tx.Exec(`UPDATE users SET current_plan_id=NULL WHERE id=? AND current_plan_id=?`, userID, pkgID); err != nil {
+			return nil, err
+		}
 	} else if sp.Type == "traffic" {
 		if err = subFromPool(tx, userID, sp.TrafficBytes, now); err != nil {
 			return nil, err
 		}
 	}
 
-	if _, err = tx.Exec(`UPDATE orders SET status='refunded' WHERE id=?`, orderID); err != nil {
+	// Recompute the legacy users.* aggregate from the surviving buckets instead of
+	// doing independent clamped arithmetic on the columns — the latter drifted out
+	// of sync with the (clamped) bucket values after a refund. Buckets are
+	// authoritative; this keeps the dashboard totals consistent with them.
+	newTraffic, newUp, newDown, newExpiry, err := recomputeUserAggregate(tx, userID, now)
+	if err != nil {
 		return nil, err
+	}
+
+	// Mark the order refunded atomically. The WHERE status='success' guard makes a
+	// concurrent double-refund a no-op (0 rows) rather than a double reversal.
+	res, err := tx.Exec(`UPDATE orders SET status='refunded' WHERE id=? AND status='success'`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, ErrAlreadyRefunded
 	}
 
 	updated := *u
 	updated.Points = newPoints
 	updated.TrafficLimit = newTraffic
+	updated.UsedUp = newUp
+	updated.UsedDown = newDown
 	updated.ExpiryAt = newExpiry
+	if sp.Type == "plan" && u.CurrentPlanID.Valid && u.CurrentPlanID.Int64 == pkgID {
+		updated.CurrentPlanID = sql.NullInt64{}
+	}
 
 	if sync != nil {
 		if err = sync(&updated, false); err != nil {

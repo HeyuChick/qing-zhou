@@ -70,9 +70,73 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 
 	// Inject proxy server IPs into tun exclude_address to prevent routing loop.
 	injectSingboxTunExclude(doc, proxies)
+	// Domain-based node servers: keep them out of fake-ip and off the proxy
+	// detour, mirroring the Clash injectNodeDomains fix (otherwise "TUN on → no
+	// network" for any node whose server is a domain).
+	injectSingboxDomains(doc, proxies)
 
 	b, err := json.MarshalIndent(doc, "", "  ")
 	return string(b), err
+}
+
+// mapSlice normalizes a JSON array value to []map[string]any. A template loaded
+// via json.Unmarshal yields []any (of map[string]any); the Go-built default
+// yields []map[string]any. Element maps are shared, so mutating them in place
+// affects the underlying document either way.
+func mapSlice(v any) []map[string]any {
+	switch s := v.(type) {
+	case []map[string]any:
+		return s
+	case []any:
+		out := make([]map[string]any, 0, len(s))
+		for _, e := range s {
+			if m, ok := e.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// prependRule inserts rule at the front of a dns/route rules array, preserving
+// the array's concrete element type (which differs between a Go-built default
+// and a json.Unmarshal'd custom template).
+func prependRule(v any, rule map[string]any) any {
+	switch s := v.(type) {
+	case []map[string]any:
+		return append([]map[string]any{rule}, s...)
+	case []any:
+		return append([]any{any(rule)}, s...)
+	case nil:
+		return []map[string]any{rule}
+	default:
+		return v
+	}
+}
+
+// injectSingboxDomains makes the client resolve each domain-based node server via
+// the direct "local" DNS (never fake-ip or the proxy-detoured "remote" server)
+// and route the connection to that server directly. Without this, resolving a
+// foreign node domain either yields a 198.18.x fake-ip dialed into the node's own
+// TUN, or deadlocks bootstrapping DNS through the very proxy being established.
+func injectSingboxDomains(doc map[string]any, proxies []*Proxy) {
+	seen := map[string]bool{}
+	for _, p := range proxies {
+		if p.Server != "" && net.ParseIP(p.Server) == nil {
+			seen[p.Server] = true
+		}
+	}
+	if len(seen) == 0 {
+		return
+	}
+	domains := sortedKeys(seen)
+	if dns, ok := doc["dns"].(map[string]any); ok {
+		dns["rules"] = prependRule(dns["rules"], map[string]any{"domain": domains, "server": "local"})
+	}
+	if route, ok := doc["route"].(map[string]any); ok {
+		route["rules"] = prependRule(route["rules"], map[string]any{"domain": domains, "outbound": "direct"})
+	}
 }
 
 func singboxURLTest(tag string, outbounds []string) map[string]any {
@@ -192,8 +256,11 @@ func injectSingboxTunExclude(doc map[string]any, proxies []*Proxy) {
 	if len(seen) == 0 {
 		return
 	}
-	inbounds, ok := doc["inbounds"].([]map[string]any)
-	if !ok {
+	// Normalize the inbounds array — a custom template decodes as []any, not
+	// []map[string]any, so a naked type assertion would silently skip the
+	// exclusion and reintroduce the TUN routing loop.
+	inbounds := mapSlice(doc["inbounds"])
+	if inbounds == nil {
 		return
 	}
 	for _, ib := range inbounds {

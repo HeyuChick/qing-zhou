@@ -35,7 +35,7 @@ type autoGroups struct {
 // selector groups reference nodes by name/tag, so duplicates would silently drop
 // or alias nodes. Collisions get a " #N" suffix; empties fall back to server.
 func dedupeNames(ps []*Proxy) {
-	seen := map[string]int{}
+	seen := map[string]bool{}
 	for _, p := range ps {
 		n := p.Name
 		if n == "" {
@@ -44,12 +44,25 @@ func dedupeNames(ps []*Proxy) {
 		if n == "" {
 			n = p.Protocol
 		}
-		if c := seen[n]; c > 0 {
-			seen[n] = c + 1
-			p.Name = fmt.Sprintf("%s #%d", n, c+1)
-		} else {
-			seen[n] = 1
-			p.Name = n
+		p.Name = uniqueName(n, seen)
+		seen[p.Name] = true
+	}
+}
+
+// uniqueName returns base if unused, else the first free " #k" (k≥2) suffix. The
+// suffixed candidate is re-checked against used, so it can't collide with a node
+// that is literally already named "X #2".
+func uniqueName(base string, used map[string]bool) string {
+	if base == "" {
+		base = "节点"
+	}
+	if !used[base] {
+		return base
+	}
+	for k := 2; ; k++ {
+		cand := fmt.Sprintf("%s #%d", base, k)
+		if !used[cand] {
+			return cand
 		}
 	}
 }
@@ -71,9 +84,22 @@ func buildAutoGroups(ps []*Proxy) autoGroups {
 		}
 		by[p.Group] = append(by[p.Group], p.Name)
 	}
+	// A panel group name is reused verbatim as a proxy-group / url-test tag, so it
+	// must not collide with a reserved selector tag, DIRECT, or a node name — else
+	// the client sees two different things under one tag (duplicate/omitted proxy
+	// or a self-referencing selector). Suffix any colliding group name.
+	used := map[string]bool{
+		tagProxy: true, tagAuto: true, grpSelectClash: true, grpAutoClash: true,
+		"direct": true, "DIRECT": true, "GLOBAL": true,
+	}
+	for _, n := range ag.all {
+		used[n] = true
+	}
 	for _, g := range order {
 		if len(by[g]) >= 2 && len(by[g]) < len(ag.all) {
-			ag.byGroup = append(ag.byGroup, nodeGroup{name: g, names: by[g]})
+			name := uniqueName(g, used)
+			used[name] = true
+			ag.byGroup = append(ag.byGroup, nodeGroup{name: name, names: by[g]})
 		}
 	}
 	return ag

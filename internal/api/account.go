@@ -73,7 +73,11 @@ func (a *API) maintain() {
 		log.Printf("maintenance: pruned %d stale session(s)", n)
 	}
 	a.st.CleanupEmailTokens()
-	if a.authRL != nil {
-		a.authRL.sweep()
+	// Sweep every limiter — otherwise resendRL/probeRL entries accumulate for the
+	// process lifetime (unbounded memory; the probe endpoint is IP-keyed).
+	for _, rl := range []*rateLimiter{a.authRL, a.resendRL, a.probeRL} {
+		if rl != nil {
+			rl.sweep()
+		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"qingzhou/internal/mailer"
 	"qingzhou/internal/sbctl"
 	"qingzhou/internal/store"
+	"qingzhou/internal/updater"
 	"qingzhou/web"
 )
 
@@ -23,7 +24,8 @@ type API struct {
 	resendRL *rateLimiter
 	probeRL  *rateLimiter // rate limit for agent report endpoint
 
-	sbctl *sbctl.Controller // native sing-box orchestrator; nil if not enabled
+	sbctl   *sbctl.Controller // native sing-box orchestrator; nil if not enabled
+	updater *updater.Manager  // GitHub-release self-updater
 
 	linkMu    sync.Mutex
 	linkCache map[int64]linkCacheEntry
@@ -43,21 +45,47 @@ func (a *API) sbRebuild() error {
 }
 
 func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
-	return &API{
+	a := &API{
 		st: st, secret: secret, mailer: mail,
 		authRL:    newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
 		resendRL:  newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
-		probeRL:   newRateLimiter(60, time.Minute),    // 60 probe reports / IP / min
+		probeRL:   newRateLimiter(60, time.Minute),   // 60 probe reports / IP / min
 		linkCache: make(map[int64]linkCacheEntry),
 	}
+	// Self-updater: repo + optional GitHub token come from env or DB settings,
+	// falling back to the project's canonical repo.
+	a.updater = updater.New(
+		func() string {
+			if v := os.Getenv("QZ_UPDATE_REPO"); v != "" {
+				return v
+			}
+			v, _ := st.GetSetting("update_repo")
+			return v
+		},
+		func() string {
+			if v := os.Getenv("QZ_UPDATE_GITHUB_TOKEN"); v != "" {
+				return v
+			}
+			v, _ := st.GetSetting("update_github_token")
+			return v
+		},
+	)
+	return a
 }
 
 func (a *API) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// NOTE: middleware.RealIP is intentionally NOT used — it trusts client
+	// X-Forwarded-For/X-Real-IP unconditionally, which would let any client spoof
+	// its source IP and bypass the per-IP rate limiters. clientIP() honors those
+	// headers only from a trusted proxy peer (see trustedproxy.go).
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+	// Cap request bodies so an authenticated client can't drive the process into
+	// memory pressure with a multi-GB POST. 8 MiB comfortably covers the largest
+	// legitimate payload (pasted airport lists / sing-box config templates).
+	r.Use(maxBodyMiddleware(8 << 20))
 
 	// Public
 	r.Get("/api/health", a.handleHealth)
@@ -84,6 +112,7 @@ func (a *API) Router() http.Handler {
 
 	// Public monitoring dashboard (no auth required).
 	r.Get("/api/monitor/public", a.handleMonitorPublic)
+	r.Get("/api/monitor/public/sparklines", a.handleMonitorPublicSparklines)
 	r.Get("/api/monitor/heatmap", a.handleMonitorPublicHeatmap)
 
 	// Authenticated (any logged-in user)
@@ -124,6 +153,9 @@ func (a *API) Router() http.Handler {
 		ar.Put("/api/admin/settings", a.handlePutSettings)
 		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
+		ar.Get("/api/admin/update/check", a.handleUpdateCheck)
+		ar.Get("/api/admin/update/status", a.handleUpdateStatus)
+		ar.Post("/api/admin/update/apply", a.handleUpdateApply)
 		ar.Get("/api/admin/help", a.handleAdminHelpDocs)
 		ar.Post("/api/admin/help", a.handleAdminCreateHelpDoc)
 		ar.Put("/api/admin/help/{id}", a.handleAdminUpdateHelpDoc)

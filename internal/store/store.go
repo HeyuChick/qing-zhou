@@ -25,8 +25,13 @@ type Store struct {
 // Pragmas go in the DSN (not a one-off Exec) so EVERY pooled connection gets
 // them — busy_timeout/foreign_keys are per-connection, not DB-wide.
 func Open(path string) (*Store, error) {
+	// _txlock=immediate makes db.Begin() issue BEGIN IMMEDIATE, acquiring the
+	// write lock up front. Without it, a read→write transaction (purchase,
+	// refund, point adjust) upgrades mid-flight and can hit SQLITE_BUSY_SNAPSHOT,
+	// which busy_timeout does NOT retry — a valid purchase would fail spuriously.
+	// Under WAL, readers never block on the reserved write lock, so this is safe.
 	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)" +
-		"&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+		"&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

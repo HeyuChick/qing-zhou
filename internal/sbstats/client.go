@@ -77,7 +77,10 @@ func (c *Client) QueryUserTraffic(ctx context.Context) (map[string]*Traffic, err
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	// Bound the read: the peer is normally the local sing-box, but a
+	// malfunctioning/hostile listener on the configured address could otherwise
+	// stream an unbounded body and OOM the panel.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
 		return nil, err
 	}

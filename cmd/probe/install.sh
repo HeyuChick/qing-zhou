@@ -30,20 +30,38 @@ ENV_FILE="/etc/qingzhou-probe.env"
 SERVICE_FILE="/etc/systemd/system/qingzhou-probe.service"
 
 echo "[1/4] 下载探针二进制 (${ARCH})..."
+# 下载到同目录临时文件，成功后原子替换。直接覆盖正在运行的二进制会触发
+# ETXTBSY(Text file busy)，导致 curl 写入失败(退出码 23)——升级场景必现。
+TMP_PATH="${INSTALL_PATH}.new"
+trap 'rm -f "$TMP_PATH"' EXIT
 if command -v curl &> /dev/null; then
-  HTTP_CODE=$(curl -sL -w "%{http_code}" -o "$INSTALL_PATH" "$BIN_URL")
+  CURL_RC=0
+  HTTP_CODE=$(curl -sSL -w "%{http_code}" -o "$TMP_PATH" "$BIN_URL") || CURL_RC=$?
+  if [ "$CURL_RC" != "0" ]; then
+    echo "❌ 下载失败: curl 退出码 $CURL_RC"
+    echo "   URL: $BIN_URL"
+    exit 1
+  fi
   if [ "$HTTP_CODE" != "200" ]; then
     echo "❌ 下载失败: HTTP $HTTP_CODE"
     echo "   URL: $BIN_URL"
     exit 1
   fi
 elif command -v wget &> /dev/null; then
-  wget -qO "$INSTALL_PATH" "$BIN_URL" || { echo "❌ 下载失败"; exit 1; }
+  wget -qO "$TMP_PATH" "$BIN_URL" || { echo "❌ 下载失败"; exit 1; }
 else
   echo "❌ 错误: 需要 curl 或 wget"
   exit 1
 fi
-chmod +x "$INSTALL_PATH"
+if [ ! -s "$TMP_PATH" ]; then
+  echo "❌ 下载的文件为空，请检查 URL 是否正确"
+  echo "   URL: $BIN_URL"
+  exit 1
+fi
+chmod +x "$TMP_PATH"
+# 原子替换：rename() 对正在运行的旧二进制是安全的，不会 ETXTBSY。
+mv -f "$TMP_PATH" "$INSTALL_PATH"
+trap - EXIT
 echo "   已安装到 $INSTALL_PATH ($(du -h "$INSTALL_PATH" | cut -f1))"
 
 # Create secure environment file (not visible in /proc/*/cmdline).

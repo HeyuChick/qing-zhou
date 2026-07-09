@@ -98,20 +98,38 @@ ENV_FILE="/etc/qingzhou-probe.env"
 SERVICE_FILE="/etc/systemd/system/qingzhou-probe.service"
 
 echo "[1/4] 下载探针二进制 (${ARCH})..."
+# 下载到同目录临时文件，成功后原子替换。直接覆盖正在运行的二进制会触发
+# ETXTBSY(Text file busy)，导致 curl 写入失败(退出码 23)——升级场景必现。
+TMP_PATH="${INSTALL_PATH}.new"
+trap 'rm -f "$TMP_PATH"' EXIT
 if command -v curl &> /dev/null; then
-  HTTP_CODE=$(curl -sL -w "%{http_code}" -o "$INSTALL_PATH" "$BIN_URL")
+  CURL_RC=0
+  HTTP_CODE=$(curl -sSL -w "%{http_code}" -o "$TMP_PATH" "$BIN_URL") || CURL_RC=$?
+  if [ "$CURL_RC" != "0" ]; then
+    echo "❌ 下载失败: curl 退出码 $CURL_RC"
+    echo "   URL: $BIN_URL"
+    exit 1
+  fi
   if [ "$HTTP_CODE" != "200" ]; then
     echo "❌ 下载失败: HTTP $HTTP_CODE"
     echo "   URL: $BIN_URL"
     exit 1
   fi
 elif command -v wget &> /dev/null; then
-  wget -qO "$INSTALL_PATH" "$BIN_URL" || { echo "❌ 下载失败"; exit 1; }
+  wget -qO "$TMP_PATH" "$BIN_URL" || { echo "❌ 下载失败"; exit 1; }
 else
   echo "❌ 错误: 需要 curl 或 wget"
   exit 1
 fi
-chmod +x "$INSTALL_PATH"
+if [ ! -s "$TMP_PATH" ]; then
+  echo "❌ 下载的文件为空，请检查 URL 是否正确"
+  echo "   URL: $BIN_URL"
+  exit 1
+fi
+chmod +x "$TMP_PATH"
+# 原子替换：rename() 对正在运行的旧二进制是安全的，不会 ETXTBSY。
+mv -f "$TMP_PATH" "$INSTALL_PATH"
+trap - EXIT
 echo "   已安装到 $INSTALL_PATH ($(du -h "$INSTALL_PATH" | cut -f1))"
 
 echo "[2/4] 创建环境配置文件..."
@@ -187,16 +205,16 @@ func (a *API) handleMonitorDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ok(w, J{
-		"total_servers":  total,
-		"online":         online,
-		"offline":        total - online,
-		"expiring_soon":  expiring,
-		"alerts_unread":  unread,
+		"total_servers": total,
+		"online":        online,
+		"offline":       total - online,
+		"expiring_soon": expiring,
+		"alerts_unread": unread,
 		"summary": J{
-			"total_cpu":       totalCPU,
-			"total_mem_used":  totalMemUsed,
-			"total_mem_total": totalMemTotal,
-			"total_disk_used": totalDiskUsed,
+			"total_cpu":        totalCPU,
+			"total_mem_used":   totalMemUsed,
+			"total_mem_total":  totalMemTotal,
+			"total_disk_used":  totalDiskUsed,
 			"total_disk_total": totalDiskTotal,
 		},
 	})
@@ -211,22 +229,22 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type serverResp struct {
-		ID          int64               `json:"id"`
-		Name        string              `json:"name"`
-		Host        string              `json:"host"`
-		Enabled     bool                `json:"enabled"`
-		ProbeEnabled bool               `json:"probe_enabled"`
-		ProbeToken  string              `json:"probe_token"`
-		Provider    string              `json:"provider"`
-		Location    string              `json:"location"`
-		Spec        string              `json:"spec"`
-		Price       float64             `json:"price"`
-		ExpiryDate  int64               `json:"expiry_date"`
-		DaysLeft    *int                `json:"days_left"`
-		Status      string              `json:"status"`
-		LastSeen    int64               `json:"last_seen"`
-		Metrics     *store.ServerMetrics `json:"metrics"`
-		Notes       string              `json:"notes"`
+		ID           int64                `json:"id"`
+		Name         string               `json:"name"`
+		Host         string               `json:"host"`
+		Enabled      bool                 `json:"enabled"`
+		ProbeEnabled bool                 `json:"probe_enabled"`
+		ProbeToken   string               `json:"probe_token"`
+		Provider     string               `json:"provider"`
+		Location     string               `json:"location"`
+		Spec         string               `json:"spec"`
+		Price        float64              `json:"price"`
+		ExpiryDate   int64                `json:"expiry_date"`
+		DaysLeft     *int                 `json:"days_left"`
+		Status       string               `json:"status"`
+		LastSeen     int64                `json:"last_seen"`
+		Metrics      *store.ServerMetrics `json:"metrics"`
+		Notes        string               `json:"notes"`
 	}
 
 	now := time.Now()
@@ -251,22 +269,22 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 			dl = &d
 		}
 		out = append(out, serverResp{
-			ID:          sv.ID,
-			Name:        sv.Name,
-			Host:        sv.Host,
-			Enabled:     sv.Enabled,
+			ID:           sv.ID,
+			Name:         sv.Name,
+			Host:         sv.Host,
+			Enabled:      sv.Enabled,
 			ProbeEnabled: sv.ProbeEnabled,
-			ProbeToken:  sv.ProbeToken,
-			Provider:    sv.Provider,
-			Location:    sv.Location,
-			Spec:        sv.Spec,
-			Price:       sv.Price,
-			ExpiryDate:  sv.ExpiryDate,
-			DaysLeft:    dl,
-			Status:      status,
-			LastSeen:    sv.LastSeen,
-			Metrics:     m,
-			Notes:       sv.Notes,
+			ProbeToken:   sv.ProbeToken,
+			Provider:     sv.Provider,
+			Location:     sv.Location,
+			Spec:         sv.Spec,
+			Price:        sv.Price,
+			ExpiryDate:   sv.ExpiryDate,
+			DaysLeft:     dl,
+			Status:       status,
+			LastSeen:     sv.LastSeen,
+			Metrics:      m,
+			Notes:        sv.Notes,
 		})
 	}
 	if out == nil {
@@ -380,6 +398,101 @@ func (a *API) handleMonitorPublicHeatmap(w http.ResponseWriter, r *http.Request)
 		"range":      rangeStr,
 		"bucket_sec": bucketSec,
 	})
+}
+
+// handleMonitorPublicSparklines returns downsampled recent CPU / network history
+// per probe-enabled server for the public dashboard's mini charts. No auth.
+func (a *API) handleMonitorPublicSparklines(w http.ResponseWriter, r *http.Request) {
+	rangeStr := r.URL.Query().Get("range")
+	var dur time.Duration
+	switch rangeStr {
+	case "6h":
+		dur = 6 * time.Hour
+	case "24h":
+		dur = 24 * time.Hour
+	default:
+		rangeStr = "1h"
+		dur = time.Hour
+	}
+	const points = 32
+	startTs := time.Now().Add(-dur).Unix()
+	bucketSec := int64(dur.Seconds()) / points
+	if bucketSec < 1 {
+		bucketSec = 1
+	}
+
+	servers, err := a.st.ListServers()
+	if err != nil {
+		fail(w, 500, "查询失败")
+		return
+	}
+	// server_id -> row index (probe-enabled only, stable order)
+	idx := map[int64]int{}
+	type spark struct {
+		Name string    `json:"name"`
+		CPU  []float64 `json:"cpu"`
+		Up   []int64   `json:"net_up"`
+		Down []int64   `json:"net_down"`
+	}
+	var rows []spark
+	for _, sv := range servers {
+		if !sv.ProbeEnabled {
+			continue
+		}
+		idx[sv.ID] = len(rows)
+		rows = append(rows, spark{
+			Name: sv.Name,
+			CPU:  make([]float64, points),
+			Up:   make([]int64, points),
+			Down: make([]int64, points),
+		})
+	}
+
+	metrics, err := a.st.ListAllMetricsSince(startTs)
+	if err != nil {
+		fail(w, 500, "查询失败")
+		return
+	}
+	// Accumulate into buckets, then average per bucket.
+	cpuSum := make([][]float64, len(rows))
+	upSum := make([][]int64, len(rows))
+	downSum := make([][]int64, len(rows))
+	cnt := make([][]int, len(rows))
+	for i := range rows {
+		cpuSum[i] = make([]float64, points)
+		upSum[i] = make([]int64, points)
+		downSum[i] = make([]int64, points)
+		cnt[i] = make([]int, points)
+	}
+	for _, m := range metrics {
+		ri, ok := idx[m.ServerID]
+		if !ok {
+			continue
+		}
+		b := int((m.Ts - startTs) / bucketSec)
+		if b < 0 {
+			b = 0
+		} else if b >= points {
+			b = points - 1
+		}
+		cpuSum[ri][b] += m.CPUPercent
+		upSum[ri][b] += m.NetTx
+		downSum[ri][b] += m.NetRx
+		cnt[ri][b]++
+	}
+	for i := range rows {
+		for b := 0; b < points; b++ {
+			if c := cnt[i][b]; c > 0 {
+				rows[i].CPU[b] = cpuSum[i][b] / float64(c)
+				rows[i].Up[b] = upSum[i][b] / int64(c)
+				rows[i].Down[b] = downSum[i][b] / int64(c)
+			}
+		}
+	}
+	if rows == nil {
+		rows = []spark{}
+	}
+	ok(w, J{"servers": rows, "range": rangeStr, "points": points})
 }
 
 // heatRow is an internal row representation shared by admin/public heatmap.
@@ -509,12 +622,12 @@ func (a *API) handleMarkAlertRead(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	sv, err := a.st.GetServer(id)
-	if sv == nil {
-		fail(w, 404, "服务器不存在")
-		return
-	}
 	if err != nil {
 		fail(w, 500, "读取服务器失败")
+		return
+	}
+	if sv == nil {
+		fail(w, 404, "服务器不存在")
 		return
 	}
 
@@ -590,23 +703,32 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 	onlineWindow := now.Add(-2 * time.Minute).Unix()
 
 	type pubMetrics struct {
-		CPUPercent float64 `json:"cpu_percent"`
-		MemUsed    int64   `json:"mem_used"`
-		MemTotal   int64   `json:"mem_total"`
-		DiskUsed   int64   `json:"disk_used"`
-		DiskTotal  int64   `json:"disk_total"`
-		NetUp      int64   `json:"net_up"`
-		NetDown    int64   `json:"net_down"`
-		Load1      float64 `json:"load1"`
-		Load5      float64 `json:"load5"`
-		Load15     float64 `json:"load15"`
-		Uptime     int64   `json:"uptime"`
+		CPUPercent     float64 `json:"cpu_percent"`
+		MemUsed        int64   `json:"mem_used"`
+		MemTotal       int64   `json:"mem_total"`
+		SwapUsed       int64   `json:"swap_used"`
+		SwapTotal      int64   `json:"swap_total"`
+		DiskUsed       int64   `json:"disk_used"`
+		DiskTotal      int64   `json:"disk_total"`
+		NetUp          int64   `json:"net_up"`
+		NetDown        int64   `json:"net_down"`
+		Load1          float64 `json:"load1"`
+		Load5          float64 `json:"load5"`
+		Load15         float64 `json:"load15"`
+		TCPConnections int     `json:"tcp_connections"`
+		ProcessCount   int     `json:"process_count"`
+		Uptime         int64   `json:"uptime"`
+		Platform       string  `json:"platform"`
+		Arch           string  `json:"arch"`
 	}
 
 	type pubServer struct {
 		Name     string      `json:"name"`
 		Status   string      `json:"status"`
 		Location string      `json:"location"`
+		Provider string      `json:"provider"`
+		Spec     string      `json:"spec"`
+		DaysLeft *int        `json:"days_left"`
 		Metrics  *pubMetrics `json:"metrics"`
 		LastSeen int64       `json:"last_seen"`
 	}
@@ -623,23 +745,40 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 		var pm *pubMetrics
 		if m, _ := a.st.GetLatestMetrics(sv.ID); m != nil {
 			pm = &pubMetrics{
-				CPUPercent: m.CPUPercent,
-				MemUsed:    m.MemUsed,
-				MemTotal:   m.MemTotal,
-				DiskUsed:   m.DiskUsed,
-				DiskTotal:  m.DiskTotal,
-				NetUp:      m.NetTx,
-				NetDown:    m.NetRx,
-				Load1:      m.Load1,
-				Load5:      m.Load5,
-				Load15:     m.Load15,
-				Uptime:     m.Uptime,
+				CPUPercent:     m.CPUPercent,
+				MemUsed:        m.MemUsed,
+				MemTotal:       m.MemTotal,
+				SwapUsed:       m.SwapUsed,
+				SwapTotal:      m.SwapTotal,
+				DiskUsed:       m.DiskUsed,
+				DiskTotal:      m.DiskTotal,
+				NetUp:          m.NetTx,
+				NetDown:        m.NetRx,
+				Load1:          m.Load1,
+				Load5:          m.Load5,
+				Load15:         m.Load15,
+				TCPConnections: m.TCPConnections,
+				ProcessCount:   m.ProcessCount,
+				Uptime:         m.Uptime,
+				Platform:       m.Platform,
+				Arch:           m.Arch,
 			}
+		}
+		var dl *int
+		if sv.ExpiryDate > 0 {
+			d := int(time.Unix(sv.ExpiryDate, 0).Sub(now).Hours() / 24)
+			if d < 0 {
+				d = 0
+			}
+			dl = &d
 		}
 		out = append(out, pubServer{
 			Name:     sv.Name,
 			Status:   status,
 			Location: sv.Location,
+			Provider: sv.Provider,
+			Spec:     sv.Spec,
+			DaysLeft: dl,
 			Metrics:  pm,
 			LastSeen: sv.LastSeen,
 		})

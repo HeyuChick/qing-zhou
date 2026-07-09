@@ -5,6 +5,7 @@ package sshctl
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -44,12 +45,17 @@ type ServerConfig struct {
 	SystemdUnit string `json:"systemd_unit"`  // e.g. sing-box
 	SingBoxBin  string `json:"sing_box_bin"`  // e.g. /usr/local/bin/sing-box
 	V2rayListen string `json:"v2ray_listen"`  // e.g. 127.0.0.1
+	HostKey     string `json:"-"`             // pinned SSH host key (authorized_keys line); "" = pin on first use
 }
 
 // RemoteManager coordinates SSH operations against multiple remote servers.
 type RemoteManager struct {
-	timeout       time.Duration
-	strictHostKey bool
+	timeout time.Duration
+
+	// persistHostKey pins a server's SSH host key on first successful connect
+	// (TOFU). nil disables persistence (verification against an already-pinned
+	// key still applies).
+	persistHostKey func(serverID int64, hostKey string) error
 
 	// lastConfigHash tracks the SHA-256 of the last successfully applied
 	// config per server (keyed by host:configPath). When Rebuild() is
@@ -68,12 +74,6 @@ func WithTimeout(d time.Duration) Option {
 	return func(m *RemoteManager) { m.timeout = d }
 }
 
-// WithStrictHostKey enables strict host-key checking.
-// By default, unknown host keys are accepted (insecure but convenient).
-func WithStrictHostKey(v bool) Option {
-	return func(m *RemoteManager) { m.strictHostKey = v }
-}
-
 // New creates a RemoteManager with the given options.
 func New(opts ...Option) *RemoteManager {
 	m := &RemoteManager{
@@ -83,6 +83,12 @@ func New(opts ...Option) *RemoteManager {
 		o(m)
 	}
 	return m
+}
+
+// SetHostKeyPersister registers a callback used to pin a server's SSH host key
+// on first successful connection (trust-on-first-use).
+func (m *RemoteManager) SetHostKeyPersister(fn func(serverID int64, hostKey string) error) {
+	m.persistHostKey = fn
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -98,17 +104,38 @@ func (m *RemoteManager) buildClientConfig(cfg *ServerConfig) (*ssh.ClientConfig,
 		return nil, errors.New("ssh: no authentication method configured (set password or key)")
 	}
 
-	hostKeyCb := ssh.InsecureIgnoreHostKey() //nolint:gosec
-	if m.strictHostKey {
-		hostKeyCb = nil // use /etc/ssh/known_hosts — will fail if missing
-	}
-
 	return &ssh.ClientConfig{
 		User:            cfg.SSHUser,
 		Auth:            authMethods,
-		HostKeyCallback: hostKeyCb,
+		HostKeyCallback: m.hostKeyCallback(cfg),
 		Timeout:         m.timeout,
 	}, nil
+}
+
+// hostKeyCallback verifies the remote host key. If the server already has a
+// pinned key, the presented key must match it (mismatch = possible MITM →
+// refuse). Otherwise the key is trusted on first use and pinned via the
+// persister, so every later connection is verified. This replaces the previous
+// InsecureIgnoreHostKey, which let any MITM impersonate a landing server and
+// harvest SSH credentials / push an attacker-chosen config (root RCE).
+func (m *RemoteManager) hostKeyCallback(cfg *ServerConfig) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		presented := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+		if cfg.HostKey != "" {
+			if subtle.ConstantTimeCompare([]byte(cfg.HostKey), []byte(presented)) == 1 {
+				return nil
+			}
+			return fmt.Errorf("ssh host key mismatch for %s: refusing (possible MITM; clear the pinned key to re-trust)", cfg.Host)
+		}
+		// Trust on first use: pin the key so subsequent connections are verified.
+		if m.persistHostKey != nil && cfg.ID != 0 {
+			if err := m.persistHostKey(cfg.ID, presented); err != nil {
+				return fmt.Errorf("pin host key: %w", err)
+			}
+		}
+		cfg.HostKey = presented
+		return nil
+	}
 }
 
 func (m *RemoteManager) buildAuthMethods(cfg *ServerConfig) ([]ssh.AuthMethod, error) {
@@ -428,13 +455,17 @@ func (m *RemoteManager) writeFile(ctx context.Context, client *ssh.Client, remot
 
 	// Use a cat-heredoc approach for reliable transfer.
 	// The delimiter is unlikely to appear in a JSON config.
+	// umask 077 + explicit chmod so the file (which embeds the Reality private
+	// key, user passwords and UUIDs) is never world-readable to other local
+	// users on the landing host.
 	const delim = "__SSHCTL_EOF_8f3a__"
 	script := fmt.Sprintf(
-		`cat > %s << '%s'
+		`umask 077; cat > %s << '%s'
 %s
 %s
+chmod 600 %s
 `,
-		shellQuote(remotePath), delim, string(data), delim,
+		shellQuote(remotePath), delim, string(data), delim, shellQuote(remotePath),
 	)
 
 	if _, err := m.run(ctx, client, script); err != nil {

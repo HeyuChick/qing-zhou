@@ -49,12 +49,49 @@ func scanMetrics(sc scanner) (*ServerMetrics, error) {
 	return &m, nil
 }
 
+// clamp bounds reported metrics to sane ranges so a misbehaving or hostile probe
+// (token-authenticated but otherwise untrusted) can't skew dashboard aggregates
+// and heatmap classification with negative or impossible values.
+func (m *ServerMetrics) clamp() {
+	nn := func(v int64) int64 {
+		if v < 0 {
+			return 0
+		}
+		return v
+	}
+	if m.CPUPercent < 0 {
+		m.CPUPercent = 0
+	} else if m.CPUPercent > 100 {
+		m.CPUPercent = 100
+	}
+	m.MemUsed, m.MemTotal = nn(m.MemUsed), nn(m.MemTotal)
+	m.SwapUsed, m.SwapTotal = nn(m.SwapUsed), nn(m.SwapTotal)
+	m.DiskUsed, m.DiskTotal = nn(m.DiskUsed), nn(m.DiskTotal)
+	m.NetRx, m.NetTx = nn(m.NetRx), nn(m.NetTx)
+	if m.MemTotal > 0 && m.MemUsed > m.MemTotal {
+		m.MemUsed = m.MemTotal
+	}
+	if m.SwapTotal > 0 && m.SwapUsed > m.SwapTotal {
+		m.SwapUsed = m.SwapTotal
+	}
+	if m.DiskTotal > 0 && m.DiskUsed > m.DiskTotal {
+		m.DiskUsed = m.DiskTotal
+	}
+	if m.TCPConnections < 0 {
+		m.TCPConnections = 0
+	}
+	if m.ProcessCount < 0 {
+		m.ProcessCount = 0
+	}
+}
+
 // InsertMetrics writes one metrics snapshot.
 func (s *Store) InsertMetrics(serverID int64, m ServerMetrics) error {
 	now := time.Now().Unix()
 	if m.Ts == 0 {
 		m.Ts = now
 	}
+	m.clamp() // reject nonsense values from a misbehaving/hostile probe
 	_, err := s.db.Exec(`INSERT INTO server_metrics
 		(server_id, ts, cpu_percent, mem_used, mem_total, swap_used, swap_total,
 		 disk_used, disk_total, net_rx, net_tx, load1, load5, load15,
@@ -71,9 +108,15 @@ func (s *Store) GetLatestMetrics(serverID int64) (*ServerMetrics, error) {
 	return scanMetrics(s.db.QueryRow(`SELECT `+metricsCols+` FROM server_metrics WHERE server_id=? ORDER BY ts DESC LIMIT 1`, serverID))
 }
 
-// ListMetrics returns metrics for a server since the given Unix timestamp.
+// ListMetrics returns metrics for a server since the given Unix timestamp. The
+// row count is capped (most-recent-first within the window, returned in
+// chronological order) so a long range on a high-frequency probe can't serialize
+// hundreds of thousands of rows into a single response.
 func (s *Store) ListMetrics(serverID int64, since int64) ([]*ServerMetrics, error) {
-	rows, err := s.db.Query(`SELECT `+metricsCols+` FROM server_metrics WHERE server_id=? AND ts>=? ORDER BY ts`, serverID, since)
+	const maxMetricsRows = 5000
+	rows, err := s.db.Query(`SELECT `+metricsCols+` FROM (
+		SELECT `+metricsCols+` FROM server_metrics WHERE server_id=? AND ts>=? ORDER BY ts DESC LIMIT ?
+	) ORDER BY ts`, serverID, since, maxMetricsRows)
 	if err != nil {
 		return nil, err
 	}

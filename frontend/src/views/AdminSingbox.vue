@@ -337,7 +337,7 @@ function openTls(t?: any, clone = false) {
       fingerprint: (c.utls && c.utls.fingerprint) || 'chrome',
       private_key: r.private_key || '', public_key: (c.reality && c.reality.public_key) || '',
       short_ids: sids.length ? sids : [''],
-      certificate: s.certificate || '', key: s.key || '',
+      certificate: Array.isArray(s.certificate) ? s.certificate.join('\n') : (s.certificate || ''), key: Array.isArray(s.key) ? s.key.join('\n') : (s.key || ''),
       alpn: s.alpn || [], min_version: s.min_version || '', max_version: s.max_version || '',
       insecure: !!c.insecure,
     })

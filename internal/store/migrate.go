@@ -386,9 +386,52 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE servers ADD COLUMN spec TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE servers ADD COLUMN price REAL NOT NULL DEFAULT 0`,
 		`ALTER TABLE servers ADD COLUMN notes TEXT NOT NULL DEFAULT ''`,
+		// Pinned SSH host key (authorized_keys line) for TOFU verification, so the
+		// panel doesn't blindly trust any host key on connect (MITM → root RCE).
+		`ALTER TABLE servers ADD COLUMN host_key TEXT NOT NULL DEFAULT ''`,
+		// Lookup index for the probe token: the token itself is now encrypted at
+		// rest, so the report endpoint matches on this SHA-256 hash instead.
+		`ALTER TABLE servers ADD COLUMN probe_token_hash TEXT NOT NULL DEFAULT ''`,
 	} {
 		_, _ = s.db.Exec(stmt)
 	}
+	// Backfill probe_token_hash for existing (plaintext) tokens so hash-based
+	// lookup keeps working after the upgrade. Idempotent (skips rows already set).
+	if err := s.backfillProbeTokenHash(); err != nil {
+		return err
+	}
 	// Seed the bucket model from legacy single-plan columns (idempotent).
 	return s.backfillUserPlans()
+}
+
+// backfillProbeTokenHash computes probe_token_hash from the stored token for any
+// probe-enabled server missing it (legacy rows whose token predates encryption).
+func (s *Store) backfillProbeTokenHash() error {
+	rows, err := s.db.Query(`SELECT id, probe_token FROM servers WHERE probe_token != '' AND probe_token_hash = ''`)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		id  int64
+		tok string
+	}
+	var todo []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.tok); err != nil {
+			rows.Close()
+			return err
+		}
+		todo = append(todo, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range todo {
+		if _, err := s.db.Exec(`UPDATE servers SET probe_token_hash=? WHERE id=?`, hashProbeToken(r.tok), r.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
