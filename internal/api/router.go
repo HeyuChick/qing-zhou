@@ -47,7 +47,7 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		st: st, secret: secret, mailer: mail,
 		authRL:    newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
 		resendRL:  newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
-		probeRL:   newRateLimiter(60, time.Minute),    // 60 probe reports / IP / min
+		probeRL:   newRateLimiter(60, time.Minute),   // 60 probe reports / IP / min
 		linkCache: make(map[int64]linkCacheEntry),
 	}
 }
@@ -91,6 +91,7 @@ func (a *API) Router() http.Handler {
 
 	// Public monitoring dashboard (no auth required).
 	r.Get("/api/monitor/public", a.handleMonitorPublic)
+	r.Get("/api/monitor/public/sparklines", a.handleMonitorPublicSparklines)
 	r.Get("/api/monitor/heatmap", a.handleMonitorPublicHeatmap)
 
 	// Authenticated (any logged-in user)
