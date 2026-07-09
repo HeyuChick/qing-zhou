@@ -570,7 +570,7 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "保存失败（tag 可能重复）")
 		return
 	}
-	if err := a.sbRebuild(); err != nil {
+	if err := a.sbctl.RebuildServer(n.ServerID); err != nil {
 		fail(w, http.StatusBadGateway, "已保存，但应用到 sing-box 失败："+err.Error())
 		return
 	}
@@ -579,11 +579,16 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request) {
-	if err := a.st.DeleteSbInbound(atoi(chi.URLParam(r, "id"))); err != nil {
+	inboundID := int64(atoi(chi.URLParam(r, "id")))
+	// 先查询归属服务器，删除后只重建该服务器，避免影响其他服务器。
+	ib, _ := a.st.GetSbInbound(inboundID)
+	if err := a.st.DeleteSbInbound(inboundID); err != nil {
 		fail(w, http.StatusInternalServerError, "删除失败")
 		return
 	}
-	_ = a.sbRebuild()
+	if ib != nil {
+		_ = a.sbctl.RebuildServer(ib.ServerID)
+	}
 	ok(w, nil)
 }
 
