@@ -170,27 +170,32 @@
             </n-form-item>
           </template>
           <template v-if="te.mode === 'tls'">
-            <n-form-item v-if="te.server_id === 0" label=" ">
-              <div style="display:flex;flex-direction:column;gap:6px;width:100%;padding:10px;background:var(--bg-soft);border-radius:8px;">
-                <div style="font-size:12px;font-weight:650;">ACME 在线申请真实证书（Let's Encrypt · 仅本机）</div>
-                <n-radio-group v-model:value="acme.method" size="small">
-                  <n-radio value="dns-cf">Cloudflare DNS（推荐，支持泛域名、无需端口）</n-radio>
-                  <n-radio value="webroot">Webroot（nginx/网站根目录，不占端口）</n-radio>
-                  <n-radio value="http-01">HTTP-01 standalone（需 80 端口空闲）</n-radio>
-                </n-radio-group>
-                <n-input v-if="acme.method === 'dns-cf'" v-model:value="acme.cf_token" type="password" show-password-on="click" placeholder="Cloudflare API Token" />
-                <n-input v-if="acme.method === 'webroot'" v-model:value="acme.webroot" placeholder="网站根目录，如 /var/www/html（nginx 该域名 root）" />
-                <span v-if="acme.method === 'http-01'" style="font-size:11px;color:var(--text-3);">若本机已用 nginx 占用 80 端口，standalone 会失败——请改用 Cloudflare DNS 或 Webroot。</span>
-                <n-input v-model:value="acme.email" placeholder="账户邮箱（可选，建议填写）" />
-                <n-button type="primary" :loading="acmeLoading" @click="requestAcme">申请证书（域名取上方 SNI，名称取上方名称）</n-button>
-                <span style="font-size:11px;color:var(--text-3);">申请成功后证书写入本机固定路径，sing-box 以 certificate_path 引用；续期由 acme.sh 的 cron 自动完成，无需面板参与。远程服务器暂不支持在线申请。</span>
-              </div>
-            </n-form-item>
             <n-form-item label=" ">
               <div style="display:flex;flex-direction:column;gap:4px;width:100%;">
                 <n-button :loading="genCertLoading" @click="genSelfSigned">一键生成自签证书（按 SNI）</n-button>
-                <span style="font-size:11px;color:var(--text-3);">自签证书适用于 TUIC / Hysteria2 等允许 insecure 或证书指纹的客户端；浏览器与严格校验客户端不会信任。需可信证书请用上方 ACME 申请，或粘贴 Let's Encrypt 等签发的 PEM。</span>
+                <span style="font-size:11px;color:var(--text-3);">自签证书适用于 TUIC / Hysteria2 等允许 insecure 或证书指纹的客户端。大多数节点用 Reality（无需证书）或自签即可；需可信证书再展开下方 ACME 或粘贴 PEM。</span>
               </div>
+            </n-form-item>
+            <n-form-item v-if="te.server_id === 0" label=" ">
+              <n-collapse class="acme-collapse" style="width:100%;">
+                <n-collapse-item name="acme">
+                  <template #header><span style="font-size:13px;font-weight:600;">ACME 在线申请真实证书（可选 · Let's Encrypt）</span></template>
+                  <div style="display:flex;flex-direction:column;gap:6px;padding-top:2px;">
+                    <span style="font-size:11px;color:var(--text-3);">仅套 CDN 的 WS-TLS 等场景才需要真证书；仅本机可申请。</span>
+                    <n-radio-group v-model:value="acme.method" size="small">
+                      <n-radio value="dns-cf">Cloudflare DNS（推荐，支持泛域名、无需端口）</n-radio>
+                      <n-radio value="webroot">Webroot（nginx/网站根目录，不占端口）</n-radio>
+                      <n-radio value="http-01">HTTP-01 standalone（需 80 端口空闲）</n-radio>
+                    </n-radio-group>
+                    <n-input v-if="acme.method === 'dns-cf'" v-model:value="acme.cf_token" type="password" show-password-on="click" placeholder="Cloudflare API Token" />
+                    <n-input v-if="acme.method === 'webroot'" v-model:value="acme.webroot" placeholder="网站根目录，如 /var/www/html（nginx 该域名 root）" />
+                    <span v-if="acme.method === 'http-01'" style="font-size:11px;color:var(--text-3);">若本机已用 nginx 占用 80 端口，standalone 会失败——请改用 Cloudflare DNS 或 Webroot。</span>
+                    <n-input v-model:value="acme.email" placeholder="账户邮箱（可选，建议填写）" />
+                    <n-button type="primary" :loading="acmeLoading" @click="requestAcme">申请证书（域名取上方 SNI，名称取上方名称）</n-button>
+                    <span style="font-size:11px;color:var(--text-3);">申请成功后证书写入本机固定路径，sing-box 以 certificate_path 引用；续期由 acme.sh 的 cron 自动完成。远程服务器暂不支持在线申请。</span>
+                  </div>
+                </n-collapse-item>
+              </n-collapse>
             </n-form-item>
             <n-form-item label="证书 PEM"><n-input v-model:value="te.certificate" type="textarea" :rows="3" placeholder="-----BEGIN CERTIFICATE-----" /></n-form-item>
             <n-form-item label="私钥 PEM"><n-input v-model:value="te.key" type="textarea" :rows="3" placeholder="-----BEGIN PRIVATE KEY-----" /></n-form-item>
@@ -782,6 +787,11 @@ async function load() {
   padding: 14px !important;
   background: var(--bg-soft);
 }
+/* 折叠的 ACME 区块：轻量收纳 */
+.acme-collapse { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); padding: 2px 12px; }
+.acme-collapse :deep(.n-collapse-item) { margin-top: 0; border-top: none; }
+.acme-collapse :deep(.n-collapse-item__header) { padding: 10px 0 !important; }
+
 .machine-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .machine-name { font-weight: 650; font-size: 15px; color: var(--text); }
 .machine-host { font-size: 12px; color: var(--text-3); }
