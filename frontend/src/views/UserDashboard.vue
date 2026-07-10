@@ -31,6 +31,21 @@
       </div>
     </div>
 
+    <!-- 分套餐资源：每个套餐独立计量，分别显示剩余流量与到期 -->
+    <n-card v-if="plans.length" title="我的套餐" size="small" style="margin-bottom:20px;">
+      <div v-for="p in plans" :key="p.id" style="margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <span style="font-weight:600;">{{ p.name || '套餐 #' + p.id }}</span>
+          <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
+        </div>
+        <n-progress type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;">
+          <span>剩余 {{ p.remaining < 0 ? '不限' : fmtBytes(p.remaining) }}（{{ fmtBytes(p.used) }} / {{ fmtTotal(p.traffic_limit) }}）</span>
+          <span>{{ p.expiry_at ? fmtDate(p.expiry_at) : '不过期' }}</span>
+        </div>
+      </div>
+    </n-card>
+
     <n-card title="流量趋势" size="small" style="margin-bottom:20px;">
       <template #header-extra>
         <n-radio-group v-model:value="trendRange" size="small">
@@ -72,7 +87,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NAlert, NInputGroup, NInput, NButton, NList, NListItem, NThing, NTag, NRadioGroup, NRadioButton, useMessage } from 'naive-ui'
+import { NCard, NAlert, NInputGroup, NInput, NButton, NList, NListItem, NThing, NTag, NRadioGroup, NRadioButton, NProgress, useMessage } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { apiGet, apiList } from '@/api'
 import { fmtBytes, fmtTotal, fmtDate, daysLeft, yuan, pct } from '@/utils/format'
@@ -81,6 +96,13 @@ const router = useRouter(); const auth = useAuthStore(); const message = useMess
 const dash = ref<any>({}); const notices = ref<any[]>([]); const trendRange = ref('7d'); const trendData = ref<any[]>([])
 
 const dl = computed(() => daysLeft(dash.value.expiry_at))
+const plans = computed<any[]>(() => dash.value.plans || [])
+function planPct(p: any) { return pct(p.used, p.traffic_limit) }
+function planStatus(p: any) {
+  if (p.status === 'expired' || (p.expiry_at && p.expiry_at * 1000 < Date.now())) return { type: 'error' as const, label: '已过期' }
+  if (p.status === 'exhausted' || (p.traffic_limit > 0 && p.used >= p.traffic_limit)) return { type: 'warning' as const, label: '已用尽' }
+  return { type: 'success' as const, label: '正常' }
+}
 const usedPct = computed(() => pct(dash.value.traffic?.used, dash.value.traffic?.total))
 const ringColor = computed(() => usedPct.value > 90 ? '#c2685c' : usedPct.value > 70 ? '#bf9540' : '#6f8f76')
 const circumference = 2 * Math.PI * 58

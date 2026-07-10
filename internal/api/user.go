@@ -192,6 +192,11 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			plan = p.Name
 		}
 	}
+	// Per-plan breakdown (each bucket metered independently). The traffic block
+	// above is the legacy roll-up kept for back-compat; the dashboard should
+	// surface per-plan remaining/expiry from here so multiple plans don't merge
+	// into one number.
+	buckets, _ := a.st.ListBuckets(u.ID)
 	ok(w, J{
 		"username": u.Username,
 		"email":    nsOr(u.Email),
@@ -202,6 +207,7 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			"total":     u.TrafficLimit, // 0 = unlimited
 			"remaining": remaining,
 		},
+		"plans":            buildPlanViews(buckets),
 		"expiry_at":        u.ExpiryAt,
 		"current_plan":     plan,
 		"subscription_url": a.subURL(r, u),

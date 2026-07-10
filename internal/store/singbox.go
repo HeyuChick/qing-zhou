@@ -582,8 +582,10 @@ func firstShortID(v interface{}) string {
 // traffic pool), so an exhausted/expired plan only drops its own nodes while the
 // user's other plans keep working. The owning bucket's identity (its own stats
 // key) goes into the inbound, giving sing-box per-bucket traffic accounting.
-// Admins and banned users are excluded; with no node groups configured at all it
-// falls back to "every user's first active bucket in every inbound" (zero-config).
+// Banned users are excluded; admins holding an active plan are provisioned like
+// any other user (so an admin account can also be used as a subscription). With
+// no node groups configured at all it falls back to "every user's first active
+// bucket in every inbound" (zero-config).
 func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 	inbounds, err := s.ListSbInbounds()
 	if err != nil {
@@ -592,9 +594,12 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 	groupCount, _ := s.GroupCount()
 	freeGroup, _ := s.GetSettingInt64("free_group_id", 0)
 
-	// Load every bucket whose owner is an eligible (non-admin, non-banned) user.
+	// Load every bucket whose owner is an eligible (non-banned) user. Admins are
+	// included: an admin who buys a plan gets a normal metered bucket and should
+	// be usable as a subscription just like any other user. Only active buckets
+	// (orderBuckets below) end up provisioned, so plan-less admins add nothing.
 	rows, err := s.db.Query(`SELECT ` + bucketCols + ` FROM user_plans
-		WHERE user_id IN (SELECT id FROM users WHERE role!='admin' AND status!='banned')
+		WHERE user_id IN (SELECT id FROM users WHERE status!='banned')
 		ORDER BY user_id, id`)
 	if err != nil {
 		return nil, err
