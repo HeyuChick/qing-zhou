@@ -170,6 +170,12 @@
             </n-form-item>
           </template>
           <template v-if="te.mode === 'tls'">
+            <n-form-item label=" ">
+              <div style="display:flex;flex-direction:column;gap:4px;width:100%;">
+                <n-button type="primary" :loading="genCertLoading" @click="genSelfSigned">一键生成自签证书（按 SNI）</n-button>
+                <span style="font-size:11px;color:var(--text-3);">自签证书适用于 TUIC / Hysteria2 等允许 insecure 或证书指纹的客户端；浏览器与严格校验客户端不会信任。需可信证书请粘贴 Let's Encrypt 等签发的 PEM。</span>
+              </div>
+            </n-form-item>
             <n-form-item label="证书 PEM"><n-input v-model:value="te.certificate" type="textarea" :rows="3" placeholder="-----BEGIN CERTIFICATE-----" /></n-form-item>
             <n-form-item label="私钥 PEM"><n-input v-model:value="te.key" type="textarea" :rows="3" placeholder="-----BEGIN PRIVATE KEY-----" /></n-form-item>
             <n-form-item label="ALPN">
@@ -454,6 +460,20 @@ async function testHandshake() {
   } finally {
     hsTesting.value = false
   }
+}
+
+// 一键生成自签证书：按当前 SNI 生成 PEM 证书+私钥并填入表单。
+const genCertLoading = ref(false)
+async function genSelfSigned() {
+  const host = (te.server_name || '').trim()
+  if (!host) { message.warning('请先填写 SNI 域名'); return }
+  genCertLoading.value = true
+  try {
+    const r = await apiPost<any>('/api/admin/sb/tls/self-signed', { server_name: host })
+    te.certificate = r?.certificate || ''
+    te.key = r?.key || ''
+    message.success('自签证书已生成，请检查后保存')
+  } catch (e: any) { message.error(e.message || '生成失败') } finally { genCertLoading.value = false }
 }
 
 async function genKeys() {

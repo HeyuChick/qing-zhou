@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -32,6 +33,40 @@ func (a *API) handleAdminRealityKeypair(w http.ResponseWriter, r *http.Request) 
 	}
 	sid, _ := singbox.GenerateShortID(8)
 	ok(w, J{"private_key": priv, "public_key": pub, "short_id": sid})
+}
+
+// POST /api/admin/sb/tls/self-signed {server_name, days?} — generate a
+// self-signed certificate + key for the given SNI, returned as PEM. Used by the
+// 证书 TLS drawer's one-click button; the operator still reviews and saves.
+func (a *API) handleAdminSelfSignedCert(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ServerName string `json:"server_name"`
+		Days       int    `json:"days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if strings.TrimSpace(req.ServerName) == "" {
+		fail(w, http.StatusBadRequest, "SNI 域名必填")
+		return
+	}
+	certPEM, keyPEM, err := singbox.GenerateSelfSignedCert(req.ServerName, req.Days)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "生成自签证书失败："+err.Error())
+		return
+	}
+	ok(w, J{"certificate": certPEM, "key": keyPEM})
+}
+
+// validateCertKeyPair reports whether the PEM certificate and key are both
+// parseable and form a matching pair (the key belongs to the cert). Returns a
+// user-facing Chinese error describing the first problem found, or nil when ok.
+func validateCertKeyPair(certPEM, keyPEM string) error {
+	if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
+		return fmt.Errorf("证书与私钥无效或不匹配：%v", err)
+	}
+	return nil
 }
 
 // GET /api/admin/sb/sni-test?host=www.microsoft.com[:port]&port=8443
@@ -442,6 +477,12 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Certificate == "" || req.Key == "" {
 		fail(w, http.StatusBadRequest, "证书和私钥必填")
+		return
+	}
+	// Pre-validate the PEM pair here so a bad paste is caught at save time with a
+	// clear message, instead of surfacing later as an opaque sing-box apply error.
+	if err := validateCertKeyPair(req.Certificate, req.Key); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	server := map[string]interface{}{
