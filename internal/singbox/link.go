@@ -25,6 +25,7 @@ type LinkParams struct {
 	Fingerprint string // utls fp, default chrome
 	ALPN        string // comma-joined, e.g. h3,h2,http/1.1
 	Congestion  string // tuic congestion_control
+	ZeroRTT     bool   // tuic 0-RTT handshake (must match the inbound to save a RTT)
 	Insecure    bool
 	Flow        bool // vless reality vision
 
@@ -33,6 +34,11 @@ type LinkParams struct {
 	Path        string // ws/httpupgrade path
 	WSHost      string // ws/httpupgrade Host header
 	ServiceName string // grpc service name
+
+	// ws 0-RTT early data. Both must match the inbound; carried so the client
+	// gets the same 1-RTT-saving handshake the server advertises.
+	WSMaxEarlyData    int
+	WSEarlyDataHeader string
 
 	// shadowsocks
 	Method    string // ss method (2022-blake3-*)
@@ -46,6 +52,43 @@ type LinkParams struct {
 	// handshake fails when the inbound has obfs enabled.
 	Obfs         string // obfs type, e.g. "salamander"
 	ObfsPassword string
+
+	// TCP dial tuning (TCP-based protocols only). TCP Fast Open and MPTCP each
+	// need BOTH ends enabled to do anything, so 轻舟 mirrors the inbound's
+	// setting onto the client link.
+	TCPFastOpen bool // -> tcp_fast_open / tfo
+	MPTCP       bool // -> tcp_multi_path / mptcp
+
+	// Multiplex + TCP Brutal congestion control (vless/vmess/trojan). Multiplex
+	// must be enabled on BOTH ends; Brutal is a sub-option that only takes
+	// effect when the client also turns it on with per-endpoint bandwidths.
+	// BrutalUp/BrutalDown are the CLIENT's uplink/downlink in Mbps (the caller
+	// mirrors the server's values across the link).
+	Mux        bool
+	BrutalUp   int
+	BrutalDown int
+}
+
+// tuningQuery renders the TCP/multiplex tuning params shared by the URL-style
+// TCP protocols (vless/trojan). These are custom query keys understood by
+// 轻舟's own subscription renderer; unknown-key-tolerant clients ignore them.
+// allowMux gates multiplex: it must be dropped when xtls-rprx-vision flow is
+// active (sing-box rejects multiplex together with vision).
+func (p LinkParams) tuningQuery(allowMux bool) []string {
+	var q []string
+	if p.TCPFastOpen {
+		q = append(q, "tfo=1")
+	}
+	if p.MPTCP {
+		q = append(q, "mptcp=1")
+	}
+	if allowMux && p.Mux {
+		q = append(q, "mux=1")
+		if p.BrutalUp > 0 && p.BrutalDown > 0 {
+			q = append(q, "brutal_up="+strconv.Itoa(p.BrutalUp), "brutal_down="+strconv.Itoa(p.BrutalDown))
+		}
+	}
+	return q
 }
 
 // transportQuery appends the transport-specific query params for a share link.
@@ -58,6 +101,12 @@ func (p LinkParams) transportQuery() []string {
 		}
 		if p.WSHost != "" {
 			q = append(q, "host="+url.QueryEscape(p.WSHost))
+		}
+		if p.WSMaxEarlyData > 0 {
+			q = append(q, "max_early_data="+strconv.Itoa(p.WSMaxEarlyData))
+			if p.WSEarlyDataHeader != "" {
+				q = append(q, "early_data_header_name="+url.QueryEscape(p.WSEarlyDataHeader))
+			}
 		}
 		return q
 	case "httpupgrade":
@@ -102,10 +151,12 @@ func BuildShareLink(p LinkParams) string {
 	switch p.Type {
 	case "vless":
 		q := p.transportQuery()
+		visionActive := false
 		if p.PublicKey != "" { // Reality
 			q = append(q, "security=reality", "pbk="+esc(p.PublicKey), "sid="+esc(p.ShortID), "fp="+esc(fp), "sni="+esc(p.SNI))
 			if p.Flow && tcp { // vision only on raw-TCP Reality
 				q = append(q, "flow=xtls-rprx-vision")
+				visionActive = true
 			}
 		} else { // plain TLS
 			q = append(q, "security=tls", "fp="+esc(fp), "sni="+esc(p.SNI))
@@ -113,6 +164,7 @@ func BuildShareLink(p LinkParams) string {
 				q = append(q, "allowInsecure=1")
 			}
 		}
+		q = append(q, p.tuningQuery(!visionActive)...) // mux is invalid with vision flow
 		return "vless://" + esc(p.UUID) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "trojan":
 		q := p.transportQuery()
@@ -120,6 +172,7 @@ func BuildShareLink(p LinkParams) string {
 		if p.Insecure {
 			q = append(q, "allowInsecure=1")
 		}
+		q = append(q, p.tuningQuery(true)...)
 		return "trojan://" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "tuic":
 		q := []string{"security=tls"}
@@ -132,6 +185,9 @@ func BuildShareLink(p LinkParams) string {
 		}
 		if p.Congestion != "" {
 			q = append(q, "congestion_control="+esc(p.Congestion))
+		}
+		if p.ZeroRTT {
+			q = append(q, "zero_rtt=1")
 		}
 		return "tuic://" + esc(p.UUID) + ":" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "hysteria2":
@@ -166,6 +222,21 @@ func BuildShareLink(p LinkParams) string {
 			m["sni"] = p.SNI
 		} else {
 			m["tls"] = ""
+		}
+		// Custom tuning keys (ignored by clients that don't understand them);
+		// 轻舟's own Clash/sing-box renderers read them back.
+		if p.TCPFastOpen {
+			m["tfo"] = "1"
+		}
+		if p.MPTCP {
+			m["mptcp"] = "1"
+		}
+		if p.Mux {
+			m["mux"] = "1"
+			if p.BrutalUp > 0 && p.BrutalDown > 0 {
+				m["brutal_up"] = strconv.Itoa(p.BrutalUp)
+				m["brutal_down"] = strconv.Itoa(p.BrutalDown)
+			}
 		}
 		b, _ := json.Marshal(m)
 		return "vmess://" + base64.StdEncoding.EncodeToString(b)

@@ -38,8 +38,16 @@ type SbInbound struct {
 	Options    string `json:"options"` // JSON object of extra inbound fields
 	Enabled    bool   `json:"enabled"`
 	SortOrder  int    `json:"sort_order"`
-	CreatedAt  int64  `json:"created_at"`
-	UpdatedAt  int64  `json:"updated_at"`
+	// UpstreamInboundID makes this inbound a relay: instead of exiting to the
+	// internet, its traffic is forwarded to the landing inbound with this id
+	// (0 = direct exit / landing). See BuildSingboxConfigForServer relay wiring.
+	UpstreamInboundID int64 `json:"upstream_inbound_id"`
+	// RelaySecret is a landing inbound's own auth secret, generated lazily when a
+	// relay first targets it. Both the relay's upstream outbound and the relay
+	// user injected into this inbound derive their credential from it.
+	RelaySecret string `json:"-"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
 }
 
 // ---- sb_tls ----
@@ -116,7 +124,7 @@ func (s *Store) DeleteSbTls(id int64) error {
 // ---- sb_inbounds ----
 
 func (s *Store) ListSbInbounds() ([]*SbInbound, error) {
-	rows, err := s.db.Query(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, created_at, updated_at
+	rows, err := s.db.Query(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, created_at, updated_at
 		FROM sb_inbounds ORDER BY sort_order, id`)
 	if err != nil {
 		return nil, err
@@ -126,7 +134,7 @@ func (s *Store) ListSbInbounds() ([]*SbInbound, error) {
 	for rows.Next() {
 		var n SbInbound
 		var enabled int
-		if err := rows.Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.UpstreamInboundID, &n.RelaySecret, &n.CreatedAt, &n.UpdatedAt); err != nil {
 			return nil, err
 		}
 		n.Enabled = enabled == 1
@@ -138,8 +146,8 @@ func (s *Store) ListSbInbounds() ([]*SbInbound, error) {
 func (s *Store) GetSbInbound(id int64) (*SbInbound, error) {
 	var n SbInbound
 	var enabled int
-	err := s.db.QueryRow(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, created_at, updated_at
-		FROM sb_inbounds WHERE id=?`, id).Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.CreatedAt, &n.UpdatedAt)
+	err := s.db.QueryRow(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, created_at, updated_at
+		FROM sb_inbounds WHERE id=?`, id).Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.UpstreamInboundID, &n.RelaySecret, &n.CreatedAt, &n.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -159,9 +167,9 @@ func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 		n.Listen = "::"
 	}
 	if n.ID == 0 {
-		res, err := s.db.Exec(`INSERT INTO sb_inbounds (server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			n.ServerID, n.Type, n.Tag, n.Listen, n.ListenPort, n.TlsID, n.Options, b2i(n.Enabled), n.SortOrder, now, now)
+		res, err := s.db.Exec(`INSERT INTO sb_inbounds (server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			n.ServerID, n.Type, n.Tag, n.Listen, n.ListenPort, n.TlsID, n.Options, b2i(n.Enabled), n.SortOrder, n.UpstreamInboundID, n.RelaySecret, now, now)
 		if err != nil {
 			return 0, err
 		}
@@ -179,8 +187,8 @@ func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 		return n.ID, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE sb_inbounds SET server_id=?, type=?, tag=?, listen=?, listen_port=?, tls_id=?, options=?, enabled=?, sort_order=?, updated_at=? WHERE id=?`,
-		n.ServerID, n.Type, n.Tag, n.Listen, n.ListenPort, n.TlsID, n.Options, b2i(n.Enabled), n.SortOrder, now, n.ID); err != nil {
+	if _, err := tx.Exec(`UPDATE sb_inbounds SET server_id=?, type=?, tag=?, listen=?, listen_port=?, tls_id=?, options=?, enabled=?, sort_order=?, upstream_inbound_id=?, relay_secret=?, updated_at=? WHERE id=?`,
+		n.ServerID, n.Type, n.Tag, n.Listen, n.ListenPort, n.TlsID, n.Options, b2i(n.Enabled), n.SortOrder, n.UpstreamInboundID, n.RelaySecret, now, n.ID); err != nil {
 		return n.ID, err
 	}
 	if tagChanged {
@@ -224,7 +232,7 @@ func (s *Store) DeleteSbInbound(id int64) error {
 }
 
 func (s *Store) ListSbInboundsByServer(serverID int64) ([]*SbInbound, error) {
-	rows, err := s.db.Query(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, created_at, updated_at
+	rows, err := s.db.Query(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, created_at, updated_at
 		FROM sb_inbounds WHERE server_id=? ORDER BY sort_order, id`, serverID)
 	if err != nil {
 		return nil, err
@@ -234,7 +242,7 @@ func (s *Store) ListSbInboundsByServer(serverID int64) ([]*SbInbound, error) {
 	for rows.Next() {
 		var n SbInbound
 		var enabled int
-		if err := rows.Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.UpstreamInboundID, &n.RelaySecret, &n.CreatedAt, &n.UpdatedAt); err != nil {
 			return nil, err
 		}
 		n.Enabled = enabled == 1
@@ -288,54 +296,11 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 	if err != nil {
 		return nil, err
 	}
-	tlsCache := map[int64]*SbTls{}
-	var ibs []singbox.Inbound
-	for _, ib := range inbounds {
-		if !ib.Enabled {
-			continue
-		}
-		baseMap := map[string]interface{}{
-			"type":        ib.Type,
-			"tag":         ib.Tag,
-			"listen":      ib.Listen,
-			"listen_port": ib.ListenPort,
-		}
-		if ib.Options != "" && ib.Options != "{}" {
-			var opts map[string]interface{}
-			if err := json.Unmarshal([]byte(ib.Options), &opts); err == nil {
-				for k, v := range opts {
-					baseMap[k] = v
-				}
-			}
-		}
-		if ib.TlsID != 0 {
-			tls := tlsCache[ib.TlsID]
-			if tls == nil {
-				tls, _ = s.GetSbTls(ib.TlsID)
-				tlsCache[ib.TlsID] = tls
-			}
-			if tls != nil && tls.ServerJSON != "" {
-				var tj map[string]interface{}
-				if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err == nil {
-					baseMap["tls"] = tj
-				}
-			}
-		}
-		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: usersByTag[ib.Tag]})
+	allInbounds, err := s.ListSbInbounds()
+	if err != nil {
+		return nil, err
 	}
-	return singbox.GenerateConfig([]byte(base), ibs, v2rayListen)
-}
-
-// BuildSingboxConfigForServer is like BuildSingboxConfig but filters inbounds
-// to those belonging to the given server. serverID 0 means "no server" (legacy).
-func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen string, usersByTag map[string][]singbox.User) ([]byte, error) {
-	var inbounds []*SbInbound
-	var err error
-	if serverID == 0 {
-		inbounds, err = s.ListSbInbounds()
-	} else {
-		inbounds, err = s.ListSbInboundsByServer(serverID)
-	}
+	relays, landingUsers, err := s.buildRelayWiring(inbounds, allInbounds)
 	if err != nil {
 		return nil, err
 	}
@@ -372,13 +337,72 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 				}
 			}
 		}
-		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: usersByTag[ib.Tag]})
+		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: mergeRelayUser(usersByTag[ib.Tag], landingUsers, ib.Tag)})
+	}
+	return singbox.GenerateConfigWithRelays([]byte(base), ibs, v2rayListen, relays)
+}
+
+// BuildSingboxConfigForServer is like BuildSingboxConfig but filters inbounds
+// to those belonging to the given server. serverID 0 means "no server" (legacy).
+func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen string, usersByTag map[string][]singbox.User) ([]byte, error) {
+	var inbounds []*SbInbound
+	var err error
+	if serverID == 0 {
+		inbounds, err = s.ListSbInbounds()
+	} else {
+		inbounds, err = s.ListSbInboundsByServer(serverID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	allInbounds, err := s.ListSbInbounds()
+	if err != nil {
+		return nil, err
+	}
+	relays, landingUsers, err := s.buildRelayWiring(inbounds, allInbounds)
+	if err != nil {
+		return nil, err
+	}
+	tlsCache := map[int64]*SbTls{}
+	var ibs []singbox.Inbound
+	for _, ib := range inbounds {
+		if !ib.Enabled {
+			continue
+		}
+		baseMap := map[string]interface{}{
+			"type":        ib.Type,
+			"tag":         ib.Tag,
+			"listen":      ib.Listen,
+			"listen_port": ib.ListenPort,
+		}
+		if ib.Options != "" && ib.Options != "{}" {
+			var opts map[string]interface{}
+			if err := json.Unmarshal([]byte(ib.Options), &opts); err == nil {
+				for k, v := range opts {
+					baseMap[k] = v
+				}
+			}
+		}
+		if ib.TlsID != 0 {
+			tls := tlsCache[ib.TlsID]
+			if tls == nil {
+				tls, _ = s.GetSbTls(ib.TlsID)
+				tlsCache[ib.TlsID] = tls
+			}
+			if tls != nil && tls.ServerJSON != "" {
+				var tj map[string]interface{}
+				if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err == nil {
+					baseMap["tls"] = tj
+				}
+			}
+		}
+		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: mergeRelayUser(usersByTag[ib.Tag], landingUsers, ib.Tag)})
 	}
 	// Remote servers may not have v2ray_api compiled in; pass empty to skip.
 	if serverID == 0 {
-		return singbox.GenerateConfig([]byte(base), ibs, v2rayListen)
+		return singbox.GenerateConfigWithRelays([]byte(base), ibs, v2rayListen, relays)
 	}
-	return singbox.GenerateConfig([]byte(base), ibs, "")
+	return singbox.GenerateConfigWithRelays([]byte(base), ibs, "", relays)
 }
 
 // BuildSelfBuiltLinks generates client share-links for every enabled native
@@ -457,10 +481,25 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
 			Insecure:    mapBool(client, "insecure"),
 			Congestion:  mapStr(opts, "congestion_control"),
-			Method:      mapStr(opts, "method"),   // shadowsocks
+			ZeroRTT:     mapBool(opts, "zero_rtt_handshake"), // tuic 0-RTT
+			Method:      mapStr(opts, "method"),              // shadowsocks
 			ServerKey:   mapStr(opts, "password"), // shadowsocks-2022 server PSK
 			UpMbps:      mapInt(opts, "up_mbps"),  // hysteria v1
 			DownMbps:    mapInt(opts, "down_mbps"),
+			TCPFastOpen: mapBool(opts, "tcp_fast_open"),
+			MPTCP:       mapBool(opts, "tcp_multi_path"),
+		}
+		// Multiplex + Brutal (vless/vmess/trojan): both are opt-in on the client,
+		// so mirror the inbound's setting onto the link or Brutal does nothing.
+		if mx, ok := opts["multiplex"].(map[string]interface{}); ok && mapBool(mx, "enabled") {
+			p.Mux = true
+			if br, ok := mx["brutal"].(map[string]interface{}); ok && mapBool(br, "enabled") {
+				// Brutal bandwidths are per-endpoint and mirror across the link: the
+				// server's uplink (up_mbps = what clients download) is the client's
+				// downlink, and the server's downlink is the client's uplink.
+				p.BrutalUp = mapInt(br, "down_mbps")
+				p.BrutalDown = mapInt(br, "up_mbps")
+			}
 		}
 		// hysteria2 salamander obfs lives in options as {"obfs":{"type","password"}}.
 		if obfs, ok := opts["obfs"].(map[string]interface{}); ok {
@@ -472,6 +511,8 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
 			p.Network = mapStr(tr, "type")
 			p.Path = mapStr(tr, "path")
 			p.ServiceName = mapStr(tr, "service_name")
+			p.WSMaxEarlyData = mapInt(tr, "max_early_data")
+			p.WSEarlyDataHeader = mapStr(tr, "early_data_header_name")
 			if h := mapStr(tr, "host"); h != "" {
 				p.WSHost = h
 			} else if hdr, ok := tr["headers"].(map[string]interface{}); ok {

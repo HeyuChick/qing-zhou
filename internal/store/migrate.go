@@ -358,6 +358,12 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE announcements ADD COLUMN end_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE node_sources ADD COLUMN group_ids TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_inbounds ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
+		// Relay chaining: an inbound with upstream_inbound_id != 0 forwards its
+		// traffic to that landing inbound instead of exiting directly. relay_secret
+		// is a landing inbound's own auth secret (lazily generated) from which the
+		// relay credential is derived.
+		`ALTER TABLE sb_inbounds ADD COLUMN upstream_inbound_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sb_inbounds ADD COLUMN relay_secret TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE servers ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_tls ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,

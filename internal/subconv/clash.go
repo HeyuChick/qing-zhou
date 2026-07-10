@@ -191,13 +191,42 @@ func clashProxy(p *Proxy) map[string]any {
 		if v := p.param("congestion_control", "congestion-controller"); v != "" {
 			m["congestion-controller"] = v
 		}
+		if p.param("zero_rtt", "reduce_rtt") == "1" {
+			m["reduce-rtt"] = true
+		}
 		if p.param("allow_insecure", "insecure", "allowInsecure") == "1" {
 			m["skip-cert-verify"] = true
 		}
 	default:
 		return nil
 	}
+	// TCP/multiplex dial tuning (vless/vmess/trojan). smux is incompatible with
+	// vless xtls-rprx-vision, so drop it when a flow is set.
+	switch p.Protocol {
+	case "vless", "vmess", "trojan":
+		t := p.tuning()
+		_, hasFlow := m["flow"]
+		clashApplyTuning(m, t, hasFlow)
+	}
 	return m
+}
+
+// clashApplyTuning sets mihomo's tfo/mptcp/smux proxy options from t. mux is
+// suppressed when suppressMux (a vless vision flow is present).
+func clashApplyTuning(m map[string]any, t tuning, suppressMux bool) {
+	if t.tfo {
+		m["tfo"] = true
+	}
+	if t.mptcp {
+		m["mptcp"] = true
+	}
+	if t.mux && !suppressMux {
+		smux := map[string]any{"enabled": true}
+		if t.brutalUp > 0 && t.brutalDown > 0 {
+			smux["brutal-opts"] = map[string]any{"enabled": true, "up": t.brutalUp, "down": t.brutalDown}
+		}
+		m["smux"] = smux
+	}
 }
 
 func clashWS(m map[string]any, p *Proxy, network, path, host string) {
@@ -210,6 +239,14 @@ func clashWS(m map[string]any, p *Proxy, network, path, host string) {
 	}
 	if host != "" {
 		wo["headers"] = map[string]any{"Host": host}
+	}
+	// ws 0-RTT early data (must mirror the inbound). early-data-header-name is
+	// required for mihomo to use header-based early data instead of the path mode.
+	if ed := atoi(p.param("max_early_data")); ed > 0 {
+		wo["max-early-data"] = ed
+		if h := p.param("early_data_header_name"); h != "" {
+			wo["early-data-header-name"] = h
+		}
 	}
 	m["ws-opts"] = wo
 }

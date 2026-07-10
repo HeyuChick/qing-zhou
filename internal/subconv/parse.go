@@ -303,3 +303,33 @@ func (p *Proxy) param(keys ...string) string {
 	}
 	return ""
 }
+
+// tuning is the TCP/multiplex client-dial tuning carried by a link (see
+// singbox.LinkParams.tuningQuery). Values live in Params for url-style protocols
+// and in the vmess JSON map, so tuning() reads from whichever a Proxy has.
+type tuning struct {
+	tfo, mptcp, mux bool
+	brutalUp        int
+	brutalDown      int
+}
+
+func (p *Proxy) tuning() tuning {
+	val := func(k string) string {
+		if p.Params != nil {
+			if v := p.Params.Get(k); v != "" {
+				return v
+			}
+		}
+		if p.VMess != nil {
+			return str(p.VMess[k])
+		}
+		return ""
+	}
+	return tuning{
+		tfo:        val("tfo") == "1",
+		mptcp:      val("mptcp") == "1",
+		mux:        val("mux") == "1",
+		brutalUp:   atoi(val("brutal_up")),
+		brutalDown: atoi(val("brutal_down")),
+	}
+}

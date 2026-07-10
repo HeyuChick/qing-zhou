@@ -96,6 +96,47 @@
         </n-spin>
       </n-tab-pane>
 
+      <n-tab-pane name="topology" tab="链路拓扑">
+        <n-spin :show="loading">
+          <div v-if="inbounds.length" class="topo">
+            <div class="topo-legend">
+              <span><i class="dot client"></i>客户端</span>
+              <span><i class="dot entry"></i>入口 / 线路机入站</span>
+              <span><i class="dot landing"></i>落地入站</span>
+              <span><i class="dot inet"></i>互联网</span>
+            </div>
+            <div v-for="g in inboundGroups" :key="g.machine.id" class="topo-machine">
+              <div class="topo-mhead">
+                <span class="machine-name">{{ g.machine.name }}</span>
+                <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
+                <span class="machine-host">{{ g.machine.host }}</span>
+              </div>
+              <div v-for="r in g.items" :key="r.id" class="topo-row" :class="{ off: !r.enabled }">
+                <span class="topo-node client">👤 客户端</span>
+                <span class="topo-arrow">→</span>
+                <span class="topo-node entry">
+                  <b>{{ r.tag }}</b>
+                  <span class="topo-proto">{{ (r.type || '').toUpperCase() }}</span>
+                  <span class="topo-port">:{{ r.listen_port }}</span>
+                </span>
+                <template v-if="landingOf(r)">
+                  <span class="topo-arrow relay">⇢ 中转 ⇢</span>
+                  <span class="topo-node landing">
+                    <b>{{ landingOf(r).tag }}</b>
+                    <span class="topo-proto">{{ (landingOf(r).type || '').toUpperCase() }}</span>
+                    <span class="topo-loc">@ {{ serverName(landingOf(r).server_id) }}</span>
+                  </span>
+                </template>
+                <span v-else-if="r.upstream_inbound_id" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
+                <span class="topo-arrow">→</span>
+                <span class="topo-node inet">🌐 互联网</span>
+              </div>
+            </div>
+          </div>
+          <n-empty v-else-if="!loading" description="暂无入站，无法展示链路" style="padding:40px 0;" />
+        </n-spin>
+      </n-tab-pane>
+
       <n-tab-pane name="preview" tab="配置预览">
         <div class="page-toolbar">
           <n-select v-model:value="previewSid" :options="serverOpts" placeholder="本机" clearable style="width:200px;max-width:60%;" size="small" />
@@ -220,6 +261,12 @@
           <n-form-item label="监听地址"><n-select v-model:value="ie.listen" :options="listenOpts" /></n-form-item>
           <n-form-item label="监听端口"><n-input-number v-model:value="ie.listen_port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
           <n-form-item label="所属服务器"><n-select v-model:value="ie.server_id" :options="serverOpts" placeholder="本机" clearable /></n-form-item>
+          <n-form-item label="落地 / 中转">
+            <div style="width:100%;">
+              <n-select v-model:value="ie.upstream_inbound_id" :options="landingOpts" />
+              <div class="form-tip">直接出网＝本入站即落地机；选择某入站＝本入站作为线路机，流量转发到该落地入站再出网。</div>
+            </div>
+          </n-form-item>
           <n-form-item v-if="ie.type !== 'shadowsocks'" label="TLS / Reality"><n-select v-model:value="ie.tls_id" :options="tlsOpts" placeholder="无" clearable /></n-form-item>
           <n-form-item v-if="['vless','vmess','trojan'].includes(ie.type) && !ie.tls_id && ie.type !== 'shadowsocks'" label=" ">
             <n-tag type="warning" size="small">未配置 TLS，建议为 VLESS/VMess/Trojan 绑定 TLS 或 Reality</n-tag>
@@ -376,6 +423,19 @@ const portResult = ref<Record<number, any>>({})
 function jp(s: string) { try { return JSON.parse(s || '{}') } catch { return {} } }
 
 const serverOpts = computed(() => [{ label: '本机', value: 0 }, ...servers.value.map(s => ({ label: s.name, value: s.id }))])
+
+// Relay chaining: which inbounds can serve as a landing (must be renderable as a
+// sing-box outbound). anytls / hysteria v1 have no outbound renderer, so they
+// can't be a relay's upstream.
+const RELAY_LANDING_TYPES = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic']
+const inboundById = computed(() => { const m: Record<number, any> = {}; for (const n of inbounds.value) m[n.id] = n; return m })
+function landingOf(r: any) { return r && r.upstream_inbound_id ? (inboundById.value[r.upstream_inbound_id] || null) : null }
+const landingOpts = computed(() => [
+  { label: '直接出网（本入站即落地）', value: 0 },
+  ...inbounds.value
+    .filter(n => n.id !== ie.id && n.enabled && RELAY_LANDING_TYPES.includes(n.type) && !n.upstream_inbound_id)
+    .map(n => ({ label: `${n.tag} · ${(n.type || '').toUpperCase()} @ ${serverName(n.server_id)}`, value: n.id })),
+])
 const tlsOpts = computed(() => tlsList.value.map(t => ({ label: t.name + ' (' + t.mode + ')', value: t.id })))
 const protoOpts = [
   { label: 'VLESS', value: 'vless' }, { label: 'VMess', value: 'vmess' }, { label: 'Trojan', value: 'trojan' },
@@ -564,7 +624,7 @@ const ie = reactive({
   net: 'tcp', ws_path: '/', ws_host: '', ws_early_data: 0, grpc_service: '', grpc_multi: false,
   ss_method: '2022-blake3-aes-128-gcm', flow: 'xtls-rprx-vision',
   anytls_idle_check: 0, anytls_idle_timeout: 0, anytls_min_idle: 0,
-  mux: false, brutal: false, brutal_up: 0, brutal_down: 0,
+  mux: false, brutal: false, brutal_up: 0, brutal_down: 0, upstream_inbound_id: 0,
 })
 
 function resetIe() {
@@ -575,7 +635,7 @@ function resetIe() {
     net: 'tcp', ws_path: '/', ws_host: '', ws_early_data: 0, grpc_service: '', grpc_multi: false,
     ss_method: '2022-blake3-aes-128-gcm', flow: 'xtls-rprx-vision',
     anytls_idle_check: 0, anytls_idle_timeout: 0, anytls_min_idle: 0,
-    mux: false, brutal: false, brutal_up: 0, brutal_down: 0,
+    mux: false, brutal: false, brutal_up: 0, brutal_down: 0, upstream_inbound_id: 0,
   })
 }
 
@@ -593,6 +653,7 @@ function openInbound(n?: any, clone = false) {
       ss_method: o.method || '2022-blake3-aes-128-gcm', flow: normFlow(o.flow),
       anytls_idle_check: o.idle_session_check_interval || 0, anytls_idle_timeout: o.idle_session_timeout || 0, anytls_min_idle: o.min_idle_session || 0,
       mux: !!mx.enabled, brutal: !!br.enabled, brutal_up: br.up_mbps || 0, brutal_down: br.down_mbps || 0,
+      upstream_inbound_id: n.upstream_inbound_id || 0,
     })
   } else {
     resetIe()
@@ -645,7 +706,7 @@ async function saveInbound() {
       }
       if (ie.mux) { o.multiplex = { enabled: true }; if (ie.brutal) o.multiplex.brutal = { enabled: true, up_mbps: ie.brutal_up, down_mbps: ie.brutal_down } }
     }
-    const body = { type: ie.type, tag: ie.tag, listen: ie.listen || '::', listen_port: ie.listen_port, tls_id: ie.type === 'shadowsocks' ? 0 : (ie.tls_id || 0), server_id: ie.server_id || 0, enabled: ie.enabled, options: JSON.stringify(o) }
+    const body = { type: ie.type, tag: ie.tag, listen: ie.listen || '::', listen_port: ie.listen_port, tls_id: ie.type === 'shadowsocks' ? 0 : (ie.tls_id || 0), server_id: ie.server_id || 0, enabled: ie.enabled, upstream_inbound_id: ie.upstream_inbound_id || 0, options: JSON.stringify(o) }
     const fn = ie.id ? apiPut : apiPost
     const url = ie.id ? '/api/admin/sb/inbounds/' + ie.id : '/api/admin/sb/inbounds'
     await fn(url, body)
@@ -658,7 +719,7 @@ async function deleteInbound(id: number) { try { await apiDelete('/api/admin/sb/
 async function toggleInbound(n: any) {
   try {
     const o = jp(n.options)
-    await apiPut('/api/admin/sb/inbounds/' + n.id, { type: n.type, tag: n.tag, listen: n.listen || '::', listen_port: n.listen_port, tls_id: n.tls_id, server_id: n.server_id, enabled: !n.enabled, options: JSON.stringify(o) })
+    await apiPut('/api/admin/sb/inbounds/' + n.id, { type: n.type, tag: n.tag, listen: n.listen || '::', listen_port: n.listen_port, tls_id: n.tls_id, server_id: n.server_id, enabled: !n.enabled, upstream_inbound_id: n.upstream_inbound_id || 0, options: JSON.stringify(o) })
     n.enabled = !n.enabled
   } catch (e: any) { message.error(e.message) }
 }
@@ -684,7 +745,7 @@ async function batchToggle(enable: boolean) {
     if (n.enabled === enable) { ok++; continue }
     try {
       const o = jp(n.options)
-      await apiPut('/api/admin/sb/inbounds/' + n.id, { type: n.type, tag: n.tag, listen: n.listen || '::', listen_port: n.listen_port, tls_id: n.tls_id, server_id: n.server_id, enabled: enable, options: JSON.stringify(o) })
+      await apiPut('/api/admin/sb/inbounds/' + n.id, { type: n.type, tag: n.tag, listen: n.listen || '::', listen_port: n.listen_port, tls_id: n.tls_id, server_id: n.server_id, enabled: enable, upstream_inbound_id: n.upstream_inbound_id || 0, options: JSON.stringify(o) })
       n.enabled = enable
       ok++
     } catch {}
@@ -730,6 +791,34 @@ async function load() {
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 16px; }
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
+
+.form-tip { font-size: 12px; color: var(--text-3, #999); margin-top: 4px; line-height: 1.5; }
+
+/* 链路拓扑 */
+.topo { display: flex; flex-direction: column; gap: 18px; padding: 4px 2px; }
+.topo-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-3, #888); }
+.topo-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.topo-legend .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.dot.client { background: #909399; }
+.dot.entry { background: #2080f0; }
+.dot.landing { background: #f0a020; }
+.dot.inet { background: #18a058; }
+.topo-machine { border: 1px solid var(--n-border-color, #e6e6ec); border-radius: 8px; padding: 12px 14px; }
+.topo-mhead { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.topo-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 0; }
+.topo-row + .topo-row { border-top: 1px dashed var(--n-border-color, #ececf2); }
+.topo-row.off { opacity: 0.42; }
+.topo-node { display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 10px; border-radius: 7px; font-size: 13px; border: 1px solid transparent; white-space: nowrap; }
+.topo-node.client { background: rgba(144, 147, 153, 0.14); color: var(--text-2, #666); }
+.topo-node.entry { background: rgba(32, 128, 240, 0.12); border-color: rgba(32, 128, 240, 0.35); }
+.topo-node.landing { background: rgba(240, 160, 32, 0.13); border-color: rgba(240, 160, 32, 0.4); }
+.topo-node.inet { background: rgba(24, 160, 88, 0.12); color: #18a058; }
+.topo-node b { font-weight: 650; }
+.topo-proto { font-size: 11px; opacity: 0.75; }
+.topo-port, .topo-loc { font-size: 11px; opacity: 0.6; }
+.topo-arrow { color: var(--text-3, #aaa); font-size: 13px; user-select: none; }
+.topo-arrow.relay { color: #f0a020; font-weight: 600; font-size: 12px; }
+.topo-arrow.relay.warn { color: #d03050; }
 
 .sni-result {
   width: 100%;

@@ -628,13 +628,14 @@ func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) 
 			"tag":         n.Tag,
 			"listen":      n.Listen,
 			"listen_port": n.ListenPort,
-			"tls_id":      n.TlsID,
-			"options":     n.Options,
-			"enabled":     n.Enabled,
-			"sort_order":  n.SortOrder,
-			"created_at":  n.CreatedAt,
-			"updated_at":  n.UpdatedAt,
-			"user_count":  len(usersByTag[n.Tag]),
+			"tls_id":              n.TlsID,
+			"options":             n.Options,
+			"enabled":             n.Enabled,
+			"sort_order":          n.SortOrder,
+			"upstream_inbound_id": n.UpstreamInboundID,
+			"created_at":          n.CreatedAt,
+			"updated_at":          n.UpdatedAt,
+			"user_count":          len(usersByTag[n.Tag]),
 		}
 		out = append(out, m)
 	}
@@ -699,6 +700,30 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Relay validation: the upstream must be an existing, different inbound.
+	if n.UpstreamInboundID != 0 {
+		if n.UpstreamInboundID == n.ID {
+			fail(w, http.StatusBadRequest, "落地入站不能是自己")
+			return
+		}
+		up, err := a.st.GetSbInbound(n.UpstreamInboundID)
+		if err != nil || up == nil {
+			fail(w, http.StatusBadRequest, "所选落地入站不存在")
+			return
+		}
+		if up.UpstreamInboundID != 0 {
+			fail(w, http.StatusBadRequest, "落地入站本身是中转入站，不支持多级链式")
+			return
+		}
+	}
+	// Capture the pre-save upstream so a rebuild also reaches the OLD landing
+	// server when the upstream is changed or cleared.
+	var oldUpstream int64
+	if n.ID != 0 {
+		if prev, _ := a.st.GetSbInbound(n.ID); prev != nil {
+			oldUpstream = prev.UpstreamInboundID
+		}
+	}
 	newID, err := a.st.SaveSbInbound(&n)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "保存失败（tag 可能重复）")
@@ -708,8 +733,30 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadGateway, "已保存，但应用到 sing-box 失败："+err.Error())
 		return
 	}
+	// A relay inbound's landing lives on another server that must also rebuild to
+	// inject (or drop) the relay credential in its users[].
+	a.rebuildLandingServers(n.UpstreamInboundID, oldUpstream)
 	saved, _ := a.st.GetSbInbound(newID)
 	ok(w, saved)
+}
+
+// rebuildLandingServers rebuilds the server(s) hosting the given landing
+// inbound(s) so their users[] pick up (or drop) the relay credential. Duplicate
+// and zero ids are ignored, as is the case where the landing shares the server
+// just rebuilt by the caller.
+func (a *API) rebuildLandingServers(landingIDs ...int64) {
+	seen := map[int64]bool{}
+	for _, id := range landingIDs {
+		if id == 0 {
+			continue
+		}
+		up, _ := a.st.GetSbInbound(id)
+		if up == nil || seen[up.ServerID] {
+			continue
+		}
+		seen[up.ServerID] = true
+		_ = a.sbctl.RebuildServer(up.ServerID)
+	}
 }
 
 func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request) {
@@ -722,6 +769,9 @@ func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request)
 	}
 	if ib != nil {
 		_ = a.sbctl.RebuildServer(ib.ServerID)
+		// If this was a relay inbound, its landing server must rebuild to drop the
+		// now-unused relay credential.
+		a.rebuildLandingServers(ib.UpstreamInboundID)
 	} else {
 		// 查不到归属服务器（异常情况）时全量重建兜底，避免被删的 inbound
 		// 残留在某个运行中的配置里。

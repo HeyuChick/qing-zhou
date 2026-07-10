@@ -2,6 +2,7 @@ package subconv
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
 )
@@ -146,6 +147,22 @@ func singboxURLTest(tag string, outbounds []string) map[string]any {
 	}
 }
 
+// SingboxOutboundFromLink parses a share link and renders it as a sing-box
+// outbound (dial-side) object. Used to build relay upstream outbounds that dial
+// a landing inbound. Returns an error if the link is unparseable or its protocol
+// has no outbound renderer.
+func SingboxOutboundFromLink(link string) (map[string]any, error) {
+	p, err := ParseLink(link)
+	if err != nil {
+		return nil, err
+	}
+	o := singboxOutbound(p)
+	if o == nil {
+		return nil, fmt.Errorf("subconv: protocol %q has no sing-box outbound renderer", p.Protocol)
+	}
+	return o, nil
+}
+
 func singboxOutbound(p *Proxy) map[string]any {
 	o := map[string]any{"tag": p.Name, "server": p.Server, "server_port": p.Port}
 	switch p.Protocol {
@@ -156,7 +173,7 @@ func singboxOutbound(p *Proxy) map[string]any {
 			o["flow"] = v
 		}
 		if net := p.param("type"); net == "ws" {
-			o["transport"] = sbWS(p.param("path"), p.param("host"))
+			o["transport"] = sbWS(p.param("path"), p.param("host"), atoi(p.param("max_early_data")), p.param("early_data_header_name"))
 		}
 		o["tls"] = sbTLS(p, p.param("security"))
 	case "vmess":
@@ -165,7 +182,7 @@ func singboxOutbound(p *Proxy) map[string]any {
 		o["alter_id"] = p.AlterID
 		o["security"] = "auto"
 		if str(p.VMess["net"]) == "ws" {
-			o["transport"] = sbWS(str(p.VMess["path"]), str(p.VMess["host"]))
+			o["transport"] = sbWS(str(p.VMess["path"]), str(p.VMess["host"]), 0, "")
 		}
 		if str(p.VMess["tls"]) == "tls" {
 			tls := map[string]any{"enabled": true}
@@ -193,11 +210,40 @@ func singboxOutbound(p *Proxy) map[string]any {
 		if v := p.param("congestion_control", "congestion-controller"); v != "" {
 			o["congestion_control"] = v
 		}
+		if p.param("zero_rtt", "reduce_rtt") == "1" {
+			o["zero_rtt_handshake"] = true
+		}
 		o["tls"] = sbTLS(p, "tls")
 	default:
 		return nil
 	}
+	// TCP/multiplex dial tuning (vless/vmess/trojan). multiplex is incompatible
+	// with vless xtls-rprx-vision, so drop it when a flow is set.
+	switch p.Protocol {
+	case "vless", "vmess", "trojan":
+		t := p.tuning()
+		_, hasFlow := o["flow"]
+		sbApplyTuning(o, t, hasFlow)
+	}
 	return o
+}
+
+// sbApplyTuning sets sing-box's tcp_fast_open/tcp_multi_path/multiplex outbound
+// options from t. mux is suppressed when suppressMux (a vless vision flow).
+func sbApplyTuning(o map[string]any, t tuning, suppressMux bool) {
+	if t.tfo {
+		o["tcp_fast_open"] = true
+	}
+	if t.mptcp {
+		o["tcp_multi_path"] = true
+	}
+	if t.mux && !suppressMux {
+		mx := map[string]any{"enabled": true}
+		if t.brutalUp > 0 && t.brutalDown > 0 {
+			mx["brutal"] = map[string]any{"enabled": true, "up_mbps": t.brutalUp, "down_mbps": t.brutalDown}
+		}
+		o["multiplex"] = mx
+	}
 }
 
 func sbTLS(p *Proxy, sec string) map[string]any {
@@ -230,13 +276,20 @@ func sbTLS(p *Proxy, sec string) map[string]any {
 	return tls
 }
 
-func sbWS(path, host string) map[string]any {
+func sbWS(path, host string, maxEarlyData int, edHeader string) map[string]any {
 	t := map[string]any{"type": "ws"}
 	if path != "" {
 		t["path"] = path
 	}
 	if host != "" {
 		t["headers"] = map[string]any{"Host": host}
+	}
+	// ws 0-RTT early data (must mirror the inbound).
+	if maxEarlyData > 0 {
+		t["max_early_data"] = maxEarlyData
+		if edHeader != "" {
+			t["early_data_header_name"] = edHeader
+		}
 	}
 	return t
 }

@@ -116,11 +116,27 @@ func DeriveSSKey(secret, method string) string {
 	return base64.StdEncoding.EncodeToString(h[:SSKeyLen(method)])
 }
 
+// Relay is one relay wiring on a server: an extra Outbound that dials a landing
+// inbound, plus the tags of local (relay) inbounds whose traffic must be routed
+// into it. Used to chain 客户端 → 线路机 → 落地机 → 互联网.
+type Relay struct {
+	Outbound    map[string]interface{} // sing-box outbound object; must carry "tag"
+	InboundTags []string               // local relay inbound tags routed to Outbound
+}
+
 // GenerateConfig assembles the full sing-box config: it starts from base (the
 // log/dns/route/ntp/outbounds template), appends the inbounds with users
 // injected, and wires experimental.v2ray_api.stats to track every user.
 // v2rayListen is the gRPC listen address (default 127.0.0.1:18080).
 func GenerateConfig(base json.RawMessage, inbounds []Inbound, v2rayListen string) ([]byte, error) {
+	return GenerateConfigWithRelays(base, inbounds, v2rayListen, nil)
+}
+
+// GenerateConfigWithRelays is GenerateConfig plus relay wiring: each Relay's
+// Outbound is appended to outbounds[] and a route rule sending its InboundTags
+// to that outbound is added, so a relay inbound's traffic exits via the landing
+// instead of the default "direct" final.
+func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayListen string, relays []Relay) ([]byte, error) {
 	cfg := map[string]interface{}{}
 	if len(base) > 0 {
 		if err := json.Unmarshal(base, &cfg); err != nil {
@@ -162,6 +178,38 @@ func GenerateConfig(base json.RawMessage, inbounds []Inbound, v2rayListen string
 	}
 	cfg["inbounds"] = ibList
 	sort.Strings(names)
+
+	// Relay wiring: append each landing outbound and a route rule steering the
+	// relay inbounds' traffic into it (evaluated before route.final="direct").
+	if len(relays) > 0 {
+		obs, _ := cfg["outbounds"].([]interface{})
+		route, _ := cfg["route"].(map[string]interface{})
+		if route == nil {
+			route = map[string]interface{}{}
+			cfg["route"] = route
+		}
+		rules, _ := route["rules"].([]interface{})
+		seenOut := map[string]bool{}
+		for _, r := range relays {
+			if r.Outbound == nil || len(r.InboundTags) == 0 {
+				continue
+			}
+			tag, _ := r.Outbound["tag"].(string)
+			if tag == "" {
+				continue
+			}
+			if !seenOut[tag] {
+				seenOut[tag] = true
+				obs = append(obs, r.Outbound)
+			}
+			rules = append(rules, map[string]interface{}{
+				"inbound":  r.InboundTags,
+				"outbound": tag,
+			})
+		}
+		cfg["outbounds"] = obs
+		route["rules"] = rules
+	}
 
 	// v2rayListen="" means skip v2ray_api (used for remote servers without the plugin).
 	if v2rayListen != "" {
