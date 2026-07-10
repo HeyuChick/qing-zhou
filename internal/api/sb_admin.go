@@ -588,6 +588,10 @@ func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request)
 	}
 	if ib != nil {
 		_ = a.sbctl.RebuildServer(ib.ServerID)
+	} else {
+		// 查不到归属服务器（异常情况）时全量重建兜底，避免被删的 inbound
+		// 残留在某个运行中的配置里。
+		_ = a.sbRebuild()
 	}
 	ok(w, nil)
 }
