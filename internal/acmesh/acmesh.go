@@ -28,8 +28,9 @@ type Runner interface {
 type Method string
 
 const (
-	MethodHTTP01 Method = "http-01" // standalone listener on :80
-	MethodCFDNS  Method = "dns-cf"  // Cloudflare DNS-01 (supports wildcard)
+	MethodHTTP01  Method = "http-01" // standalone listener on :80
+	MethodWebroot Method = "webroot" // drop challenge into an existing web root (nginx/etc.)
+	MethodCFDNS   Method = "dns-cf"  // Cloudflare DNS-01 (supports wildcard)
 )
 
 // IssueOpts describes a certificate request.
@@ -37,6 +38,7 @@ type IssueOpts struct {
 	Domain    string // e.g. proxy.example.com or *.example.com (dns-cf only)
 	Method    Method
 	CFToken   string // Cloudflare API token, required for MethodCFDNS
+	Webroot   string // web root that already serves the domain on :80, required for MethodWebroot
 	Email     string // ACME account email (optional but recommended)
 	CertDir   string // where the installed cert/key land; default /etc/sing-box/certs
 	ReloadCmd string // run by acme.sh after issue and on every renewal
@@ -97,6 +99,16 @@ func buildIssueCmd(o IssueOpts) (string, error) {
 			return "", fmt.Errorf("wildcard domains require the Cloudflare DNS method")
 		}
 		return base + " --standalone --httpport 80", nil
+	case MethodWebroot:
+		if strings.HasPrefix(domain, "*.") {
+			return "", fmt.Errorf("wildcard domains require the Cloudflare DNS method")
+		}
+		if strings.TrimSpace(o.Webroot) == "" {
+			return "", fmt.Errorf("webroot path is required for the webroot method")
+		}
+		// acme.sh writes the challenge under <webroot>/.well-known/acme-challenge/,
+		// which the existing web server (e.g. nginx) serves — no port binding.
+		return base + " -w " + shellQuote(strings.TrimSpace(o.Webroot)), nil
 	case MethodCFDNS:
 		if strings.TrimSpace(o.CFToken) == "" {
 			return "", fmt.Errorf("Cloudflare API token is required for the DNS method")
@@ -157,6 +169,11 @@ func Issue(ctx context.Context, r Runner, o IssueOpts) (*IssueResult, error) {
 		// acme.sh exits non-zero when a valid cert already exists and isn't near
 		// renewal ("Domains not changed / skipping"); treat that as success.
 		if !strings.Contains(out, "Skipping") && !strings.Contains(out, "not changed") {
+			// Common, self-inflicted failure: :80 is held by a web server (nginx).
+			// Point the operator at the methods that don't need to bind :80.
+			if strings.Contains(out, "port 80 is already used") || strings.Contains(out, "Please stop it") {
+				return nil, fmt.Errorf("80 端口已被占用（通常是 nginx/网站服务）——请改用「Cloudflare DNS」或「webroot（网站根目录）」方式，无需占用端口。原始输出：%s", out)
+			}
 			return nil, fmt.Errorf("acme.sh issue failed: %v: %s", err, out)
 		}
 	}

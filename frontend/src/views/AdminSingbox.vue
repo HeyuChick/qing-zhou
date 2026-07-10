@@ -174,10 +174,13 @@
               <div style="display:flex;flex-direction:column;gap:6px;width:100%;padding:10px;background:var(--bg-soft);border-radius:8px;">
                 <div style="font-size:12px;font-weight:650;">ACME 在线申请真实证书（Let's Encrypt · 仅本机）</div>
                 <n-radio-group v-model:value="acme.method" size="small">
-                  <n-radio value="http-01">HTTP-01（需 80 端口空闲、域名解析到本机）</n-radio>
-                  <n-radio value="dns-cf">Cloudflare DNS（支持泛域名、无需 80）</n-radio>
+                  <n-radio value="dns-cf">Cloudflare DNS（推荐，支持泛域名、无需端口）</n-radio>
+                  <n-radio value="webroot">Webroot（nginx/网站根目录，不占端口）</n-radio>
+                  <n-radio value="http-01">HTTP-01 standalone（需 80 端口空闲）</n-radio>
                 </n-radio-group>
                 <n-input v-if="acme.method === 'dns-cf'" v-model:value="acme.cf_token" type="password" show-password-on="click" placeholder="Cloudflare API Token" />
+                <n-input v-if="acme.method === 'webroot'" v-model:value="acme.webroot" placeholder="网站根目录，如 /var/www/html（nginx 该域名 root）" />
+                <span v-if="acme.method === 'http-01'" style="font-size:11px;color:var(--text-3);">若本机已用 nginx 占用 80 端口，standalone 会失败——请改用 Cloudflare DNS 或 Webroot。</span>
                 <n-input v-model:value="acme.email" placeholder="账户邮箱（可选，建议填写）" />
                 <n-button type="primary" :loading="acmeLoading" @click="requestAcme">申请证书（域名取上方 SNI，名称取上方名称）</n-button>
                 <span style="font-size:11px;color:var(--text-3);">申请成功后证书写入本机固定路径，sing-box 以 certificate_path 引用；续期由 acme.sh 的 cron 自动完成，无需面板参与。远程服务器暂不支持在线申请。</span>
@@ -313,7 +316,8 @@ const filteredInbounds = computed(() => {
 const machines = computed(() => {
   const list = [{ id: 0, name: '本机', host: '面板本机', enabled: true, isLocal: true }]
   for (const s of servers.value) {
-    list.push({ id: s.id, name: s.name || ('服务器 #' + s.id), host: s.host || '—', enabled: s.enabled ?? true, isLocal: false })
+    if (s.enabled === false) continue // 已禁用的机器不在此显示（可在「服务器」页启用后回来管理）
+    list.push({ id: s.id, name: s.name || ('服务器 #' + s.id), host: s.host || '—', enabled: true, isLocal: false })
   }
   return list
 })
@@ -410,7 +414,7 @@ const te = reactive({
 function openTls(t?: any, clone = false) {
   sniResult.value = null
   hsResult.value = null
-  acme.method = 'http-01'; acme.cf_token = ''; acme.email = ''
+  acme.method = 'dns-cf'; acme.cf_token = ''; acme.webroot = ''; acme.email = ''
   if (t) {
     const s = jp(t.server_json), c = jp(t.client_json), r = s.reality || {}, hs = r.handshake || {}
     // short_id 可能是数组或单值，统一为数组
@@ -477,17 +481,18 @@ async function testHandshake() {
 }
 
 // ACME 在线申请：调用后端 acme.sh 签发真实证书（仅本机），成功后直接落库并刷新。
-const acme = reactive({ method: 'http-01', cf_token: '', email: '' })
+const acme = reactive({ method: 'dns-cf', cf_token: '', webroot: '', email: '' })
 const acmeLoading = ref(false)
 async function requestAcme() {
   const domain = (te.server_name || '').trim()
   if (!te.name || !domain) { message.error('名称和 SNI（域名）必填'); return }
   if (acme.method === 'dns-cf' && !acme.cf_token.trim()) { message.error('Cloudflare DNS 需填 API Token'); return }
+  if (acme.method === 'webroot' && !acme.webroot.trim()) { message.error('Webroot 方式需填网站根目录'); return }
   acmeLoading.value = true
   try {
     await apiPost('/api/admin/sb/tls/acme', {
       name: te.name, server_id: te.server_id || 0, server_name: domain,
-      method: acme.method, cf_token: acme.cf_token.trim(), email: acme.email.trim(),
+      method: acme.method, cf_token: acme.cf_token.trim(), webroot: acme.webroot.trim(), email: acme.email.trim(),
     })
     message.success('证书申请成功，已保存')
     showTls.value = false
@@ -757,20 +762,30 @@ async function load() {
 .port-result.ok { background: rgba(24, 160, 88, 0.08); color: #18a058; }
 .port-result.err { background: rgba(208, 48, 80, 0.08); color: #d03050; }
 
-/* 按机器分组 */
+/* 按机器分组：克制的白卡 + 浅描边，与全站一致 */
 .machine-list :deep(.n-collapse-item) {
-  border: 1px solid var(--n-border-color, #e0e0e6);
-  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
   margin-bottom: 12px;
-  padding: 4px 12px 0;
-  background: var(--n-color, transparent);
+  background: var(--card);
+  overflow: hidden;
 }
-.machine-list :deep(.n-collapse-item__header) { padding: 12px 4px; }
+.machine-list :deep(.n-collapse-item:not(:first-child)) { margin-top: 0; }
+.machine-list :deep(.n-collapse-item__header) {
+  padding: 12px 14px !important;
+  border-radius: 12px 12px 0 0;
+}
+.machine-list :deep(.n-collapse-item--active > .n-collapse-item__header) {
+  border-bottom: 1px solid var(--border);
+}
+.machine-list :deep(.n-collapse-item__content-inner) {
+  padding: 14px !important;
+  background: var(--bg-soft);
+}
 .machine-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.machine-name { font-weight: 650; font-size: 15px; }
+.machine-name { font-weight: 650; font-size: 15px; color: var(--text); }
 .machine-host { font-size: 12px; color: var(--text-3); }
 .machine-extra { display: flex; align-items: center; gap: 6px; }
-.machine-list :deep(.card-grid) { padding-bottom: 12px; }
 @media (max-width: 640px) {
   .machine-host { display: none; }
   .machine-extra { gap: 4px; }

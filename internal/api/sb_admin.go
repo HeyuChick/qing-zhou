@@ -86,8 +86,9 @@ func (a *API) handleAdminAcmeCert(w http.ResponseWriter, r *http.Request) {
 		Name       string `json:"name"`
 		ServerID   int64  `json:"server_id"`
 		ServerName string `json:"server_name"` // the domain to issue for
-		Method     string `json:"method"`      // "http-01" | "dns-cf"
+		Method     string `json:"method"`      // "http-01" | "webroot" | "dns-cf"
 		CFToken    string `json:"cf_token"`
+		Webroot    string `json:"webroot"`
 		Email      string `json:"email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -120,6 +121,7 @@ func (a *API) handleAdminAcmeCert(w http.ResponseWriter, r *http.Request) {
 		Domain:    domain,
 		Method:    method,
 		CFToken:   strings.TrimSpace(req.CFToken),
+		Webroot:   strings.TrimSpace(req.Webroot),
 		Email:     strings.TrimSpace(req.Email),
 		CertDir:   certDir,
 		ReloadCmd: "systemctl restart " + unit,

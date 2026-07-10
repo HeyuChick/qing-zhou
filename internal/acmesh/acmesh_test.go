@@ -26,6 +26,27 @@ func TestBuildIssueCmd_HTTP01RejectsWildcard(t *testing.T) {
 	}
 }
 
+func TestBuildIssueCmd_Webroot(t *testing.T) {
+	cmd, err := buildIssueCmd(IssueOpts{Domain: "a.example.com", Method: MethodWebroot, Webroot: "/var/www/html"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	for _, want := range []string{"--issue", "-d 'a.example.com'", "-w '/var/www/html'"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("cmd %q missing %q", cmd, want)
+		}
+	}
+	if strings.Contains(cmd, "--standalone") {
+		t.Errorf("webroot cmd should not use standalone: %q", cmd)
+	}
+}
+
+func TestBuildIssueCmd_WebrootNeedsPath(t *testing.T) {
+	if _, err := buildIssueCmd(IssueOpts{Domain: "a.example.com", Method: MethodWebroot}); err == nil {
+		t.Error("expected error when webroot path is missing")
+	}
+}
+
 func TestBuildIssueCmd_CFDNS(t *testing.T) {
 	cmd, err := buildIssueCmd(IssueOpts{Domain: "*.example.com", Method: MethodCFDNS, CFToken: "tok123"})
 	if err != nil {
