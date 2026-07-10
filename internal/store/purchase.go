@@ -92,24 +92,12 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 	}
 
 	now := time.Now().Unix()
-	resetUsed := false
-	setPlan := false
-	newTraffic := u.TrafficLimit
-	newExpiry := u.ExpiryAt
-
+	setPlan := pkg.Type == "plan"
 	switch pkg.Type {
-	case "traffic":
-		newTraffic += pkg.TrafficBytes
-	case "plan":
-		if u.ExpiryAt > now { // active: stack remaining traffic, extend expiry
-			newExpiry = u.ExpiryAt + pkg.DurationDays*86400
-			newTraffic = u.TrafficLimit + pkg.TrafficBytes
-		} else { // expired: forfeit old traffic, start fresh
-			newExpiry = now + pkg.DurationDays*86400
-			newTraffic = pkg.TrafficBytes
-			resetUsed = true
-		}
-		setPlan = true
+	case "traffic", "plan":
+		// Entitlement is applied by the bucket ops below (a plan renews/stacks its
+		// own metered bucket; traffic tops up the pool). The legacy users.* columns
+		// are recomputed from the buckets afterward so the aggregate never drifts.
 	default:
 		return nil, ErrUnknownPkgType
 	}
@@ -134,7 +122,7 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 	// up the shared pool. The legacy users.* fields above are kept as a rough
 	// aggregate for back-compat; buckets are authoritative for enforcement.
 	if pkg.Type == "plan" {
-		if err = insertPlanBucket(tx, userID, u.Username, pkg, orderID, now); err != nil {
+		if err = upsertPlanBucket(tx, userID, u.Username, pkg, orderID, now); err != nil {
 			return nil, err
 		}
 	} else if pkg.Type == "traffic" {
@@ -151,14 +139,10 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 		return nil, err
 	}
 
-	// Apply entitlement (traffic + expiry; plan also sets current plan).
-	if resetUsed {
-		_, err = tx.Exec(`UPDATE users SET traffic_limit=?, expiry_at=?, used_up=0, used_down=0, updated_at=? WHERE id=?`,
-			newTraffic, newExpiry, now, userID)
-	} else {
-		_, err = tx.Exec(`UPDATE users SET traffic_limit=?, expiry_at=?, updated_at=? WHERE id=?`,
-			newTraffic, newExpiry, now, userID)
-	}
+	// Recompute the legacy users.* aggregate from the authoritative buckets, so a
+	// renewal (stacked bucket) or a second independent plan is reflected exactly,
+	// with no drift from ad-hoc column math.
+	newTraffic, newUp, newDown, newExpiry, err := recomputeUserAggregate(tx, userID, now)
 	if err != nil {
 		return nil, err
 	}
@@ -185,17 +169,16 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 	updated := *u
 	updated.Points = newPoints
 	updated.TrafficLimit = newTraffic
+	updated.UsedUp = newUp
+	updated.UsedDown = newDown
 	updated.ExpiryAt = newExpiry
-	if resetUsed {
-		updated.UsedUp, updated.UsedDown = 0, 0
-	}
 	if setPlan {
 		updated.CurrentPlanID = sql.NullInt64{Int64: pkg.ID, Valid: true}
 	}
 
 	// External sync inside the tx.
 	if sync != nil {
-		if err = sync(&updated, resetUsed); err != nil {
+		if err = sync(&updated, false); err != nil {
 			return nil, err
 		}
 	}
@@ -237,24 +220,11 @@ func (s *Store) AssignPackage(userID int64, pkg *Package, operatorID int64, sync
 	}
 
 	now := time.Now().Unix()
-	resetUsed := false
-	setPlan := false
-	newTraffic := u.TrafficLimit
-	newExpiry := u.ExpiryAt
-
+	setPlan := pkg.Type == "plan"
 	switch pkg.Type {
-	case "traffic":
-		newTraffic += pkg.TrafficBytes
-	case "plan":
-		if u.ExpiryAt > now { // active: stack remaining traffic, extend expiry
-			newExpiry = u.ExpiryAt + pkg.DurationDays*86400
-			newTraffic = u.TrafficLimit + pkg.TrafficBytes
-		} else { // expired: forfeit old traffic, start fresh
-			newExpiry = now + pkg.DurationDays*86400
-			newTraffic = pkg.TrafficBytes
-			resetUsed = true
-		}
-		setPlan = true
+	case "traffic", "plan":
+		// Same model as Purchase: entitlement flows through the bucket ops; the
+		// users.* aggregate is recomputed from buckets afterward.
 	default:
 		return nil, ErrUnknownPkgType
 	}
@@ -268,9 +238,9 @@ func (s *Store) AssignPackage(userID int64, pkg *Package, operatorID int64, sync
 	}
 	orderID, _ := res.LastInsertId()
 
-	// Bucket model (same as Purchase): plan → new metered bucket, traffic → pool.
+	// Bucket model (same as Purchase): plan → renew/create metered bucket, traffic → pool.
 	if pkg.Type == "plan" {
-		if err = insertPlanBucket(tx, userID, u.Username, pkg, orderID, now); err != nil {
+		if err = upsertPlanBucket(tx, userID, u.Username, pkg, orderID, now); err != nil {
 			return nil, err
 		}
 	} else if pkg.Type == "traffic" {
@@ -287,13 +257,7 @@ func (s *Store) AssignPackage(userID int64, pkg *Package, operatorID int64, sync
 		return nil, err
 	}
 
-	if resetUsed {
-		_, err = tx.Exec(`UPDATE users SET traffic_limit=?, expiry_at=?, used_up=0, used_down=0, updated_at=? WHERE id=?`,
-			newTraffic, newExpiry, now, userID)
-	} else {
-		_, err = tx.Exec(`UPDATE users SET traffic_limit=?, expiry_at=?, updated_at=? WHERE id=?`,
-			newTraffic, newExpiry, now, userID)
-	}
+	newTraffic, newUp, newDown, newExpiry, err := recomputeUserAggregate(tx, userID, now)
 	if err != nil {
 		return nil, err
 	}
@@ -305,16 +269,15 @@ func (s *Store) AssignPackage(userID int64, pkg *Package, operatorID int64, sync
 
 	updated := *u
 	updated.TrafficLimit = newTraffic
+	updated.UsedUp = newUp
+	updated.UsedDown = newDown
 	updated.ExpiryAt = newExpiry
-	if resetUsed {
-		updated.UsedUp, updated.UsedDown = 0, 0
-	}
 	if setPlan {
 		updated.CurrentPlanID = sql.NullInt64{Int64: pkg.ID, Valid: true}
 	}
 
 	if sync != nil {
-		if err = sync(&updated, resetUsed); err != nil {
+		if err = sync(&updated, false); err != nil {
 			return nil, err
 		}
 	}
@@ -427,16 +390,22 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 		}
 	}
 
-	// Bucket model: drop the plan bucket this order created, or claw the traffic
-	// top-up back out of the pool (clamped to what's already used).
+	// Bucket model: reverse this order's contribution to the package's (possibly
+	// renewed/stacked) plan bucket, or claw the traffic top-up back out of the
+	// pool (both clamped to what's already used).
 	if sp.Type == "plan" {
-		if err = removeBucketByOrder(tx, orderID); err != nil {
+		if err = reversePlanBucket(tx, userID, pkgID, sp.TrafficBytes, sp.DurationDays, now); err != nil {
 			return nil, err
 		}
-		// If the user's current-plan pointer referenced this package, clear it —
-		// its backing bucket no longer exists (otherwise the pointer dangles).
-		if _, err = tx.Exec(`UPDATE users SET current_plan_id=NULL WHERE id=? AND current_plan_id=?`, userID, pkgID); err != nil {
-			return nil, err
+		// If the bucket was fully removed and the current-plan pointer referenced
+		// this package, clear it so it doesn't dangle. (If the bucket survives the
+		// reversal, the pointer stays valid.)
+		var stillExists int
+		_ = tx.QueryRow(`SELECT 1 FROM user_plans WHERE user_id=? AND kind='plan' AND package_id=? LIMIT 1`, userID, pkgID).Scan(&stillExists)
+		if stillExists == 0 {
+			if _, err = tx.Exec(`UPDATE users SET current_plan_id=NULL WHERE id=? AND current_plan_id=?`, userID, pkgID); err != nil {
+				return nil, err
+			}
 		}
 	} else if sp.Type == "traffic" {
 		if err = subFromPool(tx, userID, sp.TrafficBytes, now); err != nil {

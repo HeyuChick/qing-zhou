@@ -385,12 +385,13 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 // inbound using the user's own credentials — replacing the sing-box sub fetch so
 // subscriptions survive the cutover. host is the dial address advertised to
 // clients (node_host_override / origin IP). The links carry remark=inbound.tag
-// so the subscription layer's group filter still applies. Returns nil when the
-// user has no proxy credentials.
+// so the subscription layer's group filter still applies. Each link uses the
+// credentials of the bucket that owns the inbound (see UserOwnedInbounds), so a
+// user with an active plan bucket gets links even if their legacy users.*
+// identity is empty — e.g. an admin account, which is never provisioned a
+// client_uuid. Returns nil only when no address is configured or no bucket
+// owns any inbound.
 func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
-	if !u.ClientUUID.Valid || u.ClientUUID.String == "" {
-		return nil
-	}
 	if host == "" {
 		return nil // no advertised address configured
 	}

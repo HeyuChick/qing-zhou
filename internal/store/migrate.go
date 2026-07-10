@@ -401,7 +401,11 @@ func (s *Store) Migrate() error {
 		return err
 	}
 	// Seed the bucket model from legacy single-plan columns (idempotent).
-	return s.backfillUserPlans()
+	if err := s.backfillUserPlans(); err != nil {
+		return err
+	}
+	// Collapse duplicate plan buckets left by pre-renewal repurchases (idempotent).
+	return s.mergeDuplicatePlanBuckets()
 }
 
 // backfillProbeTokenHash computes probe_token_hash from the stored token for any

@@ -36,6 +36,66 @@ func insertPlanBucket(ex execer, userID int64, username string, pkg *Package, or
 	return err
 }
 
+// upsertPlanBucket renews the user's existing bucket for this package if one
+// exists, otherwise creates a fresh one. Renewal is the correct model for
+// repurchasing the SAME plan: it keeps a single metered identity and stacks —
+// traffic quota is added and expiry extended from whichever is later (now or the
+// current expiry, so an expired plan renews from now, not the past). Buying a
+// DIFFERENT plan still mints its own independent bucket. This is what makes a
+// repeat purchase show as one renewed row, not many duplicates.
+func upsertPlanBucket(tx txLike, userID int64, username string, pkg *Package, orderID, now int64) error {
+	var id, limit, expiry int64
+	err := tx.QueryRow(`SELECT id, traffic_limit, expiry_at FROM user_plans
+		WHERE user_id=? AND kind='plan' AND package_id=? ORDER BY id LIMIT 1`, userID, pkg.ID).Scan(&id, &limit, &expiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return insertPlanBucket(tx, userID, username, pkg, orderID, now)
+	}
+	if err != nil {
+		return err
+	}
+	base := now
+	if expiry > now {
+		base = expiry // still active: extend from current expiry
+	}
+	newExpiry := base + pkg.DurationDays*86400
+	newLimit := limit + pkg.TrafficBytes
+	_, err = tx.Exec(`UPDATE user_plans SET traffic_limit=?, expiry_at=?, order_id=?, updated_at=? WHERE id=?`,
+		newLimit, newExpiry, orderID, now, id)
+	return err
+}
+
+// reversePlanBucket undoes one plan order's contribution to its package bucket
+// (used on refund): it subtracts the package's traffic quota (clamped so the
+// limit never drops below what's already used) and one duration period from the
+// expiry. If nothing is left (no remaining quota and expired), the bucket is
+// removed; otherwise it survives with the reduced allowances — correct whether
+// the bucket held a single purchase or several stacked renewals.
+func reversePlanBucket(tx txLike, userID, packageID, trafficBytes, durationDays, now int64) error {
+	var id, limit, used, expiry int64
+	err := tx.QueryRow(`SELECT id, traffic_limit, used_up+used_down, expiry_at FROM user_plans
+		WHERE user_id=? AND kind='plan' AND package_id=? ORDER BY id LIMIT 1`, userID, packageID).Scan(&id, &limit, &used, &expiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	newLimit := limit - trafficBytes
+	if newLimit < used {
+		newLimit = used
+	}
+	if newLimit < 0 {
+		newLimit = 0
+	}
+	newExpiry := expiry - durationDays*86400
+	if newLimit <= used && newExpiry <= now {
+		_, err = tx.Exec(`DELETE FROM user_plans WHERE id=?`, id)
+		return err
+	}
+	_, err = tx.Exec(`UPDATE user_plans SET traffic_limit=?, expiry_at=?, updated_at=? WHERE id=?`, newLimit, newExpiry, now, id)
+	return err
+}
+
 // addToPool tops up the user's traffic-package pool, creating it if absent.
 func addToPool(tx txLike, userID int64, username string, addBytes, now int64) error {
 	var id int64
@@ -75,12 +135,6 @@ func subFromPool(tx txLike, userID int64, subBytes, now int64) error {
 		nl = 0
 	}
 	_, err = tx.Exec(`UPDATE user_plans SET traffic_limit=?, updated_at=? WHERE id=?`, nl, now, id)
-	return err
-}
-
-// removeBucketByOrder drops the plan bucket created by a given order (refund).
-func removeBucketByOrder(ex execer, orderID int64) error {
-	_, err := ex.Exec(`DELETE FROM user_plans WHERE kind='plan' AND order_id=?`, orderID)
 	return err
 }
 
@@ -277,6 +331,52 @@ func (s *Store) AddBucketUsage(clientName string, up, down int64) error {
 		return err
 	}
 	committed = true
+	return nil
+}
+
+// mergeDuplicatePlanBuckets collapses pre-existing duplicate plan buckets (same
+// user + package) into one, summing traffic quota and usage and taking the
+// latest expiry. This repairs accounts that repurchased a plan before renewal
+// stacking existed (which minted a new bucket each time). The survivor is the
+// oldest bucket, so it keeps a stable identity; the rest are deleted and their
+// sing-box identities drop out on the next rebuild. Idempotent: once merged,
+// each (user, package) has a single row and the query matches nothing. The
+// users.* aggregate is unchanged because the survivor holds the summed totals.
+func (s *Store) mergeDuplicatePlanBuckets() error {
+	rows, err := s.db.Query(`SELECT user_id, package_id, MIN(id),
+		SUM(traffic_limit), SUM(used_up), SUM(used_down), MAX(expiry_at)
+		FROM user_plans WHERE kind='plan' AND package_id>0
+		GROUP BY user_id, package_id HAVING COUNT(*)>1`)
+	if err != nil {
+		return err
+	}
+	type dup struct {
+		userID, packageID, keepID, limit, up, down, expiry int64
+	}
+	var dups []dup
+	for rows.Next() {
+		var d dup
+		if err := rows.Scan(&d.userID, &d.packageID, &d.keepID, &d.limit, &d.up, &d.down, &d.expiry); err != nil {
+			rows.Close()
+			return err
+		}
+		dups = append(dups, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	for _, d := range dups {
+		if _, err := s.db.Exec(`UPDATE user_plans SET traffic_limit=?, used_up=?, used_down=?, expiry_at=?, updated_at=? WHERE id=?`,
+			d.limit, d.up, d.down, d.expiry, now, d.keepID); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`DELETE FROM user_plans WHERE kind='plan' AND user_id=? AND package_id=? AND id<>?`,
+			d.userID, d.packageID, d.keepID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
