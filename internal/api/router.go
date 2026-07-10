@@ -183,6 +183,7 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/sb/tls/reality", a.handleAdminCreateRealityTls)
 		ar.Put("/api/admin/sb/tls/reality/{id}", a.handleAdminUpdateRealityTls)
 		ar.Post("/api/admin/sb/tls/self-signed", a.handleAdminSelfSignedCert)
+		ar.Post("/api/admin/sb/tls/acme", a.handleAdminAcmeCert)
 		ar.Post("/api/admin/sb/tls/cert", a.handleAdminSaveCertTls)
 		ar.Put("/api/admin/sb/tls/cert/{id}", a.handleAdminSaveCertTls)
 		ar.Put("/api/admin/sb/tls/{id}", a.handleAdminSaveSbTls)

@@ -170,10 +170,23 @@
             </n-form-item>
           </template>
           <template v-if="te.mode === 'tls'">
+            <n-form-item v-if="te.server_id === 0" label=" ">
+              <div style="display:flex;flex-direction:column;gap:6px;width:100%;padding:10px;background:var(--bg-soft);border-radius:8px;">
+                <div style="font-size:12px;font-weight:650;">ACME 在线申请真实证书（Let's Encrypt · 仅本机）</div>
+                <n-radio-group v-model:value="acme.method" size="small">
+                  <n-radio value="http-01">HTTP-01（需 80 端口空闲、域名解析到本机）</n-radio>
+                  <n-radio value="dns-cf">Cloudflare DNS（支持泛域名、无需 80）</n-radio>
+                </n-radio-group>
+                <n-input v-if="acme.method === 'dns-cf'" v-model:value="acme.cf_token" type="password" show-password-on="click" placeholder="Cloudflare API Token" />
+                <n-input v-model:value="acme.email" placeholder="账户邮箱（可选，建议填写）" />
+                <n-button type="primary" :loading="acmeLoading" @click="requestAcme">申请证书（域名取上方 SNI，名称取上方名称）</n-button>
+                <span style="font-size:11px;color:var(--text-3);">申请成功后证书写入本机固定路径，sing-box 以 certificate_path 引用；续期由 acme.sh 的 cron 自动完成，无需面板参与。远程服务器暂不支持在线申请。</span>
+              </div>
+            </n-form-item>
             <n-form-item label=" ">
               <div style="display:flex;flex-direction:column;gap:4px;width:100%;">
-                <n-button type="primary" :loading="genCertLoading" @click="genSelfSigned">一键生成自签证书（按 SNI）</n-button>
-                <span style="font-size:11px;color:var(--text-3);">自签证书适用于 TUIC / Hysteria2 等允许 insecure 或证书指纹的客户端；浏览器与严格校验客户端不会信任。需可信证书请粘贴 Let's Encrypt 等签发的 PEM。</span>
+                <n-button :loading="genCertLoading" @click="genSelfSigned">一键生成自签证书（按 SNI）</n-button>
+                <span style="font-size:11px;color:var(--text-3);">自签证书适用于 TUIC / Hysteria2 等允许 insecure 或证书指纹的客户端；浏览器与严格校验客户端不会信任。需可信证书请用上方 ACME 申请，或粘贴 Let's Encrypt 等签发的 PEM。</span>
               </div>
             </n-form-item>
             <n-form-item label="证书 PEM"><n-input v-model:value="te.certificate" type="textarea" :rows="3" placeholder="-----BEGIN CERTIFICATE-----" /></n-form-item>
@@ -397,6 +410,7 @@ const te = reactive({
 function openTls(t?: any, clone = false) {
   sniResult.value = null
   hsResult.value = null
+  acme.method = 'http-01'; acme.cf_token = ''; acme.email = ''
   if (t) {
     const s = jp(t.server_json), c = jp(t.client_json), r = s.reality || {}, hs = r.handshake || {}
     // short_id 可能是数组或单值，统一为数组
@@ -460,6 +474,25 @@ async function testHandshake() {
   } finally {
     hsTesting.value = false
   }
+}
+
+// ACME 在线申请：调用后端 acme.sh 签发真实证书（仅本机），成功后直接落库并刷新。
+const acme = reactive({ method: 'http-01', cf_token: '', email: '' })
+const acmeLoading = ref(false)
+async function requestAcme() {
+  const domain = (te.server_name || '').trim()
+  if (!te.name || !domain) { message.error('名称和 SNI（域名）必填'); return }
+  if (acme.method === 'dns-cf' && !acme.cf_token.trim()) { message.error('Cloudflare DNS 需填 API Token'); return }
+  acmeLoading.value = true
+  try {
+    await apiPost('/api/admin/sb/tls/acme', {
+      name: te.name, server_id: te.server_id || 0, server_name: domain,
+      method: acme.method, cf_token: acme.cf_token.trim(), email: acme.email.trim(),
+    })
+    message.success('证书申请成功，已保存')
+    showTls.value = false
+    await load()
+  } catch (e: any) { message.error(e.message || '申请失败') } finally { acmeLoading.value = false }
 }
 
 // 一键生成自签证书：按当前 SNI 生成 PEM 证书+私钥并填入表单。

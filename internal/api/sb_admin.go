@@ -12,11 +12,14 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"qingzhou/internal/acmesh"
 	"qingzhou/internal/singbox"
 	"qingzhou/internal/sshctl"
 	"qingzhou/internal/store"
@@ -57,6 +60,94 @@ func (a *API) handleAdminSelfSignedCert(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ok(w, J{"certificate": certPEM, "key": keyPEM})
+}
+
+// sbSetting resolves a sing-box config value the same way the controller does:
+// env var → DB setting → default. Keeps the ACME reload command and cert dir in
+// sync with where the local sing-box actually reads its config / systemd unit.
+func (a *API) sbSetting(envKey, settingKey, def string) string {
+	if v := os.Getenv(envKey); v != "" {
+		return v
+	}
+	if v, _ := a.st.GetSetting(settingKey); v != "" {
+		return v
+	}
+	return def
+}
+
+// POST /api/admin/sb/tls/acme {name, server_id, server_name, method, cf_token, email}
+// — issue a real Let's Encrypt certificate via acme.sh on the local host, install
+// it to a stable path, and save a TLS profile that references those paths
+// (tls.certificate_path / key_path). acme.sh's cron renews it in place; sing-box
+// picks up the new file on its next reload. Local host only for now; remote
+// servers must issue on-box or paste a cert.
+func (a *API) handleAdminAcmeCert(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name       string `json:"name"`
+		ServerID   int64  `json:"server_id"`
+		ServerName string `json:"server_name"` // the domain to issue for
+		Method     string `json:"method"`      // "http-01" | "dns-cf"
+		CFToken    string `json:"cf_token"`
+		Email      string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	domain := strings.TrimSpace(req.ServerName)
+	if req.Name == "" || domain == "" {
+		fail(w, http.StatusBadRequest, "名称和域名必填")
+		return
+	}
+	if req.ServerID != 0 {
+		fail(w, http.StatusBadRequest, "在线申请当前仅支持本机；远程服务器请在该机器上用 acme.sh 申请后粘贴证书，或用自签")
+		return
+	}
+	method := acmesh.Method(strings.TrimSpace(req.Method))
+	if method == "" {
+		method = acmesh.MethodHTTP01
+	}
+
+	unit := a.sbSetting("QZ_SINGBOX_UNIT", "sb_systemd_unit", "sing-box")
+	cfgPath := a.sbSetting("QZ_SINGBOX_CONFIG", "sb_config_path", "/etc/sing-box/config.json")
+	certDir := path.Join(path.Dir(cfgPath), "certs")
+
+	// acme.sh can block on DNS propagation (dns_cf sleeps ~2min); allow headroom.
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
+	defer cancel()
+	res, err := acmesh.Issue(ctx, acmesh.LocalRunner{}, acmesh.IssueOpts{
+		Domain:    domain,
+		Method:    method,
+		CFToken:   strings.TrimSpace(req.CFToken),
+		Email:     strings.TrimSpace(req.Email),
+		CertDir:   certDir,
+		ReloadCmd: "systemctl restart " + unit,
+	})
+	if err != nil {
+		fail(w, http.StatusBadGateway, "证书申请失败："+err.Error())
+		return
+	}
+
+	server := map[string]interface{}{
+		"enabled":          true,
+		"server_name":      domain,
+		"certificate_path": res.CertPath,
+		"key_path":         res.KeyPath,
+	}
+	client := map[string]interface{}{
+		"utls": map[string]interface{}{"enabled": true, "fingerprint": "chrome"},
+	}
+	sj, _ := json.Marshal(server)
+	cj, _ := json.Marshal(client)
+	id, err := a.st.SaveSbTls(&store.SbTls{ServerID: req.ServerID, Name: req.Name, Mode: "tls", ServerJSON: string(sj), ClientJSON: string(cj)})
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "证书已申请，但保存配置失败")
+		return
+	}
+	_ = a.sbctl.RebuildServer(req.ServerID)
+	saved, _ := a.st.GetSbTls(id)
+	ok(w, saved)
 }
 
 // validateCertKeyPair reports whether the PEM certificate and key are both
