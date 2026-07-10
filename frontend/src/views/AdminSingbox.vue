@@ -42,37 +42,57 @@
           <n-button v-if="checkedIds.size" size="small" @click="batchToggle(true)">批量启用</n-button>
           <n-button v-if="checkedIds.size" size="small" @click="batchToggle(false)">批量停用</n-button>
           <n-button v-if="checkedIds.size" size="small" type="error" @click="batchDelete">批量删除</n-button>
+          <n-button size="small" @click="toggleAllMachines">{{ allExpanded ? '全部折叠' : '全部展开' }}</n-button>
           <n-button size="small" type="primary" @click="openInbound()">添加入站</n-button>
         </div>
         <n-spin :show="loading">
-          <div v-if="filteredInbounds.length" class="card-grid">
-            <div v-for="r in filteredInbounds" :key="r.id" class="list-card">
-              <div class="lc-head">
-                <n-checkbox :checked="checkedIds.has(r.id)" @update:checked="toggleCheck(r.id)" style="margin-right:6px;" />
-                <span class="lc-title">{{ r.tag || '—' }}</span>
-                <n-tag :type="r.enabled ? 'success' : 'error'" size="tiny" bordered="false" style="cursor:pointer;" @click="toggleInbound(r)">{{ r.enabled ? '启用' : '停用' }}</n-tag>
+          <n-collapse v-if="inboundGroups.length" v-model:expanded-names="expandedMachines" arrow-placement="left" class="machine-list">
+            <n-collapse-item v-for="g in inboundGroups" :key="g.machine.id" :name="g.machine.id">
+              <template #header>
+                <div class="machine-head">
+                  <span class="machine-name">{{ g.machine.name }}</span>
+                  <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
+                  <span class="machine-host">{{ g.machine.host }}</span>
+                  <n-tag v-if="!g.machine.enabled" size="tiny" type="warning" bordered="false">已禁用</n-tag>
+                </div>
+              </template>
+              <template #header-extra>
+                <div class="machine-extra" @click.stop>
+                  <n-tag size="tiny" :type="g.enabledCount ? 'success' : 'default'" bordered="false">启用 {{ g.enabledCount }} / {{ g.total }}</n-tag>
+                  <n-button size="tiny" @click="previewMachine(g.machine.id)">预览</n-button>
+                  <n-button size="tiny" type="primary" @click="openInboundFor(g.machine.id)">＋ 入站</n-button>
+                </div>
+              </template>
+              <div v-if="g.items.length" class="card-grid">
+                <div v-for="r in g.items" :key="r.id" class="list-card">
+                  <div class="lc-head">
+                    <n-checkbox :checked="checkedIds.has(r.id)" @update:checked="toggleCheck(r.id)" style="margin-right:6px;" />
+                    <span class="lc-title">{{ r.tag || '—' }}</span>
+                    <n-tag :type="r.enabled ? 'success' : 'error'" size="tiny" bordered="false" style="cursor:pointer;" @click="toggleInbound(r)">{{ r.enabled ? '启用' : '停用' }}</n-tag>
+                  </div>
+                  <div class="lc-meta">
+                    <span class="kv"><n-tag size="tiny" bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag></span>
+                    <span class="kv">端口 <b>{{ r.listen_port }}</b></span>
+                    <span class="kv">用户 <b>{{ r.user_count ?? 0 }}</b></span>
+                    <span class="kv">TLS <b>{{ tlsName(r.tls_id) }}</b></span>
+                  </div>
+                  <div class="lc-foot">
+                    <n-button size="tiny" @click="openInbound(r)">编辑</n-button>
+                    <n-button size="tiny" @click="cloneInbound(r)">克隆</n-button>
+                    <n-button size="tiny" :loading="portChecking === r.id" @click="checkPort(r)">测端口</n-button>
+                    <n-button size="tiny" type="error" @click="deleteInbound(r.id)">删除</n-button>
+                  </div>
+                  <div v-if="portResult[r.id]" class="port-result" :class="{ ok: portResult[r.id].reachable, err: !portResult[r.id].reachable }">
+                    {{ portResult[r.id].reachable ? '可达 · ' + portResult[r.id].ms.toFixed(0) + 'ms' : '不可达 · ' + (portResult[r.id].error || '失败') }}
+                  </div>
+                </div>
               </div>
-              <div class="lc-meta">
-                <span class="kv"><n-tag size="tiny" bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag></span>
-                <span class="kv">端口 <b>{{ r.listen_port }}</b></span>
-                <span class="kv">用户 <b>{{ r.user_count ?? 0 }}</b></span>
-              </div>
-              <div class="lc-meta">
-                <span class="kv">服务器 <b>{{ serverName(r.server_id) }}</b></span>
-                <span class="kv">TLS <b>{{ tlsName(r.tls_id) }}</b></span>
-              </div>
-              <div class="lc-foot">
-                <n-button size="tiny" @click="openInbound(r)">编辑</n-button>
-                <n-button size="tiny" @click="cloneInbound(r)">克隆</n-button>
-                <n-button size="tiny" :loading="portChecking === r.id" @click="checkPort(r)">测端口</n-button>
-                <n-button size="tiny" type="error" @click="deleteInbound(r.id)">删除</n-button>
-              </div>
-              <div v-if="portResult[r.id]" class="port-result" :class="{ ok: portResult[r.id].reachable, err: !portResult[r.id].reachable }">
-                {{ portResult[r.id].reachable ? '可达 · ' + portResult[r.id].ms.toFixed(0) + 'ms' : '不可达 · ' + (portResult[r.id].error || '失败') }}
-              </div>
-            </div>
-          </div>
-          <n-empty v-else-if="!loading" description="暂无入站" style="padding:40px 0;" />
+              <n-empty v-else :description="inbSearch ? '无匹配入站' : '该机器暂无入站'" size="small" style="padding:18px 0;">
+                <template v-if="!inbSearch" #extra><n-button size="tiny" @click="openInboundFor(g.machine.id)">添加入站</n-button></template>
+              </n-empty>
+            </n-collapse-item>
+          </n-collapse>
+          <n-empty v-else-if="!loading" :description="inbSearch ? '无匹配入站' : '暂无入站'" style="padding:40px 0;" />
         </n-spin>
       </n-tab-pane>
 
@@ -231,7 +251,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import {
   NTabs, NTabPane, NDrawer, NDrawerContent, NButton, NForm, NFormItem, NInput, NInputNumber, NInputGroup,
-  NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCode, NCheckbox, useMessage
+  NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCode, NCheckbox, NCollapse, NCollapseItem, useMessage
 } from 'naive-ui'
 import { apiList, apiGet, apiPost, apiPut, apiDelete } from '@/api'
 
@@ -268,6 +288,50 @@ const filteredInbounds = computed(() => {
   if (!q) return inbounds.value
   return inbounds.value.filter(n => (n.tag || '').toLowerCase().includes(q) || (n.type || '').toLowerCase().includes(q))
 })
+
+// ========== 按机器分组（一台机器一张卡片） ==========
+// 机器 = 本机(server_id 0) + 每台远程服务器。
+const machines = computed(() => {
+  const list = [{ id: 0, name: '本机', host: '面板本机', enabled: true, isLocal: true }]
+  for (const s of servers.value) {
+    list.push({ id: s.id, name: s.name || ('服务器 #' + s.id), host: s.host || '—', enabled: s.enabled ?? true, isLocal: false })
+  }
+  return list
+})
+
+// 每台机器一组，携带该机器的入站（经搜索过滤）与启用/总数统计。
+// 搜索状态下隐藏没有命中的机器，避免噪音。
+const inboundGroups = computed(() => {
+  const searching = !!inbSearch.value.trim()
+  const matched = filteredInbounds.value
+  return machines.value.map(m => {
+    const all = inbounds.value.filter(n => (n.server_id || 0) === m.id)
+    const items = matched.filter(n => (n.server_id || 0) === m.id)
+    return { machine: m, items, total: all.length, enabledCount: all.filter(n => n.enabled).length }
+  }).filter(g => !searching || g.items.length > 0)
+})
+
+// 折叠状态：默认全部展开；首次加载后按机器 id 铺开。
+const expandedMachines = ref<number[]>([])
+let expandedInit = false
+const allExpanded = computed(() => expandedMachines.value.length >= machines.value.length)
+function toggleAllMachines() {
+  expandedMachines.value = allExpanded.value ? [] : machines.value.map(m => m.id)
+}
+
+// 在指定机器下新增入站（预填所属服务器）。
+function openInboundFor(serverId: number) {
+  resetIe()
+  ie.server_id = serverId
+  showInb.value = true
+}
+
+// 跳到「配置预览」并选中该机器。
+function previewMachine(id: number) {
+  tab.value = 'preview'
+  previewSid.value = id || null
+  loadPreview()
+}
 
 // 批量操作
 const checkedIds = ref(new Set<number>())
@@ -594,6 +658,8 @@ async function load() {
   try {
     const [t, i, s] = await Promise.all([apiList('/api/admin/sb/tls'), apiList('/api/admin/sb/inbounds'), apiList('/api/admin/servers')])
     tlsList.value = t; inbounds.value = i; servers.value = s
+    // 首次加载后默认展开所有机器；之后保留用户的折叠状态。
+    if (!expandedInit) { expandedMachines.value = machines.value.map(m => m.id); expandedInit = true }
   } catch {} finally { loading.value = false }
 }
 </script>
@@ -637,4 +703,23 @@ async function load() {
 }
 .port-result.ok { background: rgba(24, 160, 88, 0.08); color: #18a058; }
 .port-result.err { background: rgba(208, 48, 80, 0.08); color: #d03050; }
+
+/* 按机器分组 */
+.machine-list :deep(.n-collapse-item) {
+  border: 1px solid var(--n-border-color, #e0e0e6);
+  border-radius: 10px;
+  margin-bottom: 12px;
+  padding: 4px 12px 0;
+  background: var(--n-color, transparent);
+}
+.machine-list :deep(.n-collapse-item__header) { padding: 12px 4px; }
+.machine-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.machine-name { font-weight: 650; font-size: 15px; }
+.machine-host { font-size: 12px; color: var(--text-3); }
+.machine-extra { display: flex; align-items: center; gap: 6px; }
+.machine-list :deep(.card-grid) { padding-bottom: 12px; }
+@media (max-width: 640px) {
+  .machine-host { display: none; }
+  .machine-extra { gap: 4px; }
+}
 </style>
