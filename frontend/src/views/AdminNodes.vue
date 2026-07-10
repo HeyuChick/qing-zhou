@@ -2,57 +2,49 @@
   <div>
     <h2 class="page-title">节点管理</h2>
     <n-tabs v-model:value="tab" animated>
-      <!-- 节点 -->
+      <!-- 节点（按分组卡片展示，同组节点聚在一张卡片里） -->
       <n-tab-pane name="nodes" tab="节点">
         <div class="page-toolbar">
           <span class="spacer" />
+          <n-button size="small" @click="openGroup()">添加分组</n-button>
           <n-button size="small" @click="openNodeImport">批量导入</n-button>
           <n-button size="small" type="primary" @click="openNode()">添加节点</n-button>
         </div>
         <n-spin :show="loading">
-          <div v-if="nodes.length" class="card-grid">
-            <div v-for="r in nodes" :key="r.id" class="list-card">
-              <div class="lc-head">
-                <span class="lc-title">{{ r.name || '—' }}</span>
-                <n-tag :type="r.enabled ? 'success' : 'default'" size="tiny" bordered="false">{{ r.enabled ? '启用' : '禁用' }}</n-tag>
+          <div v-if="groupedView.length">
+            <n-card v-for="gv in groupedView" :key="gv.key" size="small" :title="gv.name" class="group-card">
+              <template #header-extra>
+                <div class="group-actions">
+                  <n-tag size="tiny" :type="gv.isUngrouped ? 'default' : 'info'" bordered="false">{{ gv.nodes.length }} 节点</n-tag>
+                  <n-button size="tiny" type="primary" @click="openNodeInGroup(gv.group)">＋ 节点</n-button>
+                  <n-button v-if="gv.group" size="tiny" @click="openGroup(gv.group)">编辑</n-button>
+                  <n-button v-if="gv.group" size="tiny" type="error" @click="handleDeleteGroup(gv.group.id)">删除</n-button>
+                </div>
+              </template>
+              <div v-if="gv.description" class="group-desc">{{ gv.description }}</div>
+              <div v-if="gv.nodes.length" class="card-grid">
+                <div v-for="r in gv.nodes" :key="r.id" class="list-card">
+                  <div class="lc-head">
+                    <span class="lc-title">{{ r.name || '—' }}</span>
+                    <n-tag :type="r.enabled ? 'success' : 'default'" size="tiny" bordered="false">{{ r.enabled ? '启用' : '禁用' }}</n-tag>
+                  </div>
+                  <div class="lc-meta">
+                    <span class="kv"><n-tag :type="r.type === 'self_built' ? 'info' : 'warning'" size="tiny" bordered="false">{{ r.type === 'self_built' ? '自建' : '外部' }}</n-tag></span>
+                    <span class="kv">协议 <b>{{ nodeProtocol(r) }}</b></span>
+                  </div>
+                  <div v-if="(r.group_ids || []).length > 1" class="lc-meta"><span class="kv">分组 <b>{{ groupNames(r.group_ids) }}</b></span></div>
+                  <div class="lc-foot">
+                    <n-button size="tiny" @click="openNode(r)">编辑</n-button>
+                    <n-button size="tiny" type="error" @click="handleDeleteNode(r.id)">删除</n-button>
+                  </div>
+                </div>
               </div>
-              <div class="lc-meta">
-                <span class="kv"><n-tag :type="r.type === 'self_built' ? 'info' : 'warning'" size="tiny" bordered="false">{{ r.type === 'self_built' ? '自建' : '外部' }}</n-tag></span>
-                <span class="kv">协议 <b>{{ nodeProtocol(r) }}</b></span>
-              </div>
-              <div class="lc-meta"><span class="kv">分组 <b>{{ groupNames(r.group_ids) }}</b></span></div>
-              <div class="lc-foot">
-                <n-button size="tiny" @click="openNode(r)">编辑</n-button>
-                <n-button size="tiny" type="error" @click="handleDeleteNode(r.id)">删除</n-button>
-              </div>
-            </div>
+              <n-empty v-else description="该分组暂无节点" size="small" style="padding:12px 0;">
+                <template #extra><n-button size="tiny" @click="openNodeInGroup(gv.group)">添加节点</n-button></template>
+              </n-empty>
+            </n-card>
           </div>
-          <n-empty v-else-if="!loading" description="暂无节点" style="padding:40px 0;" />
-        </n-spin>
-      </n-tab-pane>
-
-      <!-- 分组 -->
-      <n-tab-pane name="groups" tab="分组">
-        <div class="page-toolbar">
-          <span class="spacer" />
-          <n-button size="small" type="primary" @click="openGroup()">添加分组</n-button>
-        </div>
-        <n-spin :show="loading">
-          <div v-if="groups.length" class="card-grid">
-            <div v-for="r in groups" :key="r.id" class="list-card">
-              <div class="lc-head">
-                <span class="lc-title">{{ r.name || '—' }}</span>
-                <n-tag size="tiny" bordered="false">{{ r.node_count || 0 }} 节点</n-tag>
-              </div>
-              <div v-if="r.description" class="lc-meta" style="color:var(--text-2);">{{ r.description }}</div>
-              <div class="lc-meta"><span class="kv">排序 <b>{{ r.sort_order ?? 0 }}</b></span></div>
-              <div class="lc-foot">
-                <n-button size="tiny" @click="openGroup(r)">编辑</n-button>
-                <n-button size="tiny" type="error" @click="handleDeleteGroup(r.id)">删除</n-button>
-              </div>
-            </div>
-          </div>
-          <n-empty v-else-if="!loading" description="暂无分组" style="padding:40px 0;" />
+          <n-empty v-else-if="!loading" description="暂无分组或节点" style="padding:40px 0;" />
         </n-spin>
       </n-tab-pane>
 
@@ -156,7 +148,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import {
   NTabs, NTabPane, NDrawer, NDrawerContent, NButton, NForm, NFormItem, NInput, NInputNumber,
-  NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, useMessage
+  NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCard, useMessage
 } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
 
@@ -195,6 +187,24 @@ function groupNames(ids: number[] | undefined): string {
   return ids.map(id => groupMap.value.get(id) || '#' + id).join(', ')
 }
 
+// 统一视图：每个分组一张卡片，卡片内是该组的节点；未归任何分组的节点放到「未分组」卡片。
+// 一个节点可属于多个分组，会在每个所属分组的卡片里各出现一次。
+const groupedView = computed(() => {
+  const out: any[] = []
+  const sorted = [...groups.value].sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id)
+  for (const g of sorted) {
+    out.push({
+      key: 'g' + g.id, name: g.name, description: g.description || '', group: g, isUngrouped: false,
+      nodes: nodes.value.filter(n => (n.group_ids || []).includes(g.id)),
+    })
+  }
+  const ungrouped = nodes.value.filter(n => !n.group_ids || n.group_ids.length === 0)
+  if (ungrouped.length) {
+    out.push({ key: 'ungrouped', name: '未分组', description: '', group: null, isUngrouped: true, nodes: ungrouped })
+  }
+  return out
+})
+
 // --- Nodes ---
 const showNode = ref(false)
 const editingNode = ref<any>(null)
@@ -207,6 +217,11 @@ function openNode(n?: any) {
     Object.assign(nodeForm, { name: '', type: 'self_built', inbound_tag: '', link: '', group_ids: [], enabled: true })
   }
   showNode.value = true
+}
+// 从分组卡片直接添加节点，预选该分组。
+function openNodeInGroup(g: any | null) {
+  openNode()
+  if (g) nodeForm.group_ids = [g.id]
 }
 async function handleSaveNode() {
   saving.value = true
@@ -295,4 +310,7 @@ async function load() {
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 16px; }
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
+.group-card { margin-bottom: 14px; }
+.group-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.group-desc { color: var(--text-2); font-size: 12px; margin-bottom: 10px; }
 </style>
