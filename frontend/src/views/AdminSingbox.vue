@@ -130,6 +130,10 @@
                 <span v-else-if="r.upstream_inbound_id" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
                 <span class="topo-arrow">→</span>
                 <span class="topo-node inet">🌐 互联网</span>
+                <span class="topo-actions">
+                  <n-button v-if="!r.upstream_inbound_id && !landingTargetIds.has(r.id)" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
+                  <n-button v-else-if="r.upstream_inbound_id" size="tiny" quaternary type="warning" @click="unlinkRelay(r)">解除中转</n-button>
+                </span>
               </div>
             </div>
           </div>
@@ -256,6 +260,9 @@
     <n-drawer v-model:show="showInb" :width="drawerW" placement="right">
       <n-drawer-content :title="ie.id ? '编辑入站' : '添加入站'" closable>
         <n-form label-placement="left" label-width="100">
+          <n-alert v-if="chainSourceId" type="info" :show-icon="false" style="margin-bottom:12px;">
+            新入站将作为「<b>{{ chainSourceName }}</b>」的落地，保存后自动建立中转链路（该入站→本入站→互联网）。
+          </n-alert>
           <n-form-item label="协议"><n-select v-model:value="ie.type" :options="protoOpts" :disabled="!!ie.id" /></n-form-item>
           <n-form-item label="名称 / Tag"><n-input v-model:value="ie.tag" /></n-form-item>
           <n-form-item label="监听地址"><n-select v-model:value="ie.listen" :options="listenOpts" /></n-form-item>
@@ -397,6 +404,7 @@ function toggleAllMachines() {
 // 在指定机器下新增入站（预填所属服务器）。
 function openInboundFor(serverId: number) {
   resetIe()
+  chainSourceId.value = 0
   ie.server_id = serverId
   showInb.value = true
 }
@@ -612,6 +620,27 @@ async function deleteTls(id: number) { try { await apiDelete('/api/admin/sb/tls/
 // ========== Inbound ==========
 const showInb = ref(false)
 const presetType = ref<string | null>(null)
+// 若 > 0：本次「添加入站」保存后，把该源入站的落地(upstream)指向新建入站，形成中转链路。
+const chainSourceId = ref(0)
+const chainSourceName = computed(() => { const s = inbounds.value.find(n => n.id === chainSourceId.value); return s ? s.tag : '' })
+// 已被别的入站当作落地目标的入站 id 集合（用于禁止在其后再串联，避免多级链式）。
+const landingTargetIds = computed(() => { const s = new Set<number>(); for (const n of inbounds.value) if (n.upstream_inbound_id) s.add(n.upstream_inbound_id); return s })
+
+// 从拓扑图为某入站串联一个落地：打开「添加入站」抽屉，保存后自动把源入站的落地指向新入站。
+function addLandingAfter(r: any) {
+  resetIe()
+  chainSourceId.value = r.id
+  ie.tag = (r.tag || 'node') + '-landing'
+  showInb.value = true
+}
+
+// 解除某入站的中转，恢复直接出网。
+async function unlinkRelay(r: any) {
+  try {
+    await apiPut('/api/admin/sb/inbounds/' + r.id, { type: r.type, tag: r.tag, listen: r.listen || '::', listen_port: r.listen_port, tls_id: r.tls_id, server_id: r.server_id, enabled: r.enabled, upstream_inbound_id: 0, options: JSON.stringify(jp(r.options)) })
+    message.success('已解除中转'); await load()
+  } catch (e: any) { message.error(e.message) }
+}
 // 归一化 flow 值：空或 vision 统一成 xtls-rprx-vision，兼容旧数据和 sing-box 1.10+ 新名
 function normFlow(v: any): string {
   if (!v || v === 'vision') return 'xtls-rprx-vision'
@@ -640,6 +669,7 @@ function resetIe() {
 }
 
 function openInbound(n?: any, clone = false) {
+  chainSourceId.value = 0
   if (n) {
     const o = jp(n.options), tr = o.transport || {}, mx = o.multiplex || {}, br = mx.brutal || {}, obfs = o.obfs || {}
     Object.assign(ie, {
@@ -667,6 +697,7 @@ function cloneInbound(n: any) { openInbound(n, true) }
 function applyPreset(v: string | null) {
   if (!v) return
   resetIe()
+  chainSourceId.value = 0
   const presets: Record<string, any> = {
     'vless-reality': { type: 'vless', tag: 'vless-reality', listen_port: 443, flow: 'xtls-rprx-vision' },
     'vless-ws-tls': { type: 'vless', tag: 'vless-ws', listen_port: 443, net: 'ws', ws_path: '/ws', flow: 'none' },
@@ -709,7 +740,15 @@ async function saveInbound() {
     const body = { type: ie.type, tag: ie.tag, listen: ie.listen || '::', listen_port: ie.listen_port, tls_id: ie.type === 'shadowsocks' ? 0 : (ie.tls_id || 0), server_id: ie.server_id || 0, enabled: ie.enabled, upstream_inbound_id: ie.upstream_inbound_id || 0, options: JSON.stringify(o) }
     const fn = ie.id ? apiPut : apiPost
     const url = ie.id ? '/api/admin/sb/inbounds/' + ie.id : '/api/admin/sb/inbounds'
-    await fn(url, body)
+    const created = await fn(url, body)
+    // 串联落地：把源入站的 upstream 指向刚建的入站，形成 源→新落地 的中转链路。
+    if (chainSourceId.value && created && created.id) {
+      const src = inbounds.value.find(n => n.id === chainSourceId.value)
+      if (src) {
+        await apiPut('/api/admin/sb/inbounds/' + src.id, { type: src.type, tag: src.tag, listen: src.listen || '::', listen_port: src.listen_port, tls_id: src.tls_id, server_id: src.server_id, enabled: src.enabled, upstream_inbound_id: created.id, options: JSON.stringify(jp(src.options)) })
+      }
+    }
+    chainSourceId.value = 0
     message.success('保存成功'); showInb.value = false; await load()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
 }
@@ -819,6 +858,8 @@ async function load() {
 .topo-arrow { color: var(--text-3, #aaa); font-size: 13px; user-select: none; }
 .topo-arrow.relay { color: #f0a020; font-weight: 600; font-size: 12px; }
 .topo-arrow.relay.warn { color: #d03050; }
+.topo-actions { margin-left: auto; display: inline-flex; gap: 6px; }
+@media (max-width: 600px) { .topo-actions { margin-left: 0; } }
 
 .sni-result {
   width: 100%;
