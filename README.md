@@ -120,6 +120,19 @@
 - 一台 **Linux amd64** 服务器（落地节点用）；面板本身跨平台
 - 可选：域名 + HTTPS 证书（生产强烈建议）、SMTP（邮箱验证 / 找回密码用）
 
+### 〇、Docker 一键部署（最省事）
+
+面板是中心机、SSH 管远程落地，容器不需要跑 sing-box；镜像内置两架构探针，支持 amd64/arm64。
+
+```bash
+git clone https://github.com/mllt992/qing-zhou.git && cd qing-zhou
+# 改 docker-compose.yml 里的 QZ_PUBLIC_BASE 与 QZ_SECRET_KEY(openssl rand -hex 32)
+docker compose up -d
+docker compose logs -f qingzhou     # 首启打印随机管理员密码（未设 QZ_ADMIN_PASS 时）
+```
+
+或直接用镜像：`docker run -d -p 8081:8081 -e QZ_SECRET_KEY=$(openssl rand -hex 32) -v qingzhou-data:/data ghcr.io/mllt992/qing-zhou:latest`。**Docker 用「拉新镜像 + 重建容器」升级**，详见 [Wiki · Docker 部署](https://github.com/mllt992/qing-zhou/wiki/Docker-部署)。
+
 ### 一、本地开发运行
 
 ```bash

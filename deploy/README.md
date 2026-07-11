@@ -1,5 +1,20 @@
 # 部署 / 运维
 
+## Docker（最省事）
+
+面板是中心机、SSH 管远程落地，容器不需要跑 sing-box，只需持久化 DB。镜像内置两架构探针，支持 amd64/arm64。
+
+```bash
+# 改 docker-compose.yml 里的 QZ_PUBLIC_BASE 与 QZ_SECRET_KEY(openssl rand -hex 32)
+docker compose up -d
+docker compose logs -f qingzhou     # 首启打印随机管理员密码（未设 QZ_ADMIN_PASS 时）
+```
+
+要点：容器内 `QZ_LISTEN=0.0.0.0:8081`（镜像默认）；DB 在 `/data`（挂卷持久化）；生产必设 `QZ_SECRET_KEY`；
+以 uid 10001 非 root 运行（命名卷可直接写，bind 挂载需 `chown 10001`）。**升级用「拉新镜像 + 重建容器」，
+不要用面板内在线更新。** 详见 Wiki「Docker 部署」。自建镜像 `docker build --build-arg VERSION=<tag> -t qingzhou .`；
+发 release 时 `.github/workflows/docker.yml` 会自动构建并推送到 GHCR。
+
 ## sing-box（每台落地机）
 轻舟自管原生 sing-box。每台落地服务器先跑一键脚本（已装则检测、未装则装官方含
 `v2ray_api` 版到 `/usr/local/bin/sing-box` + systemd + 内核调优，并输出可填入面板
