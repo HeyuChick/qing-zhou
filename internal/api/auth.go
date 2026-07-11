@@ -60,7 +60,7 @@ func (a *API) issueLogin(w http.ResponseWriter, r *http.Request, u *store.User) 
 	if err != nil {
 		return "", err
 	}
-	setAuthCookie(w, tok, isHTTPS(r))
+	setAuthCookie(w, tok, a.isHTTPS(r))
 	return tok, nil
 }
 

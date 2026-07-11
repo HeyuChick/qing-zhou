@@ -104,7 +104,7 @@ func (a *API) handleForgot(w http.ResponseWriter, r *http.Request) {
 	if u, _ := a.st.UserByEmail(email); u != nil && u.Email.Valid {
 		token, _ := idgen.RandToken(24)
 		if err := a.st.CreateEmailToken(u.ID, token, "reset", time.Hour); err == nil {
-			link := publicBase(r) + "/reset?token=" + token
+			link := a.publicBase(r) + "/reset?token=" + token
 			a.deliver(email, "重置密码 - 轻舟", resetEmailHTML(link), link)
 		}
 	}
@@ -201,7 +201,7 @@ func (a *API) handleBindEmail(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "创建验证令牌失败")
 		return
 	}
-	link := publicBase(r) + "/api/auth/verify?token=" + token
+	link := a.publicBase(r) + "/api/auth/verify?token=" + token
 	a.deliver(email, "验证你的邮箱 - 轻舟", verifyEmailHTML(link), link)
 	ok(w, J{"message": "验证邮件已发送到该邮箱，请点击其中链接完成绑定"})
 }
@@ -238,7 +238,7 @@ func (a *API) handleResendVerify(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "创建验证令牌失败")
 		return
 	}
-	link := publicBase(r) + "/api/auth/verify?token=" + token
+	link := a.publicBase(r) + "/api/auth/verify?token=" + token
 	a.deliver(email, "验证你的邮箱 - 轻舟", verifyEmailHTML(link), link)
 	ok(w, J{"message": "验证邮件已发送，请查收（含垃圾箱）"})
 }

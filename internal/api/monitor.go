@@ -75,7 +75,7 @@ func (a *API) handleDownloadAgent(w http.ResponseWriter, r *http.Request) {
 // handleDownloadInstallScript serves a one-click install script that downloads
 // the probe binary and sets up systemd. Usage: bash <(curl -sL <panel>/api/monitor/install.sh) <token>
 func (a *API) handleDownloadInstallScript(w http.ResponseWriter, r *http.Request) {
-	panelURL := publicBase(r)
+	panelURL := a.publicBase(r)
 	script := `#!/bin/bash
 # qingzhou-probe one-click installer
 # Usage: bash <(curl -sL ` + panelURL + `/api/monitor/install.sh) <probe_token>

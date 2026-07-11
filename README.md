@@ -151,7 +151,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 
 ```bash
 # 1) 在落地服务器上一键安装 sing-box（官方含 v2ray_api 版 + systemd + 内核调优）
-#    脚本由面板静态托管，把域名换成你自己的面板地址：
+#    脚本由面板托管，把域名换成你自己的面板地址（也可在「系统设置 → 面板访问地址」一键复制）：
 curl -fsSL https://<你的面板域名>/install-singbox.sh | bash
 
 # 2) 放置二进制并写配置
@@ -208,8 +208,9 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 |---|---|---|
 | `QZ_LISTEN` | `127.0.0.1:8081` | 监听地址（生产建议只听本地 + 前置 nginx） |
 | `QZ_DB` | `qingzhou.db` | SQLite 数据库文件路径 |
-| `QZ_PUBLIC_BASE` | 从请求推断 | 对外地址，用于生成订阅链接，如 `https://node.example.com` |
-| `QZ_WEB_DIR` | 空 | 设为 `web/dist` 开启前端热更新；生产留空用内嵌资源 |
+| `QZ_PUBLIC_BASE` | 设置页/请求推断 | 面板对外地址（订阅链接、探针安装、邮件链接、sing-box 安装命令），如 `https://node.example.com`。也可在「系统设置 → 面板访问地址」填；本变量优先 |
+| `QZ_PROBE_DIR` | `cmd/probe/dist` | 探针二进制目录，面板据此提供下载。二进制部署须设为绝对目录（放入 `probe-linux-amd64/arm64`），否则探针安装 404 |
+| `QZ_WEB_DIR` | 空 | 设为 `frontend/dist` 开启前端热更新；生产留空用内嵌资源 |
 | `QZ_ADMIN_USER` | `mllt992` | 初始管理员用户名（仅首次 seed 生效） |
 | `QZ_ADMIN_PASS` | 随机生成 | 初始管理员密码；留空则随机生成并打印到日志 |
 | `QZ_SECRET_KEY` | 回退 jwt_secret | **加密库内敏感配置的主密钥**，建议 `openssl rand -hex 32`，置环境变量不入库 |

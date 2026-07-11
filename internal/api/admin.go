@@ -18,6 +18,7 @@ var secretSettings = map[string]bool{
 // settingEnv maps a setting key to the env var that overrides it (env wins in
 // buildMailer). Used to surface the *effective* config in the panel.
 var settingEnv = map[string]string{
+	"public_base":    "QZ_PUBLIC_BASE",
 	"smtp_host":      "QZ_SMTP_HOST",
 	"smtp_port":      "QZ_SMTP_PORT",
 	"smtp_user":      "QZ_SMTP_USER",

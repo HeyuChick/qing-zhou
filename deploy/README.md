@@ -7,7 +7,18 @@
 ```bash
 curl -fsSL https://<你的面板域名>/install-singbox.sh | bash
 ```
+面板「**系统设置 → 面板访问地址**」会按你配置的地址生成可一键复制的完整命令。访问地址来源优先级：
+`QZ_PUBLIC_BASE` 环境变量 > 设置页「访问地址」> 反代头/请求 Host。
+
 本机落地用脚本输出的默认值即可（`QZ_SINGBOX_*`）；远程落地在面板「服务器」新增并填写。
+
+## 探针监控（可选，每台服务器）
+探针 `qingzhou-probe` 上报 CPU/内存/磁盘/负载，安装命令在面板「服务器监控」页获取。
+
+> **注意**：探针二进制由面板托管下载（`/api/monitor/agent/linux-<arch>`），从 `QZ_PROBE_DIR`
+> 指定的目录读取，默认相对路径 `cmd/probe/dist`。二进制部署时该相对目录通常不存在，探针安装会
+> 报「下载失败: HTTP 404」。请从 GitHub Release 下载 `probe-linux-amd64` / `probe-linux-arm64`
+> 放到一个目录（文件名不变），并在 env 里设 `QZ_PROBE_DIR=/opt/qingzhou/probe`。
 
 ## 目录约定（服务器）
 - 程序：`/opt/qingzhou/qingzhou`

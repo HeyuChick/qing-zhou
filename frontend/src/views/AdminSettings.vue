@@ -22,6 +22,37 @@
         </n-form>
       </n-card>
 
+      <n-card title="面板访问地址" size="small" style="margin-bottom:16px;">
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;line-height:1.7;">
+          面板对外访问地址，用于订阅链接、探针安装、邮件验证/找回链接，以及下方的 sing-box 一键安装命令。
+          填写完整地址，例如 <code>https://node.example.com</code> 或 <code>http://1.2.3.4:8081</code>；
+          不带 <code>http(s)://</code> 前缀时默认按 <code>https</code> 处理。留空则自动依据反向代理头 / 请求 Host 推断。
+        </p>
+        <n-form label-placement="left" label-width="120">
+          <n-form-item label="访问地址">
+            <n-input v-model:value="form.public_base" :disabled="envLocked('public_base')"
+              placeholder="https://node.example.com 或 http://1.2.3.4:8081" style="max-width:420px;" />
+          </n-form-item>
+          <n-form-item v-if="envLocked('public_base')" label=" ">
+            <span style="font-size:12px;color:var(--warning,#d97706);">
+              已由环境变量 QZ_PUBLIC_BASE 固定；如需在面板内修改，请移除该环境变量后重启。
+            </span>
+          </n-form-item>
+          <n-form-item label="sing-box 安装命令">
+            <div style="width:100%;max-width:560px;">
+              <n-input-group>
+                <n-input :value="installCmd" readonly style="font-family:monospace;font-size:12px;" />
+                <n-button type="primary" ghost @click="copyInstall">复制</n-button>
+              </n-input-group>
+              <p style="font-size:12px;color:var(--text-3);margin-top:6px;line-height:1.7;">
+                在落地服务器上以 root 运行此命令：已安装 sing-box 会自动检测并打印信息；未安装则拉取官方最新版（含
+                v2ray_api，面板统计依赖）并完成内核调优，最后输出可填入「服务器」的接管信息。
+              </p>
+            </div>
+          </n-form-item>
+        </n-form>
+      </n-card>
+
       <n-card title="首页设置" size="small" style="margin-bottom:16px;">
         <n-form label-placement="left" label-width="120">
           <n-form-item label="首页模式">
@@ -81,8 +112,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
-import { NCard, NForm, NFormItem, NInput, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
 import { apiGet, apiPost, apiPut, apiList } from '@/api'
 
 const message = useMessage()
@@ -102,6 +133,32 @@ const alertMem = ref(90)
 const alertDisk = ref(85)
 const testEmail = ref('')
 const groupOptions = ref<any[]>([])
+
+// Mirror the backend's normalizeBase: trim, drop trailing slashes, default to
+// https:// when no scheme is given.
+function normalizeBase(v: string): string {
+  v = (v || '').trim().replace(/\/+$/, '')
+  if (!v) return ''
+  if (!v.includes('://')) v = 'https://' + v
+  return v
+}
+// Base used to build the copyable command: the configured address, else the
+// address the admin is currently browsing (so the command is never blank).
+const effectiveBase = computed(() => normalizeBase(form.public_base) || window.location.origin)
+const installCmd = computed(() => `curl -fsSL ${effectiveBase.value}/install-singbox.sh | bash`)
+
+function envLocked(key: string): boolean {
+  return (form._env_keys || '').split(',').includes(key)
+}
+
+async function copyInstall() {
+  try {
+    await navigator.clipboard.writeText(installCmd.value)
+    message.success('已复制安装命令')
+  } catch {
+    message.error('复制失败，请手动复制')
+  }
+}
 
 async function handleSave() {
   saving.value = true

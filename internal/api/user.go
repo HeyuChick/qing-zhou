@@ -122,7 +122,7 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusInternalServerError, "创建验证令牌失败")
 			return
 		}
-		link := publicBase(r) + "/api/auth/verify?token=" + token
+		link := a.publicBase(r) + "/api/auth/verify?token=" + token
 		a.deliver(req.Email, "验证你的邮箱 - 轻舟", verifyEmailHTML(link), link)
 		ok(w, J{"need_verify": true, "message": "注册成功，请查收验证邮件后激活账号"})
 		return
@@ -358,7 +358,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = subconv.FormatForUA(r.Header.Get("User-Agent"))
 	}
-	subURL := publicBase(r) + r.URL.Path
+	subURL := a.publicBase(r) + r.URL.Path
 	body, ctype, err := subconv.Render(format, links, groups, clashTpl, singboxTpl, subURL)
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)
@@ -565,5 +565,5 @@ func (a *API) subURL(r *http.Request, u *store.User) string {
 	if !u.SubToken.Valid {
 		return ""
 	}
-	return publicBase(r) + "/sub/" + u.SubToken.String
+	return a.publicBase(r) + "/sub/" + u.SubToken.String
 }
