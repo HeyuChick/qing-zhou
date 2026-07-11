@@ -54,9 +54,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.img.outputs.name }}
+          # latest 在发布 release 时自动打；手动 dispatch 也打（仅对最新 tag 手动重建时用）
           tags: |
             type=raw,value=${{ steps.ver.outputs.tag }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
 
       - name: Build & push (amd64 + arm64)
         uses: docker/build-push-action@v6
