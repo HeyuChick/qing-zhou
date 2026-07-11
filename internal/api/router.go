@@ -251,12 +251,31 @@ func (a *API) Router() http.Handler {
 		ar.Delete("/api/admin/announcements/{id}", a.handleAdminDeleteAnnouncement)
 	})
 
+	// sing-box one-click install script. Served explicitly (above the SPA
+	// catch-all) from the embedded web/dist so `curl https://<panel>/install-singbox.sh | bash`
+	// works under any frontend — the new frontend/dist doesn't bundle it, so
+	// without this the request would fall through to index.html.
+	r.Get("/install-singbox.sh", serveInstallScript)
+
 	// Embedded SPA (must be last; specific routes above take precedence).
 	// Set QZ_USE_NEW_FRONTEND=1 to serve the new Vue 3 frontend from the
 	// frontend/ package. Otherwise, the original web/ frontend is used.
 	r.Handle("/*", frontendHandler())
 
 	return r
+}
+
+// serveInstallScript serves the embedded sing-box install script as a shell
+// script, independent of which SPA frontend is active.
+func serveInstallScript(w http.ResponseWriter, r *http.Request) {
+	b, ok := web.InstallScript()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store, must-revalidate")
+	_, _ = w.Write(b)
 }
 
 // frontendHandler returns the appropriate SPA handler based on environment.

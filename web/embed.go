@@ -27,6 +27,18 @@ func assetFS() fs.FS {
 	return sub
 }
 
+// InstallScript returns the embedded sing-box install script. It always reads
+// from the binary's embedded copy (web/dist), independent of QZ_WEB_DIR or the
+// active SPA frontend, so the /install-singbox.sh endpoint keeps working even
+// when the new frontend/dist (which doesn't bundle the script) is served.
+func InstallScript() ([]byte, bool) {
+	b, err := distFS.ReadFile("dist/install-singbox.sh")
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
 // Handler serves static assets, falling back to index.html for SPA routes.
 func Handler() http.Handler {
 	sub := assetFS()
