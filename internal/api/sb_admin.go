@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/acmesh"
+	"qingzhou/internal/sbproc"
 	"qingzhou/internal/singbox"
 	"qingzhou/internal/sshctl"
 	"qingzhou/internal/store"
@@ -780,13 +782,13 @@ func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request)
 	ok(w, nil)
 }
 
-// GET /api/admin/sb/preview?server_id=N — render the sing-box config for a
-// specific server (server_id=0 or omitted = local).
-func (a *API) handleAdminSbPreview(w http.ResponseWriter, r *http.Request) {
+// buildPreviewConfig renders the sing-box config for a specific server
+// (serverID <= 0 = local). Shared by the preview and correctness-check
+// endpoints so both validate exactly what they display.
+func (a *API) buildPreviewConfig(serverID int64) ([]byte, error) {
 	byTag, err := a.st.BuildUsersByTag(nowUnix())
 	if err != nil {
-		fail(w, http.StatusInternalServerError, "构建用户映射失败")
-		return
+		return nil, fmt.Errorf("构建用户映射失败: %w", err)
 	}
 	base, _ := a.st.GetSetting("sb_base_config")
 	if base == "" {
@@ -796,19 +798,107 @@ func (a *API) handleAdminSbPreview(w http.ResponseWriter, r *http.Request) {
 	if listen == "" {
 		listen = "127.0.0.1:18080"
 	}
-	serverID := atoi(r.URL.Query().Get("server_id"))
-	var cfg []byte
 	if serverID > 0 {
-		cfg, err = a.st.BuildSingboxConfigForServer(serverID, base, listen, byTag)
-	} else {
-		cfg, err = a.st.BuildSingboxConfig(base, listen, byTag)
+		return a.st.BuildSingboxConfigForServer(serverID, base, listen, byTag)
 	}
+	return a.st.BuildSingboxConfig(base, listen, byTag)
+}
+
+// GET /api/admin/sb/preview?server_id=N — render the sing-box config for a
+// specific server (server_id=0 or omitted = local).
+func (a *API) handleAdminSbPreview(w http.ResponseWriter, r *http.Request) {
+	cfg, err := a.buildPreviewConfig(atoi(r.URL.Query().Get("server_id")))
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "生成配置失败")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_, _ = w.Write(cfg)
+}
+
+// GET /api/admin/sb/check?server_id=N — generate the config for a server and
+// validate it with `sing-box check`, the same gate Apply uses before shipping.
+// Exposed read-only so the admin can catch a bad config before it goes live.
+// Always returns 200 with {ok,stage,output,...}; ok=false means "config has a
+// problem", not "the request failed".
+func (a *API) handleAdminSbCheck(w http.ResponseWriter, r *http.Request) {
+	serverID := atoi(r.URL.Query().Get("server_id"))
+	cfg, err := a.buildPreviewConfig(serverID)
+	if err != nil {
+		ok(w, J{"ok": false, "stage": "generate", "output": "生成配置失败：" + err.Error()})
+		return
+	}
+
+	// Structural sanity + a couple of panel-level lints that don't need the
+	// binary (empty inbounds is a common "why is my node dead" cause).
+	var doc struct {
+		Inbounds  []struct {
+			Tag        string `json:"tag"`
+			ListenPort int    `json:"listen_port"`
+		} `json:"inbounds"`
+		Outbounds []json.RawMessage `json:"outbounds"`
+	}
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		ok(w, J{"ok": false, "stage": "json", "output": "生成的配置不是合法 JSON：" + err.Error()})
+		return
+	}
+	var warnings []string
+	if len(doc.Inbounds) == 0 {
+		warnings = append(warnings, "该机器没有任何入站，inbounds 为空（配置能通过校验但不会提供任何服务）。")
+	}
+	seen := map[int]string{}
+	for _, ib := range doc.Inbounds {
+		if ib.ListenPort == 0 {
+			continue
+		}
+		if prev, dup := seen[ib.ListenPort]; dup {
+			warnings = append(warnings, fmt.Sprintf("端口 %d 被多个入站占用（%s、%s），启动时会冲突。", ib.ListenPort, prev, ib.Tag))
+		}
+		seen[ib.ListenPort] = ib.Tag
+	}
+
+	base := J{"inbounds": len(doc.Inbounds), "outbounds": len(doc.Outbounds), "warnings": warnings}
+
+	bin := sbproc.FindSingBoxBin()
+	if bin == "" {
+		base["ok"] = len(warnings) == 0
+		base["stage"] = "no-binary"
+		base["output"] = "未找到 sing-box 可执行文件，仅校验了 JSON 结构（未做 sing-box check）。可设置 QZ_SINGBOX_BIN 或把 sing-box 装到 PATH 后重试。"
+		ok(w, base)
+		return
+	}
+
+	tmp, err := os.CreateTemp("", "qz-precheck-*.json")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "创建临时文件失败")
+		return
+	}
+	path := tmp.Name()
+	defer os.Remove(path)
+	if _, err := tmp.Write(cfg); err != nil {
+		tmp.Close()
+		fail(w, http.StatusInternalServerError, "写入临时文件失败")
+		return
+	}
+	tmp.Close()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	out, cerr := exec.CommandContext(ctx, bin, "check", "-c", path).CombinedOutput()
+	base["stage"] = "check"
+	if cerr != nil {
+		base["ok"] = false
+		base["output"] = strings.TrimSpace(string(out)+"\n"+cerr.Error())
+		ok(w, base)
+		return
+	}
+	base["ok"] = len(warnings) == 0
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		msg = "sing-box check 通过，配置合法。"
+	}
+	base["output"] = msg
+	ok(w, base)
 }
 
 func nowUnix() int64 { return time.Now().Unix() }

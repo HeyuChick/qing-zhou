@@ -143,14 +143,26 @@
 
       <n-tab-pane name="preview" tab="配置预览">
         <div class="page-toolbar">
-          <n-select v-model:value="previewSid" :options="serverOpts" placeholder="本机" clearable style="width:200px;max-width:60%;" size="small" />
+          <n-select v-model:value="previewSid" :options="serverOpts" placeholder="本机" clearable style="width:200px;max-width:60%;" size="small" @update:value="onPreviewServerChange" />
           <span class="spacer" />
+          <n-button size="small" :loading="checkLoading" :disabled="!previewJson" @click="runCheck">正确性检查</n-button>
+          <n-button size="small" :disabled="!previewJson" @click="copyPreview">复制配置</n-button>
           <n-button size="small" type="primary" :loading="previewLoading" @click="loadPreview">刷新预览</n-button>
         </div>
         <p v-if="previewNoInbounds" style="font-size:12px;color:var(--warning,#d97706);margin:0 0 10px;line-height:1.7;">
           这台机器（{{ serverName(previewSid || 0) }}）下没有任何入站，因此配置里 <code>inbounds</code> 为空。
           请在上方下拉切换到入站所在的机器，或回「入站」页确认入站的**归属机器**与**已启用**状态。
         </p>
+        <div v-if="checkResult" class="check-result" :class="checkResult.ok ? 'ok' : 'err'">
+          <div class="check-head">
+            <b>{{ checkResult.ok ? '✓ 配置校验通过' : '✗ 配置存在问题' }}</b>
+            <span class="check-meta">入站 {{ checkResult.inbounds }} · 出站 {{ checkResult.outbounds }}<template v-if="checkResult.stage === 'no-binary'"> · 未做 sing-box check</template></span>
+          </div>
+          <ul v-if="checkResult.warnings && checkResult.warnings.length" class="check-warn">
+            <li v-for="(wmsg, i) in checkResult.warnings" :key="i">{{ wmsg }}</li>
+          </ul>
+          <pre v-if="checkResult.output" class="check-out">{{ checkResult.output }}</pre>
+        </div>
         <n-code :code="previewJson" language="json" style="max-height:60vh;overflow:auto;" />
       </n-tab-pane>
     </n-tabs>
@@ -338,7 +350,7 @@ import {
   NTabs, NTabPane, NDrawer, NDrawerContent, NButton, NForm, NFormItem, NInput, NInputNumber, NInputGroup,
   NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCode, NCheckbox, NCollapse, NCollapseItem, useMessage
 } from 'naive-ui'
-import { apiList, apiGet, apiPost, apiPut, apiDelete } from '@/api'
+import { apiList, apiGet, apiGetRaw, apiPost, apiPut, apiDelete } from '@/api'
 
 const message = useMessage()
 const tab = ref('tls')
@@ -831,17 +843,60 @@ async function batchDelete() {
 }
 
 // ========== Preview ==========
+const checkLoading = ref(false)
+const checkResult = ref<any>(null)
+
 async function loadPreview() {
   previewLoading.value = true
+  checkResult.value = null // stale check no longer matches the refreshed config
   try {
     const url = previewSid.value ? '/api/admin/sb/preview?server_id=' + previewSid.value : '/api/admin/sb/preview'
-    previewJson.value = JSON.stringify(await apiGet(url), null, 2)
+    // 预览接口直接返回原始 sing-box 配置文档（无 {code,data,msg} 信封），
+    // 必须用 apiGetRaw 取整个响应体，否则 .data 拆封会得到 null。
+    previewJson.value = JSON.stringify(await apiGetRaw(url), null, 2)
   } catch (e: any) {
     // Don't swallow: a blank preview with no reason is what makes "预览是空的"
     // impossible to diagnose. Surface the server's error and clear stale output.
     previewJson.value = ''
     message.error('生成预览失败：' + (e?.message || e))
   } finally { previewLoading.value = false }
+}
+
+// 切换机器后清掉上一台机器的校验结果，避免结果与当前预览不一致。
+function onPreviewServerChange() {
+  previewPicked = true // 用户已显式选机器，别让 tab 重访逻辑覆盖
+  checkResult.value = null
+  loadPreview()
+}
+
+// 正确性检查：让后端用生成配置跑 `sing-box check`（与真正下发前的校验同一道关卡）。
+async function runCheck() {
+  checkLoading.value = true
+  try {
+    const url = previewSid.value ? '/api/admin/sb/check?server_id=' + previewSid.value : '/api/admin/sb/check'
+    checkResult.value = await apiGet<any>(url)
+    if (checkResult.value?.ok) message.success('配置校验通过')
+    else message.warning('配置存在问题，详见下方结果')
+  } catch (e: any) {
+    message.error('校验失败：' + (e?.message || e))
+  } finally { checkLoading.value = false }
+}
+
+// 一键复制当前预览配置。剪贴板 API 在非 HTTPS 场景可能不可用，退回 execCommand。
+async function copyPreview() {
+  const text = previewJson.value
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    message.success('配置已复制')
+  } catch {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta)
+      message.success('配置已复制')
+    } catch { message.error('复制失败，请手动选择文本复制') }
+  }
 }
 
 function copy(text: string) { if (text) { navigator.clipboard.writeText(text); message.success('已复制') } }
@@ -927,6 +982,35 @@ async function load() {
 }
 .port-result.ok { background: rgba(24, 160, 88, 0.08); color: #18a058; }
 .port-result.err { background: rgba(208, 48, 80, 0.08); color: #d03050; }
+
+/* 配置正确性检查结果 */
+.check-result {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--n-border-color, #e0e0e6);
+  font-size: 13px;
+}
+.check-result.ok { border-color: #18a058; background: rgba(24, 160, 88, 0.07); }
+.check-result.err { border-color: #d03050; background: rgba(208, 48, 80, 0.07); }
+.check-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.check-result.ok .check-head b { color: #18a058; }
+.check-result.err .check-head b { color: #d03050; }
+.check-meta { font-size: 12px; color: var(--text-3, #999); }
+.check-warn { margin: 8px 0 0; padding-left: 18px; color: #b88200; line-height: 1.6; }
+.check-out {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--n-color, rgba(0, 0, 0, 0.04));
+  font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+}
 
 /* 按机器分组：克制的白卡 + 浅描边，与全站一致 */
 .machine-list :deep(.n-collapse-item) {

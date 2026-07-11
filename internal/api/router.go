@@ -193,6 +193,7 @@ func (a *API) Router() http.Handler {
 		ar.Put("/api/admin/sb/inbounds/{id}", a.handleAdminSaveSbInbound)
 		ar.Delete("/api/admin/sb/inbounds/{id}", a.handleAdminDeleteSbInbound)
 		ar.Get("/api/admin/sb/preview", a.handleAdminSbPreview)
+		ar.Get("/api/admin/sb/check", a.handleAdminSbCheck)
 		ar.Get("/api/admin/sb/port-check", a.handleAdminPortCheck)
 		ar.Get("/api/admin/sb/import-remote/list-files", a.handleAdminImportRemoteListFiles)
 		ar.Get("/api/admin/sb/import-remote/preview", a.handleAdminImportRemotePreview)
