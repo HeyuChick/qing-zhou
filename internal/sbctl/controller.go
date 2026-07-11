@@ -307,6 +307,12 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	if err != nil {
 		return fmt.Errorf("get server %d: %w", serverID, err)
 	}
+	// GetServer returns (nil, nil) for a missing row. Guard before dereferencing
+	// sv — otherwise an inbound whose server_id points to a deleted server panics
+	// the whole request (nil pointer) instead of failing cleanly.
+	if sv == nil {
+		return fmt.Errorf("服务器 %d 不存在（可能已被删除）", serverID)
+	}
 	cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.v2rayListen, byTag)
 	if err != nil {
 		return fmt.Errorf("server %d build config: %w", sv.ID, err)

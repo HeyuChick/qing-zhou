@@ -1,7 +1,7 @@
 <template>
   <div>
     <h2 class="page-title">sing-box 配置</h2>
-    <n-tabs v-model:value="tab" animated>
+    <n-tabs v-model:value="tab" animated @update:value="onTabChange">
       <n-tab-pane name="tls" tab="TLS 配置">
         <div class="page-toolbar">
           <n-input v-model:value="tlsSearch" placeholder="搜索名称/SNI" size="small" clearable style="width:200px;max-width:50%;" />
@@ -147,6 +147,10 @@
           <span class="spacer" />
           <n-button size="small" type="primary" :loading="previewLoading" @click="loadPreview">刷新预览</n-button>
         </div>
+        <p v-if="previewNoInbounds" style="font-size:12px;color:var(--warning,#d97706);margin:0 0 10px;line-height:1.7;">
+          这台机器（{{ serverName(previewSid || 0) }}）下没有任何入站，因此配置里 <code>inbounds</code> 为空。
+          请在上方下拉切换到入站所在的机器，或回「入站」页确认入站的**归属机器**与**已启用**状态。
+        </p>
         <n-code :code="previewJson" language="json" style="max-height:60vh;overflow:auto;" />
       </n-tab-pane>
     </n-tabs>
@@ -355,6 +359,12 @@ const servers = ref<any[]>([])
 const previewJson = ref('')
 const previewLoading = ref(false)
 const previewSid = ref<number | null>(null)
+// True when a preview rendered successfully but has zero inbounds — the usual
+// cause of a "空的" preview is having the wrong machine selected.
+const previewNoInbounds = computed(() => {
+  if (!previewJson.value) return false
+  try { return (JSON.parse(previewJson.value).inbounds || []).length === 0 } catch { return false }
+})
 
 // 搜索/筛选
 const tlsSearch = ref('')
@@ -413,7 +423,23 @@ function openInboundFor(serverId: number) {
 function previewMachine(id: number) {
   tab.value = 'preview'
   previewSid.value = id || null
+  previewPicked = true // explicit choice — don't let a later tab revisit override it
   loadPreview()
+}
+
+// 首次进入「配置预览」时，默认选中一台真正有入站的机器（入站通常建在服务器上，
+// 而非本机），并自动加载，避免默认停在空的本机预览上。
+let previewPicked = false
+function pickPreviewDefault() {
+  if (previewPicked) return
+  const withEnabled = machines.value.find(m => inbounds.value.some(n => (n.server_id || 0) === m.id && n.enabled))
+  const withAny = machines.value.find(m => inbounds.value.some(n => (n.server_id || 0) === m.id))
+  const target = withEnabled || withAny
+  if (target) previewSid.value = target.id || null
+  previewPicked = true
+}
+function onTabChange(name: string) {
+  if (name === 'preview') { pickPreviewDefault(); loadPreview() }
 }
 
 // 批量操作
@@ -810,7 +836,12 @@ async function loadPreview() {
   try {
     const url = previewSid.value ? '/api/admin/sb/preview?server_id=' + previewSid.value : '/api/admin/sb/preview'
     previewJson.value = JSON.stringify(await apiGet(url), null, 2)
-  } catch {} finally { previewLoading.value = false }
+  } catch (e: any) {
+    // Don't swallow: a blank preview with no reason is what makes "预览是空的"
+    // impossible to diagnose. Surface the server's error and clear stale output.
+    previewJson.value = ''
+    message.error('生成预览失败：' + (e?.message || e))
+  } finally { previewLoading.value = false }
 }
 
 function copy(text: string) { if (text) { navigator.clipboard.writeText(text); message.success('已复制') } }
