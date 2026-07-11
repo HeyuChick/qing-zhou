@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,15 +19,19 @@ var (
 )
 
 type Order struct {
-	ID          int64  `json:"id"`
-	UserID      int64  `json:"user_id"`
-	Username    string `json:"username,omitempty"` // filled by admin queries only
-	PackageID   int64  `json:"package_id"`
-	Name        string `json:"name"` // from snapshot (survives package deletion)
-	Type        string `json:"type"`
-	PricePoints int64  `json:"price_points"`
-	Status      string `json:"status"`
-	CreatedAt   int64  `json:"created_at"`
+	ID              int64   `json:"id"`
+	UserID          int64   `json:"user_id"`
+	Username        string  `json:"username,omitempty"` // filled by admin queries only
+	PackageID       int64   `json:"package_id"`
+	Name            string  `json:"name"` // from snapshot (survives package deletion)
+	Type            string  `json:"type"`
+	PricePoints     int64   `json:"price_points"`
+	Status          string  `json:"status"`
+	CreatedAt       int64   `json:"created_at"`
+	RefundedPoints  int64   `json:"refunded_points"`
+	RefundedAt      int64   `json:"refunded_at"`
+	RefundRatio     float64 `json:"refund_ratio"`
+	RefundedTraffic int64   `json:"refunded_traffic"`
 }
 
 type PurchaseResult struct {
@@ -297,8 +303,10 @@ func (s *Store) AssignPackage(userID int64, pkg *Package, operatorID int64, sync
 func (s *Store) GetOrder(id int64) (*Order, error) {
 	var o Order
 	var snap string
-	err := s.db.QueryRow(`SELECT id, user_id, package_id, package_snapshot, price_points, status, created_at
-		FROM orders WHERE id=?`, id).Scan(&o.ID, &o.UserID, &o.PackageID, &snap, &o.PricePoints, &o.Status, &o.CreatedAt)
+	err := s.db.QueryRow(`SELECT id, user_id, package_id, package_snapshot, price_points, status, created_at,
+		refunded_points, refunded_at, refund_ratio, refunded_traffic
+		FROM orders WHERE id=?`, id).Scan(&o.ID, &o.UserID, &o.PackageID, &snap, &o.PricePoints, &o.Status, &o.CreatedAt,
+		&o.RefundedPoints, &o.RefundedAt, &o.RefundRatio, &o.RefundedTraffic)
 	if err != nil {
 		return nil, nil // not found
 	}
@@ -328,15 +336,21 @@ func (s *Store) DeleteOrder(id int64) error {
 	return err
 }
 
-// RefundOrder reverses a successful purchase: refunds the points spent, undoes
-// the entitlement this order granted (traffic + plan duration, clamped so they
-// never go negative), marks the order 'refunded' (data is kept, not deleted),
-// and pushes the new entitlement to sing-box inside the transaction. Idempotent
-// guard: an already-refunded order returns ErrAlreadyRefunded.
-func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, resetUsed bool) error) (*User, error) {
+// RefundOrder reverses a successful purchase: refunds the points spent (prorated
+// to the unused portion, or in full — see mode), undoes the entitlement this
+// order granted (traffic + plan duration, clamped so they never go negative),
+// marks the order 'refunded' (data is kept, not deleted), and pushes the new
+// entitlement to sing-box inside the transaction. Idempotent guard: an
+// already-refunded order returns ErrAlreadyRefunded.
+//
+// mode is "" (use the store's configured policy), "prorated", or "full". Under
+// prorated, the refunded points = round(price × unused-fraction) where the
+// fraction is derived per the configured basis (traffic / time / min). The
+// entitlement reversal is identical in both modes — only the points differ.
+func (s *Store) RefundOrder(orderID, operatorID int64, mode string, sync func(updated *User, resetUsed bool) error) (*User, *RefundQuote, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	committed := false
 	defer func() {
@@ -352,41 +366,54 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 	err = tx.QueryRow(`SELECT user_id, package_id, package_snapshot, price_points, status, created_at
 		FROM orders WHERE id=?`, orderID).Scan(&userID, &pkgID, &snap, &price, &status, &createdAt)
 	if err != nil {
-		return nil, ErrOrderNotFound
+		return nil, nil, ErrOrderNotFound
 	}
 	if status == "refunded" {
-		return nil, ErrAlreadyRefunded
+		return nil, nil, ErrAlreadyRefunded
 	}
 
-	var sp struct {
-		Name         string `json:"name"`
-		Type         string `json:"type"`
-		TrafficBytes int64  `json:"traffic_bytes"`
-		DurationDays int64  `json:"duration_days"`
-	}
+	var sp orderSnapshot
 	_ = json.Unmarshal([]byte(snap), &sp)
 
 	u, err := scanUser(tx.QueryRow(`SELECT `+userCols+` FROM users WHERE id=?`, userID))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if u == nil {
-		return nil, ErrUserNotFound
+		return nil, nil, ErrUserNotFound
 	}
 
 	now := time.Now().Unix()
 
-	// Refund points (if any were charged) and write the ledger row.
-	newPoints := u.Points + price
-	if price != 0 {
+	// Compute the prorated refund from the CURRENT (pre-reversal) bucket state,
+	// inside the tx so it sees any prior uncommitted writes. Must run before the
+	// bucket reversal below, which mutates the same bucket.
+	pol := s.refundPolicy()
+	if mode == "full" || mode == "prorated" {
+		pol.Mode = mode
+	}
+	quote, err := computeRefundQuote(tx, userID, pkgID, sp, price, pol, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	quote.OrderID = orderID
+	refundPts := quote.RefundPoints
+
+	// Refund points (if any are due) and write the ledger row.
+	newPoints := u.Points + refundPts
+	if refundPts != 0 {
 		if _, err = tx.Exec(`UPDATE users SET points=? WHERE id=?`, newPoints, userID); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		note := "退款: " + sp.Name
+		if quote.Ratio < 1 {
+			note = "退款(" + strconv.Itoa(int(math.Round(quote.Ratio*100))) + "%): " + sp.Name
 		}
 		if _, err = tx.Exec(`INSERT INTO point_transactions
 			(user_id, amount, type, balance_after, ref_id, note, operator_id, created_at)
 			VALUES (?,?, 'refund', ?, ?, ?, ?, ?)`,
-			userID, price, newPoints, orderID, "退款: "+sp.Name, operatorID, now); err != nil {
-			return nil, err
+			userID, refundPts, newPoints, orderID, note, operatorID, now); err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -395,7 +422,7 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 	// pool (both clamped to what's already used).
 	if sp.Type == "plan" {
 		if err = reversePlanBucket(tx, userID, pkgID, sp.TrafficBytes, sp.DurationDays, now); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// If the bucket was fully removed and the current-plan pointer referenced
 		// this package, clear it so it doesn't dangle. (If the bucket survives the
@@ -404,12 +431,12 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 		_ = tx.QueryRow(`SELECT 1 FROM user_plans WHERE user_id=? AND kind='plan' AND package_id=? LIMIT 1`, userID, pkgID).Scan(&stillExists)
 		if stillExists == 0 {
 			if _, err = tx.Exec(`UPDATE users SET current_plan_id=NULL WHERE id=? AND current_plan_id=?`, userID, pkgID); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	} else if sp.Type == "traffic" {
 		if err = subFromPool(tx, userID, sp.TrafficBytes, now); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -419,17 +446,22 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 	// authoritative; this keeps the dashboard totals consistent with them.
 	newTraffic, newUp, newDown, newExpiry, err := recomputeUserAggregate(tx, userID, now)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Mark the order refunded atomically. The WHERE status='success' guard makes a
-	// concurrent double-refund a no-op (0 rows) rather than a double reversal.
-	res, err := tx.Exec(`UPDATE orders SET status='refunded' WHERE id=? AND status='success'`, orderID)
+	// Mark the order refunded atomically, recording the actual refunded amount
+	// and applied fraction for reporting/audit. The WHERE status='success' guard
+	// makes a concurrent double-refund a no-op (0 rows) rather than a double
+	// reversal.
+	res, err := tx.Exec(`UPDATE orders SET status='refunded',
+		refunded_points=?, refunded_at=?, refund_ratio=?, refunded_traffic=?
+		WHERE id=? AND status='success'`,
+		refundPts, now, quote.Ratio, quote.RefundTraffic, orderID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
-		return nil, ErrAlreadyRefunded
+		return nil, nil, ErrAlreadyRefunded
 	}
 
 	updated := *u
@@ -444,15 +476,15 @@ func (s *Store) RefundOrder(orderID, operatorID int64, sync func(updated *User, 
 
 	if sync != nil {
 		if err = sync(&updated, false); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if err = tx.Commit(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	committed = true
-	return &updated, nil
+	return &updated, quote, nil
 }
 
 // ListOrdersAdmin returns recent orders across all users, joined with the
@@ -463,7 +495,8 @@ func (s *Store) ListOrdersAdmin(q string, limit int) ([]*Order, error) {
 	}
 	var rows *sql.Rows
 	var err error
-	base := `SELECT o.id, o.user_id, COALESCE(u.username,''), o.package_id, o.package_snapshot, o.price_points, o.status, o.created_at
+	base := `SELECT o.id, o.user_id, COALESCE(u.username,''), o.package_id, o.package_snapshot, o.price_points, o.status, o.created_at,
+		o.refunded_points, o.refunded_at, o.refund_ratio, o.refunded_traffic
 		FROM orders o LEFT JOIN users u ON u.id=o.user_id`
 	if q = strings.TrimSpace(q); q != "" {
 		like := "%" + q + "%"
@@ -479,7 +512,8 @@ func (s *Store) ListOrdersAdmin(q string, limit int) ([]*Order, error) {
 	for rows.Next() {
 		var o Order
 		var snap string
-		if err := rows.Scan(&o.ID, &o.UserID, &o.Username, &o.PackageID, &snap, &o.PricePoints, &o.Status, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.UserID, &o.Username, &o.PackageID, &snap, &o.PricePoints, &o.Status, &o.CreatedAt,
+			&o.RefundedPoints, &o.RefundedAt, &o.RefundRatio, &o.RefundedTraffic); err != nil {
 			return nil, err
 		}
 		var sp struct {
@@ -501,11 +535,13 @@ func (s *Store) ListOrders(userID int64, limit int) ([]*Order, error) {
 	}
 	var rows *sql.Rows
 	var err error
+	const cols = `id, user_id, package_id, package_snapshot, price_points, status, created_at,
+		refunded_points, refunded_at, refund_ratio, refunded_traffic`
 	if userID == 0 {
-		rows, err = s.db.Query(`SELECT id, user_id, package_id, package_snapshot, price_points, status, created_at
+		rows, err = s.db.Query(`SELECT `+cols+`
 			FROM orders ORDER BY id DESC LIMIT ?`, limit)
 	} else {
-		rows, err = s.db.Query(`SELECT id, user_id, package_id, package_snapshot, price_points, status, created_at
+		rows, err = s.db.Query(`SELECT `+cols+`
 			FROM orders WHERE user_id=? ORDER BY id DESC LIMIT ?`, userID, limit)
 	}
 	if err != nil {
@@ -516,7 +552,8 @@ func (s *Store) ListOrders(userID int64, limit int) ([]*Order, error) {
 	for rows.Next() {
 		var o Order
 		var snap string
-		if err := rows.Scan(&o.ID, &o.UserID, &o.PackageID, &snap, &o.PricePoints, &o.Status, &o.CreatedAt); err != nil {
+		if err := rows.Scan(&o.ID, &o.UserID, &o.PackageID, &snap, &o.PricePoints, &o.Status, &o.CreatedAt,
+			&o.RefundedPoints, &o.RefundedAt, &o.RefundRatio, &o.RefundedTraffic); err != nil {
 			return nil, err
 		}
 		var sp struct {

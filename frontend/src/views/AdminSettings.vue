@@ -53,6 +53,32 @@
         </n-form>
       </n-card>
 
+      <n-card title="退款策略" size="small" style="margin-bottom:16px;">
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;line-height:1.7;">
+          管理员对订单退款时的默认规则。<b>按剩余比例</b>只退还未使用的部分（如 100G 用了 50G 退 50%）；
+          套餐同时含流量与有效期，<b>计算基准</b>决定按哪个维度算比例，推荐 <b>min(流量,时间)</b> 取更小值以防滥用。
+          流量包无有效期，恒按流量。下架商品时也按此策略退款。
+        </p>
+        <n-form label-placement="left" label-width="120">
+          <n-form-item label="退款方式">
+            <n-select v-model:value="refundMode" style="width:240px;" :options="[
+              {label:'按剩余比例退款',value:'prorated'},
+              {label:'全额退款',value:'full'},
+            ]" />
+          </n-form-item>
+          <n-form-item label="套餐计算基准">
+            <n-select v-model:value="refundBasis" :disabled="refundMode==='full'" style="width:240px;" :options="[
+              {label:'min(流量, 时间) 取更小（推荐）',value:'min'},
+              {label:'只按剩余流量',value:'traffic'},
+              {label:'只按剩余时间',value:'time'},
+            ]" />
+          </n-form-item>
+          <n-form-item label="手续费 (%)">
+            <n-input-number v-model:value="refundFee" :disabled="refundMode==='full'" :min="0" :max="100" style="width:200px;" />
+          </n-form-item>
+        </n-form>
+      </n-card>
+
       <n-card title="首页设置" size="small" style="margin-bottom:16px;">
         <n-form label-placement="left" label-width="120">
           <n-form-item label="首页模式">
@@ -131,6 +157,9 @@ const freeGroupId = ref<number | null>(null)
 const alertCpu = ref(90)
 const alertMem = ref(90)
 const alertDisk = ref(85)
+const refundMode = ref('prorated')
+const refundBasis = ref('min')
+const refundFee = ref(0)
 const testEmail = ref('')
 const groupOptions = ref<any[]>([])
 
@@ -174,6 +203,9 @@ async function handleSave() {
       alert_cpu_threshold: String(alertCpu.value),
       alert_mem_threshold: String(alertMem.value),
       alert_disk_threshold: String(alertDisk.value),
+      refund_mode: refundMode.value,
+      refund_basis: refundBasis.value,
+      refund_fee_percent: String(refundFee.value),
     }
     await apiPut('/api/admin/settings', body)
     message.success('保存成功')
@@ -209,6 +241,9 @@ onMounted(async () => {
       alertCpu.value = parseInt(data.alert_cpu_threshold) || 90
       alertMem.value = parseInt(data.alert_mem_threshold) || 90
       alertDisk.value = parseInt(data.alert_disk_threshold) || 85
+      refundMode.value = data.refund_mode === 'full' ? 'full' : 'prorated'
+      refundBasis.value = ['traffic', 'time', 'min'].includes(data.refund_basis) ? data.refund_basis : 'min'
+      refundFee.value = parseFloat(data.refund_fee_percent) || 0
     }
     groupOptions.value = (groups || []).map((g: any) => ({ label: g.name, value: g.id }))
   } catch {} finally { loading.value = false }

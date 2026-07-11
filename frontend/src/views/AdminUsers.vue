@@ -89,16 +89,21 @@
             </div>
             <div class="lc-meta">
               <span class="kv">积分 <b>{{ o.price_points }}</b></span>
+              <span class="kv" v-if="o.status === 'refunded'">已退 <b style="color:var(--warn);">{{ o.refunded_points }}</b>
+                <template v-if="o.refund_ratio > 0 && o.refund_ratio < 1">（{{ Math.round(o.refund_ratio * 100) }}%）</template>
+              </span>
               <span class="kv">{{ fmtDateTime(o.created_at) }}</span>
             </div>
             <div class="lc-foot">
-              <n-button v-if="o.status === 'success'" size="tiny" type="warning" @click="handleRefund(o.id)">退款</n-button>
+              <n-button v-if="o.status === 'success'" size="tiny" type="warning" @click="openRefund(o.id)">退款</n-button>
             </div>
           </div>
         </div>
         <n-empty v-else-if="!loadingOrders" description="暂无订单" style="padding:30px 0;" />
       </n-spin>
     </n-modal>
+
+    <refund-dialog v-model:show="refundShow" :order-id="refundId" @done="reloadUserOrders" />
   </div>
 </template>
 
@@ -110,6 +115,7 @@ import {
 } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
 import { fmtBytes, fmtTotal, fmtDate, fmtDateTime } from '@/utils/format'
+import RefundDialog from '@/components/RefundDialog.vue'
 
 const message = useMessage()
 const users = ref<any[]>([])
@@ -206,12 +212,22 @@ const showOrders = ref(false)
 const ordersUser = ref<any>(null)
 const userOrders = ref<any[]>([])
 const loadingOrders = ref(false)
+const refundShow = ref(false)
+const refundId = ref<number | null>(null)
 async function openOrders(u: any) {
   ordersUser.value = u; showOrders.value = true; loadingOrders.value = true
   try { userOrders.value = await apiList(`/api/admin/users/${u.id}/orders`) } catch {} finally { loadingOrders.value = false }
 }
-async function handleRefund(orderId: number) {
-  try { await apiPost(`/api/admin/orders/${orderId}/refund`); message.success('退款成功'); userOrders.value = userOrders.value.map(o => o.id === orderId ? { ...o, status: 'refunded' } : o) } catch (e: any) { message.error(e.message) }
+function openRefund(orderId: number) {
+  refundId.value = orderId
+  refundShow.value = true
+}
+async function reloadUserOrders() {
+  if (!ordersUser.value) return
+  // Refunding also changes the user's points/quota, so refresh both the order
+  // list and the user table behind the modal.
+  try { userOrders.value = await apiList(`/api/admin/users/${ordersUser.value.id}/orders`) } catch {}
+  await load()
 }
 
 // --- Delete ---

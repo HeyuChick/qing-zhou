@@ -172,6 +172,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/orders", a.handleAdminListOrders)
 		ar.Get("/api/admin/users/{id}/orders", a.handleAdminUserOrders)
 		ar.Get("/api/admin/users/{id}/plans", a.handleAdminUserPlans)
+		ar.Get("/api/admin/orders/{id}/refund-preview", a.handleAdminRefundPreview)
 		ar.Post("/api/admin/orders/{id}/refund", a.handleAdminRefundOrder)
 		ar.Delete("/api/admin/orders/{id}", a.handleAdminDeleteOrder)
 

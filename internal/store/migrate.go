@@ -398,6 +398,14 @@ func (s *Store) Migrate() error {
 		// Lookup index for the probe token: the token itself is now encrypted at
 		// rest, so the report endpoint matches on this SHA-256 hash instead.
 		`ALTER TABLE servers ADD COLUMN probe_token_hash TEXT NOT NULL DEFAULT ''`,
+		// Prorated refunds: record how much was actually refunded on each order so
+		// admin reporting and idempotent re-reads reflect the real (possibly partial)
+		// amount instead of the original price. refund_ratio is the applied fraction
+		// (0..1); refunded_traffic is the unused quota clawed back (audit).
+		`ALTER TABLE orders ADD COLUMN refunded_points INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE orders ADD COLUMN refunded_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE orders ADD COLUMN refund_ratio REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE orders ADD COLUMN refunded_traffic INTEGER NOT NULL DEFAULT 0`,
 	} {
 		_, _ = s.db.Exec(stmt)
 	}

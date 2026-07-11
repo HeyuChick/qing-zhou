@@ -146,7 +146,10 @@ func (a *API) handleAdminRetirePackage(w http.ResponseWriter, r *http.Request) {
 	refunded, cleared := 0, 0
 	for _, uid := range subs {
 		if oid, _ := a.st.LatestRefundableOrderForPackage(uid, id); oid > 0 {
-			if _, err := a.st.RefundOrder(oid, operatorID, a.syncEntitlement); err == nil {
+			// Retire refunds prorated too: a subscriber who already consumed most of
+			// their traffic/time gets back only the unused remainder, not the full
+			// price. Use "" so the store's configured policy applies.
+			if _, _, err := a.st.RefundOrder(oid, operatorID, "", a.syncEntitlement); err == nil {
 				refunded++
 			}
 		}
@@ -266,8 +269,26 @@ func (a *API) handleAdminDeleteOrder(w http.ResponseWriter, r *http.Request) {
 	ok(w, J{"deleted": id})
 }
 
-// POST /api/admin/orders/{id}/refund — refund a purchase: return points, undo
-// the entitlement, mark the order 'refunded' (record kept).
+// GET /api/admin/orders/{id}/refund-preview?mode= — compute (read-only) what a
+// refund would return under the current policy, so the admin can confirm the
+// prorated amount before acting. mode: ""|prorated|full.
+func (a *API) handleAdminRefundPreview(w http.ResponseWriter, r *http.Request) {
+	id := atoi(chi.URLParam(r, "id"))
+	q, err := a.st.RefundPreview(id, r.URL.Query().Get("mode"))
+	if err != nil {
+		if errors.Is(err, store.ErrOrderNotFound) {
+			fail(w, http.StatusNotFound, "订单不存在")
+			return
+		}
+		fail(w, http.StatusInternalServerError, "计算退款失败")
+		return
+	}
+	ok(w, q)
+}
+
+// POST /api/admin/orders/{id}/refund — refund a purchase: return points (prorated
+// to the unused portion by default), undo the entitlement, mark the order
+// 'refunded' (record kept). Body/query mode: ""|prorated|full.
 func (a *API) handleAdminRefundOrder(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	operatorID, _ := r.Context().Value(ctxUserID).(int64)
@@ -280,7 +301,17 @@ func (a *API) handleAdminRefundOrder(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "用户已删除，无法退款（可删除该记录）")
 		return
 	}
-	updated, err := a.st.RefundOrder(id, operatorID, a.syncEntitlement)
+	// mode may come from the query string or a small JSON body; both optional.
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		var body struct {
+			Mode string `json:"mode"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) == nil {
+			mode = body.Mode
+		}
+	}
+	updated, quote, err := a.st.RefundOrder(id, operatorID, mode, a.syncEntitlement)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrAlreadyRefunded):
@@ -295,5 +326,6 @@ func (a *API) handleAdminRefundOrder(w http.ResponseWriter, r *http.Request) {
 	a.invalidateLinks(o.UserID)
 	_ = a.sbRebuild()
 	ok(w, J{"order_id": id, "user_id": o.UserID, "points": updated.Points,
+		"refund_points": quote.RefundPoints, "refund_ratio": quote.Ratio,
 		"traffic_total": updated.TrafficLimit, "expiry_at": updated.ExpiryAt})
 }

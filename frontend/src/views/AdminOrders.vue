@@ -23,29 +23,37 @@
             <span class="kv">用户 <b>{{ o.username || '已删除' }}</b></span>
             <span class="kv"><n-tag :type="o.type === 'plan' ? 'success' : 'info'" size="tiny" bordered="false">{{ o.type || '—' }}</n-tag></span>
             <span class="kv">积分 <b>{{ o.price_points }}</b></span>
+            <span class="kv" v-if="o.status === 'refunded'">已退 <b style="color:var(--warn);">{{ o.refunded_points }}</b>
+              <template v-if="o.refund_ratio > 0 && o.refund_ratio < 1">（{{ Math.round(o.refund_ratio * 100) }}%）</template>
+            </span>
             <span class="kv">{{ fmtDateTime(o.created_at) }}</span>
           </div>
           <div class="lc-foot">
-            <n-button v-if="o.status === 'success'" size="tiny" type="warning" @click="handleRefund(o.id)">退款</n-button>
+            <n-button v-if="o.status === 'success'" size="tiny" type="warning" @click="openRefund(o.id)">退款</n-button>
             <n-button size="tiny" type="error" @click="handleDelete(o.id)">删除</n-button>
           </div>
         </div>
       </div>
       <n-empty v-else-if="!loading" description="暂无订单" style="padding:40px 0;" />
     </n-spin>
+
+    <refund-dialog v-model:show="refundShow" :order-id="refundId" @done="load" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { NSpin, NInput, NButton, NTag, NEmpty, useMessage } from 'naive-ui'
-import { apiList, apiPost, apiDelete } from '@/api'
+import { apiList, apiDelete } from '@/api'
 import { fmtDateTime } from '@/utils/format'
+import RefundDialog from '@/components/RefundDialog.vue'
 
 const message = useMessage()
 const orders = ref<any[]>([])
 const loading = ref(false)
 const search = ref('')
+const refundShow = ref(false)
+const refundId = ref<number | null>(null)
 
 const filtered = computed(() => {
   if (!search.value) return orders.value
@@ -57,13 +65,17 @@ const stats = computed(() => {
   let revenue = 0, refunded = 0
   for (const o of orders.value) {
     if (o.status === 'success') revenue += o.price_points || 0
-    if (o.status === 'refunded') refunded += o.price_points || 0
+    // Refunded tile reflects the actual returned points (prorated), not the
+    // original price; and the retained portion of a partial refund still counts
+    // as revenue.
+    if (o.status === 'refunded') { refunded += o.refunded_points || 0; revenue += (o.price_points || 0) - (o.refunded_points || 0) }
   }
   return { revenue, refunded }
 })
 
-async function handleRefund(id: number) {
-  try { await apiPost(`/api/admin/orders/${id}/refund`); message.success('退款成功'); await load() } catch (e: any) { message.error(e.message) }
+function openRefund(id: number) {
+  refundId.value = id
+  refundShow.value = true
 }
 async function handleDelete(id: number) {
   try { await apiDelete(`/api/admin/orders/${id}`); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) }

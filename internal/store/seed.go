@@ -36,6 +36,13 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		"alert_cpu_threshold":   "90",
 		"alert_mem_threshold":   "90",
 		"alert_disk_threshold":  "85",
+		// Refund policy. mode: prorated|full (default refund amount rule);
+		// basis: min|traffic|time (for plans — how the prorated fraction is derived,
+		// pool packages are always traffic-based); fee_percent: handling fee deducted
+		// from the refund (0 = none). See RefundOrder / computeRefundQuote.
+		"refund_mode":        "prorated",
+		"refund_basis":       "min",
+		"refund_fee_percent": "0",
 	}
 	for k, v := range defaults {
 		if err := s.setSettingIfAbsent(k, v); err != nil {
