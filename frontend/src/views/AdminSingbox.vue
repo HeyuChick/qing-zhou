@@ -280,6 +280,10 @@
             新入站将作为「<b>{{ chainSourceName }}</b>」的落地，保存后自动建立中转链路（该入站→本入站→互联网）。
           </n-alert>
           <n-form-item label="协议"><n-select v-model:value="ie.type" :options="protoOpts" :disabled="!!ie.id" /></n-form-item>
+          <n-alert v-if="ie.type === 'mixed'" type="warning" :show-icon="false" style="margin-bottom:12px;">
+            <b>Mixed = HTTP + SOCKS5 普通代理</b>，同一端口两种都能用，可直接把「地址 / 端口 / 用户名 / 密码」填进 1Panel、Docker、git 等只认 HTTP/SOCKS 的地方（用户在「我的订阅」页复制）。
+            <div style="margin-top:6px;">⚠️ 不挂 TLS 时账号密码与流量<b>均为明文</b>，公网使用请为其绑定一个<b>普通证书 TLS</b>（→ 变成 HTTPS 代理），或用防火墙限制来源 IP。不支持 Reality。</div>
+          </n-alert>
           <n-form-item label="名称 / Tag"><n-input v-model:value="ie.tag" /></n-form-item>
           <n-form-item label="监听地址"><n-select v-model:value="ie.listen" :options="listenOpts" /></n-form-item>
           <n-form-item label="监听端口"><n-input-number v-model:value="ie.listen_port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
@@ -487,6 +491,7 @@ const protoOpts = [
   { label: 'VLESS', value: 'vless' }, { label: 'VMess', value: 'vmess' }, { label: 'Trojan', value: 'trojan' },
   { label: 'TUIC', value: 'tuic' }, { label: 'Hysteria2', value: 'hysteria2' }, { label: 'Shadowsocks', value: 'shadowsocks' },
   { label: 'AnyTLS', value: 'anytls' }, { label: 'Hysteria v1', value: 'hysteria' },
+  { label: 'Mixed (HTTP/SOCKS5 代理)', value: 'mixed' },
 ]
 const fpOpts = ['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized'].map(v => ({ label: v, value: v }))
 const verOpts = [{ label: '1.2', value: '1.2' }, { label: '1.3', value: '1.3' }]
@@ -507,6 +512,7 @@ const presetOpts = [
   { label: 'TUIC', value: 'tuic' },
   { label: 'Trojan + TLS', value: 'trojan-tls' },
   { label: 'Shadowsocks 2022', value: 'shadowsocks' },
+  { label: 'Mixed (HTTP/SOCKS5 代理)', value: 'mixed' },
 ]
 
 function serverName(id: number) { if (!id) return '本机'; const s = servers.value.find(s => s.id === id); return s ? s.name : '#' + id }
@@ -743,6 +749,7 @@ function applyPreset(v: string | null) {
     'tuic': { type: 'tuic', tag: 'tuic', listen_port: 8443, cc: 'bbr' },
     'trojan-tls': { type: 'trojan', tag: 'trojan', listen_port: 443 },
     'shadowsocks': { type: 'shadowsocks', tag: 'ss', listen_port: 8388 },
+    'mixed': { type: 'mixed', tag: 'mixed', listen_port: 7890 },
   }
   Object.assign(ie, presets[v])
   presetType.value = null

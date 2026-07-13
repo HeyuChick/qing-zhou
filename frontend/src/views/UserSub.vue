@@ -53,6 +53,23 @@
       </div>
     </n-card>
 
+    <!-- HTTP/SOCKS5 代理（mixed 节点，不在订阅里，单独复制填入 1Panel/Docker 等） -->
+    <n-card v-if="proxies.length" title="HTTP / SOCKS5 代理" size="small" style="margin-bottom:16px;">
+      <template #header-extra><span style="font-size:11px;color:var(--text-3);">可填入 1Panel、Docker、git 等只认 HTTP/SOCKS 代理的地方</span></template>
+      <div v-for="p in proxies" :key="p.tag" style="margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span style="font-weight:600;">{{ p.tag }}</span>
+          <n-tag :type="p.tls?'success':'warning'" size="small" bordered>{{ p.tls ? 'HTTPS 代理' : 'HTTP / SOCKS5' }}</n-tag>
+        </div>
+        <div class="pxrow"><span class="pxk">类型</span><span style="font-size:13px;">{{ p.tls ? 'HTTPS' : 'HTTP / SOCKS5' }}</span></div>
+        <div class="pxrow"><span class="pxk">地址</span><div class="pxv"><n-input-group><n-input :value="p.host" readonly size="small" /><n-button size="small" @click="copy(p.host)">复制</n-button></n-input-group></div></div>
+        <div class="pxrow"><span class="pxk">端口</span><div class="pxv"><n-input-group><n-input :value="String(p.port)" readonly size="small" /><n-button size="small" @click="copy(String(p.port))">复制</n-button></n-input-group></div></div>
+        <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="p.username" readonly size="small" /><n-button size="small" @click="copy(p.username)">复制</n-button></n-input-group></div></div>
+        <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="p.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(p.password)">复制</n-button></n-input-group></div></div>
+      </div>
+      <div style="font-size:11px;color:var(--text-3);">在 1Panel「代理服务器」里：代理类型选 <b>HTTP</b> 或 <b>SOCKS5</b>（显示「HTTPS 代理」则选 <b>HTTPS</b>），地址 / 端口 / 用户名 / 密码 按上面填。</div>
+    </n-card>
+
     <!-- 节点列表 -->
     <n-card title="节点列表" size="small">
       <template #header-extra>
@@ -87,6 +104,7 @@ const router = useRouter()
 const message = useMessage()
 const sub = ref<any>({})
 const plans = ref<any[]>([])
+const proxies = ref<any[]>([])
 const nodes = ref<any[]>([])
 const showQr = ref(false)
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
@@ -205,6 +223,7 @@ watch(showQr, async (v) => {
 onMounted(async () => {
   try { sub.value = await apiGet('/api/user/subscription') || {} } catch {}
   try { plans.value = await apiList('/api/user/plans') } catch {}
+  try { proxies.value = await apiList('/api/user/proxies') } catch {}
   loadingNodes.value = true
   try { nodes.value = await apiList('/api/user/nodes') } catch {} finally { loadingNodes.value = false }
 })
@@ -213,4 +232,7 @@ onMounted(async () => {
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 4px; }
 .page-sub { color: var(--text-2); margin-bottom: 22px; }
+.pxrow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.pxk { width: 52px; flex-shrink: 0; font-size: 12px; color: var(--text-3); }
+.pxv { flex: 1; min-width: 0; }
 </style>

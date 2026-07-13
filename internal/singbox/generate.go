@@ -91,6 +91,11 @@ func renderUser(t string, u User, ib map[string]interface{}) map[string]interfac
 		return map[string]interface{}{"name": u.Name, "password": u.Password}
 	case "hysteria":
 		return map[string]interface{}{"name": u.Name, "auth_str": u.Password}
+	case "mixed":
+		// mixed inbound (HTTP + SOCKS5) authenticates by username/password. The
+		// 轻舟 user identity doubles as the username so the v2ray_api stats key
+		// (which lists u.Name) matches the authenticated user for per-user metering.
+		return map[string]interface{}{"username": u.Name, "password": u.Password}
 	default:
 		return map[string]interface{}{"name": u.Name}
 	}
@@ -170,6 +175,15 @@ func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayLis
 				seen[u.Name] = true
 				names = append(names, u.Name)
 			}
+		}
+		// A mixed (HTTP/SOCKS5) inbound authenticates via its users[]; sing-box
+		// treats an empty users list as "no auth", turning the port into an OPEN
+		// public proxy. Never emit a userless mixed inbound — during an entitlement
+		// gap (nobody entitled / all expired) it must not listen at all rather than
+		// expose an unauthenticated proxy. Circumvention protocols don't need this:
+		// their empty users[] just means nobody can connect, which is harmless.
+		if ib.Type == "mixed" && len(users) == 0 {
+			continue
 		}
 		m["users"] = users
 		// flow 是 per-user 字段，从 inbound 级别移除，否则 sing-box check 会报错

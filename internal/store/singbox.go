@@ -546,6 +546,69 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
 	return out
 }
 
+// UserProxy is one mixed (HTTP/SOCKS5) inbound's connection info for a user,
+// surfaced as copyable credentials to paste into plain-proxy fields (1Panel /
+// Docker / git http.proxy, ...). Mixed inbounds are deliberately excluded from
+// the Clash/sing-box subscription (BuildShareLink returns "" for them), so this
+// is how a user retrieves them instead.
+type UserProxy struct {
+	Tag      string `json:"tag"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	TLS      bool   `json:"tls"` // true → HTTPS proxy; false → plain HTTP/SOCKS5
+}
+
+// BuildUserProxies returns the mixed-inbound proxy credentials the user is
+// entitled to. It mirrors BuildSelfBuiltLinks' ownership + per-server host
+// override so a node hosted on a remote server advertises that server's host.
+func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
+	if host == "" {
+		return nil
+	}
+	inbounds, err := s.ListSbInbounds()
+	if err != nil {
+		return nil
+	}
+	serverCache := make(map[int64]*Server)
+	owners, _ := s.UserOwnedInbounds(u.ID, time.Now().Unix())
+	var out []UserProxy
+	for _, ib := range inbounds {
+		if !ib.Enabled || ib.Type != "mixed" {
+			continue
+		}
+		owner := owners[ib.Tag]
+		if owner == nil {
+			continue // no active bucket grants this node
+		}
+		nodeHost := host
+		if ib.ServerID != 0 {
+			if sv, ok := serverCache[ib.ServerID]; ok {
+				if sv != nil && sv.Host != "" {
+					nodeHost = sv.Host
+				}
+			} else if sv, _ := s.GetServer(ib.ServerID); sv != nil {
+				serverCache[ib.ServerID] = sv
+				if sv.Host != "" {
+					nodeHost = sv.Host
+				}
+			} else {
+				serverCache[ib.ServerID] = nil // negative cache
+			}
+		}
+		out = append(out, UserProxy{
+			Tag:      ib.Tag,
+			Host:     nodeHost,
+			Port:     ib.ListenPort,
+			Username: owner.ClientName,
+			Password: owner.ClientSecret,
+			TLS:      ib.TlsID != 0,
+		})
+	}
+	return out
+}
+
 // subInfoSuffixBucket appends a node's owning plan/pool remaining traffic + days
 // to its remark (e.g. " 208.67GB📊 58Days⏳"), so per-plan nodes show per-plan
 // info — matching what sing-box's sub server used to show for the whole account.

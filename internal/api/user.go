@@ -253,6 +253,23 @@ func (a *API) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleUserProxies returns the user's entitled mixed (HTTP/SOCKS5) inbounds as
+// copyable proxy credentials. These plain-proxy nodes are excluded from the
+// Clash/sing-box subscription on purpose, so this is how the user retrieves the
+// address/port/username/password to paste into tools like 1Panel or Docker.
+func (a *API) handleUserProxies(w http.ResponseWriter, r *http.Request) {
+	u := a.currentUser(r)
+	if u == nil {
+		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	proxies := a.st.BuildUserProxies(u, a.nodeHost())
+	if proxies == nil {
+		proxies = []store.UserProxy{}
+	}
+	ok(w, proxies)
+}
+
 // handleUserPlans returns the user's subscription plans plus the traffic pool,
 // each metered independently — this is what stops multiple plans from merging
 // their traffic and expiry into one pool.
@@ -506,8 +523,9 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	return out
 }
 
-func (a *API) selfBuiltLinks(u *store.User) []string {
-	// 轻舟 manages its own sing-box inbounds; build the links from our own data.
+// nodeHost resolves the address advertised to clients for self-built nodes: the
+// node_host_override setting, else the first enabled server's host.
+func (a *API) nodeHost() string {
 	host, _ := a.st.GetSetting("node_host_override")
 	if host == "" {
 		// Auto-detect: fall back to the first enabled server's host.
@@ -520,7 +538,12 @@ func (a *API) selfBuiltLinks(u *store.User) []string {
 			}
 		}
 	}
-	return a.st.BuildSelfBuiltLinks(u, host)
+	return host
+}
+
+func (a *API) selfBuiltLinks(u *store.User) []string {
+	// 轻舟 manages its own sing-box inbounds; build the links from our own data.
+	return a.st.BuildSelfBuiltLinks(u, a.nodeHost())
 }
 
 // ---- Admin: delete user ----

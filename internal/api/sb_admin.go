@@ -644,7 +644,7 @@ func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) 
 	ok(w, out)
 }
 
-var sbInboundTypes = map[string]bool{"vless": true, "hysteria2": true, "tuic": true, "trojan": true, "vmess": true, "shadowsocks": true, "anytls": true, "hysteria": true}
+var sbInboundTypes = map[string]bool{"vless": true, "hysteria2": true, "tuic": true, "trojan": true, "vmess": true, "shadowsocks": true, "anytls": true, "hysteria": true, "mixed": true}
 
 func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 	var n store.SbInbound
@@ -668,6 +668,15 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 	if strings.ContainsAny(n.Tag, " \t\r\n") {
 		fail(w, http.StatusBadRequest, "tag 不能包含空格")
 		return
+	}
+	// A mixed (HTTP/SOCKS5) inbound is a plain proxy for tools like 1Panel/Docker,
+	// not a circumvention protocol: it may carry a normal-cert TLS block (→ HTTPS
+	// proxy) but never Reality, which HTTP/SOCKS clients cannot speak.
+	if n.Type == "mixed" && n.TlsID != 0 {
+		if tls, _ := a.st.GetSbTls(n.TlsID); tls != nil && strings.Contains(tls.ServerJSON, "\"reality\"") {
+			fail(w, http.StatusBadRequest, "mixed 代理不支持 Reality，请选普通 TLS 证书或留空")
+			return
+		}
 	}
 	// 端口冲突检测：同服务器同端口不允许重复
 	if id := chi.URLParam(r, "id"); id != "" {

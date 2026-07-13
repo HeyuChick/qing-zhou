@@ -123,6 +123,7 @@ func (a *API) Router() http.Handler {
 		pr.Get("/api/user/dashboard", a.handleDashboard)
 		pr.Get("/api/user/plans", a.handleUserPlans)
 		pr.Get("/api/user/subscription", a.handleSubscription)
+		pr.Get("/api/user/proxies", a.handleUserProxies)
 		pr.Post("/api/user/reset-sub", a.handleResetSub)
 		pr.Get("/api/user/packages", a.handleUserPackages)
 		pr.Post("/api/user/purchase", a.handlePurchase)
