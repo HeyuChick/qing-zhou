@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -196,6 +198,41 @@ type Bucket struct {
 	OrderID      int64  `json:"order_id"`
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
+	// Mixed (HTTP/SOCKS5) proxy credential — a proxy-only account, unrelated to the
+	// login account. Empty ProxyUsername → fall back to ClientName/ClientSecret.
+	// ProxyExpiresAt 0 = permanent. See migrate.go for the schema.
+	ProxyUsername  string `json:"-"`
+	ProxyPassword  string `json:"-"`
+	ProxyExpiresAt int64  `json:"-"`
+}
+
+// ProxyName is the mixed-proxy stats identity for this bucket: the custom
+// username if set, else the system ClientName. This is the name sing-box tracks
+// (and AddBucketUsage meters) for the bucket's mixed inbounds.
+func (b *Bucket) ProxyName() string {
+	if b.ProxyUsername != "" {
+		return b.ProxyUsername
+	}
+	return b.ClientName
+}
+
+// ProxySecret is the mixed-proxy password: the custom one if set, else the
+// system ClientSecret.
+func (b *Bucket) ProxySecret() string {
+	if b.ProxyPassword != "" {
+		return b.ProxyPassword
+	}
+	return b.ClientSecret
+}
+
+// ProxyActive reports whether the mixed-proxy credential is usable now: the
+// bucket itself must be able to carry traffic AND the proxy credential must not
+// have hit its own (separate, optional) expiry.
+func (b *Bucket) ProxyActive(now int64) bool {
+	if b.ProxyExpiresAt != 0 && b.ProxyExpiresAt <= now {
+		return false
+	}
+	return b.Active(now)
 }
 
 // Used is the bucket's total consumed bytes.
@@ -218,13 +255,15 @@ func (b *Bucket) Active(now int64) bool {
 }
 
 const bucketCols = `id, user_id, kind, package_id, name, client_name, client_uuid, client_secret,
-	traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, created_at, updated_at`
+	traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, created_at, updated_at,
+	proxy_username, proxy_password, proxy_expires_at`
 
 func scanBucket(sc scanner) (*Bucket, error) {
 	var b Bucket
 	err := sc.Scan(&b.ID, &b.UserID, &b.Kind, &b.PackageID, &b.Name, &b.ClientName, &b.ClientUUID,
 		&b.ClientSecret, &b.TrafficLimit, &b.UsedUp, &b.UsedDown, &b.ExpiryAt, &b.LastOnlineAt,
-		&b.OrderID, &b.CreatedAt, &b.UpdatedAt)
+		&b.OrderID, &b.CreatedAt, &b.UpdatedAt,
+		&b.ProxyUsername, &b.ProxyPassword, &b.ProxyExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -255,6 +294,59 @@ func (s *Store) ListBuckets(userID int64) ([]*Bucket, error) {
 // BucketByClientName resolves a sing-box stats identity to its bucket.
 func (s *Store) BucketByClientName(name string) (*Bucket, error) {
 	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+` FROM user_plans WHERE client_name=?`, name))
+}
+
+// proxyUsernameRe restricts a custom mixed-proxy username to safe characters: it
+// lands verbatim in the sing-box config and becomes a stats identity, so no
+// whitespace/quotes/control chars. Length 2-64, must start alphanumeric.
+var proxyUsernameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]{1,63}$`)
+
+// ValidateProxyUsername checks a user-chosen mixed-proxy username. The "qz_"
+// prefix is reserved for system-generated client_names, so banning it guarantees
+// a custom username can never collide with any bucket's client_name identity.
+func ValidateProxyUsername(name string) error {
+	if !proxyUsernameRe.MatchString(name) {
+		return errors.New("用户名需 2-64 位，仅限字母/数字/ _.@- ，且以字母或数字开头")
+	}
+	if strings.HasPrefix(name, "qz_") {
+		return errors.New("用户名不能以 qz_ 开头（系统保留前缀）")
+	}
+	return nil
+}
+
+// SetBucketProxyCred sets a bucket's mixed-proxy credential (a proxy-only
+// account, unrelated to the login account). expiresAt 0 = permanent. Ownership is
+// enforced via userID. The username must not collide with another bucket's
+// proxy_username or any client_name.
+func (s *Store) SetBucketProxyCred(bucketID, userID int64, username, password string, expiresAt int64) error {
+	if err := ValidateProxyUsername(username); err != nil {
+		return err
+	}
+	if len(password) < 6 || len(password) > 128 {
+		return errors.New("密码需 6-128 位")
+	}
+	if expiresAt < 0 {
+		return errors.New("有效期非法")
+	}
+	// Reject a username already taken by another bucket's proxy_username or by any
+	// client_name (belt-and-suspenders; the qz_ ban already excludes client_names).
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_plans WHERE (proxy_username=? AND id<>?) OR client_name=?`,
+		username, bucketID, username).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return errors.New("该用户名已被占用，请换一个")
+	}
+	res, err := s.db.Exec(`UPDATE user_plans SET proxy_username=?, proxy_password=?, proxy_expires_at=?, updated_at=? WHERE id=? AND user_id=?`,
+		username, password, expiresAt, time.Now().Unix(), bucketID, userID)
+	if err != nil {
+		return errors.New("保存失败，用户名可能已被占用") // unique-index guard against a concurrent duplicate
+	}
+	if aff, _ := res.RowsAffected(); aff == 0 {
+		return errors.New("套餐不存在或无权修改")
+	}
+	return nil
 }
 
 // PoolBucket returns the user's traffic-package pool bucket (or nil).
@@ -292,8 +384,8 @@ func insertBucket(ex execer, b *Bucket) (int64, error) {
 // mirrors it onto the owning user (aggregate counters + last_online + the
 // per-user time-series) so the dashboard totals/charts and online detection
 // keep working. Called once per stats poll per active identity.
-func (s *Store) AddBucketUsage(clientName string, up, down int64) error {
-	if clientName == "" || (up == 0 && down == 0) {
+func (s *Store) AddBucketUsage(statName string, up, down int64) error {
+	if statName == "" || (up == 0 && down == 0) {
 		return nil
 	}
 	now := time.Now().Unix()
@@ -311,20 +403,30 @@ func (s *Store) AddBucketUsage(clientName string, up, down int64) error {
 		}
 	}()
 
-	res, err := tx.Exec(`UPDATE user_plans SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE client_name=?`,
-		up, down, now, now, clientName)
+	// Resolve the stats identity to its bucket. A bucket has up to two identities:
+	// client_name (used by every protocol) and, for mixed inbounds, an optional
+	// custom proxy_username. Both meter the same bucket. proxy_username can never
+	// equal a client_name (client_names are qz_-prefixed, proxy_usernames may not
+	// be) and is globally unique, so at most one row matches.
+	var bucketID, userID int64
+	err = tx.QueryRow(`SELECT id, user_id FROM user_plans WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
+		statName, statName).Scan(&bucketID, &userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // unknown identity (e.g. a just-removed bucket) — ignore, rolls back
+	}
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil // unknown identity (e.g. a just-removed bucket) — ignore, rolls back
-	}
-	if _, err = tx.Exec(`UPDATE users SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=?
-		WHERE id=(SELECT user_id FROM user_plans WHERE client_name=?)`, up, down, now, now, clientName); err != nil {
+	if _, err = tx.Exec(`UPDATE user_plans SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
+		up, down, now, now, bucketID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`INSERT INTO traffic_samples (user_id, ts, up, down)
-		SELECT user_id, ?, ?, ? FROM user_plans WHERE client_name=?`, now, up, down, clientName); err != nil {
+	if _, err = tx.Exec(`UPDATE users SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
+		up, down, now, now, userID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO traffic_samples (user_id, ts, up, down) VALUES (?, ?, ?, ?)`,
+		userID, now, up, down); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {

@@ -57,18 +57,47 @@
     <n-card v-if="proxies.length" title="HTTP / SOCKS5 代理" size="small" style="margin-bottom:16px;">
       <template #header-extra><span style="font-size:11px;color:var(--text-3);">可填入 1Panel、Docker、git 等只认 HTTP/SOCKS 代理的地方</span></template>
       <div v-for="p in proxies" :key="p.tag" style="margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;">
           <span style="font-weight:600;">{{ p.tag }}</span>
-          <n-tag :type="p.tls?'success':'warning'" size="small" bordered>{{ p.tls ? 'HTTPS 代理' : 'HTTP / SOCKS5' }}</n-tag>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <n-tag v-if="p.expired" type="error" size="small" bordered>已过期</n-tag>
+            <n-tag :type="p.tls?'success':'warning'" size="small" bordered>{{ p.tls ? 'HTTPS 代理' : 'HTTP / SOCKS5' }}</n-tag>
+            <n-button size="tiny" @click="openEditProxy(p)">编辑账号</n-button>
+          </div>
         </div>
         <div class="pxrow"><span class="pxk">类型</span><span style="font-size:13px;">{{ p.tls ? 'HTTPS' : 'HTTP / SOCKS5' }}</span></div>
         <div class="pxrow"><span class="pxk">地址</span><div class="pxv"><n-input-group><n-input :value="p.host" readonly size="small" /><n-button size="small" @click="copy(p.host)">复制</n-button></n-input-group></div></div>
         <div class="pxrow"><span class="pxk">端口</span><div class="pxv"><n-input-group><n-input :value="String(p.port)" readonly size="small" /><n-button size="small" @click="copy(String(p.port))">复制</n-button></n-input-group></div></div>
         <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="p.username" readonly size="small" /><n-button size="small" @click="copy(p.username)">复制</n-button></n-input-group></div></div>
         <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="p.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(p.password)">复制</n-button></n-input-group></div></div>
+        <div class="pxrow"><span class="pxk">有效期</span><span style="font-size:12px;color:var(--text-2);">{{ p.expires_at ? fmtDate(p.expires_at) : '永久' }}<span v-if="!p.custom" style="color:var(--text-3);"> · 系统默认账号，建议点「编辑账号」自设</span></span></div>
       </div>
       <div style="font-size:11px;color:var(--text-3);">在 1Panel「代理服务器」里：代理类型选 <b>HTTP</b> 或 <b>SOCKS5</b>（显示「HTTPS 代理」则选 <b>HTTPS</b>），地址 / 端口 / 用户名 / 密码 按上面填。</div>
     </n-card>
+
+    <!-- 编辑代理账号 -->
+    <n-modal v-model:show="showEditProxy" preset="card" title="编辑代理账号" style="max-width:440px;">
+      <n-form label-placement="left" label-width="72">
+        <n-form-item label="节点"><n-input :value="editForm.tag" readonly /></n-form-item>
+        <n-form-item label="用户名">
+          <n-input v-model:value="editForm.username" placeholder="仅字母/数字/ _.@- ，不能以 qz_ 开头" />
+        </n-form-item>
+        <n-form-item label="密码">
+          <n-input-group>
+            <n-input v-model:value="editForm.password" type="password" show-password-on="click" placeholder="6-128 位" />
+            <n-button @click="genProxyPassword">生成32位</n-button>
+          </n-input-group>
+        </n-form-item>
+        <n-form-item label="有效期">
+          <div style="width:100%;">
+            <n-switch v-model:value="editForm.permanent" style="margin-bottom:8px;"><template #checked>永久</template><template #unchecked>指定日期</template></n-switch>
+            <n-date-picker v-if="!editForm.permanent" v-model:value="editForm.expireTs" type="datetime" clearable style="width:100%;" />
+          </div>
+        </n-form-item>
+        <div style="font-size:11px;color:var(--text-3);margin-bottom:12px;">这是仅用于该协议的独立账号，与登录账号无关。密码泄露可随时来此更改；到期后该代理自动停用（可续期）。</div>
+        <n-button type="primary" block :loading="savingProxy" @click="saveProxy">保存</n-button>
+      </n-form>
+    </n-modal>
 
     <!-- 节点列表 -->
     <n-card title="节点列表" size="small">
@@ -95,17 +124,62 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NInput, NInputGroup, NButton, NDataTable, NProgress, NTag, NSelect, NSpace, useMessage } from 'naive-ui'
-import { apiGet, apiList, apiPost } from '@/api'
+import { NCard, NInput, NInputGroup, NButton, NDataTable, NProgress, NTag, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, useMessage } from 'naive-ui'
+import { apiGet, apiList, apiPost, apiPut } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { fmtBytes, fmtTotal, fmtDate, pct } from '@/utils/format'
 import QRCode from 'qrcode'
 
 const router = useRouter()
 const message = useMessage()
+const auth = useAuthStore()
 const sub = ref<any>({})
 const plans = ref<any[]>([])
 const proxies = ref<any[]>([])
 const nodes = ref<any[]>([])
+
+// 代理账号编辑
+const showEditProxy = ref(false)
+const savingProxy = ref(false)
+const editForm = ref<any>({ bucket_id: 0, tag: '', username: '', password: '', permanent: true, expireTs: null as number | null })
+
+function openEditProxy(p: any) {
+  editForm.value = {
+    bucket_id: p.bucket_id,
+    tag: p.tag,
+    // 默认用登录账号名（仅作默认，是独立的代理账号）；已自设过则回填现有用户名。
+    username: p.custom ? p.username : (auth.user?.username || ''),
+    password: '',
+    permanent: !p.expires_at,
+    expireTs: p.expires_at ? p.expires_at * 1000 : null,
+  }
+  showEditProxy.value = true
+}
+
+function genProxyPassword() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+  const arr = new Uint32Array(32)
+  crypto.getRandomValues(arr)
+  editForm.value.password = Array.from(arr, (n) => chars[n % chars.length]).join('')
+}
+
+async function saveProxy() {
+  const f = editForm.value
+  if (!f.username?.trim()) { message.warning('请填写用户名'); return }
+  if (!f.password || f.password.length < 6) { message.warning('密码至少 6 位'); return }
+  if (!f.permanent && !f.expireTs) { message.warning('请选择有效期，或切换为永久'); return }
+  savingProxy.value = true
+  try {
+    await apiPut('/api/user/proxies/' + f.bucket_id, {
+      username: f.username.trim(),
+      password: f.password,
+      expires_at: f.permanent ? 0 : Math.floor(f.expireTs / 1000),
+    })
+    message.success('已保存，代理账号已更新')
+    showEditProxy.value = false
+    proxies.value = await apiList('/api/user/proxies')
+  } catch (e: any) { message.error(e.message) } finally { savingProxy.value = false }
+}
 const showQr = ref(false)
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 const search = ref('')

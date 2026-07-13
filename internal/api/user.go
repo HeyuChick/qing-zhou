@@ -270,6 +270,38 @@ func (a *API) handleUserProxies(w http.ResponseWriter, r *http.Request) {
 	ok(w, proxies)
 }
 
+// handleUpdateUserProxy sets the caller's custom mixed-proxy credential on one of
+// their buckets: a proxy-only account (username/password, unrelated to login)
+// with an optional expiry. Rotatable anytime — the config is rebuilt so sing-box
+// picks up the new credential immediately.
+func (a *API) handleUpdateUserProxy(w http.ResponseWriter, r *http.Request) {
+	u := a.currentUser(r)
+	if u == nil {
+		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	bucketID := int64(atoi(chi.URLParam(r, "bucket")))
+	if bucketID <= 0 {
+		fail(w, http.StatusBadRequest, "无效的套餐 id")
+		return
+	}
+	var req struct {
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+		ExpiresAt int64  `json:"expires_at"` // 0 = permanent
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := a.st.SetBucketProxyCred(bucketID, u.ID, strings.TrimSpace(req.Username), req.Password, req.ExpiresAt); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = a.sbRebuild()
+	ok(w, nil)
+}
+
 // handleUserPlans returns the user's subscription plans plus the traffic pool,
 // each metered independently — this is what stops multiple plans from merging
 // their traffic and expiry into one pool.

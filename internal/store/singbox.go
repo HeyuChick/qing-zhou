@@ -552,12 +552,16 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
 // the Clash/sing-box subscription (BuildShareLink returns "" for them), so this
 // is how a user retrieves them instead.
 type UserProxy struct {
-	Tag      string `json:"tag"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	TLS      bool   `json:"tls"` // true → HTTPS proxy; false → plain HTTP/SOCKS5
+	Tag       string `json:"tag"`
+	BucketID  int64  `json:"bucket_id"` // owning bucket — target of a credential edit
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	TLS       bool   `json:"tls"`        // true → HTTPS proxy; false → plain HTTP/SOCKS5
+	ExpiresAt int64  `json:"expires_at"` // 0 = permanent
+	Expired   bool   `json:"expired"`    // credential past its expiry (won't authenticate)
+	Custom    bool   `json:"custom"`     // true → user has set a custom username/password
 }
 
 // BuildUserProxies returns the mixed-inbound proxy credentials the user is
@@ -572,7 +576,8 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 		return nil
 	}
 	serverCache := make(map[int64]*Server)
-	owners, _ := s.UserOwnedInbounds(u.ID, time.Now().Unix())
+	now := time.Now().Unix()
+	owners, _ := s.UserOwnedInbounds(u.ID, now)
 	var out []UserProxy
 	for _, ib := range inbounds {
 		if !ib.Enabled || ib.Type != "mixed" {
@@ -598,12 +603,16 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 			}
 		}
 		out = append(out, UserProxy{
-			Tag:      ib.Tag,
-			Host:     nodeHost,
-			Port:     ib.ListenPort,
-			Username: owner.ClientName,
-			Password: owner.ClientSecret,
-			TLS:      ib.TlsID != 0,
+			Tag:       ib.Tag,
+			BucketID:  owner.ID,
+			Host:      nodeHost,
+			Port:      ib.ListenPort,
+			Username:  owner.ProxyName(),
+			Password:  owner.ProxySecret(),
+			TLS:       ib.TlsID != 0,
+			ExpiresAt: owner.ProxyExpiresAt,
+			Expired:   owner.ProxyExpiresAt != 0 && owner.ProxyExpiresAt <= now,
+			Custom:    owner.ProxyUsername != "",
 		})
 	}
 	return out
@@ -750,7 +759,21 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 			ibGroups, _ = s.SelfBuiltNodeGroupIDs(ib.Tag)
 		}
 		for _, ord := range ordered {
-			if b := pickOwner(ord, ibGroups, groupCount); b != nil {
+			b := pickOwner(ord, ibGroups, groupCount)
+			if b == nil {
+				continue
+			}
+			// A mixed (HTTP/SOCKS5) inbound authenticates with the bucket's custom
+			// proxy credential (username/password), which has its own optional expiry
+			// separate from the plan. Skip a bucket whose proxy credential has expired
+			// so its user drops out of the mixed inbound (and GenerateConfig then omits
+			// a now-userless mixed inbound rather than exposing an open proxy).
+			if ib.Type == "mixed" {
+				if !b.ProxyActive(now) {
+					continue
+				}
+				out[ib.Tag] = append(out[ib.Tag], singbox.User{Name: b.ProxyName(), Password: b.ProxySecret()})
+			} else {
 				out[ib.Tag] = append(out[ib.Tag], singbox.User{Name: b.ClientName, UUID: b.ClientUUID, Password: b.ClientSecret})
 			}
 		}

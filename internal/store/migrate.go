@@ -406,6 +406,18 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE orders ADD COLUMN refunded_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE orders ADD COLUMN refund_ratio REAL NOT NULL DEFAULT 0`,
 		`ALTER TABLE orders ADD COLUMN refunded_traffic INTEGER NOT NULL DEFAULT 0`,
+		// Per-bucket custom credentials for mixed (HTTP/SOCKS5) proxy inbounds: a
+		// user-chosen username/password (proxy-only account, unrelated to login) that
+		// replaces client_name/client_secret ONLY for mixed inbounds, with its own
+		// expiry (0 = permanent). Empty proxy_username → fall back to client_name, so
+		// existing buckets keep working. proxy_username is an additional sing-box
+		// stats identity for the bucket, so AddBucketUsage matches it too.
+		`ALTER TABLE user_plans ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE user_plans ADD COLUMN proxy_password TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE user_plans ADD COLUMN proxy_expires_at INTEGER NOT NULL DEFAULT 0`,
+		// A proxy_username must be globally unique (it becomes a stats identity);
+		// partial index so the many empty defaults don't collide.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_proxy_username ON user_plans(proxy_username) WHERE proxy_username <> ''`,
 	} {
 		_, _ = s.db.Exec(stmt)
 	}
