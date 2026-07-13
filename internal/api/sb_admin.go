@@ -64,6 +64,69 @@ func (a *API) handleAdminSelfSignedCert(w http.ResponseWriter, r *http.Request) 
 	ok(w, J{"certificate": certPEM, "key": keyPEM})
 }
 
+// handleAdminQuickSelfSignedTls generates a self-signed cert AND saves it as a
+// ready-to-bind TLS entry in one call — the "一键绑定证书" path for mixed
+// (HTTP/SOCKS5) inbounds that want to become HTTPS proxies without a domain. The
+// SNI defaults to the address clients dial for the inbound's server (its host,
+// else the panel's node host), so the cert's SAN matches; it also embeds an IP
+// SAN when that address is an IP. Returns the saved TLS entry (with its id).
+func (a *API) handleAdminQuickSelfSignedTls(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ServerID   int64  `json:"server_id"`
+		ServerName string `json:"server_name"` // optional override (domain or IP)
+		Name       string `json:"name"`        // optional TLS entry name
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	sni := strings.TrimSpace(req.ServerName)
+	if sni == "" {
+		if req.ServerID != 0 {
+			if sv, _ := a.st.GetServer(req.ServerID); sv != nil {
+				sni = strings.TrimSpace(sv.Host)
+			}
+		}
+		if sni == "" {
+			sni = strings.TrimSpace(a.nodeHost())
+		}
+	}
+	if sni == "" {
+		fail(w, http.StatusBadRequest, "无法确定证书域名/IP：请在该服务器或「系统设置 → 面板访问地址」配置 host，或手动填写 SNI")
+		return
+	}
+	certPEM, keyPEM, err := singbox.GenerateSelfSignedCert(sni, 3650)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "生成自签证书失败："+err.Error())
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "自签-" + sni
+	}
+	server := map[string]interface{}{
+		"enabled":     true,
+		"server_name": sni,
+		"certificate": certPEM,
+		"key":         keyPEM,
+	}
+	// insecure=true on the client side: a self-signed cert won't chain to a public
+	// CA, so clients (and 轻舟's own link renderers) must skip verification.
+	client := map[string]interface{}{
+		"insecure": true,
+		"utls":     map[string]interface{}{"enabled": true, "fingerprint": "chrome"},
+	}
+	sj, _ := json.Marshal(server)
+	cj, _ := json.Marshal(client)
+	newID, err := a.st.SaveSbTls(&store.SbTls{ServerID: req.ServerID, Name: name, Mode: "tls", ServerJSON: string(sj), ClientJSON: string(cj)})
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "保存证书失败")
+		return
+	}
+	saved, _ := a.st.GetSbTls(newID)
+	ok(w, saved)
+}
+
 // sbSetting resolves a sing-box config value the same way the controller does:
 // env var → DB setting → default. Keeps the ACME reload command and cert dir in
 // sync with where the local sing-box actually reads its config / systemd unit.

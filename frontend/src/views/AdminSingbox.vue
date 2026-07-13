@@ -295,6 +295,15 @@
             </div>
           </n-form-item>
           <n-form-item v-if="ie.type !== 'shadowsocks'" label="TLS / Reality"><n-select v-model:value="ie.tls_id" :options="tlsOpts" placeholder="无" clearable /></n-form-item>
+          <n-form-item v-if="ie.type === 'mixed' && !ie.tls_id" label=" ">
+            <div style="width:100%;">
+              <n-button size="small" :loading="quickCertLoading" @click="quickBindCert">🔒 一键生成自签证书并绑定（→ HTTPS 代理）</n-button>
+              <div class="form-tip">用该服务器地址自动签一张证书并绑定，公网使用更安全。客户端需勾选「跳过证书验证」；要浏览器/系统信任则改用 ACME 证书。</div>
+            </div>
+          </n-form-item>
+          <n-form-item v-if="ie.type === 'mixed' && ie.tls_id" label=" ">
+            <n-tag type="success" size="small">已绑定 TLS，保存后即为 HTTPS 代理（1Panel 代理类型选 HTTPS）</n-tag>
+          </n-form-item>
           <n-form-item v-if="['vless','vmess','trojan'].includes(ie.type) && !ie.tls_id && ie.type !== 'shadowsocks'" label=" ">
             <n-tag type="warning" size="small">未配置 TLS，建议为 VLESS/VMess/Trojan 绑定 TLS 或 Reality</n-tag>
           </n-form-item>
@@ -360,6 +369,7 @@ const message = useMessage()
 const tab = ref('tls')
 const loading = ref(false)
 const saving = ref(false)
+const quickCertLoading = ref(false)
 const genLoading = ref(false)
 
 // 抽屉宽度：移动端全屏，桌面 500px
@@ -486,7 +496,8 @@ const landingOpts = computed(() => [
     .filter(n => n.id !== ie.id && n.enabled && RELAY_LANDING_TYPES.includes(n.type) && !n.upstream_inbound_id)
     .map(n => ({ label: `${n.tag} · ${(n.type || '').toUpperCase()} @ ${serverName(n.server_id)}`, value: n.id })),
 ])
-const tlsOpts = computed(() => tlsList.value.map(t => ({ label: t.name + ' (' + t.mode + ')', value: t.id })))
+// value 0 = 未绑定；显式给个「无」选项，否则 n-select 会把裸值 0 显示出来。
+const tlsOpts = computed(() => [{ label: '无', value: 0 }, ...tlsList.value.map(t => ({ label: t.name + ' (' + t.mode + ')', value: t.id }))])
 const protoOpts = [
   { label: 'VLESS', value: 'vless' }, { label: 'VMess', value: 'vmess' }, { label: 'Trojan', value: 'trojan' },
   { label: 'TUIC', value: 'tuic' }, { label: 'Hysteria2', value: 'hysteria2' }, { label: 'Shadowsocks', value: 'shadowsocks' },
@@ -754,6 +765,17 @@ function applyPreset(v: string | null) {
   Object.assign(ie, presets[v])
   presetType.value = null
   showInb.value = true
+}
+
+// 一键：用该服务器地址签一张自签证书、存为 TLS 条目并绑定到当前入站。
+async function quickBindCert() {
+  quickCertLoading.value = true
+  try {
+    const tls: any = await apiPost('/api/admin/sb/tls/quick-selfsigned', { server_id: ie.server_id || 0, name: '自签-' + (ie.tag || 'mixed') })
+    tlsList.value = await apiList('/api/admin/sb/tls') // 刷新下拉，让新证书可选
+    ie.tls_id = tls.id
+    message.success('已生成自签证书并绑定，保存后即为 HTTPS 代理')
+  } catch (e: any) { message.error(e.message) } finally { quickCertLoading.value = false }
 }
 
 async function saveInbound() {
