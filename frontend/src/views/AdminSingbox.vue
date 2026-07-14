@@ -124,12 +124,14 @@
               <span><i class="dot entry"></i>入口 / 线路机入站</span>
               <span><i class="dot landing"></i>落地入站</span>
               <span><i class="dot inet"></i>互联网</span>
+              <span style="flex:1;"></span>
+              <n-button size="tiny" quaternary @click="showTopoIp = !showTopoIp">{{ showTopoIp ? '🙈 隐藏 IP' : '👁 显示 IP' }}</n-button>
             </div>
             <div v-for="g in inboundGroups" :key="g.machine.id" class="topo-machine">
               <div class="topo-mhead">
                 <span class="machine-name">{{ g.machine.name }}</span>
                 <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
-                <span class="machine-host">{{ g.machine.host }}</span>
+                <span class="machine-host">{{ showTopoIp ? g.machine.host : maskHost(g.machine.host) }}</span>
               </div>
               <div v-for="r in g.items" :key="r.id" class="topo-row" :class="{ off: !r.enabled }">
                 <span class="topo-node client">👤 客户端</span>
@@ -390,6 +392,7 @@ const tab = ref('tls')
 const loading = ref(false)
 const saving = ref(false)
 const quickCertLoading = ref(false)
+const showTopoIp = ref(false) // 链路拓扑默认对 IP 打码，避免截图/分享泄露真实地址
 const genLoading = ref(false)
 
 // 抽屉宽度：移动端全屏，桌面 500px
@@ -563,6 +566,16 @@ const presetOpts = [
   { label: 'Mixed (HTTP/SOCKS5 代理)', value: 'mixed' },
 ]
 
+// maskHost 对 IP/域名打码，链路拓扑默认用它，防止截图/分享时泄露真实地址。
+// IPv4 保留首尾段（38.***.***.54）；域名/IPv6 保留首尾各两位；非地址标签（如「面板本机」）原样返回。
+function maskHost(h: string): string {
+  if (!h) return h
+  const v4 = h.match(/^(\d{1,3})\.\d{1,3}\.\d{1,3}\.(\d{1,3})$/)
+  if (v4) return `${v4[1]}.***.***.${v4[2]}`
+  if (!/[.:]/.test(h)) return h // 「面板本机」「—」等非地址标签
+  if (h.length <= 6) return '***'
+  return h.slice(0, 2) + '***' + h.slice(-2)
+}
 function serverName(id: number) { if (!id) return '本机'; const s = servers.value.find(s => s.id === id); return s ? s.name : '#' + id }
 function tlsName(id: number) { if (!id) return '无'; const t = tlsList.value.find(t => t.id === id); return t ? t.name : '#' + id }
 function tlsUseCount(id: number) { return inbounds.value.filter(n => n.tls_id === id).length }
