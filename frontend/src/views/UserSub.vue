@@ -20,7 +20,12 @@
 
     <!-- 分计划资源 -->
     <n-card v-if="plans.length" title="我的计划" size="small" style="margin-bottom:16px;">
-      <div v-for="p in plans" :key="p.id" style="margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px;">
+      <template v-if="expiredCount" #header-extra>
+        <n-button size="tiny" quaternary @click="showExpiredPlans = !showExpiredPlans">
+          {{ showExpiredPlans ? '隐藏已过期' : '显示已过期 (' + expiredCount + ')' }}
+        </n-button>
+      </template>
+      <div v-for="p in visiblePlans" :key="p.id" style="margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
           <span style="font-weight:600;">{{ p.name || '计划 #' + p.id }}</span>
           <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
@@ -30,6 +35,9 @@
           <span>{{ fmtBytes(p.used) }} / {{ fmtTotal(p.traffic_limit) }}</span>
           <span>{{ fmtDate(p.expiry_at) }}</span>
         </div>
+      </div>
+      <div v-if="!visiblePlans.length" style="font-size:12px;color:var(--text-3);text-align:center;padding:6px 0;">
+        {{ expiredCount }} 个已过期套餐已隐藏，点右上角「显示已过期」查看
       </div>
     </n-card>
 
@@ -213,6 +221,11 @@ function planStatus(p: any) {
   if (p.traffic_limit > 0 && p.used >= p.traffic_limit) return { type: 'warning' as const, label: '已用尽' }
   return { type: 'success' as const, label: '正常' }
 }
+// 过期套餐默认隐藏（减少堆积的历史套餐干扰），可一键展开。
+const showExpiredPlans = ref(false)
+function isExpiredPlan(p: any) { return !!(p.expiry_at && p.expiry_at * 1000 < Date.now()) }
+const expiredCount = computed(() => plans.value.filter(isExpiredPlan).length)
+const visiblePlans = computed(() => showExpiredPlans.value ? plans.value : plans.value.filter(p => !isExpiredPlan(p)))
 function latencyColor(ms: number) {
   if (ms < 0) return 'var(--text-3)'
   if (ms < 150) return '#10b981'
