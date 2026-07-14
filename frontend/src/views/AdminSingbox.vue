@@ -6,31 +6,51 @@
         <div class="page-toolbar">
           <n-input v-model:value="tlsSearch" placeholder="搜索名称/SNI" size="small" clearable style="width:200px;max-width:50%;" />
           <span class="spacer" />
+          <n-button size="small" @click="toggleAllMachines">{{ allExpanded ? '全部折叠' : '全部展开' }}</n-button>
           <n-button size="small" type="primary" @click="openTls()">添加 TLS</n-button>
         </div>
         <n-spin :show="loading">
-          <div v-if="filteredTls.length" class="card-grid">
-            <div v-for="r in filteredTls" :key="r.id" class="list-card">
-              <div class="lc-head">
-                <span class="lc-title">{{ r.name || '—' }}</span>
-                <n-tag :type="r.mode === 'reality' ? 'success' : 'info'" size="tiny" bordered="false">{{ r.mode === 'reality' ? 'Reality' : '证书 TLS' }}</n-tag>
-                <n-tag v-if="r.cert_info" :type="r.cert_info.expired ? 'error' : r.cert_info.expiring ? 'warning' : 'success'" size="tiny" bordered="false">
-                  {{ r.cert_info.expired ? '已过期' : r.cert_info.days_left + '天' }}
-                </n-tag>
+          <n-collapse v-if="tlsGroups.length" v-model:expanded-names="expandedMachines" arrow-placement="left" class="machine-list">
+            <n-collapse-item v-for="g in tlsGroups" :key="g.machine.id" :name="g.machine.id">
+              <template #header>
+                <div class="machine-head">
+                  <span class="machine-name">{{ g.machine.name }}</span>
+                  <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
+                  <span class="machine-host">{{ g.machine.host }}</span>
+                </div>
+              </template>
+              <template #header-extra>
+                <div class="machine-extra" @click.stop>
+                  <n-tag size="tiny" :type="g.total ? 'success' : 'default'" bordered="false">{{ g.total }} 项</n-tag>
+                  <n-button size="tiny" type="primary" @click="openTlsFor(g.machine.id)">＋ TLS</n-button>
+                </div>
+              </template>
+              <div v-if="g.items.length" class="card-grid">
+                <div v-for="r in g.items" :key="r.id" class="list-card">
+                  <div class="lc-head">
+                    <span class="lc-title">{{ r.name || '—' }}</span>
+                    <n-tag :type="r.mode === 'reality' ? 'success' : 'info'" size="tiny" bordered="false">{{ r.mode === 'reality' ? 'Reality' : '证书 TLS' }}</n-tag>
+                    <n-tag v-if="r.cert_info" :type="r.cert_info.expired ? 'error' : r.cert_info.expiring ? 'warning' : 'success'" size="tiny" bordered="false">
+                      {{ r.cert_info.expired ? '已过期' : r.cert_info.days_left + '天' }}
+                    </n-tag>
+                  </div>
+                  <div class="lc-meta">
+                    <span class="kv">SNI <b>{{ jp(r.server_json).server_name || '—' }}</b></span>
+                    <span class="kv">入站数 <b>{{ tlsUseCount(r.id) }}</b></span>
+                  </div>
+                  <div class="lc-foot">
+                    <n-button size="tiny" @click="openTls(r)">编辑</n-button>
+                    <n-button size="tiny" @click="cloneTls(r)">克隆</n-button>
+                    <n-button size="tiny" type="error" @click="deleteTls(r.id)">删除</n-button>
+                  </div>
+                </div>
               </div>
-              <div class="lc-meta">
-                <span class="kv">SNI <b>{{ jp(r.server_json).server_name || '—' }}</b></span>
-                <span class="kv">服务器 <b>{{ serverName(r.server_id) }}</b></span>
-              </div>
-              <div class="lc-meta"><span class="kv">入站数 <b>{{ tlsUseCount(r.id) }}</b></span></div>
-              <div class="lc-foot">
-                <n-button size="tiny" @click="openTls(r)">编辑</n-button>
-                <n-button size="tiny" @click="cloneTls(r)">克隆</n-button>
-                <n-button size="tiny" type="error" @click="deleteTls(r.id)">删除</n-button>
-              </div>
-            </div>
-          </div>
-          <n-empty v-else-if="!loading" description="暂无 TLS 配置" style="padding:40px 0;" />
+              <n-empty v-else :description="tlsSearch ? '无匹配 TLS' : '该机器暂无 TLS'" size="small" style="padding:18px 0;">
+                <template v-if="!tlsSearch" #extra><n-button size="tiny" @click="openTlsFor(g.machine.id)">添加 TLS</n-button></template>
+              </n-empty>
+            </n-collapse-item>
+          </n-collapse>
+          <n-empty v-else-if="!loading" :description="tlsSearch ? '无匹配 TLS' : '暂无 TLS 配置'" style="padding:40px 0;" />
         </n-spin>
       </n-tab-pane>
 
@@ -429,6 +449,17 @@ const inboundGroups = computed(() => {
   }).filter(g => !searching || g.items.length > 0)
 })
 
+// TLS 配置按机器分组显示（与入站页一致）。搜索时只保留有匹配项的机器。
+const tlsGroups = computed(() => {
+  const searching = !!tlsSearch.value.trim()
+  const matched = filteredTls.value
+  return machines.value.map(m => {
+    const all = tlsList.value.filter(t => (t.server_id || 0) === m.id)
+    const items = matched.filter(t => (t.server_id || 0) === m.id)
+    return { machine: m, items, total: all.length }
+  }).filter(g => !searching || g.items.length > 0)
+})
+
 // 折叠状态：默认全部展开；首次加载后按机器 id 铺开。
 const expandedMachines = ref<number[]>([])
 let expandedInit = false
@@ -443,6 +474,12 @@ function openInboundFor(serverId: number) {
   chainSourceId.value = 0
   ie.server_id = serverId
   showInb.value = true
+}
+
+// 新建 TLS 并预选所属机器（TLS 页按机器分组时的「＋ TLS」入口）。
+function openTlsFor(serverId: number) {
+  openTls()
+  te.server_id = serverId
 }
 
 // 跳到「配置预览」并选中该机器。
