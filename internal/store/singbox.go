@@ -405,17 +405,26 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 	return singbox.GenerateConfigWithRelays([]byte(base), ibs, "", relays)
 }
 
+// SelfBuiltLink is one generated share-link plus the inbound tag it came from.
+// The tag is carried alongside rather than read back out of the link's remark,
+// because the remark shows the node's admin-configured display name.
+type SelfBuiltLink struct {
+	Tag  string // inbound tag — the group filter's join key
+	Link string
+}
+
 // BuildSelfBuiltLinks generates client share-links for every enabled native
 // inbound using the user's own credentials — replacing the sing-box sub fetch so
 // subscriptions survive the cutover. host is the dial address advertised to
-// clients (node_host_override / origin IP). The links carry remark=inbound.tag
-// so the subscription layer's group filter still applies. Each link uses the
-// credentials of the bucket that owns the inbound (see UserOwnedInbounds), so a
+// clients (node_host_override / origin IP). Each link's remark is the node's
+// display name from the 节点 page, falling back to the inbound tag when no node
+// is bound to it. Each link uses the credentials of the bucket that owns the
+// inbound (see UserOwnedInbounds), so a
 // user with an active plan bucket gets links even if their legacy users.*
 // identity is empty — e.g. an admin account, which is never provisioned a
 // client_uuid. Returns nil only when no address is configured or no bucket
 // owns any inbound.
-func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
+func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 	if host == "" {
 		return nil // no advertised address configured
 	}
@@ -438,8 +447,9 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
 	// that bucket's credentials and shows its own remaining quota/expiry. A node
 	// with no active owning bucket is omitted (no access).
 	owners, _ := s.UserOwnedInbounds(u.ID, time.Now().Unix())
+	nodeNames, _ := s.SelfBuiltNodeNames()
 
-	var out []string
+	var out []SelfBuiltLink
 	for _, ib := range inbounds {
 		if !ib.Enabled {
 			continue
@@ -474,8 +484,14 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
 		}
 		_ = json.Unmarshal([]byte(ib.Options), &opts)
 
+		// Remark = the node's display name from the 节点 page; the raw inbound tag
+		// is only a fallback for an inbound no node is bound to.
+		remark := ib.Tag
+		if n := nodeNames[ib.Tag]; n != "" {
+			remark = n
+		}
 		p := singbox.LinkParams{
-			Type: ib.Type, Tag: ib.Tag + subInfoSuffixBucket(owner), Host: nodeHost, Port: ib.ListenPort,
+			Type: ib.Type, Tag: remark + subInfoSuffixBucket(owner), Host: nodeHost, Port: ib.ListenPort,
 			UUID: owner.ClientUUID, Password: owner.ClientSecret,
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
@@ -540,7 +556,7 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []string {
 			p.ALPN = strings.Join(parts, ",")
 		}
 		if link := singbox.BuildShareLink(p); link != "" {
-			out = append(out, link)
+			out = append(out, SelfBuiltLink{Tag: ib.Tag, Link: link})
 		}
 	}
 	return out

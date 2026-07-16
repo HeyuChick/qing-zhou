@@ -69,6 +69,32 @@ func (s *Store) ListNodes() ([]*Node, error) {
 	return out, nil
 }
 
+// SelfBuiltNodeNames maps each bound inbound tag to the display name the admin
+// gave that node on the 节点 page. Used as the subscription remark so clients
+// show the configured name instead of the raw inbound tag. A tag bound by more
+// than one node keeps the first (sort_order, id) — the same order the node page
+// lists them in.
+func (s *Store) SelfBuiltNodeNames() (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT inbound_tag, name FROM nodes
+		WHERE type='self_built' AND inbound_tag != '' AND name != ''
+		ORDER BY sort_order, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var tag, name string
+		if err := rows.Scan(&tag, &name); err != nil {
+			return nil, err
+		}
+		if _, dup := out[tag]; !dup {
+			out[tag] = name
+		}
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CreateNode(n Node) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO nodes
 		(type, name, protocol, inbound_tag, share_link, source_id, enabled, sort_order, created_at)

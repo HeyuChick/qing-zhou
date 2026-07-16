@@ -512,7 +512,7 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 		// convenience). Once any group exists, "unassigned" means "no nodes".
 		if n, _ := a.st.GroupCount(); n == 0 {
 			for _, l := range a.selfBuiltLinks(u) {
-				add(l, 0, "")
+				add(l.Link, 0, "")
 			}
 		}
 		return out
@@ -539,16 +539,8 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	}
 	if len(tagGroup) > 0 {
 		for _, l := range a.selfBuiltLinks(u) {
-			remark := subconv.LinkRemark(l)
-			for tag, gid := range tagGroup {
-				// remark is "<tag><subInfoSuffix>" where the suffix always begins
-				// with a space; match the exact tag, not a bare prefix, so tags
-				// where one is a prefix of another (e.g. "hy2" vs "hy2-pro") don't
-				// leak across groups.
-				if remark == tag || strings.HasPrefix(remark, tag+" ") {
-					add(l, gid, gname[gid])
-					break
-				}
+			if gid, ok := tagGroup[l.Tag]; ok {
+				add(l.Link, gid, gname[gid])
 			}
 		}
 	}
@@ -573,7 +565,7 @@ func (a *API) nodeHost() string {
 	return host
 }
 
-func (a *API) selfBuiltLinks(u *store.User) []string {
+func (a *API) selfBuiltLinks(u *store.User) []store.SelfBuiltLink {
 	// 轻舟 manages its own sing-box inbounds; build the links from our own data.
 	return a.st.BuildSelfBuiltLinks(u, a.nodeHost())
 }
