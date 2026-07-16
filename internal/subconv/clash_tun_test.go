@@ -148,3 +148,44 @@ func TestDefaultClashTemplateDNS(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultClashTemplateNoResolve verifies the CN geoip rule can't force a
+// fresh local DNS resolution for foreign fake-ip'd domains. Regression it
+// guards: a bare "GEOIP,CN,DIRECT" (no "no-resolve") makes mihomo resolve
+// every domain not already caught by GEOSITE,cn just to evaluate this rule —
+// and mihomo has an open bug (MetaCubeX/mihomo#2971) where respect-rules
+// doesn't reliably tunnel that resolution, so it leaks out the real network
+// instead of the proxy.
+func TestDefaultClashTemplateNoResolve(t *testing.T) {
+	var doc struct {
+		Rules []string `yaml:"rules"`
+	}
+	if err := yaml.Unmarshal([]byte(DefaultClashTemplate), &doc); err != nil {
+		t.Fatalf("parse DefaultClashTemplate: %v", err)
+	}
+	for _, r := range doc.Rules {
+		if strings.HasPrefix(r, "GEOIP,") && !strings.HasSuffix(r, ",no-resolve") {
+			t.Errorf("GEOIP rule %q forces a fresh local DNS resolution — must end in \",no-resolve\"", r)
+		}
+	}
+}
+
+// TestDefaultClashTemplateStrictRoute verifies tun.strict-route is on.
+// Regression it guards: Windows races DNS queries across every active
+// adapter ("smart multi-homed name resolution") including the physical NIC;
+// dns-hijack alone doesn't stop that, only strict-route adds the firewall
+// rules that do (clash-verge-rev#3133). Without it, Windows clients leak
+// straight to the ISP's resolver even with a fully correct dns: block.
+func TestDefaultClashTemplateStrictRoute(t *testing.T) {
+	var doc struct {
+		Tun struct {
+			StrictRoute bool `yaml:"strict-route"`
+		} `yaml:"tun"`
+	}
+	if err := yaml.Unmarshal([]byte(DefaultClashTemplate), &doc); err != nil {
+		t.Fatalf("parse DefaultClashTemplate: %v", err)
+	}
+	if !doc.Tun.StrictRoute {
+		t.Error("tun.strict-route must be true, or Windows clients leak DNS via the physical adapter")
+	}
+}

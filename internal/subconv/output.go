@@ -174,7 +174,15 @@ tun:
   auto-detect-interface: true
   dns-hijack:
     - "any:53"
-  strict-route: false
+  # Windows sends DNS queries to every active network adapter at once ("smart
+  # multi-homed name resolution") — physical NIC included — and dns-hijack
+  # alone doesn't stop that. strict-route makes mihomo add the Windows
+  # firewall rules that block the physical adapter's own DNS queries, so they
+  # can't race the TUN interface and leak straight to the ISP's resolver
+  # (this is a documented mihomo/clash-verge-rev gap: MetaCubeX/mihomo docs,
+  # clash-verge-rev#3133). false only helped avoid breaking niche apps like
+  # VirtualBox; the leak it causes is worse.
+  strict-route: true
   ipv6: false
   route-exclude-address:
     - 192.168.0.0/16
@@ -188,7 +196,16 @@ rules:
   - GEOSITE,private,DIRECT
   - GEOIP,private,DIRECT,no-resolve
   - GEOSITE,cn,DIRECT
-  - GEOIP,CN,DIRECT
+  # no-resolve: match only an ALREADY-known IP (e.g. literal-IP connections),
+  # never force a fresh local DNS resolution just to evaluate this rule.
+  # Without it, every foreign fake-ip'd domain not caught by GEOSITE,cn above
+  # forces mihomo to resolve it locally via nameserver/fallback before it can
+  # even reach MATCH — and mihomo has an open bug where respect-rules doesn't
+  # reliably tunnel that resolution (MetaCubeX/mihomo#2971), so it leaks out
+  # the real network instead. With no-resolve, those domains skip straight to
+  # MATCH untouched; the destination hostname travels through the tunnel and
+  # is resolved server-side by the node, never locally.
+  - GEOIP,CN,DIRECT,no-resolve
 `
 
 // DefaultSingboxTemplate carries the sing-box anti-leak dns+route with built-in
