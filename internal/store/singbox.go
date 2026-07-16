@@ -251,19 +251,91 @@ func (s *Store) ListSbInboundsByServer(serverID int64) ([]*SbInbound, error) {
 	return out, rows.Err()
 }
 
-// SbInboundPortConflict 检测同服务器同端口是否已被其他入站占用。
-// excludeID 用于编辑时排除自身。返回 (conflict, existingTag, error)。
-func (s *Store) SbInboundPortConflict(serverID int64, port int, excludeID int64) (bool, string, error) {
-	var tag string
-	err := s.db.QueryRow(`SELECT tag FROM sb_inbounds WHERE server_id=? AND listen_port=? AND id!=? LIMIT 1`,
-		serverID, port, excludeID).Scan(&tag)
-	if err == sql.ErrNoRows {
-		return false, "", nil
+// transportBits is the set of L4 protocols an inbound binds on its port.
+type transportBits uint8
+
+const (
+	transportTCP transportBits = 1 << iota
+	transportUDP
+)
+
+// inboundTransports reports which L4 protocols an inbound type binds. Sharing a
+// port is only a conflict when two inbounds want the same L4 — e.g. hysteria2
+// (QUIC/UDP) and vless (TCP) both on 443 is a legitimate, common pairing.
+func inboundTransports(typ, options string) transportBits {
+	switch typ {
+	case "tuic", "hysteria2", "hysteria":
+		return transportUDP // QUIC-based: UDP only
+	case "vless", "vmess", "trojan", "anytls", "mixed":
+		return transportTCP
+	case "shadowsocks":
+		// sing-box's shadowsocks inbound serves both unless network narrows it.
+		var opts map[string]interface{}
+		if options != "" {
+			_ = json.Unmarshal([]byte(options), &opts)
+		}
+		var bits transportBits
+		if n, _ := opts["network"].(string); n != "" {
+			for _, part := range strings.Split(n, ",") {
+				switch strings.TrimSpace(part) {
+				case "tcp":
+					bits |= transportTCP
+				case "udp":
+					bits |= transportUDP
+				}
+			}
+		}
+		if bits == 0 {
+			bits = transportTCP | transportUDP
+		}
+		return bits
+	default:
+		// Unknown/new type: assume it may bind both, so a clash is reported
+		// rather than silently allowed — a double bind fails at sing-box start,
+		// which is worse than a false rejection the admin can see and reason about.
+		return transportTCP | transportUDP
 	}
+}
+
+// listenIsAny reports whether a listen address is a wildcard (binds every
+// interface, so it overlaps any other address on the same port).
+func listenIsAny(s string) bool {
+	return s == "" || s == "::" || s == "::0" || s == "0.0.0.0"
+}
+
+func listenOverlaps(a, b string) bool {
+	if listenIsAny(a) || listenIsAny(b) {
+		return true
+	}
+	return a == b
+}
+
+// SbInboundPortConflict 检测入站的 listen+端口是否与同服务器的其他入站真正冲突。
+// 仅当「监听地址重叠」且「L4 协议(TCP/UDP)有交集」时才算冲突 —— 同端口的
+// hysteria2(UDP)+ vless(TCP)是合法搭配,不应拦截。n.ID 非 0 时排除自身。
+// 返回 (conflict, existingTag, error)。
+func (s *Store) SbInboundPortConflict(n *SbInbound) (bool, string, error) {
+	rows, err := s.db.Query(`SELECT tag, type, listen, options FROM sb_inbounds
+		WHERE server_id=? AND listen_port=? AND id!=?`, n.ServerID, n.ListenPort, n.ID)
 	if err != nil {
 		return false, "", err
 	}
-	return true, tag, nil
+	defer rows.Close()
+	newBits := inboundTransports(n.Type, n.Options)
+	for rows.Next() {
+		var tag, typ, listen, options string
+		if err := rows.Scan(&tag, &typ, &listen, &options); err != nil {
+			return false, "", err
+		}
+		if !listenOverlaps(listen, n.Listen) {
+			continue
+		}
+		if inboundTransports(typ, options)&newBits == 0 {
+			continue // different L4 — both can bind this port
+		}
+		return true, tag, nil
+	}
+	return false, "", rows.Err()
 }
 
 // SetUserPlan sets a user's current plan (for entitlement); planID 0 clears it.

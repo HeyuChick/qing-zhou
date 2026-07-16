@@ -725,9 +725,10 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "tag 必填、端口需在 1-65535")
 		return
 	}
-	// Tags must not contain whitespace: the subscription layer matches a node's
-	// remark as "<tag> <traffic-info>", so a space inside a tag would let one
-	// node's link be mis-attributed to a different tag's group.
+	// Tags are internal identifiers (sing-box config keys, relay tag suffixes,
+	// the node→group join key); keep them whitespace-free so they stay greppable
+	// in a config dump and unambiguous in logs. The displayed node name is a
+	// separate field on the 节点 page and is free to contain spaces.
 	if strings.ContainsAny(n.Tag, " \t\r\n") {
 		fail(w, http.StatusBadRequest, "tag 不能包含空格")
 		return
@@ -745,7 +746,7 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 	if id := chi.URLParam(r, "id"); id != "" {
 		n.ID = atoi(id)
 	}
-	if conflict, existingTag, err := a.st.SbInboundPortConflict(n.ServerID, n.ListenPort, n.ID); err != nil {
+	if conflict, existingTag, err := a.st.SbInboundPortConflict(&n); err != nil {
 		fail(w, http.StatusInternalServerError, "端口冲突检测失败")
 		return
 	} else if conflict {
