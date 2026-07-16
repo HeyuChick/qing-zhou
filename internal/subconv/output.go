@@ -100,6 +100,17 @@ func ParseLinks(links []string) []*Proxy {
 const DefaultClashTemplate = `
 dns:
   enable: true
+  # Route the DNS module's own upstream connections through the same rule
+  # table as regular traffic (GEOSITE/GEOIP/MATCH below), instead of dialing
+  # nameserver/fallback directly off-tunnel. Without this, every DNS query —
+  # including foreign-domain fallback lookups — exits via the real network
+  # interface, which is what a DNS-leak-test site actually measures (it sees
+  # the resolver's egress ASN, not whether the query bytes were encrypted).
+  # CN entries (doh.pub/alidns) still hit GEOSITE,cn,DIRECT and go direct;
+  # foreign fallback (1.1.1.1/8.8.8.8/dns.google) falls through to MATCH and
+  # gets tunneled through the proxy. Requires proxy-server-nameserver below
+  # to avoid a resolution loop when dialing the proxy node itself.
+  respect-rules: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter:

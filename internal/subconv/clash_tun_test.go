@@ -68,9 +68,11 @@ func contains(list []string, want string) bool {
 func TestDefaultClashTemplateDNS(t *testing.T) {
 	var doc struct {
 		DNS struct {
+			RespectRules   bool     `yaml:"respect-rules"`
 			Nameserver     []string `yaml:"nameserver"`
 			FakeIPFilter   []string `yaml:"fake-ip-filter"`
 			Fallback       []string `yaml:"fallback"`
+			ProxyServerNS  []string `yaml:"proxy-server-nameserver"`
 			FallbackFilter struct {
 				GeoIP     bool     `yaml:"geoip"`
 				GeoIPCode string   `yaml:"geoip-code"`
@@ -89,6 +91,18 @@ func TestDefaultClashTemplateDNS(t *testing.T) {
 		if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "tls://") {
 			t.Errorf("dns.nameserver has a plaintext entry %q — leaks queried domains in cleartext", s)
 		}
+	}
+
+	// --- respect-rules: DNS module's own connections must follow the same
+	// GEOSITE/GEOIP/MATCH table as regular traffic, or foreign fallback
+	// lookups dial out the real interface regardless of nameserver being DoH —
+	// this is what DNS-leak-test sites actually detect (egress ASN, not
+	// encryption). Requires proxy-server-nameserver to avoid a resolution loop. ---
+	if !doc.DNS.RespectRules {
+		t.Error("dns.respect-rules must be true, or fallback DNS dials off-tunnel and leaks the real network's ASN")
+	}
+	if len(doc.DNS.ProxyServerNS) == 0 {
+		t.Error("dns.proxy-server-nameserver must be set when respect-rules is true (avoids a resolution loop)")
 	}
 
 	// --- fallback DNS: must not be dominated by a single vendor ---
