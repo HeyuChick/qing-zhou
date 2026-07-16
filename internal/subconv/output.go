@@ -123,9 +123,12 @@ dns:
   default-nameserver:
     - 223.5.5.5
     - 119.29.29.29
+  # DoH only — mihomo races every nameserver entry concurrently, so a plain
+  # UDP:53 entry here leaks every queried domain in cleartext on the local
+  # network (it isn't tunneled through the proxy). default-nameserver/
+  # proxy-server-nameserver above stay plain IP: they only bootstrap-resolve
+  # the DoH hostnames themselves, which is low-sensitivity.
   nameserver:
-    - 223.5.5.5
-    - 119.29.29.29
     - https://doh.pub/dns-query
     - https://dns.alidns.com/dns-query
   fallback:
@@ -161,6 +164,7 @@ tun:
   dns-hijack:
     - "any:53"
   strict-route: false
+  ipv6: false
   route-exclude-address:
     - 192.168.0.0/16
     - 10.0.0.0/8

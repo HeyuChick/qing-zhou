@@ -68,8 +68,9 @@ func contains(list []string, want string) bool {
 func TestDefaultClashTemplateDNS(t *testing.T) {
 	var doc struct {
 		DNS struct {
-			FakeIPFilter []string `yaml:"fake-ip-filter"`
-			Fallback     []string `yaml:"fallback"`
+			Nameserver     []string `yaml:"nameserver"`
+			FakeIPFilter   []string `yaml:"fake-ip-filter"`
+			Fallback       []string `yaml:"fallback"`
 			FallbackFilter struct {
 				GeoIP     bool     `yaml:"geoip"`
 				GeoIPCode string   `yaml:"geoip-code"`
@@ -79,6 +80,15 @@ func TestDefaultClashTemplateDNS(t *testing.T) {
 	}
 	if err := yaml.Unmarshal([]byte(DefaultClashTemplate), &doc); err != nil {
 		t.Fatalf("parse DefaultClashTemplate: %v", err)
+	}
+
+	// --- nameserver: DoH/DoT only. mihomo races every entry concurrently, so a
+	// plain UDP:53 entry here leaks every queried domain in cleartext on the
+	// local network instead of through the (encrypted, tunneled) proxy. ---
+	for _, s := range doc.DNS.Nameserver {
+		if !strings.HasPrefix(s, "https://") && !strings.HasPrefix(s, "tls://") {
+			t.Errorf("dns.nameserver has a plaintext entry %q — leaks queried domains in cleartext", s)
+		}
 	}
 
 	// --- fallback DNS: must not be dominated by a single vendor ---
