@@ -28,6 +28,9 @@
           <n-form-item label="密码" path="password">
             <n-input v-model:value="regForm.password" type="password" show-password-on="click" placeholder="请输入密码" />
           </n-form-item>
+          <n-form-item label="邮箱" path="email">
+            <n-input v-model:value="regForm.email" placeholder="请输入邮箱" />
+          </n-form-item>
           <n-form-item v-if="config.config.register_mode === 'code'" label="邀请码" path="code">
             <n-input v-model:value="regForm.code" placeholder="请输入注册码" />
           </n-form-item>
@@ -67,7 +70,7 @@ const tab = ref('login')
 const loading = ref(false)
 
 const loginForm = reactive({ username: '', password: '' })
-const regForm = reactive({ username: '', password: '', code: '' })
+const regForm = reactive({ username: '', password: '', code: '', email: '' })
 const forgotEmail = ref('')
 
 const loginRules: FormRules = {
@@ -77,6 +80,18 @@ const loginRules: FormRules = {
 const regRules: FormRules = {
   username: { required: true, message: '请输入用户名', trigger: 'blur' },
   password: { required: true, min: 6, message: '密码至少6位', trigger: 'blur' },
+  email: {
+    trigger: ['blur', 'input'],
+    validator(_rule, value: string) {
+      if (config.config.email_verify_required && !value) {
+        return new Error('需要邮箱以完成验证')
+      }
+      if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+        return new Error('邮箱格式不正确')
+      }
+      return true
+    },
+  },
 }
 
 async function handleLogin() {
@@ -96,7 +111,7 @@ async function handleLogin() {
 async function handleRegister() {
   loading.value = true
   try {
-    await auth.register(regForm.username, regForm.password, regForm.code || undefined)
+    await auth.register(regForm.username, regForm.password, regForm.code || undefined, regForm.email || undefined)
     message.success('注册成功')
     emit('update:show', false)
     router.push('/dashboard')

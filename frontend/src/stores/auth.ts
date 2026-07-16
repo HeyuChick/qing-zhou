@@ -29,9 +29,10 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.setItem('qz_token', data.token)
   }
 
-  async function register(username: string, password: string, code?: string) {
+  async function register(username: string, password: string, code?: string, email?: string) {
     const body: any = { username, password }
     if (code) body.code = code
+    if (email) body.email = email
     const data = await apiPost<{ token: string; user: User }>('/api/auth/register', body)
     token.value = data.token
     user.value = data.user
