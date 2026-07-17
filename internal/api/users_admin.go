@@ -40,7 +40,14 @@ func (a *API) handleAdminRebuild(w http.ResponseWriter, r *http.Request) {
 	ok(w, J{"total": len(users), "synced": len(users), "disabled_no_access": disabled})
 }
 
-func adminUserView(u *store.User) J {
+// adminUserViewWithGroups renders a user for the admin UI. group_ids is always
+// present (never null) so the frontend can bind it to a multi-select without a
+// null guard. There is deliberately no group-less variant: one that passed nil
+// would report "this user is in no groups", which is a claim, not a default.
+func adminUserViewWithGroups(u *store.User, groupIDs []int64) J {
+	if groupIDs == nil {
+		groupIDs = []int64{}
+	}
 	return J{
 		"id":             u.ID,
 		"username":       u.Username,
@@ -54,17 +61,26 @@ func adminUserView(u *store.User) J {
 		"expiry_at":      u.ExpiryAt,
 		"has_client":     u.ClientID.Valid,
 		"created_at":     u.CreatedAt,
+		"group_ids":      groupIDs,
 	}
+}
+
+// adminUserViewLoadGroups builds the view for a single user, fetching their
+// groups. Use the bulk path for lists.
+func (a *API) adminUserViewLoadGroups(u *store.User) J {
+	gids, _ := a.st.UserGroupIDs(u.ID)
+	return adminUserViewWithGroups(u, gids)
 }
 
 // POST /api/admin/users — admin creates a user directly (no registration gate,
 // no email verification) and provisions their sing-box client immediately.
 func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Username string `json:"username"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Points   int64  `json:"points"`
+		Username string  `json:"username"`
+		Email    string  `json:"email"`
+		Password string  `json:"password"`
+		Points   int64   `json:"points"`
+		GroupIDs []int64 `json:"group_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -114,6 +130,7 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.st.SetEmailVerified(id) // admin-created accounts are pre-verified
+	_ = a.st.SetUserGroups(id, req.GroupIDs)
 
 	u, _ := a.st.UserByID(id)
 	if err := a.provisionClient(u); err != nil {
@@ -127,7 +144,7 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u, _ = a.st.UserByID(id)
-	ok(w, adminUserView(u))
+	ok(w, a.adminUserViewLoadGroups(u))
 }
 
 // PUT /api/admin/users/{id} — edit a user's quota / expiry / status.
@@ -144,11 +161,12 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		TrafficLimit *int64  `json:"traffic_limit"`
-		ExpiryAt     *int64  `json:"expiry_at"`
-		Status       *string `json:"status"`
-		Password     *string `json:"password"`
-		ResetTraffic bool    `json:"reset_traffic"`
+		TrafficLimit *int64   `json:"traffic_limit"`
+		ExpiryAt     *int64   `json:"expiry_at"`
+		Status       *string  `json:"status"`
+		Password     *string  `json:"password"`
+		ResetTraffic bool     `json:"reset_traffic"`
+		GroupIDs     *[]int64 `json:"group_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -193,6 +211,15 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
+	// Group membership only changes when the caller sends the field. Removing a
+	// user from a group blocks future buys of that group's packages; plans they
+	// already hold keep working until they expire.
+	if req.GroupIDs != nil {
+		if err := a.st.SetUserGroups(id, *req.GroupIDs); err != nil {
+			fail(w, http.StatusInternalServerError, "保存用户组失败")
+			return
+		}
+	}
 	// Banning must terminate existing sessions — otherwise the user's already-
 	// issued JWT stays valid for up to 7 days (authMiddleware only checks the
 	// session exists, not the user's status). Re-login is blocked by handleLogin.
@@ -202,7 +229,7 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	a.invalidateLinks(id)
 	_ = a.sbRebuild()
 	out, _ := a.st.UserByID(id)
-	ok(w, adminUserView(out))
+	ok(w, a.adminUserViewLoadGroups(out))
 }
 
 // POST /api/admin/users/{id}/assign-plan {package_id} — admin grants a package
@@ -262,7 +289,7 @@ func (a *API) handleAdminAssignPlan(w http.ResponseWriter, r *http.Request) {
 	a.invalidateLinks(id)
 	_ = a.sbRebuild()
 	out, _ := a.st.UserByID(id)
-	ok(w, adminUserView(out))
+	ok(w, a.adminUserViewLoadGroups(out))
 }
 
 // GET /api/admin/users?q=
@@ -272,9 +299,18 @@ func (a *API) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "读取用户失败")
 		return
 	}
+	ids := make([]int64, len(users))
+	for i, u := range users {
+		ids[i] = u.ID
+	}
+	groups, err := a.st.UserGroupIDsBulk(ids) // one query, not one per user
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "读取用户组失败")
+		return
+	}
 	out := make([]J, 0, len(users))
 	for _, u := range users {
-		out = append(out, adminUserView(u))
+		out = append(out, adminUserViewWithGroups(u, groups[u.ID]))
 	}
 	ok(w, out)
 }

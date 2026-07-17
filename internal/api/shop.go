@@ -8,9 +8,15 @@ import (
 	"qingzhou/internal/store"
 )
 
-// GET /api/user/packages — items on sale.
+// GET /api/user/packages — items on sale and visible to this user (packages
+// restricted to user groups they're not in are hidden).
 func (a *API) handleUserPackages(w http.ResponseWriter, r *http.Request) {
-	pkgs, err := a.st.ListPackages(true)
+	u := a.currentUser(r)
+	if u == nil {
+		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	pkgs, err := a.st.ListPackagesForUser(u.ID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "读取商品失败")
 		return
@@ -51,6 +57,8 @@ func (a *API) handlePurchase(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusPaymentRequired, "积分不足")
 		case errors.Is(err, store.ErrPackageDisabled):
 			fail(w, http.StatusBadRequest, "商品已下架")
+		case errors.Is(err, store.ErrPackageNotAllowed):
+			fail(w, http.StatusForbidden, "该商品仅限指定用户组购买")
 		case errors.Is(err, store.ErrOutOfStock):
 			fail(w, http.StatusConflict, "商品库存不足")
 		case errors.Is(err, store.ErrUserNotFound):

@@ -39,7 +39,7 @@ func validatePackage(p *store.Package) string {
 }
 
 func (a *API) handleAdminListPackages(w http.ResponseWriter, r *http.Request) {
-	pkgs, err := a.st.ListPackages(false)
+	pkgs, err := a.st.ListPackages()
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "读取商品失败")
 		return
@@ -49,6 +49,8 @@ func (a *API) handleAdminListPackages(w http.ResponseWriter, r *http.Request) {
 		if p.Type == "plan" {
 			p.GroupIDs, _ = a.st.PlanGroupIDs(p.ID)
 		}
+		// Unlike node groups, buyer restrictions apply to every package type.
+		p.UserGroupIDs, _ = a.st.PackageUserGroupIDs(p.ID)
 		p.Subscribers = subs[p.ID]
 	}
 	ok(w, pkgs)
@@ -75,9 +77,20 @@ func (a *API) handleAdminCreatePackage(w http.ResponseWriter, r *http.Request) {
 	if p.Type == "plan" {
 		_ = a.st.SetPlanGroups(id, p.GroupIDs)
 	}
+	// Unlike the node-group binding above, this one must not fail silently: a
+	// package with no user-group rows is PUBLIC, so a dropped write would put a
+	// restricted package on sale to everyone. Undo the create and report it.
+	if err := a.st.SetPackageUserGroups(id, p.UserGroupIDs); err != nil {
+		_ = a.st.DeletePackage(id)
+		fail(w, http.StatusInternalServerError, "保存可购买用户组失败，商品未创建（避免误开放给所有人）")
+		return
+	}
 	created, _ := a.st.GetPackage(id)
-	if created != nil && created.Type == "plan" {
-		created.GroupIDs, _ = a.st.PlanGroupIDs(id)
+	if created != nil {
+		if created.Type == "plan" {
+			created.GroupIDs, _ = a.st.PlanGroupIDs(id)
+		}
+		created.UserGroupIDs, _ = a.st.PackageUserGroupIDs(id)
 	}
 	ok(w, created)
 }
@@ -105,9 +118,20 @@ func (a *API) handleAdminUpdatePackage(w http.ResponseWriter, r *http.Request) {
 	if p.Type == "plan" {
 		_ = a.st.SetPlanGroups(id, p.GroupIDs)
 	}
+	// Must not fail silently — see handleAdminCreatePackage. SetPackageUserGroups
+	// is transactional, so a failure leaves the previous bindings in place (the
+	// safe direction: still restricted); the other package fields are already
+	// saved, so say plainly that only this part didn't stick.
+	if err := a.st.SetPackageUserGroups(id, p.UserGroupIDs); err != nil {
+		fail(w, http.StatusInternalServerError, "商品已保存，但可购买用户组未能更新（仍沿用原设置），请重试")
+		return
+	}
 	updated, _ := a.st.GetPackage(id)
-	if updated != nil && updated.Type == "plan" {
-		updated.GroupIDs, _ = a.st.PlanGroupIDs(id)
+	if updated != nil {
+		if updated.Type == "plan" {
+			updated.GroupIDs, _ = a.st.PlanGroupIDs(id)
+		}
+		updated.UserGroupIDs, _ = a.st.PackageUserGroupIDs(id)
 	}
 	ok(w, updated)
 }

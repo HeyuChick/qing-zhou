@@ -112,6 +112,12 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if regCodeID > 0 {
 		_ = a.st.RecordRegCodeUse(regCodeID, u.ID, u.Username, u.Email.String)
+		// Grant the code's user groups, so a code handed to a specific crowd
+		// unlocks that crowd's packages. Granted before any verification gate:
+		// membership alone gives nothing until they buy.
+		if gids, gerr := a.st.RegCodeUserGroupIDs(regCodeID); gerr == nil {
+			_ = a.st.AddUserGroups(u.ID, gids)
+		}
 	}
 
 	// If email verification is required, defer provisioning until verified.

@@ -130,6 +130,44 @@ CREATE TABLE IF NOT EXISTS plan_groups (
 );
 CREATE INDEX IF NOT EXISTS idx_plan_groups_pkg ON plan_groups(package_id);
 
+-- User groups gate WHO MAY BUY a package. Do not confuse with node_groups,
+-- which gate WHICH NODES a bought package grants (users → packages here vs
+-- packages → nodes there); the two are independent axes.
+CREATE TABLE IF NOT EXISTS user_groups (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    NOT NULL,
+  description TEXT    NOT NULL DEFAULT '',
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_group_members (
+  user_id  INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  PRIMARY KEY (user_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ugm_group ON user_group_members(group_id);
+CREATE INDEX IF NOT EXISTS idx_ugm_user  ON user_group_members(user_id);
+
+-- package_user_groups restricts a package to the listed user groups. NO ROWS
+-- for a package means "public": anyone may buy it. That keeps every package
+-- that existed before this feature buyable after the upgrade.
+CREATE TABLE IF NOT EXISTS package_user_groups (
+  package_id INTEGER NOT NULL,
+  group_id   INTEGER NOT NULL,
+  PRIMARY KEY (package_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pug_pkg   ON package_user_groups(package_id);
+CREATE INDEX IF NOT EXISTS idx_pug_group ON package_user_groups(group_id);
+
+-- Registration codes may auto-join their redeemer into user groups.
+CREATE TABLE IF NOT EXISTS reg_code_user_groups (
+  code_id  INTEGER NOT NULL,
+  group_id INTEGER NOT NULL,
+  PRIMARY KEY (code_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rcug_code ON reg_code_user_groups(code_id);
+
 CREATE TABLE IF NOT EXISTS reg_codes (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   code       TEXT    NOT NULL UNIQUE,

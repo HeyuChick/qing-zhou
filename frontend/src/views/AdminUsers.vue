@@ -19,6 +19,9 @@
             <span class="kv">流量 <b>{{ fmtBytes(u.used) }} / {{ fmtTotal(u.traffic_limit) }}</b></span>
             <span class="kv">到期 <b>{{ fmtDate(u.expiry_at) }}</b></span>
           </div>
+          <div v-if="u.group_ids?.length" class="lc-meta">
+            <span class="kv">用户组 <b>{{ groupNames(u.group_ids) }}</b></span>
+          </div>
           <div class="lc-foot" style="flex-wrap:wrap;">
             <n-button size="tiny" @click="openEdit(u)">编辑</n-button>
             <n-button size="tiny" type="info" @click="openRecharge(u)">充值</n-button>
@@ -38,6 +41,9 @@
         <n-form-item label="邮箱"><n-input v-model:value="newUser.email" /></n-form-item>
         <n-form-item label="密码"><n-input v-model:value="newUser.password" type="password" /></n-form-item>
         <n-form-item label="积分"><n-input-number v-model:value="newUser.points" :min="0" style="width:100%;" /></n-form-item>
+        <n-form-item label="用户组">
+          <n-select v-model:value="newUser.group_ids" :options="userGroupOptions" multiple clearable placeholder="留空 = 只能买公开套餐" />
+        </n-form-item>
       </n-form>
       <n-button type="primary" block :loading="saving" @click="handleCreate">创建</n-button>
     </n-modal>
@@ -49,6 +55,14 @@
         <n-form-item label="不限流量"><n-switch v-model:value="unlimitedTraffic" /></n-form-item>
         <n-form-item v-if="!unlimitedTraffic" label="流量 (GB)"><n-input-number v-model:value="editTrafficGB" :min="0" style="width:100%;" /></n-form-item>
         <n-form-item label="到期时间"><n-input v-model:value="editExpiry" type="datetime-local" style="width:100%;" /></n-form-item>
+        <n-form-item label="用户组">
+          <div style="width:100%;">
+            <n-select v-model:value="editGroupIDs" :options="userGroupOptions" multiple clearable placeholder="留空 = 只能买公开套餐" />
+            <div style="margin-top:4px;font-size:12px;color:var(--text-3);line-height:1.5;">
+              决定该用户能买哪些专属套餐。移出用户组不影响其已购买的套餐。
+            </div>
+          </div>
+        </n-form-item>
         <n-form-item label="封禁"><n-switch v-model:value="editBanned" /></n-form-item>
         <n-form-item label="重置密码"><n-input v-model:value="resetPw" type="password" placeholder="留空不重置" /></n-form-item>
         <n-form-item label="重置流量"><n-switch v-model:value="resetTraffic" /></n-form-item>
@@ -131,8 +145,8 @@ const filtered = computed(() => {
 
 // --- Create ---
 const showCreate = ref(false)
-const newUser = reactive({ username: '', email: '', password: '', points: 0 })
-function openCreate() { Object.assign(newUser, { username: '', email: '', password: '', points: 0 }); showCreate.value = true }
+const newUser = reactive({ username: '', email: '', password: '', points: 0, group_ids: [] as number[] })
+function openCreate() { Object.assign(newUser, { username: '', email: '', password: '', points: 0, group_ids: [] }); showCreate.value = true }
 async function handleCreate() {
   saving.value = true
   try { await apiPost('/api/admin/users', newUser); message.success('创建成功'); showCreate.value = false; await load() } catch (e: any) { message.error(e.message) } finally { saving.value = false }
@@ -147,6 +161,7 @@ const editExpiry = ref('')
 const editBanned = ref(false)
 const resetPw = ref('')
 const resetTraffic = ref(false)
+const editGroupIDs = ref<number[]>([])
 function openEdit(u: any) {
   editUser.value = { ...u }
   unlimitedTraffic.value = !u.traffic_limit || u.traffic_limit <= 0
@@ -154,6 +169,7 @@ function openEdit(u: any) {
   editExpiry.value = u.expiry_at ? new Date(u.expiry_at * 1000).toISOString().slice(0, 16) : ''
   editBanned.value = u.status === 'banned'
   resetPw.value = ''; resetTraffic.value = false
+  editGroupIDs.value = [...(u.group_ids || [])]
   showEdit.value = true
 }
 async function handleSave() {
@@ -167,6 +183,7 @@ async function handleSave() {
     if (editExpiry.value) body.expiry_at = Math.floor(new Date(editExpiry.value).getTime() / 1000)
     if (resetPw.value) body.password = resetPw.value
     if (resetTraffic.value) body.reset_traffic = true
+    body.group_ids = editGroupIDs.value
     await apiPut(`/api/admin/users/${editUser.value.id}`, body)
     message.success('保存成功'); showEdit.value = false; await load()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
@@ -235,9 +252,22 @@ async function handleDelete(id: number) {
   try { await apiDelete(`/api/admin/users/${id}`); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) }
 }
 
+// --- User groups ---
+const userGroups = ref<any[]>([])
+const userGroupOptions = computed(() => userGroups.value.map(g => ({ label: g.name, value: g.id })))
+function groupNames(ids?: number[]) {
+  return (ids || []).map(id => userGroups.value.find(g => g.id === id)?.name).filter(Boolean).join('、')
+}
+
 async function load() {
   loading.value = true
-  try { users.value = await apiList('/api/admin/users') } catch {} finally { loading.value = false }
+  try {
+    const [us, gs] = await Promise.all([
+      apiList('/api/admin/users'),
+      apiList('/api/admin/user-groups').catch(() => []),
+    ])
+    users.value = us; userGroups.value = gs
+  } catch {} finally { loading.value = false }
 }
 onMounted(load)
 </script>

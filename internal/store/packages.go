@@ -19,8 +19,9 @@ type Package struct {
 	Enabled      bool    `json:"enabled"`
 	SortOrder    int64   `json:"sort_order"`
 	CreatedAt    int64   `json:"created_at"`
-	GroupIDs     []int64 `json:"group_ids,omitempty"`  // plan↔node-groups (not a column)
-	Subscribers  int64   `json:"subscribers,omitempty"` // users currently on this plan (not a column)
+	GroupIDs     []int64 `json:"group_ids,omitempty"`      // plan↔node-groups: which nodes it grants (not a column)
+	UserGroupIDs []int64 `json:"user_group_ids,omitempty"` // package↔user-groups: who may buy it; empty = public (not a column)
+	Subscribers  int64   `json:"subscribers,omitempty"`    // users currently on this plan (not a column)
 }
 
 const pkgCols = `id, type, name, description, price_points, traffic_bytes, device_add,
@@ -43,15 +44,40 @@ func (s *Store) GetPackage(id int64) (*Package, error) {
 	return scanPackage(s.db.QueryRow(`SELECT `+pkgCols+` FROM packages WHERE id=?`, id))
 }
 
-// ListPackages returns packages ordered for display. If enabledOnly, hides
-// disabled and out-of-stock items (for the user-facing shop).
-func (s *Store) ListPackages(enabledOnly bool) ([]*Package, error) {
-	q := `SELECT ` + pkgCols + ` FROM packages`
-	if enabledOnly {
-		q += ` WHERE enabled=1 AND type!='device' AND (stock<0 OR stock>0)`
+// ListPackages returns every package ordered for display (admin view). The
+// user-facing shop uses ListPackagesForUser, which also applies the on-sale and
+// user-group filters.
+func (s *Store) ListPackages() ([]*Package, error) {
+	rows, err := s.db.Query(`SELECT ` + pkgCols + ` FROM packages ORDER BY sort_order ASC, id ASC`)
+	if err != nil {
+		return nil, err
 	}
-	q += ` ORDER BY sort_order ASC, id ASC`
-	rows, err := s.db.Query(q)
+	defer rows.Close()
+	var out []*Package
+	for rows.Next() {
+		p, err := scanPackage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListPackagesForUser returns the on-sale packages userID is allowed to buy:
+// the public ones (no user-group bindings) plus those bound to a group the user
+// belongs to. Restricted packages the user has no claim on are hidden outright.
+//
+// This is only the display half of the rule — Purchase re-checks inside its
+// transaction, so hiding a package here is not what makes it unbuyable.
+func (s *Store) ListPackagesForUser(userID int64) ([]*Package, error) {
+	rows, err := s.db.Query(`SELECT `+pkgCols+` FROM packages p
+		WHERE p.enabled=1 AND p.type!='device' AND (p.stock<0 OR p.stock>0)
+		  AND (NOT EXISTS (SELECT 1 FROM package_user_groups g WHERE g.package_id=p.id)
+		       OR EXISTS (SELECT 1 FROM package_user_groups g
+		                  JOIN user_group_members m ON m.group_id=g.group_id
+		                  WHERE g.package_id=p.id AND m.user_id=?))
+		ORDER BY p.sort_order ASC, p.id ASC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +124,9 @@ func (s *Store) DeletePackage(id int64) error {
 	// package that no longer exists. (Callers guard against deleting a package
 	// that still has subscribers, so current_plan_id is not orphaned here.)
 	if _, err := tx.Exec(`DELETE FROM plan_groups WHERE package_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM package_user_groups WHERE package_id=?`, id); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM packages WHERE id=?`, id); err != nil {

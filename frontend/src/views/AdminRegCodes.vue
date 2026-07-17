@@ -8,7 +8,14 @@
         <div><div style="font-size:12px;color:var(--text-3);margin-bottom:4px;">数量</div><n-input-number v-model:value="genCount" :min="1" :max="100" style="width:100px;" /></div>
         <div><div style="font-size:12px;color:var(--text-3);margin-bottom:4px;">最大使用次数（0=不限）</div><n-input-number v-model:value="genMaxUses" :min="0" style="width:140px;" /></div>
         <div style="flex:1;min-width:160px;"><div style="font-size:12px;color:var(--text-3);margin-bottom:4px;">备注</div><n-input v-model:value="genNote" placeholder="可选" /></div>
+        <div style="flex:1;min-width:200px;">
+          <div style="font-size:12px;color:var(--text-3);margin-bottom:4px;">加入用户组（可选）</div>
+          <n-select v-model:value="genGroupIDs" :options="userGroupOptions" multiple clearable placeholder="用此码注册即加入" />
+        </div>
         <n-button type="primary" :loading="generating" @click="handleGenerate">生成</n-button>
+      </div>
+      <div v-if="genGroupIDs.length" style="margin-top:8px;font-size:12px;color:var(--text-3);">
+        用这批注册码注册的用户将自动加入「{{ groupNames(genGroupIDs) }}」，从而可以购买这些用户组的专属套餐。
       </div>
       <div v-if="generatedCodes.length" style="margin-top:12px;padding:10px;background:var(--bg-soft);border-radius:8px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -32,6 +39,9 @@
             <span class="kv">{{ fmtDateTime(r.created_at) }}</span>
           </div>
           <div v-if="r.note" class="lc-meta" style="color:var(--text-3);">{{ r.note }}</div>
+          <div v-if="r.group_ids?.length" class="lc-meta">
+            <span class="kv">加入用户组 <b>{{ groupNames(r.group_ids) }}</b></span>
+          </div>
           <div v-if="r.uses && r.uses.length" class="lc-meta" style="flex-direction:column;align-items:flex-start;gap:2px;font-size:11px;">
             <span v-for="(u, i) in r.uses" :key="i">{{ u.username || u.email || '#' + u.user_id }} · {{ fmtDateTime(u.used_at) }}</span>
           </div>
@@ -48,8 +58,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { NCard, NInputNumber, NInput, NButton, NTag, NSpin, NEmpty, useMessage } from 'naive-ui'
+import { ref, computed, onMounted } from 'vue'
+import { NCard, NInputNumber, NInput, NButton, NTag, NSpin, NSelect, NEmpty, useMessage } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
 import { fmtDateTime } from '@/utils/format'
 
@@ -60,7 +70,14 @@ const generating = ref(false)
 const genCount = ref(10)
 const genMaxUses = ref(0)
 const genNote = ref('')
+const genGroupIDs = ref<number[]>([])
 const generatedCodes = ref<string[]>([])
+
+const userGroups = ref<any[]>([])
+const userGroupOptions = computed(() => userGroups.value.map(g => ({ label: g.name, value: g.id })))
+function groupNames(ids?: number[]) {
+  return (ids || []).map(id => userGroups.value.find(g => g.id === id)?.name).filter(Boolean).join('、')
+}
 
 function regStatusType(r: any): any {
   if (!r.enabled) return 'default'
@@ -76,7 +93,9 @@ function regStatusLabel(r: any): string {
 async function handleGenerate() {
   generating.value = true
   try {
-    const data = await apiPost<any>('/api/admin/reg-codes/generate', { count: genCount.value, max_uses: genMaxUses.value, note: genNote.value })
+    const data = await apiPost<any>('/api/admin/reg-codes/generate', {
+      count: genCount.value, max_uses: genMaxUses.value, note: genNote.value, group_ids: genGroupIDs.value,
+    })
     const newCodes = data?.codes || []
     generatedCodes.value = newCodes
     message.success(`已生成 ${newCodes.length} 个注册码`)
@@ -96,7 +115,13 @@ async function handleDelete(id: number) {
 
 async function load() {
   loading.value = true
-  try { codes.value = await apiList('/api/admin/reg-codes') } catch {} finally { loading.value = false }
+  try {
+    const [cs, gs] = await Promise.all([
+      apiList('/api/admin/reg-codes'),
+      apiList('/api/admin/user-groups').catch(() => []),
+    ])
+    codes.value = cs; userGroups.value = gs
+  } catch {} finally { loading.value = false }
 }
 onMounted(load)
 </script>

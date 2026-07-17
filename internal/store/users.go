@@ -153,6 +153,7 @@ func (s *Store) DeleteUser(id int64) error {
 		`DELETE FROM user_disabled_nodes WHERE user_id=?`,
 		`DELETE FROM device_addons WHERE user_id=?`,
 		`DELETE FROM announcement_reads WHERE user_id=?`,
+		`DELETE FROM user_group_members WHERE user_id=?`,
 		`DELETE FROM users WHERE id=?`,
 	} {
 		if _, err := tx.Exec(q, id); err != nil {

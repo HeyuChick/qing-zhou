@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	ErrPackageDisabled = errors.New("商品已下架")
-	ErrOutOfStock      = errors.New("商品库存不足")
+	ErrPackageDisabled   = errors.New("商品已下架")
+	ErrPackageNotAllowed = errors.New("该商品仅限指定用户组购买")
+	ErrOutOfStock        = errors.New("商品库存不足")
 	ErrUnknownPkgType  = errors.New("未知商品类型")
 	ErrOrderNotFound   = errors.New("订单不存在")
 	ErrAlreadyRefunded = errors.New("该订单已退款")
@@ -92,6 +93,16 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 	}
 	if pkg.Stock == 0 {
 		return nil, ErrOutOfStock
+	}
+	// Group gate, checked in-tx alongside enabled/stock for the same reason: the
+	// shop listing hides restricted packages, but a client can POST any id, and
+	// membership may be revoked between the listing and this call.
+	allowed, err := canBuyPackageTx(tx, userID, pkg.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, ErrPackageNotAllowed
 	}
 	if u.Points < pkg.PricePoints {
 		return nil, ErrInsufficientFunds

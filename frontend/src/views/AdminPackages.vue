@@ -10,6 +10,9 @@
         <div v-for="p in packages" :key="p.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title">{{ p.name || '—' }}</span>
+            <n-tag v-if="p.user_group_ids?.length" type="warning" size="tiny" bordered="false" :title="userGroupNames(p.user_group_ids)">
+              专属
+            </n-tag>
             <n-tag :type="p.enabled !== false ? 'success' : 'default'" size="tiny" bordered="false">{{ p.enabled !== false ? '上架' : '下架' }}</n-tag>
           </div>
           <div class="lc-meta">
@@ -22,6 +25,9 @@
             <span v-if="p.traffic_bytes" class="kv">{{ fmtTotal(p.traffic_bytes) }}</span>
             <span v-if="p.duration_days" class="kv">{{ p.duration_days }}天</span>
             <span v-if="p.device_add" class="kv">+{{ p.device_add }}设备</span>
+          </div>
+          <div v-if="p.user_group_ids?.length" class="lc-meta" style="color:var(--text-3);">
+            <span class="kv">仅限 <b>{{ userGroupNames(p.user_group_ids) }}</b> 购买</span>
           </div>
           <div v-if="p.description" class="lc-meta" style="color:var(--text-3);">{{ p.description }}</div>
           <div class="lc-foot" style="flex-wrap:wrap;">
@@ -48,7 +54,23 @@
         <n-form-item label="积分"><n-input-number v-model:value="form.price" :min="0" style="width:100%;" /></n-form-item>
         <n-form-item label="库存（-1不限）"><n-input-number v-model:value="form.stock" :min="-1" style="width:100%;" /></n-form-item>
         <n-form-item v-if="form.type==='plan'" label="节点分组">
-          <n-select v-model:value="form.group_ids" :options="groupOptions" multiple placeholder="该套餐可使用的节点分组" />
+          <n-select v-model:value="form.group_ids" :options="groupOptions" multiple placeholder="买了这个套餐，能用哪些节点" />
+        </n-form-item>
+        <n-form-item label="可购买用户组">
+          <div style="width:100%;">
+            <n-select
+              v-model:value="form.user_group_ids"
+              :options="userGroupOptions"
+              multiple
+              clearable
+              placeholder="留空 = 所有人都能买"
+            />
+            <div style="margin-top:4px;font-size:12px;color:var(--text-3);line-height:1.5;">
+              {{ form.user_group_ids.length
+                ? '专属套餐：只有所选用户组的成员能看到并购买。'
+                : '公开套餐：所有用户都能购买。选择用户组后即变为专属。' }}
+            </div>
+          </div>
         </n-form-item>
       </n-form>
       <n-button type="primary" block :loading="saving" @click="handleSave">保存</n-button>
@@ -68,13 +90,23 @@ import { fmtTotal, yuan } from '@/utils/format'
 const message = useMessage()
 const packages = ref<any[]>([])
 const groups = ref<any[]>([])
+const userGroups = ref<any[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const showForm = ref(false)
 const editing = ref<any>(null)
-const form = reactive({ name: '', type: 'traffic', description: '', traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [] as number[] })
+const form = reactive({ name: '', type: 'traffic', description: '', traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [] as number[], user_group_ids: [] as number[] })
 
+// groups = node groups (which nodes a plan grants); userGroups = who may buy it.
 const groupOptions = computed(() => groups.value.map(g => ({ label: g.name, value: g.id })))
+const userGroupOptions = computed(() => userGroups.value.map(g => ({ label: g.name, value: g.id })))
+
+function userGroupNames(ids: number[]) {
+  return ids
+    .map(id => userGroups.value.find(g => g.id === id)?.name)
+    .filter(Boolean)
+    .join('、')
+}
 
 function openForm(pkg?: any) {
   editing.value = pkg || null
@@ -83,10 +115,10 @@ function openForm(pkg?: any) {
       name: pkg.name, type: pkg.type, description: pkg.description || '',
       traffic_gb: (pkg.traffic_bytes || 0) / (1024 * 1024 * 1024), days: pkg.duration_days || 0,
       device_add: pkg.device_add || 1, price: pkg.price_points || 0, stock: pkg.stock ?? -1,
-      group_ids: pkg.group_ids || [],
+      group_ids: pkg.group_ids || [], user_group_ids: pkg.user_group_ids || [],
     })
   } else {
-    Object.assign(form, { name: '', type: 'traffic', description: '', traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [] })
+    Object.assign(form, { name: '', type: 'traffic', description: '', traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [], user_group_ids: [] })
   }
   showForm.value = true
 }
@@ -115,8 +147,12 @@ async function handleDelete(id: number) {
 async function load() {
   loading.value = true
   try {
-    const [pkgs, g] = await Promise.all([apiList('/api/admin/packages'), apiList('/api/admin/node-groups').catch(() => [])])
-    packages.value = pkgs; groups.value = g
+    const [pkgs, g, ug] = await Promise.all([
+      apiList('/api/admin/packages'),
+      apiList('/api/admin/node-groups').catch(() => []),
+      apiList('/api/admin/user-groups').catch(() => []),
+    ])
+    packages.value = pkgs; groups.value = g; userGroups.value = ug
   } catch {} finally { loading.value = false }
 }
 onMounted(load)
