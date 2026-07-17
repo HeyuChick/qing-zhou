@@ -135,16 +135,23 @@ docker compose logs -f qingzhou     # 首启打印随机管理员密码（未设
 
 ### 一、本地开发运行
 
+前端产物不入库（仓库里 `frontend/dist` 只有一个占位文件），所以**先构建一次前端**，否则面板是白页：
+
 ```bash
-# 前端热更新：QZ_WEB_DIR 让服务直接读磁盘上的 web/dist，改前端刷新即可
-QZ_WEB_DIR=web/dist QZ_LISTEN=127.0.0.1:8081 go run .
+cd frontend && npm install && npx vite build && cd ..
+QZ_LISTEN=127.0.0.1:8081 go run .
 ```
 
-Windows PowerShell：
+Windows PowerShell 可直接用 `./start.ps1`（已设好上述环境变量）。
 
-```powershell
-$env:QZ_WEB_DIR='web/dist'; $env:QZ_LISTEN='127.0.0.1:8081'; go run .
-```
+改前端时有两种方式：
+
+| 方式 | 做法 | 适用 |
+| --- | --- | --- |
+| **热更新**（推荐） | 另开终端 `cd frontend && npm run dev`，访问 <http://127.0.0.1:5173> | 改前端，vite 把 `/api`、`/sub` 代理到 8081 的后端 |
+| **直读磁盘** | `npx vite build` 后设 `QZ_WEB_DIR=frontend/dist` 启动 | 想在 8081 一个端口上看完整效果，改完重新 build 刷新即可，无需重编 Go |
+
+> 用 `npx vite build` 而不是 `npm run build`：后者会先跑 `vue-tsc`，而仓库目前有一批与业务无关的既有类型错误，CI（`release.yml`）用的也是 `npx vite build`。
 
 浏览器访问 <http://127.0.0.1:8081>。**首次启动**会自动初始化数据库并创建管理员账号：
 
@@ -154,11 +161,12 @@ $env:QZ_WEB_DIR='web/dist'; $env:QZ_LISTEN='127.0.0.1:8081'; go run .
 ### 二、编译生产二进制（单文件，内嵌前端）
 
 ```bash
+cd frontend && npx vite build && cd ..     # 前端产物会被编译进二进制，必须先构建
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
   go build -trimpath -ldflags "-s -w" -o qingzhou .
 ```
 
-不设 `QZ_WEB_DIR` 时使用内嵌前端资源，**单文件即可部署**。
+不设 `QZ_WEB_DIR` 时使用内嵌前端资源，**单文件即可部署**。注意 `frontend/dist` 是在 `go build` 时被内嵌的——改了前端只重编 Go 是没用的，要先 `vite build`。
 
 ### 三、最小可用部署（单机把面板 + 落地一起跑）
 

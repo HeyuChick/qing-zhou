@@ -51,7 +51,18 @@ func Handler() http.Handler {
 				return
 			}
 		}
-		index, _ := fs.ReadFile(sub, "index.html")
+		index, err := fs.ReadFile(sub, "index.html")
+		if err != nil {
+			// dist/ holds only the .gitkeep placeholder on a fresh clone, so this
+			// is what you get if you build the Go binary without building the
+			// frontend first. Swallowing it serves an empty 200 — a blank page
+			// with nothing in the log to explain it. Say so instead.
+			http.Error(w, "前端资源缺失：请先在 frontend/ 下执行 `npx vite build`，"+
+				"再重新编译 Go 二进制（前端在 go build 时内嵌）。"+
+				"开发时也可设 QZ_WEB_DIR=frontend/dist 直读磁盘。",
+				http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(index)
 	})

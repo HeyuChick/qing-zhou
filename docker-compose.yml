@@ -19,7 +19,6 @@ services:
     environment:
       # 容器内必须监听 0.0.0.0，否则端口映射不通
       QZ_LISTEN: "0.0.0.0:8081"
-      QZ_USE_NEW_FRONTEND: "1"
       # 面板对外访问地址（订阅链接、探针安装、邮件链接都用它）——改成你的域名/IP
       QZ_PUBLIC_BASE: "https://node.example.com"
       # 敏感配置加密主密钥，务必改：openssl rand -hex 32

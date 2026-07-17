@@ -44,7 +44,6 @@ COPY --from=builder /out/qingzhou /usr/local/bin/qingzhou
 COPY --from=builder /out/probe /opt/qingzhou/probe
 ENV QZ_LISTEN=0.0.0.0:8081 \
     QZ_DB=/data/qingzhou.db \
-    QZ_USE_NEW_FRONTEND=1 \
     QZ_PROBE_DIR=/opt/qingzhou/probe
 EXPOSE 8081
 VOLUME ["/data"]

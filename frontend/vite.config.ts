@@ -11,13 +11,15 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Proxy to the panel's default QZ_LISTEN (see start.ps1 / deploy env), so
+    // `npm run dev` talks to a locally running backend out of the box.
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'http://127.0.0.1:8081',
         changeOrigin: true,
       },
       '/sub': {
-        target: 'http://localhost:8080',
+        target: 'http://127.0.0.1:8081',
         changeOrigin: true,
       },
     },

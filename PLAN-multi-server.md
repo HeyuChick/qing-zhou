@@ -30,4 +30,4 @@
 ## Task 6: 前端改造
 - 新增服务器管理页面
 - 修改入站管理选择服务器
-- 文件: `web/dist/views-admin.js`
+- 文件: `frontend/src/views/AdminServers.vue`, `frontend/src/views/AdminSingbox.vue`
