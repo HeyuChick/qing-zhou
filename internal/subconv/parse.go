@@ -44,8 +44,60 @@ func b64decode(s string) ([]byte, error) {
 
 func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
 
-// ParseLink parses a single share URI into a Proxy.
+// ParseLink parses a single share URI into a Proxy, rejecting nodes that could
+// never work (see validate).
 func ParseLink(raw string) (*Proxy, error) {
+	p, err := parseLinkRaw(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := validate(p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// ssMethods are the shadowsocks ciphers both sing-box and mihomo accept.
+//
+// The cipher is whatever preceded the first ':' in the link's userinfo, i.e.
+// fully attacker-controlled for an imported subscription. Both clients treat an
+// unknown method as a fatal config error rather than skipping the one node, so
+// letting it through would take down every subscriber's whole profile — the same
+// failure mode already guarded for packet_encoding.
+var ssMethods = map[string]bool{
+	"aes-128-gcm": true, "aes-192-gcm": true, "aes-256-gcm": true,
+	"aes-128-ctr": true, "aes-192-ctr": true, "aes-256-ctr": true,
+	"aes-128-cfb": true, "aes-192-cfb": true, "aes-256-cfb": true,
+	"chacha20-ietf-poly1305": true, "xchacha20-ietf-poly1305": true,
+	"chacha20-ietf": true, "chacha20": true, "rc4-md5": true,
+	"2022-blake3-aes-128-gcm": true, "2022-blake3-aes-256-gcm": true,
+	"2022-blake3-chacha20-poly1305": true,
+	"none": true, "plain": true,
+}
+
+// validate drops a parsed node that cannot produce a usable client config.
+//
+// Dropping one node is always better than emitting it: mihomo and sing-box both
+// abort on the *whole* config when a single node is malformed, so one bad entry
+// in an imported airport subscription would otherwise leave every user with no
+// working profile at all.
+func validate(p *Proxy) error {
+	if p.Server == "" {
+		return fmt.Errorf("missing server")
+	}
+	// sing-box's server_port is a uint16 and mihomo's port is an int: a value
+	// outside this range makes the generated config fail to unmarshal. Neither
+	// net.SplitHostPort nor url.Parse range-check it, so it has to happen here.
+	if p.Port <= 0 || p.Port > 65535 {
+		return fmt.Errorf("port %d out of range", p.Port)
+	}
+	if p.Protocol == "ss" && !ssMethods[strings.ToLower(strings.TrimSpace(p.Method))] {
+		return fmt.Errorf("unsupported shadowsocks method %q", p.Method)
+	}
+	return nil
+}
+
+func parseLinkRaw(raw string) (*Proxy, error) {
 	raw = strings.TrimSpace(raw)
 	switch {
 	case strings.HasPrefix(raw, "vless://"):

@@ -172,8 +172,8 @@ func singboxOutbound(p *Proxy) map[string]any {
 		if v := p.param("flow"); v != "" {
 			o["flow"] = v
 		}
-		if net := p.param("type"); net == "ws" {
-			o["transport"] = sbWS(p.param("path"), p.param("host"), atoi(p.param("max_early_data")), p.param("early_data_header_name"))
+		if t := sbTransport(p); t != nil {
+			o["transport"] = t
 		}
 		// UDP over VLESS requires an agreed packet encoding. Leaving it unset
 		// makes each client fall back to its own default, which breaks UDP
@@ -212,6 +212,11 @@ func singboxOutbound(p *Proxy) map[string]any {
 	case "trojan":
 		o["type"] = "trojan"
 		o["password"] = p.Password
+		// trojan carries the same transports as vless; it had none at all here,
+		// so a ws/grpc trojan node was dialled as plain TCP and never connected.
+		if t := sbTransport(p); t != nil {
+			o["transport"] = t
+		}
 		o["tls"] = sbTLS(p, "tls")
 	case "hysteria2":
 		o["type"] = "hysteria2"
@@ -288,6 +293,48 @@ func sbTLS(p *Proxy, sec string) map[string]any {
 		tls["insecure"] = true
 	}
 	return tls
+}
+
+// sbTransport renders the transport block for a URL-style proxy, or nil for
+// plain TCP.
+//
+// Only "ws" used to be handled, so a grpc / httpupgrade / h2 node was emitted
+// with no transport at all — the client then dialled plain TCP at a server
+// speaking gRPC and the node simply never connected, with nothing in the config
+// to suggest why. An unrecognised value also yields nil rather than being passed
+// through: sing-box rejects an unknown transport type by refusing the whole
+// config, which would take down every node in the subscription, not just this one.
+func sbTransport(p *Proxy) map[string]any {
+	switch p.param("type") {
+	case "ws":
+		return sbWS(p.param("path"), p.param("host"),
+			atoi(p.param("max_early_data")), p.param("early_data_header_name"))
+	case "grpc":
+		t := map[string]any{"type": "grpc"}
+		if v := p.param("serviceName", "servicename"); v != "" {
+			t["service_name"] = v
+		}
+		return t
+	case "httpupgrade":
+		t := map[string]any{"type": "httpupgrade"}
+		if v := p.param("path"); v != "" {
+			t["path"] = v
+		}
+		if v := p.param("host"); v != "" {
+			t["host"] = v
+		}
+		return t
+	case "h2", "http":
+		t := map[string]any{"type": "http"}
+		if v := p.param("path"); v != "" {
+			t["path"] = v
+		}
+		if v := p.param("host"); v != "" {
+			t["host"] = []string{v}
+		}
+		return t
+	}
+	return nil
 }
 
 func sbWS(path, host string, maxEarlyData int, edHeader string) map[string]any {

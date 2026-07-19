@@ -1,0 +1,65 @@
+name: ci
+
+# Runs on every push and PR. The race detector is the point: it needs cgo, which
+# is unavailable on the maintainer's Windows machine, so concurrency bugs in the
+# stats/rebuild goroutines could previously only be found by reading the code.
+# Here they get caught automatically.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      # The Go build embeds frontend/dist, which is not committed. A minimal
+      # placeholder keeps `go build` honest without paying for a full npm install
+      # on every push; the release workflow builds the real frontend.
+      - name: Placeholder frontend assets
+        run: |
+          mkdir -p frontend/dist
+          [ -f frontend/dist/index.html ] || echo '<!doctype html><title>ci</title>' > frontend/dist/index.html
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race ./...
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # install-singbox.sh is piped into `bash` as root on every landing node —
+      # a syntax error there is a broken node, so at minimum it must parse.
+      - name: Parse install script
+        run: bash -n internal/assets/install-singbox.sh
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build frontend
+        working-directory: frontend
+        # npx vite build, not npm run build: the latter runs vue-tsc first and
+        # the repo carries pre-existing type errors unrelated to any given change.
+        # This still catches real compile errors (a `const` reassignment slipped
+        # through review once and only the bundler caught it).
+        run: |
+          npm ci
+          npx vite build
