@@ -318,8 +318,14 @@ func (s *Store) GetOrder(id int64) (*Order, error) {
 		refunded_points, refunded_at, refund_ratio, refunded_traffic
 		FROM orders WHERE id=?`, id).Scan(&o.ID, &o.UserID, &o.PackageID, &snap, &o.PricePoints, &o.Status, &o.CreatedAt,
 		&o.RefundedPoints, &o.RefundedAt, &o.RefundRatio, &o.RefundedTraffic)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil // genuinely not found
+	}
 	if err != nil {
-		return nil, nil // not found
+		// A real DB fault must not masquerade as "order not found" — callers turn a
+		// nil order into a 404, which would hide the error and (for refund) look like
+		// the order vanished.
+		return nil, err
 	}
 	var sp struct {
 		Name string `json:"name"`
@@ -410,12 +416,18 @@ func (s *Store) RefundOrder(orderID, operatorID int64, mode string, sync func(up
 	quote.OrderID = orderID
 	refundPts := quote.RefundPoints
 
-	// Refund points (if any are due) and write the ledger row.
+	// Refund points (if any are due), then always write the refund ledger row.
 	newPoints := u.Points + refundPts
 	if refundPts != 0 {
 		if _, err = tx.Exec(`UPDATE users SET points=? WHERE id=?`, newPoints, userID); err != nil {
 			return nil, nil, err
 		}
+	}
+	// Write the ledger row even for a zero-value refund (a fully-consumed order, or
+	// a 0-point admin grant): the order is being marked refunded, and reconciling
+	// order status against the ledger must never turn up a refunded order with no
+	// corresponding flow. amount 0 is a legitimate, auditable event.
+	{
 		note := "退款: " + sp.Name
 		if quote.Ratio < 1 {
 			note = "退款(" + strconv.Itoa(int(math.Round(quote.Ratio*100))) + "%): " + sp.Name

@@ -62,6 +62,7 @@ import { ref, computed, onMounted } from 'vue'
 import { NCard, NInputNumber, NInput, NButton, NTag, NSpin, NSelect, NEmpty, useMessage } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
 import { fmtDateTime } from '@/utils/format'
+import { copyText } from '@/utils/clipboard'
 
 const message = useMessage()
 const codes = ref<any[]>([])
@@ -103,8 +104,12 @@ async function handleGenerate() {
   } catch (e: any) { message.error(e.message) } finally { generating.value = false }
 }
 
-function copyCode(code: string) { navigator.clipboard.writeText(code); message.success('已复制') }
-function copyAll() { navigator.clipboard.writeText(generatedCodes.value.join('\n')); message.success('已复制全部') }
+async function copyCode(code: string) {
+  if (await copyText(code)) message.success('已复制'); else message.error('复制失败，请手动复制')
+}
+async function copyAll() {
+  if (await copyText(generatedCodes.value.join('\n'))) message.success('已复制全部'); else message.error('复制失败，请手动复制')
+}
 
 async function toggleEnabled(r: any) {
   try { await apiPut(`/api/admin/reg-codes/${r.id}`, { enabled: !r.enabled }); r.enabled = !r.enabled; message.success(r.enabled ? '已启用' : '已禁用') } catch (e: any) { message.error(e.message) }

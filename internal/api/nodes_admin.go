@@ -51,7 +51,7 @@ func (a *API) handleAdminCreateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created, _ := a.st.GetNode(id)
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	ok(w, created)
 }
 
@@ -67,7 +67,7 @@ func (a *API) handleAdminUpdateNode(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "更新节点失败")
 		return
 	}
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	ok(w, nil)
 }
 
@@ -76,7 +76,7 @@ func (a *API) handleAdminDeleteNode(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "删除节点失败")
 		return
 	}
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	ok(w, nil)
 }
 

@@ -24,6 +24,10 @@ type SbTls struct {
 	ClientJSON string `json:"client_json"`
 	CreatedAt  int64  `json:"created_at"`
 	UpdatedAt  int64  `json:"updated_at"`
+	// DecryptFailed is set when ServerJSON was stored encrypted but could not be
+	// decrypted (typically a changed/wrong QZ_SECRET_KEY). The config builder MUST
+	// refuse to emit such an inbound rather than downgrade it to a plaintext one.
+	DecryptFailed bool `json:"-"`
 }
 
 // SbInbound is a native sing-box server inbound owned by 轻舟.
@@ -65,7 +69,9 @@ func (s *Store) ListSbTls() ([]*SbTls, error) {
 		if err := rows.Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
-		t.ServerJSON = s.decrypt(t.ServerJSON)
+		var ok bool
+		t.ServerJSON, ok = s.decryptOK(t.ServerJSON)
+		t.DecryptFailed = !ok
 		out = append(out, &t)
 	}
 	return out, rows.Err()
@@ -83,7 +89,9 @@ func (s *Store) GetSbTls(id int64) (*SbTls, error) {
 		// otherwise silently drop this inbound's TLS block and emit it plaintext.
 		return nil, err
 	}
-	t.ServerJSON = s.decrypt(t.ServerJSON)
+	var ok bool
+	t.ServerJSON, ok = s.decryptOK(t.ServerJSON)
+	t.DecryptFailed = !ok
 	return &t, nil
 }
 
@@ -402,10 +410,19 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 				tls, _ = s.GetSbTls(ib.TlsID)
 				tlsCache[ib.TlsID] = tls
 			}
-			if tls != nil && tls.ServerJSON != "" {
-				var tj map[string]interface{}
-				if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err == nil {
-					baseMap["tls"] = tj
+			if tls != nil {
+				if tls.DecryptFailed {
+					// A wrong/changed QZ_SECRET_KEY left this TLS profile
+					// undecryptable. Refuse to build rather than emit the inbound
+					// without its TLS block, which would downgrade a Reality/TLS
+					// node to plaintext and leak all its traffic in the clear.
+					return nil, fmt.Errorf("入站 %s 的 TLS 配置(id=%d)无法解密，已拒绝生成配置以避免降级为明文入站——请确认 QZ_SECRET_KEY 与加密时一致", ib.Tag, ib.TlsID)
+				}
+				if tls.ServerJSON != "" {
+					var tj map[string]interface{}
+					if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err == nil {
+						baseMap["tls"] = tj
+					}
 				}
 			}
 		}
@@ -461,10 +478,19 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 				tls, _ = s.GetSbTls(ib.TlsID)
 				tlsCache[ib.TlsID] = tls
 			}
-			if tls != nil && tls.ServerJSON != "" {
-				var tj map[string]interface{}
-				if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err == nil {
-					baseMap["tls"] = tj
+			if tls != nil {
+				if tls.DecryptFailed {
+					// A wrong/changed QZ_SECRET_KEY left this TLS profile
+					// undecryptable. Refuse to build rather than emit the inbound
+					// without its TLS block, which would downgrade a Reality/TLS
+					// node to plaintext and leak all its traffic in the clear.
+					return nil, fmt.Errorf("入站 %s 的 TLS 配置(id=%d)无法解密，已拒绝生成配置以避免降级为明文入站——请确认 QZ_SECRET_KEY 与加密时一致", ib.Tag, ib.TlsID)
+				}
+				if tls.ServerJSON != "" {
+					var tj map[string]interface{}
+					if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err == nil {
+						baseMap["tls"] = tj
+					}
 				}
 			}
 		}

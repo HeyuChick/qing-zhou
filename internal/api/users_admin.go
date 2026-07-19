@@ -227,7 +227,7 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		_ = a.st.DeleteUserSessions(id)
 	}
 	a.invalidateLinks(id)
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	out, _ := a.st.UserByID(id)
 	ok(w, a.adminUserViewLoadGroups(out))
 }
@@ -287,7 +287,7 @@ func (a *API) handleAdminAssignPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.invalidateLinks(id)
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	out, _ := a.st.UserByID(id)
 	ok(w, a.adminUserViewLoadGroups(out))
 }

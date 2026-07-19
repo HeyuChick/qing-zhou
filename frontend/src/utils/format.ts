@@ -23,6 +23,16 @@ export function fmtDateTime(ts: number | null | undefined): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
+// toLocalDatetimeInput formats a unix timestamp for an <input type="datetime-local">,
+// which reads/writes LOCAL wall-clock. Using toISOString() here (as the old code did)
+// emits UTC, so any admin outside UTC saw — and, on save, shifted — the time by their
+// offset on every edit round-trip. Build the local components explicitly instead.
+export function toLocalDatetimeInput(ts: number | null | undefined): string {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
 export function daysLeft(ts: number | null | undefined): number | null {
   if (!ts) return null
   return Math.ceil((ts * 1000 - Date.now()) / 86400000)

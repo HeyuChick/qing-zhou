@@ -138,6 +138,24 @@ func (s *Store) GenerateRegCodes(count int, maxUses int64, note string, groupIDs
 	return codes, nil
 }
 
+// RegCodeRedeemable reports whether a code currently has a free slot, WITHOUT
+// consuming one — a fast pre-check so registration can reject an invalid code
+// before creating anything. The authoritative, atomic decrement is still
+// ConsumeRegCode, which must be called (and its result re-checked) once the
+// account is durably created, so a slot is never burned on a failed signup.
+func (s *Store) RegCodeRedeemable(code string) (int64, bool) {
+	code = strings.TrimSpace(strings.ToUpper(code))
+	if code == "" {
+		return 0, false
+	}
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM reg_codes WHERE code=? AND enabled=1 AND (max_uses<=0 OR used<max_uses)`, code).Scan(&id)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
 // ConsumeRegCode atomically validates and uses one slot of a code. On success
 // it returns the code's id (for recording who used it) and true.
 func (s *Store) ConsumeRegCode(code string) (int64, bool) {

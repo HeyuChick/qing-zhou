@@ -30,7 +30,7 @@
           </div>
           <div class="lc-foot">
             <n-button v-if="o.status === 'success'" size="tiny" type="warning" @click="openRefund(o.id)">退款</n-button>
-            <n-button size="tiny" type="error" @click="handleDelete(o.id)">删除</n-button>
+            <n-button size="tiny" type="error" @click="handleDelete(o)">删除</n-button>
           </div>
         </div>
       </div>
@@ -43,12 +43,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { NSpin, NInput, NButton, NTag, NEmpty, useMessage } from 'naive-ui'
+import { NSpin, NInput, NButton, NTag, NEmpty, useMessage, useDialog } from 'naive-ui'
 import { apiList, apiDelete } from '@/api'
 import { fmtDateTime } from '@/utils/format'
 import RefundDialog from '@/components/RefundDialog.vue'
 
 const message = useMessage()
+const dialog = useDialog()
 const orders = ref<any[]>([])
 const loading = ref(false)
 const search = ref('')
@@ -77,13 +78,23 @@ function openRefund(id: number) {
   refundId.value = id
   refundShow.value = true
 }
-async function handleDelete(id: number) {
-  try { await apiDelete(`/api/admin/orders/${id}`); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) }
+function handleDelete(o: any) {
+  dialog.warning({
+    title: '确认删除订单',
+    content: '删除后该订单记录将永久消失（仅用于清理已删除用户的孤儿订单）。确定删除？',
+    positiveText: '删除', negativeText: '取消',
+    onPositiveClick: async () => {
+      try { await apiDelete(`/api/admin/orders/${o.id}`); message.success('已删除'); await load() }
+      catch (e: any) { message.error(e.message) }
+    },
+  })
 }
 
 async function load() {
   loading.value = true
-  try { orders.value = await apiList('/api/admin/orders') } catch {} finally { loading.value = false }
+  try { orders.value = await apiList('/api/admin/orders') }
+  catch (e: any) { message.error('加载失败：' + (e?.message || '请稍后重试')) }
+  finally { loading.value = false }
 }
 onMounted(load)
 </script>

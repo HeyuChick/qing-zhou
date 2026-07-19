@@ -37,11 +37,17 @@ func Handler() http.Handler {
 	fileServer := http.FileServer(http.FS(sub))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store, must-revalidate")
-
 		p := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 		if p != "" && p != "index.html" {
 			if st, err := fs.Stat(sub, p); err == nil && !st.IsDir() {
+				if strings.HasPrefix(p, "assets/") {
+					// Vite content-hashes these filenames (e.g. app-a1b2c3.js), so the
+					// bytes at a given URL never change — cache them for a year and stop
+					// re-downloading the whole bundle on every SPA visit.
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				} else {
+					w.Header().Set("Cache-Control", "no-store, must-revalidate")
+				}
 				fileServer.ServeHTTP(w, r)
 				return
 			}
@@ -51,6 +57,9 @@ func Handler() http.Handler {
 				return
 			}
 		}
+		// index.html and SPA fallback must never be cached — it's the bootstrap that
+		// references the hashed bundles, so a stale copy pins the app to old assets.
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
 		index, err := fs.ReadFile(sub, "index.html")
 		if err != nil {
 			// dist/ holds only the .gitkeep placeholder on a fresh clone, so this

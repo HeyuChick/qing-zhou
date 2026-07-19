@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+// smtpTimeout bounds every network phase of a send (dial + the whole SMTP
+// conversation). Without it a black-holed or unreachable SMTP host would block the
+// calling request goroutine — and leak the TCP socket — until the OS TCP timeout
+// (minutes). The HTTP middleware's request timeout cannot interrupt these blocking
+// net/smtp calls, so the deadline must live here.
+const smtpTimeout = 20 * time.Second
+
 type Mailer struct {
 	Host     string
 	Port     string
@@ -47,26 +54,65 @@ func (m *Mailer) Send(to []string, subject, htmlBody string) error {
 	if m.security() == "ssl" {
 		return m.sendImplicitTLS(addr, auth, to, msg)
 	}
-	// STARTTLS (smtp.SendMail upgrades automatically if offered) or plain.
-	return smtp.SendMail(addr, auth, m.From, to, msg)
+	return m.sendStartTLS(addr, auth, to, msg)
+}
+
+// dial opens a timeout-bounded TCP connection and arms an absolute deadline
+// covering the entire subsequent SMTP conversation.
+func (m *Mailer) dial(addr string) (net.Conn, error) {
+	conn, err := (&net.Dialer{Timeout: smtpTimeout}).Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Now().Add(smtpTimeout))
+	return conn, nil
 }
 
 func (m *Mailer) sendImplicitTLS(addr string, auth smtp.Auth, to []string, msg []byte) error {
-	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: m.Host})
+	conn, err := m.dial(addr)
+	if err != nil {
+		return err
+	}
+	tconn := tls.Client(conn, &tls.Config{ServerName: m.Host})
+	c, err := smtp.NewClient(tconn, m.Host)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	return deliver(c, auth, m.From, to, msg)
+}
+
+func (m *Mailer) sendStartTLS(addr string, auth smtp.Auth, to []string, msg []byte) error {
+	conn, err := m.dial(addr)
 	if err != nil {
 		return err
 	}
 	c, err := smtp.NewClient(conn, m.Host)
 	if err != nil {
+		conn.Close()
 		return err
 	}
-	defer c.Close()
-	if auth != nil {
-		if err := c.Auth(auth); err != nil {
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		if err := c.StartTLS(&tls.Config{ServerName: m.Host}); err != nil {
+			c.Close()
 			return err
 		}
 	}
-	if err := c.Mail(m.From); err != nil {
+	return deliver(c, auth, m.From, to, msg)
+}
+
+// deliver runs the AUTH→MAIL→RCPT→DATA→QUIT phase on an established client and
+// always closes it. auth is applied only when the server advertises AUTH.
+func deliver(c *smtp.Client, auth smtp.Auth, from string, to []string, msg []byte) error {
+	defer c.Close()
+	if auth != nil {
+		if ok, _ := c.Extension("AUTH"); ok {
+			if err := c.Auth(auth); err != nil {
+				return err
+			}
+		}
+	}
+	if err := c.Mail(from); err != nil {
 		return err
 	}
 	for _, addr := range to {

@@ -1,5 +1,10 @@
 package store
 
+import (
+	"log"
+	"strings"
+)
+
 // schema is applied idempotently on every boot. Tables for later phases
 // (packages, orders, nodes, groups, ...) are added in their own phases.
 const schema = `
@@ -372,6 +377,11 @@ CREATE TABLE IF NOT EXISTS server_metrics (
   arch            TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON server_metrics(server_id, ts);
+-- Standalone ts index: the composite (server_id, ts) can't serve queries that
+-- filter on ts alone — the hourly PruneMetrics (WHERE ts<?) and the unauthenticated
+-- heatmap/sparkline endpoints (ListAllMetricsSince, WHERE ts>=?) would otherwise
+-- full-scan this, the fastest-growing table.
+CREATE INDEX IF NOT EXISTS idx_metrics_ts ON server_metrics(ts);
 
 -- Server alerts: offline, high_cpu, high_mem, disk_full, expiring, expired.
 CREATE TABLE IF NOT EXISTS server_alerts (
@@ -457,7 +467,20 @@ func (s *Store) Migrate() error {
 		// partial index so the many empty defaults don't collide.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_proxy_username ON user_plans(proxy_username) WHERE proxy_username <> ''`,
 	} {
-		_, _ = s.db.Exec(stmt)
+		if _, err := s.db.Exec(stmt); err != nil {
+			// Benign on an up-to-date DB: the column already exists (ADD COLUMN) or
+			// was already renamed / never existed (RENAME COLUMN). Anything else — a
+			// disk error, or a typo'd statement that never lands — must be surfaced,
+			// not swallowed, or a required column shows up much later as a confusing
+			// scan failure far from the cause.
+			msg := err.Error()
+			if strings.Contains(msg, "duplicate column name") ||
+				strings.Contains(msg, "no such column") ||
+				strings.Contains(msg, "no such table") {
+				continue
+			}
+			log.Printf("migrate: statement failed (continuing): %q: %v", stmt, err)
+		}
 	}
 	// Backfill probe_token_hash for existing (plaintext) tokens so hash-based
 	// lookup keeps working after the upgrade. Idempotent (skips rows already set).

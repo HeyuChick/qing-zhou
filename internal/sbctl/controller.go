@@ -353,14 +353,28 @@ func (c *Controller) CollectStats(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	n := 0
+	failed := 0
+	var firstErr error
 	for name, t := range m {
 		if t.Up == 0 && t.Down == 0 {
 			continue
 		}
 		if err := c.st.AddUsageByClientName(name, t.Up, t.Down); err != nil {
-			return n, err
+			// The poll used reset=true, so sing-box has already zeroed this delta —
+			// it will never be reported again. A transient per-user error (e.g. a
+			// SQLITE_BUSY) must NOT abandon the remaining users' deltas too, or one
+			// slow write silently drops a whole minute of everyone's traffic. Record
+			// the first error and keep applying the rest.
+			if firstErr == nil {
+				firstErr = err
+			}
+			failed++
+			continue
 		}
 		n++
+	}
+	if firstErr != nil {
+		return n, fmt.Errorf("stats: %d/%d identity updates failed, first: %w", failed, len(m), firstErr)
 	}
 	return n, nil
 }
@@ -373,6 +387,12 @@ func (c *Controller) Run(ctx context.Context, interval time.Duration, errFn func
 		if err != nil && errFn != nil {
 			errFn(err)
 		}
+	}
+	// time.NewTicker panics on a non-positive interval; a bad QZ_SINGBOX_STATS_INTERVAL
+	// (e.g. "0s") must not crash-loop the process. Clamp to a sane minimum here so
+	// every caller is protected regardless of how the interval was derived.
+	if interval <= 0 {
+		interval = time.Minute
 	}
 	report(c.Rebuild()) // apply current state on startup
 	t := time.NewTicker(interval)

@@ -144,6 +144,11 @@ func (a *API) handleReset(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "重置失败")
 		return
 	}
+	// Revoke every existing session. Forgot-password is the account-recovery path
+	// used precisely when an account is compromised; since JWTs stay valid for days
+	// and auth only checks the session row exists (not password freshness), a stolen
+	// session would otherwise survive the reset. Mirrors change-password / admin-reset.
+	_ = a.st.DeleteUserSessions(userID)
 	ok(w, J{"message": "密码已重置，请用新密码登录"})
 }
 

@@ -71,7 +71,7 @@ func (a *API) handlePurchase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.invalidateLinks(u.ID)
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	nu := result.User
 	ok(w, J{
 		"order_id":      result.Order.ID,

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,6 +62,14 @@ func main() {
 	}
 	st.SetSecretKey([]byte(encKey))
 
+	// Self-check: if any at-rest secret can't be decrypted with the current key
+	// (typically QZ_SECRET_KEY changed after first boot), fail loudly. The config
+	// builder now refuses to emit affected inbounds rather than downgrade them to
+	// plaintext, so without this warning the symptom would be silent node outages.
+	if n := st.CountUndecryptableSecrets(); n > 0 {
+		log.Printf("WARNING: %d encrypted secret(s) (sing-box TLS/Reality key(s) and/or SMTP password) cannot be decrypted with the current key. If you recently set or changed QZ_SECRET_KEY, restore the previous value — affected TLS inbounds will refuse to deploy (never downgraded to plaintext) until the key matches.", n)
+	}
+
 	mail := buildMailer(st)
 	if mail != nil {
 		log.Printf("SMTP mailer enabled (%s)", mail.Host)
@@ -77,7 +86,15 @@ func main() {
 	// are overridable via env or DB settings.
 	ctrl := buildSbController(st, app)
 	log.Printf("native sing-box enabled (controller managing config + stats)")
-	go ctrl.Run(ctx, sbStatsInterval(), func(err error) { log.Printf("sing-box controller: %v", err) })
+	// Track the controller loop so shutdown can wait for its in-flight rebuild to
+	// finish before the deferred st.Close() runs — otherwise a stats/rebuild query
+	// can race a closed DB ("database is closed").
+	var bgWG sync.WaitGroup
+	bgWG.Add(1)
+	go func() {
+		defer bgWG.Done()
+		ctrl.Run(ctx, sbStatsInterval(), func(err error) { log.Printf("sing-box controller: %v", err) })
+	}()
 
 	app.StartSourceSync(ctx, time.Hour)
 	app.StartMaintenance(ctx, time.Hour)
@@ -107,6 +124,16 @@ func main() {
 	shctx, shcancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shcancel()
 	_ = srv.Shutdown(shctx)
+
+	// Drain the controller loop (bounded) before returning, so the deferred
+	// st.Close() doesn't fire while a rebuild is still querying the DB.
+	drained := make(chan struct{})
+	go func() { bgWG.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		log.Println("shutdown: controller drain timed out, closing anyway")
+	}
 }
 
 // buildMailer constructs the SMTP mailer from settings, with QZ_SMTP_* env

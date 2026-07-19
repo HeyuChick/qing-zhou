@@ -27,7 +27,7 @@
             <n-button size="tiny" type="info" @click="openRecharge(u)">充值</n-button>
             <n-button size="tiny" type="warning" @click="openAssign(u)">分配</n-button>
             <n-button size="tiny" @click="openOrders(u)">订单</n-button>
-            <n-button size="tiny" type="error" @click="handleDelete(u.id)">删除</n-button>
+            <n-button size="tiny" type="error" @click="handleDelete(u)">删除</n-button>
           </div>
         </div>
       </div>
@@ -125,13 +125,14 @@
 import { ref, computed, reactive, onMounted } from 'vue'
 import {
   NSpin, NInput, NInputNumber, NButton, NModal, NForm, NFormItem,
-  NSwitch, NTag, NSelect, NEmpty, useMessage
+  NSwitch, NTag, NSelect, NEmpty, useMessage, useDialog
 } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
-import { fmtBytes, fmtTotal, fmtDate, fmtDateTime } from '@/utils/format'
+import { fmtBytes, fmtTotal, fmtDate, fmtDateTime, toLocalDatetimeInput } from '@/utils/format'
 import RefundDialog from '@/components/RefundDialog.vue'
 
 const message = useMessage()
+const dialog = useDialog()
 const users = ref<any[]>([])
 const loading = ref(false)
 const saving = ref(false)
@@ -166,7 +167,7 @@ function openEdit(u: any) {
   editUser.value = { ...u }
   unlimitedTraffic.value = !u.traffic_limit || u.traffic_limit <= 0
   editTrafficGB.value = (u.traffic_limit || 0) / (1024 * 1024 * 1024)
-  editExpiry.value = u.expiry_at ? new Date(u.expiry_at * 1000).toISOString().slice(0, 16) : ''
+  editExpiry.value = toLocalDatetimeInput(u.expiry_at)
   editBanned.value = u.status === 'banned'
   resetPw.value = ''; resetTraffic.value = false
   editGroupIDs.value = [...(u.group_ids || [])]
@@ -248,8 +249,16 @@ async function reloadUserOrders() {
 }
 
 // --- Delete ---
-async function handleDelete(id: number) {
-  try { await apiDelete(`/api/admin/users/${id}`); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) }
+function handleDelete(u: any) {
+  dialog.warning({
+    title: '确认删除用户',
+    content: `确定删除用户「${u.username}」？其订阅、套餐与设备将一并失效，此操作不可撤销。`,
+    positiveText: '删除', negativeText: '取消',
+    onPositiveClick: async () => {
+      try { await apiDelete(`/api/admin/users/${u.id}`); message.success('已删除'); await load() }
+      catch (e: any) { message.error(e.message) }
+    },
+  })
 }
 
 // --- User groups ---
@@ -267,7 +276,7 @@ async function load() {
       apiList('/api/admin/user-groups').catch(() => []),
     ])
     users.value = us; userGroups.value = gs
-  } catch {} finally { loading.value = false }
+  } catch (e: any) { message.error('加载失败：' + (e?.message || '请稍后重试')) } finally { loading.value = false }
 }
 onMounted(load)
 </script>

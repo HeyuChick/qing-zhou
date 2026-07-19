@@ -45,13 +45,13 @@
 import { ref, reactive, onMounted } from 'vue'
 import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NSwitch, NTag, NSpace, NEmpty, useMessage } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
-import { fmtDate } from '@/utils/format'
+import { fmtDate, toLocalDatetimeInput } from '@/utils/format'
 const message = useMessage()
 const announcements = ref<any[]>([])
 const loading = ref(false); const saving = ref(false)
 const showForm = ref(false); const editing = ref<any>(null)
 const form = reactive({ title:'', content:'', pinned:false, enabled:true, start_at:'', end_at:'' })
-function toLocal(ts:number){ return ts ? new Date(ts*1000).toISOString().slice(0,16) : '' }
+function toLocal(ts:number){ return toLocalDatetimeInput(ts) }
 function toUnix(s:string){ return s ? Math.floor(new Date(s).getTime()/1000) : 0 }
 function openCreate(){ editing.value=null; Object.assign(form,{title:'',content:'',pinned:false,enabled:true,start_at:'',end_at:''}); showForm.value=true }
 function openEdit(a:any){ editing.value=a; Object.assign(form,{title:a.title,content:a.content,pinned:a.pinned,enabled:a.enabled,start_at:toLocal(a.start_at),end_at:toLocal(a.end_at)}); showForm.value=true }

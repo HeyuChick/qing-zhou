@@ -146,7 +146,9 @@ func (s *Store) DeleteUser(id int64) error {
 	defer tx.Rollback()
 	// Clean up the user's operational rows so they don't linger as orphans.
 	// Financial/audit history (orders, point_transactions) and the deliberately
-	// snapshotted reg_code_uses are kept intentionally.
+	// snapshotted reg_code_uses are kept intentionally. user_plans (buckets) and
+	// traffic_samples MUST go — there is no FK cascade, and a leftover bucket still
+	// resolves via BucketByClientName (stale identity) while its samples accumulate.
 	for _, q := range []string{
 		`DELETE FROM sessions WHERE user_id=?`,
 		`DELETE FROM email_tokens WHERE user_id=?`,
@@ -154,6 +156,8 @@ func (s *Store) DeleteUser(id int64) error {
 		`DELETE FROM device_addons WHERE user_id=?`,
 		`DELETE FROM announcement_reads WHERE user_id=?`,
 		`DELETE FROM user_group_members WHERE user_id=?`,
+		`DELETE FROM user_plans WHERE user_id=?`,
+		`DELETE FROM traffic_samples WHERE user_id=?`,
 		`DELETE FROM users WHERE id=?`,
 	} {
 		if _, err := tx.Exec(q, id); err != nil {

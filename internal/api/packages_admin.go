@@ -142,11 +142,13 @@ func (a *API) handleAdminDeletePackage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "无效的商品 id")
 		return
 	}
-	// Guard: never hard-delete a package that users are still subscribed to —
-	// it would dangle their plan and break the dashboard. Force "下架" first.
-	if subs, _ := a.st.PlanSubscribers(id); len(subs) > 0 {
+	// Guard: never hard-delete a package that users still hold a plan bucket for —
+	// it would dangle their bucket (metering + granting nodes for a package that no
+	// longer exists) and break the dashboard. Force "下架" first. Keyed on real
+	// buckets, not current_plan_id, so stacked/older holders are not missed.
+	if subs, _ := a.st.PackagePlanHolders(id); len(subs) > 0 {
 		fail(w, http.StatusBadRequest,
-			fmt.Sprintf("该商品仍有 %d 位用户订阅，请先「下架」（退款并清空其套餐）后再删除", len(subs)))
+			fmt.Sprintf("该商品仍有 %d 位用户持有，请先「下架」（退款并清空其套餐）后再删除", len(subs)))
 		return
 	}
 	if err := a.st.DeletePackage(id); err != nil {
@@ -166,18 +168,24 @@ func (a *API) handleAdminRetirePackage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	operatorID, _ := r.Context().Value(ctxUserID).(int64)
-	subs, _ := a.st.PlanSubscribers(id)
+	// Act on every user who actually holds a bucket for this package (bucket model),
+	// not just whoever's current_plan_id points here — otherwise a user who bought
+	// this plan then bought another keeps this one for free with no refund.
+	subs, _ := a.st.PackagePlanHolders(id)
 	refunded, cleared := 0, 0
 	for _, uid := range subs {
-		if oid, _ := a.st.LatestRefundableOrderForPackage(uid, id); oid > 0 {
-			// Retire refunds prorated too: a subscriber who already consumed most of
-			// their traffic/time gets back only the unused remainder, not the full
-			// price. Use "" so the store's configured policy applies.
+		// Refund EVERY still-refundable order for this (user, package), not only the
+		// latest — a stacked/renewed subscriber paid for each period. Prorated by
+		// default ("") so an already-consumed order returns only its unused remainder.
+		orders, _ := a.st.RefundableOrdersForPackage(uid, id)
+		for _, oid := range orders {
 			if _, _, err := a.st.RefundOrder(oid, operatorID, "", a.syncEntitlement); err == nil {
 				refunded++
 			}
 		}
-		if err := a.st.SetUserPlan(uid, 0); err == nil {
+		// Then remove any leftover plan bucket (refunds shrink but may leave a
+		// used-up remnant) and null the legacy pointer if it still points here.
+		if err := a.st.ClearPlanBucket(uid, id); err == nil {
 			cleared++
 		}
 		a.invalidateLinks(uid)
@@ -186,7 +194,7 @@ func (a *API) handleAdminRetirePackage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "下架失败")
 		return
 	}
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	ok(w, J{"subscribers": len(subs), "refunded": refunded, "cleared": cleared})
 }
 
@@ -348,7 +356,7 @@ func (a *API) handleAdminRefundOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.invalidateLinks(o.UserID)
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	ok(w, J{"order_id": id, "user_id": o.UserID, "points": updated.Points,
 		"refund_points": quote.RefundPoints, "refund_ratio": quote.Ratio,
 		"traffic_total": updated.TrafficLimit, "expiry_at": updated.ExpiryAt})

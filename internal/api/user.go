@@ -61,14 +61,16 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var regCodeID int64
 	if mode == "code" {
-		id, ok2 := a.st.ConsumeRegCode(req.Code)
-		if !ok2 {
+		// Pre-check only — do NOT consume the slot yet. Consuming here (before the
+		// account is durably created) means any later failure — a username lost to a
+		// concurrent signup, a verify-token write error — would burn a single-use
+		// code forever. The atomic decrement happens in finalizeRegCode below, once
+		// the user exists.
+		if _, ok2 := a.st.RegCodeRedeemable(req.Code); !ok2 {
 			fail(w, http.StatusBadRequest, "注册码无效或已用完")
 			return
 		}
-		regCodeID = id
 	}
 
 	hash, err := auth.HashPassword(req.Password)
@@ -110,14 +112,25 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "服务器错误")
 		return
 	}
-	if regCodeID > 0 {
-		_ = a.st.RecordRegCodeUse(regCodeID, u.ID, u.Username, u.Email.String)
-		// Grant the code's user groups, so a code handed to a specific crowd
-		// unlocks that crowd's packages. Granted before any verification gate:
-		// membership alone gives nothing until they buy.
-		if gids, gerr := a.st.RegCodeUserGroupIDs(regCodeID); gerr == nil {
+	// finalizeRegCode atomically consumes the code and records the use — but only
+	// now that the account is durably created, so nothing before this point can burn
+	// a slot. Returns false if the code's last slot was taken in the race between the
+	// pre-check and here (the caller then rolls back the half-created user).
+	finalizeRegCode := func() bool {
+		if mode != "code" {
+			return true
+		}
+		cid, ok2 := a.st.ConsumeRegCode(req.Code)
+		if !ok2 {
+			return false
+		}
+		_ = a.st.RecordRegCodeUse(cid, u.ID, u.Username, u.Email.String)
+		// Grant the code's user groups, so a code handed to a specific crowd unlocks
+		// that crowd's packages. Membership alone gives nothing until they buy.
+		if gids, gerr := a.st.RegCodeUserGroupIDs(cid); gerr == nil {
 			_ = a.st.AddUserGroups(u.ID, gids)
 		}
+		return true
 	}
 
 	// If email verification is required, defer provisioning until verified.
@@ -126,6 +139,11 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		if err := a.st.CreateEmailToken(id, token, "verify", 24*time.Hour); err != nil {
 			_ = a.st.DeleteUser(id)
 			fail(w, http.StatusInternalServerError, "创建验证令牌失败")
+			return
+		}
+		if !finalizeRegCode() {
+			_ = a.st.DeleteUser(id)
+			fail(w, http.StatusBadRequest, "注册码已被用完，请重试")
 			return
 		}
 		link := a.publicBase(r) + "/api/auth/verify?token=" + token
@@ -139,6 +157,11 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		_ = a.st.DeleteUser(id) // a user without a working node is useless
 		log.Printf("register: provision failed for %q: %v", req.Username, err)
 		fail(w, http.StatusBadGateway, "开通节点失败，请稍后重试")
+		return
+	}
+	if !finalizeRegCode() {
+		_ = a.st.DeleteUser(id)
+		fail(w, http.StatusBadRequest, "注册码已被用完，请重试")
 		return
 	}
 
@@ -304,7 +327,7 @@ func (a *API) handleUpdateUserProxy(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	ok(w, nil)
 }
 
@@ -602,7 +625,7 @@ func (a *API) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.invalidateLinks(id)
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	ok(w, nil)
 }
 

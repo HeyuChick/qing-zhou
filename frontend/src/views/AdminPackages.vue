@@ -32,9 +32,9 @@
           <div v-if="p.description" class="lc-meta" style="color:var(--text-3);">{{ p.description }}</div>
           <div class="lc-foot" style="flex-wrap:wrap;">
             <n-button size="tiny" @click="openForm(p)">编辑</n-button>
-            <n-button v-if="p.enabled !== false" size="tiny" type="warning" @click="handleRetire(p.id)">下架</n-button>
+            <n-button v-if="p.enabled !== false" size="tiny" type="warning" @click="handleRetire(p)">下架</n-button>
             <n-button v-else size="tiny" type="success" @click="handleEnable(p.id)">上架</n-button>
-            <n-button size="tiny" type="error" @click="handleDelete(p.id)">删除</n-button>
+            <n-button size="tiny" type="error" @click="handleDelete(p)">删除</n-button>
           </div>
         </div>
       </div>
@@ -82,12 +82,13 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import {
   NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber,
-  NSelect, NTag, NEmpty, useMessage
+  NSelect, NTag, NEmpty, useMessage, useDialog
 } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
 import { fmtTotal, yuan } from '@/utils/format'
 
 const message = useMessage()
+const dialog = useDialog()
 const packages = ref<any[]>([])
 const groups = ref<any[]>([])
 const userGroups = ref<any[]>([])
@@ -134,14 +135,35 @@ async function handleSave() {
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
 }
 
-async function handleRetire(id: number) {
-  try { await apiPost(`/api/admin/packages/${id}/retire`); message.success('已下架'); await load() } catch (e: any) { message.error(e.message) }
+// 下架 refunds every holder and clears their plan — irreversible and moves points,
+// so it must be confirmed with the impact spelled out.
+function handleRetire(p: any) {
+  const cnt = p.subscribers || 0
+  dialog.warning({
+    title: '确认下架套餐',
+    content: cnt > 0
+      ? `「${p.name}」当前有 ${cnt} 位用户持有。下架会按剩余流量/时间比例给他们退款并清空该套餐，操作不可撤销。确定继续？`
+      : `确定下架「${p.name}」？下架后不可购买（如仍有持有者会被退款并清空）。`,
+    positiveText: '下架', negativeText: '取消',
+    onPositiveClick: async () => {
+      try { await apiPost(`/api/admin/packages/${p.id}/retire`); message.success('已下架'); await load() }
+      catch (e: any) { message.error(e.message) }
+    },
+  })
 }
 async function handleEnable(id: number) {
   try { await apiPost(`/api/admin/packages/${id}/enable`); message.success('已上架'); await load() } catch (e: any) { message.error(e.message) }
 }
-async function handleDelete(id: number) {
-  try { await apiDelete(`/api/admin/packages/${id}`); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) }
+function handleDelete(p: any) {
+  dialog.warning({
+    title: '确认删除套餐',
+    content: `确定永久删除「${p.name}」？该操作不可撤销。若仍有用户持有，请先下架。`,
+    positiveText: '删除', negativeText: '取消',
+    onPositiveClick: async () => {
+      try { await apiDelete(`/api/admin/packages/${p.id}`); message.success('已删除'); await load() }
+      catch (e: any) { message.error(e.message) }
+    },
+  })
 }
 
 async function load() {
@@ -153,7 +175,7 @@ async function load() {
       apiList('/api/admin/user-groups').catch(() => []),
     ])
     packages.value = pkgs; groups.value = g; userGroups.value = ug
-  } catch {} finally { loading.value = false }
+  } catch (e: any) { message.error('加载失败：' + (e?.message || '请稍后重试')) } finally { loading.value = false }
 }
 onMounted(load)
 </script>

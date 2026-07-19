@@ -2,6 +2,7 @@ package api
 
 import (
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -46,6 +47,16 @@ func (a *API) sbRebuild() error {
 	return a.sbctl.Rebuild()
 }
 
+// sbRebuildLog triggers a rebuild after an already-committed change and LOGS any
+// error instead of discarding it. A failed push (unreachable node, local
+// sing-box check failure) then leaves a breadcrumb for incident debugging; the
+// periodic controller loop re-applies within one interval, so this self-heals.
+func (a *API) sbRebuildLog() {
+	if err := a.sbRebuild(); err != nil {
+		log.Printf("sing-box rebuild failed (will retry on next controller tick): %v", err)
+	}
+}
+
 func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 	a := &API{
 		st: st, secret: secret, mailer: mail,
@@ -83,6 +94,9 @@ func (a *API) Router() http.Handler {
 	// its source IP and bypass the per-IP rate limiters. clientIP() honors those
 	// headers only from a trusted proxy peer (see trustedproxy.go).
 	r.Use(middleware.Recoverer)
+	// gzip responses (JSON API + the embedded JS/CSS bundle). Cheap CPU for a large
+	// bandwidth win on the small boxes this targets; skips already-compressed types.
+	r.Use(middleware.Compress(5))
 	r.Use(middleware.Timeout(30 * time.Second))
 	// Cap request bodies so an authenticated client can't drive the process into
 	// memory pressure with a multi-GB POST. 8 MiB comfortably covers the largest

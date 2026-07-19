@@ -140,14 +140,21 @@ func (s *Store) SetPackageEnabled(id int64, enabled bool) error {
 	return err
 }
 
-// PlanSubscribers returns the ids of users whose current plan is this package.
-func (s *Store) PlanSubscribers(pkgID int64) ([]int64, error) {
-	return queryInts(s.db, `SELECT id FROM users WHERE current_plan_id=?`, pkgID)
+// PackagePlanHolders returns the ids of users who hold a live plan bucket for
+// this package. Unlike a lookup on the legacy users.current_plan_id pointer (which
+// records only the SINGLE most recently purchased plan), this reflects the bucket
+// model: a user may hold several plans at once, so retire/delete must act on the
+// real buckets or they silently skip stacked/older subscribers.
+func (s *Store) PackagePlanHolders(pkgID int64) ([]int64, error) {
+	return queryInts(s.db, `SELECT DISTINCT user_id FROM user_plans
+		WHERE kind='plan' AND package_id=? ORDER BY user_id`, pkgID)
 }
 
-// PlanSubscriberCounts maps package id → number of users currently on that plan.
+// PlanSubscriberCounts maps package id → number of users holding that plan,
+// counted from the authoritative buckets (not current_plan_id).
 func (s *Store) PlanSubscriberCounts() (map[int64]int64, error) {
-	rows, err := s.db.Query(`SELECT current_plan_id, COUNT(*) FROM users WHERE current_plan_id IS NOT NULL GROUP BY current_plan_id`)
+	rows, err := s.db.Query(`SELECT package_id, COUNT(DISTINCT user_id) FROM user_plans
+		WHERE kind='plan' AND package_id>0 GROUP BY package_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -163,16 +170,44 @@ func (s *Store) PlanSubscriberCounts() (map[int64]int64, error) {
 	return out, rows.Err()
 }
 
-// LatestRefundableOrderForPackage returns the most recent non-refunded successful
-// order id for (user, package), or 0 if none.
-func (s *Store) LatestRefundableOrderForPackage(userID, pkgID int64) (int64, error) {
-	var id int64
-	err := s.db.QueryRow(`SELECT id FROM orders WHERE user_id=? AND package_id=? AND status='success'
-		ORDER BY created_at DESC, id DESC LIMIT 1`, userID, pkgID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+// RefundableOrdersForPackage returns every non-refunded successful order id for
+// (user, package), oldest first, so retire can refund each stacked purchase — not
+// merely the latest one.
+func (s *Store) RefundableOrdersForPackage(userID, pkgID int64) ([]int64, error) {
+	return queryInts(s.db, `SELECT id FROM orders WHERE user_id=? AND package_id=? AND status='success'
+		ORDER BY created_at, id`, userID, pkgID)
+}
+
+// ClearPlanBucket removes any plan bucket the user holds for this package, nulls
+// the legacy current_plan_id pointer if it still points here, and recomputes the
+// user aggregate — all in one transaction. Used by retire to fully revoke a
+// package after its orders are refunded (refunds shrink the bucket but may leave a
+// used-up remnant), and idempotent so re-running is safe.
+func (s *Store) ClearPlanBucket(userID, pkgID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
 	}
-	return id, err
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`DELETE FROM user_plans WHERE user_id=? AND kind='plan' AND package_id=?`, userID, pkgID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE users SET current_plan_id=NULL WHERE id=? AND current_plan_id=?`, userID, pkgID); err != nil {
+		return err
+	}
+	if _, _, _, _, err := recomputeUserAggregate(tx, userID, time.Now().Unix()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func boolToInt(b bool) int {

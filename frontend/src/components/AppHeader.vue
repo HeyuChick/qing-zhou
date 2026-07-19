@@ -35,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, h } from 'vue'
+import { ref, h, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NDropdown, NIcon } from 'naive-ui'
 import { HomeOutline, SettingsOutline, PersonOutline, LogOutOutline } from '@vicons/ionicons5'
@@ -48,9 +48,12 @@ const auth = useAuthStore()
 const config = useConfigStore()
 const showLogin = ref(false)
 
-router.afterEach((to) => {
+// Store the unregister fn and drop the hook on unmount so it doesn't accumulate
+// across remounts (each stale hook could re-open the login dialog).
+const stopAfterEach = router.afterEach((to) => {
   if (to.query.login === '1') showLogin.value = true
 })
+onUnmounted(stopAfterEach)
 
 const userMenu = [
   { label: '控制台', key: '/dashboard' },

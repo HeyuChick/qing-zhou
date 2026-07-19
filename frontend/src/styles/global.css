@@ -5,7 +5,7 @@
   --border: #ece9e1;
   --text: #322f2a;
   --text-2: #6b665e;
-  --text-3: #9c978d;
+  --text-3: #7a756b; /* darkened from #9c978d (~2.9:1) to reach WCAG AA 4.5:1 on white */
   --accent: #6f8f76;
   --accent-strong: #5c7c63;
   --accent-soft: #e9f0eb;

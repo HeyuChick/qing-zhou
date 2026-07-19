@@ -132,14 +132,16 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NInput, NInputGroup, NButton, NDataTable, NProgress, NTag, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, useMessage } from 'naive-ui'
+import { NCard, NInput, NInputGroup, NButton, NDataTable, NProgress, NTag, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, useMessage, useDialog } from 'naive-ui'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { fmtBytes, fmtTotal, fmtDate, pct } from '@/utils/format'
+import { copyText } from '@/utils/clipboard'
 import QRCode from 'qrcode'
 
 const router = useRouter()
 const message = useMessage()
+const dialog = useDialog()
 const auth = useAuthStore()
 const sub = ref<any>({})
 const plans = ref<any[]>([])
@@ -288,12 +290,25 @@ async function handleToggleAll(enable: boolean) {
     message.success(enable ? '已全部启用' : '已全部禁用')
   } catch (e: any) { message.error(e.message) }
 }
-async function handleResetSub() {
-  try { await apiPost('/api/user/reset-sub'); sub.value = await apiGet('/api/user/subscription') || {}; message.success('订阅链接已重置') } catch (e: any) { message.error(e.message) }
+function handleResetSub() {
+  // Resetting mints a new token, which INVALIDATES every client already configured
+  // with the old link — the user must re-import everywhere. Confirm before doing it.
+  dialog.warning({
+    title: '确认重置订阅链接',
+    content: '重置后旧链接立即失效，所有已导入的客户端（Clash / sing-box 等）都需要用新链接重新导入。确定重置？',
+    positiveText: '重置', negativeText: '取消',
+    onPositiveClick: async () => {
+      try { await apiPost('/api/user/reset-sub'); sub.value = await apiGet('/api/user/subscription') || {}; message.success('订阅链接已重置') }
+      catch (e: any) { message.error(e.message) }
+    },
+  })
 }
-function copy(text: string) {
+async function copy(text: string) {
   if (!text) { message.warning('暂无链接'); return }
-  navigator.clipboard.writeText(text); message.success('已复制')
+  // Honest feedback: navigator.clipboard is unavailable on plain-HTTP origins
+  // (common for self-hosted panels), so copyText falls back and reports failure
+  // rather than us claiming success on a silent no-op.
+  if (await copyText(text)) message.success('已复制'); else message.error('复制失败，请手动选择并复制')
 }
 
 watch(showQr, async (v) => {
@@ -308,7 +323,7 @@ watch(showQr, async (v) => {
 })
 
 onMounted(async () => {
-  try { sub.value = await apiGet('/api/user/subscription') || {} } catch {}
+  try { sub.value = await apiGet('/api/user/subscription') || {} } catch (e: any) { message.error('订阅信息加载失败：' + (e?.message || '请稍后重试')) }
   try { plans.value = await apiList('/api/user/plans') } catch {}
   try { proxies.value = await apiList('/api/user/proxies') } catch {}
   loadingNodes.value = true

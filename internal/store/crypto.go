@@ -45,30 +45,69 @@ func (s *Store) encrypt(plain string) string {
 	return encPrefix + base64.StdEncoding.EncodeToString(ct)
 }
 
-// decrypt returns the plaintext of an encrypted setting. Non-prefixed values are
-// legacy cleartext and returned as-is. It fails CLOSED: once the enc:v1: prefix
-// is present, any decode/decrypt failure returns "" instead of handing the raw
-// ciphertext blob back to the caller.
-func (s *Store) decrypt(val string) string {
+// decryptOK returns the plaintext of an encrypted setting and reports whether
+// decryption succeeded. Non-prefixed values are legacy cleartext and returned
+// as-is with ok=true. It fails CLOSED: once the enc:v1: prefix is present, any
+// decode/decrypt failure returns ("", false) instead of handing the raw
+// ciphertext blob back to the caller. Callers that must not silently downgrade a
+// secret to empty (e.g. the sing-box config builder, which would otherwise emit
+// a plaintext inbound) MUST check ok — see decrypt for the lossy convenience form.
+func (s *Store) decryptOK(val string) (string, bool) {
 	if len(s.secretKey) == 0 || !strings.HasPrefix(val, encPrefix) {
-		return val
+		return val, true
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(val, encPrefix))
 	if err != nil {
-		return ""
+		return "", false
 	}
 	block, err := aes.NewCipher(s.secretKey)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil || len(raw) < gcm.NonceSize() {
-		return ""
+		return "", false
 	}
 	nonce, ct := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
 	pt, err := gcm.Open(nil, nonce, ct, nil)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	return string(pt)
+	return string(pt), true
+}
+
+// CountUndecryptableSecrets reports how many at-rest encrypted values fail to
+// decrypt with the current key. It is a startup self-check for a wrong/changed
+// QZ_SECRET_KEY: when non-zero, affected sing-box TLS inbounds refuse to deploy
+// (never downgraded to plaintext) and SMTP silently stops, so the operator must
+// be told loudly rather than left to debug "nodes mysteriously down".
+func (s *Store) CountUndecryptableSecrets() int {
+	n := 0
+	if rows, err := s.db.Query(`SELECT server_json FROM sb_tls`); err == nil {
+		for rows.Next() {
+			var v string
+			if rows.Scan(&v) == nil {
+				if _, ok := s.decryptOK(v); !ok {
+					n++
+				}
+			}
+		}
+		rows.Close()
+	}
+	for key := range encKeys {
+		if raw, ok, err := s.cachedSettingRaw(key); err == nil && ok {
+			if _, dok := s.decryptOK(raw); !dok {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// decrypt is the lossy convenience form of decryptOK: a decrypt failure is
+// indistinguishable from a genuinely empty value. Do NOT use it where an
+// undecryptable secret must not be treated as "no value" — use decryptOK there.
+func (s *Store) decrypt(val string) string {
+	pt, _ := s.decryptOK(val)
+	return pt
 }

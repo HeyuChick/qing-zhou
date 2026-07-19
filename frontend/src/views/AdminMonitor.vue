@@ -160,7 +160,7 @@ import {
   NCard, NButton, NSpace, NTag, NProgress, NDrawer, NDrawerContent, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSelect, NEmpty, useMessage
 } from 'naive-ui'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
-import { fmtBytes, fmtDateTime, fmtUptime, pct } from '@/utils/format'
+import { fmtBytes, fmtDateTime, fmtUptime, pct, toLocalDatetimeInput } from '@/utils/format'
 import * as echarts from 'echarts'
 
 const message = useMessage()
@@ -317,7 +317,7 @@ const assetExpiry = ref('')
 function openAsset(s: any) {
   assetServer.value = s
   Object.assign(assetForm, { provider: s.provider || '', location: s.location || '', spec: s.spec || '', price: s.price || 0, notes: s.notes || '', probe_enabled: s.probe_enabled })
-  assetExpiry.value = s.expiry_date ? new Date(s.expiry_date * 1000).toISOString().slice(0, 16) : ''
+  assetExpiry.value = toLocalDatetimeInput(s.expiry_date)
   showAsset.value = true
 }
 async function handleSaveAsset() {

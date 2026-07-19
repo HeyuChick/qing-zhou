@@ -70,7 +70,6 @@ func (a *API) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	online, _ := a.st.OnlineCount(onlineWindow)
 	onlineUsers, _ := a.st.OnlineUsers(onlineWindow, 20)
-	_ = a.st.PruneTrafficSamples(35) // opportunistic retention trim
 	ok(w, J{
 		"total_users":   ov.TotalUsers,
 		"active_users":  ov.ActiveUsers,

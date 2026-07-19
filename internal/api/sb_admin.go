@@ -400,7 +400,7 @@ func (a *API) handleAdminDeleteSbTls(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "删除失败")
 		return
 	}
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	ok(w, nil)
 }
 
@@ -585,7 +585,7 @@ func (a *API) handleAdminUpdateRealityTls(w http.ResponseWriter, r *http.Request
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	saved, _ := a.st.GetSbTls(id)
 	ok(w, saved)
 }
@@ -669,7 +669,7 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
-	_ = a.sbRebuild()
+	a.sbRebuildLog()
 	saved, _ := a.st.GetSbTls(newID)
 	ok(w, saved)
 }
@@ -850,7 +850,7 @@ func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request)
 	} else {
 		// 查不到归属服务器（异常情况）时全量重建兜底，避免被删的 inbound
 		// 残留在某个运行中的配置里。
-		_ = a.sbRebuild()
+		a.sbRebuildLog()
 	}
 	ok(w, nil)
 }

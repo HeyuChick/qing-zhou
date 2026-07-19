@@ -28,6 +28,13 @@ async function request<T = any>(path: string, opts: RequestInit = {}, raw = fals
   if (!res.ok) {
     if (res.status === 401) {
       auth.logout()
+      // Session died mid-use — bounce to the public page with the login prompt so
+      // the user isn't stranded on a dead screen of failing calls. Skip when already
+      // on the public page (its own authless calls must not cause a redirect loop).
+      const h = window.location.hash
+      if (h && h !== '#/' && !h.startsWith('#/?')) {
+        window.location.hash = '/?login=1'
+      }
     }
     const err = new Error((body && body.msg) || `请求失败 ${res.status}`) as ApiError
     err.status = res.status

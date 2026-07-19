@@ -808,6 +808,14 @@ func (a *API) StartMonitorTasks(ctx context.Context) {
 				if err := a.st.PruneMetrics(30); err != nil {
 					log.Printf("metrics prune: %v", err)
 				}
+				// traffic_samples grows one row per active identity per stats poll.
+				// Prune it on this same maintenance tick — previously it only ran when
+				// an admin happened to open the overview page, so on an unattended
+				// panel the table grew without bound (DB bloat, slow daily-traffic
+				// GROUP BYs, ever-costlier WAL checkpoints).
+				if err := a.st.PruneTrafficSamples(35); err != nil {
+					log.Printf("traffic samples prune: %v", err)
+				}
 			}
 		}
 	}()
