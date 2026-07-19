@@ -69,6 +69,10 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 	// falling back to the project's canonical repo.
 	a.updater = updater.New(
 		func() string {
+			// Host-controlled only. The stored setting is read as a legacy
+			// fallback but can no longer be written through the settings API
+			// (see immutableSettings) — repointing the update source is
+			// equivalent to arbitrary code execution on this host.
 			if v := os.Getenv("QZ_UPDATE_REPO"); v != "" {
 				return v
 			}

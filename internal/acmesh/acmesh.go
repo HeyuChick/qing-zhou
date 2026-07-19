@@ -19,9 +19,41 @@ import (
 // acmeBin is the standard acme.sh install location (per-user, root here).
 const acmeBin = "$HOME/.acme.sh/acme.sh"
 
+// AcmeVersion is the acme.sh git tag installed by Install. Pinned so the
+// bootstrap can't be repointed at new code by whoever controls the download
+// endpoint on the day a panel happens to issue its first certificate.
+const AcmeVersion = "3.0.7"
+
 // Runner executes a shell command on a host and returns combined stdout+stderr.
 type Runner interface {
 	Run(ctx context.Context, cmd string) (out string, err error)
+}
+
+// EnvRunner is a Runner that can also pass environment variables to the child
+// without putting them on its command line. Secrets (the Cloudflare token) go
+// through this: anything interpolated into the command string is visible in
+// /proc/<pid>/cmdline to every local user for as long as the command runs.
+// A Runner that doesn't implement it still works — runEnv falls back to the
+// in-command export, which is what the code did unconditionally before.
+type EnvRunner interface {
+	Runner
+	RunEnv(ctx context.Context, cmd string, env map[string]string) (out string, err error)
+}
+
+// runEnv dispatches to RunEnv when available, otherwise folds env into the
+// command string.
+func runEnv(ctx context.Context, r Runner, cmd string, env map[string]string) (string, error) {
+	if len(env) == 0 {
+		return r.Run(ctx, cmd)
+	}
+	if er, ok := r.(EnvRunner); ok {
+		return er.RunEnv(ctx, cmd, env)
+	}
+	prefix := ""
+	for k, v := range env {
+		prefix += "export " + k + "=" + shellQuote(v) + "; "
+	}
+	return r.Run(ctx, prefix+cmd)
 }
 
 // Method is the ACME challenge method.
@@ -70,9 +102,16 @@ func Install(ctx context.Context, r Runner, email string) error {
 	if e := strings.TrimSpace(email); e != "" {
 		acct = " --accountemail " + shellQuote(e)
 	}
+	// Pinned to a tagged revision instead of https://get.acme.sh, which serves
+	// whatever is current. This runs as root on the panel host, so an unpinned
+	// `curl | sh` means whoever controls that endpoint at any future moment owns
+	// the box — a second supply-chain entry point beside the self-updater.
+	// Bump AcmeVersion deliberately; the URL is a git tag, so a given version
+	// always resolves to the same bytes.
+	src := "https://raw.githubusercontent.com/acmesh-official/acme.sh/" + AcmeVersion + "/acme.sh"
 	// Prefer curl, fall back to wget — same probe the probe installer uses.
-	get := `if command -v curl >/dev/null 2>&1; then curl -fsSL https://get.acme.sh | sh -s -- ` +
-		strings.TrimSpace(acct) + `; elif command -v wget >/dev/null 2>&1; then wget -qO- https://get.acme.sh | sh -s -- ` +
+	get := `if command -v curl >/dev/null 2>&1; then curl -fsSL ` + shellQuote(src) + ` | sh -s -- --install ` +
+		strings.TrimSpace(acct) + `; elif command -v wget >/dev/null 2>&1; then wget -qO- ` + shellQuote(src) + ` | sh -s -- --install ` +
 		strings.TrimSpace(acct) + `; else echo "need curl or wget" >&2; exit 1; fi`
 	if out, err := r.Run(ctx, get); err != nil {
 		return fmt.Errorf("install acme.sh: %v: %s", err, out)
@@ -113,8 +152,9 @@ func buildIssueCmd(o IssueOpts) (string, error) {
 		if strings.TrimSpace(o.CFToken) == "" {
 			return "", fmt.Errorf("Cloudflare API token is required for the DNS method")
 		}
-		// CF_Token is consumed by acme.sh's dns_cf hook from the environment.
-		return "export CF_Token=" + shellQuote(o.CFToken) + "; " + base + " --dns dns_cf", nil
+		// CF_Token is consumed by acme.sh's dns_cf hook from the environment;
+		// Issue passes it through runEnv so it never reaches a command line.
+		return base + " --dns dns_cf", nil
 	default:
 		return "", fmt.Errorf("unsupported method %q", o.Method)
 	}
@@ -161,14 +201,25 @@ func Issue(ctx context.Context, r Runner, o IssueOpts) (*IssueResult, error) {
 		}
 	}
 	certPath, keyPath := certPaths(o.CertDir, o.Domain)
-	// Ensure the target directory exists before install-cert writes into it.
-	if out, err := r.Run(ctx, "mkdir -p "+shellQuote(path.Dir(certPath))); err != nil {
+	// 0700: the directory holds a TLS private key. mkdir -p previously left it
+	// at the umask default (0755 in a typical 022 umask).
+	if out, err := r.Run(ctx, "mkdir -p "+shellQuote(path.Dir(certPath))+" && chmod 700 "+shellQuote(path.Dir(certPath))); err != nil {
 		return nil, fmt.Errorf("create cert dir: %v: %s", err, out)
 	}
-	if out, err := r.Run(ctx, issueCmd); err != nil {
+
+	env := map[string]string{}
+	if o.Method == MethodCFDNS {
+		env["CF_Token"] = strings.TrimSpace(o.CFToken)
+	}
+	if out, err := runEnv(ctx, r, issueCmd, env); err != nil {
 		// acme.sh exits non-zero when a valid cert already exists and isn't near
-		// renewal ("Domains not changed / skipping"); treat that as success.
-		if !strings.Contains(out, "Skipping") && !strings.Contains(out, "not changed") {
+		// renewal; treat only that as success.
+		//
+		// Matched against acme.sh's own status lines, not a bare substring of the
+		// combined output — that output echoes the admin-supplied domain, so a
+		// domain containing "Skipping" used to turn a genuine failure into a
+		// success and fall through to --install-cert.
+		if !alreadyUpToDate(out) {
 			// Common, self-inflicted failure: :80 is held by a web server (nginx).
 			// Point the operator at the methods that don't need to bind :80.
 			if strings.Contains(out, "port 80 is already used") || strings.Contains(out, "Please stop it") {
@@ -180,5 +231,29 @@ func Issue(ctx context.Context, r Runner, o IssueOpts) (*IssueResult, error) {
 	if out, err := r.Run(ctx, buildInstallCmd(o, certPath, keyPath)); err != nil {
 		return nil, fmt.Errorf("acme.sh install-cert failed: %v: %s", err, out)
 	}
+	// The key is written by acme.sh under the panel's umask — typically 0644,
+	// i.e. a world-readable TLS private key. Clamp it.
+	if out, err := r.Run(ctx, "chmod 600 "+shellQuote(keyPath)); err != nil {
+		return nil, fmt.Errorf("secure key file: %v: %s", err, out)
+	}
 	return &IssueResult{CertPath: certPath, KeyPath: keyPath}, nil
+}
+
+// alreadyUpToDate reports whether acme.sh declined to reissue because the
+// existing certificate is still valid. acme.sh emits these as whole lines
+// prefixed with a timestamp, so the match is anchored to line starts after the
+// "[time] " prefix rather than run against the whole blob — which includes the
+// domain the admin typed.
+func alreadyUpToDate(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		l := strings.TrimSpace(line)
+		if i := strings.Index(l, "] "); i >= 0 && strings.HasPrefix(l, "[") {
+			l = l[i+2:]
+		}
+		if strings.HasPrefix(l, "Skipping") || strings.HasPrefix(l, "Domains not changed") ||
+			strings.HasPrefix(l, "Next renewal time is") {
+			return true
+		}
+	}
+	return false
 }

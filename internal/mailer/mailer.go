@@ -92,11 +92,20 @@ func (m *Mailer) sendStartTLS(addr string, auth smtp.Auth, to []string, msg []by
 		conn.Close()
 		return err
 	}
-	if ok, _ := c.Extension("STARTTLS"); ok {
-		if err := c.StartTLS(&tls.Config{ServerName: m.Host}); err != nil {
-			c.Close()
-			return err
-		}
+	// Hard failure when the server doesn't offer STARTTLS. Continuing on the
+	// plaintext connection is a silent downgrade: an on-path attacker only has
+	// to strip "250-STARTTLS" from the EHLO reply. With SMTP auth configured
+	// this merely fails noisily (Go's PlainAuth refuses an unencrypted
+	// connection), but with no auth configured the message itself goes out in
+	// the clear — and these messages carry password-reset links.
+	ok, _ := c.Extension("STARTTLS")
+	if !ok {
+		c.Close()
+		return fmt.Errorf("SMTP 服务器 %s 未提供 STARTTLS；已中止发送以避免明文传输（如该服务器使用隐式 TLS，请把加密方式改为 SSL/TLS）", m.Host)
+	}
+	if err := c.StartTLS(&tls.Config{ServerName: m.Host}); err != nil {
+		c.Close()
+		return err
 	}
 	return deliver(c, auth, m.From, to, msg)
 }

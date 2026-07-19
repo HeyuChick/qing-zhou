@@ -153,9 +153,20 @@ func (a *API) handleReset(w http.ResponseWriter, r *http.Request) {
 }
 
 // validEmail does a light-weight sanity check (real validation = the link works).
+//
+// CR and LF are rejected outright, not as formatting hygiene: the address is
+// interpolated raw into the "To:" header, so an address like
+// "a@b\r\nBcc: attacker@example.com" is header injection. Today net/smtp's own
+// Rcpt validation rejects those bytes before the message is transmitted, so this
+// is defence in depth — but that safety net depends on stdlib internals and on
+// deliver() happening to call Rcpt before Data. It also stops such an address
+// from being stored and then breaking every future mail to that user.
 func validEmail(e string) bool {
 	at := strings.IndexByte(e, '@')
 	if at <= 0 || at >= len(e)-3 {
+		return false
+	}
+	if strings.ContainsAny(e, "\r\n\x00") {
 		return false
 	}
 	dot := strings.LastIndexByte(e, '.')

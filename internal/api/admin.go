@@ -15,6 +15,20 @@ var secretSettings = map[string]bool{
 	"smtp_pass":  true,
 }
 
+// immutableSettings cannot be written through the settings API at all.
+//
+// update_repo names the GitHub repo the self-updater installs from. Left
+// writable, an admin session (a stolen token, or XSS) could repoint it at an
+// attacker's repo: GitHub publishes a correct sha256 for whatever asset is
+// uploaded there, so every integrity check passes and the downloaded binary
+// replaces the running one and is exec'd — persistent code execution as the
+// panel's uid, which on a typical deployment is root. It stays overridable via
+// QZ_UPDATE_REPO, which requires host access the attacker doesn't have.
+var immutableSettings = map[string]bool{
+	"jwt_secret":  true, // never rotate the signing key through the API
+	"update_repo": true,
+}
+
 // settingEnv maps a setting key to the env var that overrides it (env wins in
 // buildMailer). Used to surface the *effective* config in the panel.
 var settingEnv = map[string]string{
@@ -70,8 +84,8 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(k, "_") {
 			continue // UI-only fields like _env_keys
 		}
-		if k == "jwt_secret" {
-			continue // never overwrite via API
+		if immutableSettings[k] {
+			continue // host-only settings; see immutableSettings
 		}
 		if secretSettings[k] && (v == "***" || v == "") {
 			continue // keep current secret: masked sentinel or left blank

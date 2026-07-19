@@ -1,6 +1,7 @@
 package acmesh
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -52,9 +53,84 @@ func TestBuildIssueCmd_CFDNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	for _, want := range []string{"export CF_Token='tok123';", "-d '*.example.com'", "--dns dns_cf"} {
+	for _, want := range []string{"-d '*.example.com'", "--dns dns_cf"} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("cmd %q missing %q", cmd, want)
+		}
+	}
+	// The token must NOT be in the command string: everything here becomes an
+	// argv element of the `sh` process and is world-readable via
+	// /proc/<pid>/cmdline for as long as issuance runs — minutes, for dns_cf.
+	// Issue passes it through the child's environment instead.
+	if strings.Contains(cmd, "tok123") || strings.Contains(cmd, "CF_Token") {
+		t.Errorf("Cloudflare token leaked into the command line: %q", cmd)
+	}
+}
+
+// runEnv must hand secrets to an EnvRunner rather than folding them into the
+// command, and must still work for a plain Runner.
+func TestRunEnv_PrefersEnvRunner(t *testing.T) {
+	var gotCmd string
+	var gotEnv map[string]string
+	er := envRunnerStub{fn: func(cmd string, env map[string]string) { gotCmd, gotEnv = cmd, env }}
+	if _, err := runEnv(context.Background(), er, "acme.sh --issue", map[string]string{"CF_Token": "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotCmd, "secret") {
+		t.Errorf("secret reached the command string: %q", gotCmd)
+	}
+	if gotEnv["CF_Token"] != "secret" {
+		t.Errorf("env = %v, want CF_Token=secret", gotEnv)
+	}
+
+	// A Runner without RunEnv still gets the variable, via the old in-command
+	// export — degraded but functional.
+	var plainCmd string
+	pr := plainRunnerStub{fn: func(cmd string) { plainCmd = cmd }}
+	if _, err := runEnv(context.Background(), pr, "acme.sh --issue", map[string]string{"CF_Token": "secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plainCmd, "export CF_Token='secret';") {
+		t.Errorf("fallback did not export the variable: %q", plainCmd)
+	}
+}
+
+type envRunnerStub struct{ fn func(string, map[string]string) }
+
+func (e envRunnerStub) Run(_ context.Context, cmd string) (string, error) {
+	e.fn(cmd, nil)
+	return "", nil
+}
+func (e envRunnerStub) RunEnv(_ context.Context, cmd string, env map[string]string) (string, error) {
+	e.fn(cmd, env)
+	return "", nil
+}
+
+type plainRunnerStub struct{ fn func(string) }
+
+func (p plainRunnerStub) Run(_ context.Context, cmd string) (string, error) {
+	p.fn(cmd)
+	return "", nil
+}
+
+// alreadyUpToDate must key off acme.sh's own status lines, not a bare substring
+// of output that echoes the admin-supplied domain — otherwise a domain
+// containing "Skipping" turns a real issuance failure into a success.
+func TestAlreadyUpToDate_NotFooledByDomainEcho(t *testing.T) {
+	failure := "[Mon Jul 19] Registering account\n" +
+		"[Mon Jul 19] Create new order error for main domain: skipping-tests.example.com\n" +
+		"[Mon Jul 19] Please add '--debug' to check more details.\n"
+	if alreadyUpToDate(failure) {
+		t.Errorf("a real failure was read as up-to-date because the domain contained the marker")
+	}
+
+	for _, ok := range []string{
+		"[Mon Jul 19] Skipping. Next renewal time is: 2026-09-01\n",
+		"[Mon Jul 19] Domains not changed.\n",
+		"[Mon Jul 19] Next renewal time is: 2026-09-01\n",
+	} {
+		if !alreadyUpToDate(ok) {
+			t.Errorf("genuine up-to-date output not recognised: %q", ok)
 		}
 	}
 }

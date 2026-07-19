@@ -278,6 +278,15 @@ func (m *Manager) run() {
 		return
 	}
 	target := rel.TagName
+
+	// Refuse anything that isn't newer. run() re-fetches the release rather than
+	// carrying the one Check() showed, so without this an admin could be shown
+	// vX and served whatever /releases/latest returns at apply time — including
+	// an older, known-vulnerable build, which installed silently.
+	if !isNewer(target, version.Current(), version.IsDev()) {
+		m.fail(fmt.Sprintf("最新版本 %s 不比当前版本 %s 新，已取消更新", target, version.Current()))
+		return
+	}
 	m.setState(StatusDownloading, "开始下载 "+target, 0, target)
 
 	asset := findAsset(rel, assetName())
@@ -289,6 +298,21 @@ func (m *Manager) run() {
 	if wantDigest == "" {
 		m.fail("该版本资产缺少 sha256 摘要，出于安全考虑拒绝更新")
 		return
+	}
+	// Fetch the detached signature before spending bandwidth on the binary.
+	// Fail-closed: with a key compiled in, a release without a usable signature
+	// is refused rather than silently falling back to the digest alone.
+	var sig []byte
+	if signingEnabled() {
+		sigAsset := findAsset(rel, signatureAssetName(assetName()))
+		if sigAsset == nil {
+			m.fail(fmt.Sprintf("该版本缺少签名资产 (%s)，出于安全考虑拒绝更新", signatureAssetName(assetName())))
+			return
+		}
+		if sig, err = m.fetchSignature(ctx, sigAsset.BrowserDownloadURL); err != nil {
+			m.fail("下载签名失败: " + err.Error())
+			return
+		}
 	}
 
 	exePath, err := os.Executable()
@@ -315,12 +339,42 @@ func (m *Manager) run() {
 		m.fail("sha256 校验不匹配，已丢弃下载内容（可能被篡改或下载损坏）")
 		return
 	}
+	// The digest proves the transfer was intact; only the signature proves the
+	// project produced these bytes.
+	if signingEnabled() {
+		m.setState(StatusVerifying, "校验发布签名…", 100, target)
+		body, rerr := os.ReadFile(tmpPath)
+		if rerr != nil {
+			_ = os.Remove(tmpPath)
+			m.fail("读取下载内容失败: " + rerr.Error())
+			return
+		}
+		if verr := verifySignature(body, sig); verr != nil {
+			_ = os.Remove(tmpPath)
+			m.fail("发布签名校验失败，已丢弃下载内容: " + verr.Error())
+			return
+		}
+	}
 
 	m.setState(StatusInstalling, "安装新版本…", 100, target)
 	if err := os.Chmod(tmpPath, 0o755); err != nil {
 		_ = os.Remove(tmpPath)
 		m.fail("设置可执行权限失败: " + err.Error())
 		return
+	}
+	// Keep the outgoing binary so a release that cannot start can be rolled
+	// back. This deployment updates only through this feature and has no SSH,
+	// so without a local copy a bad release means the panel is unreachable and
+	// there is nothing left on disk to fall back to.
+	prev := backupPath(exePath)
+	_ = os.Remove(prev)
+	if err := os.Link(exePath, prev); err != nil {
+		// Hard links can fail (e.g. /proc-backed or cross-device layouts); copy.
+		if cerr := copyFile(exePath, prev); cerr != nil {
+			_ = os.Remove(tmpPath)
+			m.fail("备份当前版本失败，已取消更新: " + cerr.Error())
+			return
+		}
 	}
 	// rename() over the running binary is safe on Linux (no ETXTBSY; only
 	// *writing* a busy text file fails — the probe installer relies on the same).
@@ -335,9 +389,56 @@ func (m *Manager) run() {
 	// re-exec. On success this call does not return.
 	time.Sleep(600 * time.Millisecond)
 	if err := restartSelf(exePath); err != nil {
-		m.fail("重启失败，请手动重启服务: " + err.Error())
+		// The new binary is already installed but this process could not hand
+		// over to it. Put the old one back: leaving the new binary on disk means
+		// the next restart — whenever that happens — silently jumps versions to
+		// something that has already failed to start once.
+		msg := "重启失败: " + err.Error()
+		if rerr := restoreBackup(exePath); rerr != nil {
+			msg += "；回滚也失败了（" + rerr.Error() + "），请手动恢复"
+		} else {
+			msg += "；已回滚到更新前的版本，请手动重启服务"
+		}
+		m.fail(msg)
 		return
 	}
+}
+
+// copyFile is the fallback for backing up the running binary when a hard link
+// isn't possible.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// fetchSignature retrieves a detached signature asset into memory.
+func (m *Manager) fetchSignature(ctx context.Context, url string) ([]byte, error) {
+	req, err := m.newRequest(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxSignatureBytes))
 }
 
 // download streams url into dst, returning the lowercase hex sha256 of the body
@@ -369,8 +470,15 @@ func (m *Manager) download(ctx context.Context, url, dst string, size int64) (st
 
 	h := sha256.New()
 	pw := &progressWriter{m: m, total: size}
-	if _, err := io.Copy(io.MultiWriter(f, h, pw), resp.Body); err != nil {
+	// Bounded: see maxAssetBytes. Read one byte past the cap so an oversized
+	// body is reported as such instead of silently truncating into a digest
+	// mismatch (a confusing "tampered" message for what is really a bad repo).
+	n, err := io.Copy(io.MultiWriter(f, h, pw), io.LimitReader(resp.Body, maxAssetBytes+1))
+	if err != nil {
 		return "", err
+	}
+	if n > maxAssetBytes {
+		return "", fmt.Errorf("资产超过 %d MiB 上限，已中止下载", maxAssetBytes>>20)
 	}
 	if err := f.Sync(); err != nil {
 		return "", err
