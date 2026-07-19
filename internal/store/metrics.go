@@ -108,6 +108,31 @@ func (s *Store) GetLatestMetrics(serverID int64) (*ServerMetrics, error) {
 	return scanMetrics(s.db.QueryRow(`SELECT `+metricsCols+` FROM server_metrics WHERE server_id=? ORDER BY ts DESC LIMIT 1`, serverID))
 }
 
+// GetLatestMetricsForAll returns each server's most recent metrics row keyed by
+// server_id, in a SINGLE query — replacing loops that called GetLatestMetrics once
+// per server (an N+1, including on the unauthenticated public monitor endpoints).
+// The latest row per server is the one with the greatest id (ids are monotonic
+// with insertion, so newest-inserted == newest metrics).
+func (s *Store) GetLatestMetricsForAll() (map[int64]*ServerMetrics, error) {
+	rows, err := s.db.Query(`SELECT ` + metricsCols + ` FROM server_metrics
+		WHERE id IN (SELECT MAX(id) FROM server_metrics GROUP BY server_id)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]*ServerMetrics{}
+	for rows.Next() {
+		m, err := scanMetrics(rows)
+		if err != nil {
+			return nil, err
+		}
+		if m != nil {
+			out[m.ServerID] = m
+		}
+	}
+	return out, rows.Err()
+}
+
 // ListMetrics returns metrics for a server since the given Unix timestamp. The
 // row count is capped (most-recent-first within the window, returned in
 // chronological order) so a long range on a high-frequency probe can't serialize
@@ -187,13 +212,14 @@ func (s *Store) ListProbeServersWithMetrics() ([]ProbeServerView, error) {
 	if err != nil {
 		return nil, err
 	}
+	latest, _ := s.GetLatestMetricsForAll() // one query instead of one per server
 	now := time.Now()
 	var out []ProbeServerView
 	for _, sv := range servers {
 		if !sv.ProbeEnabled {
 			continue
 		}
-		m, _ := s.GetLatestMetrics(sv.ID)
+		m := latest[sv.ID]
 		var dl *int
 		if sv.ExpiryDate > 0 {
 			d := int(time.Unix(sv.ExpiryDate, 0).Sub(now).Hours() / 24)

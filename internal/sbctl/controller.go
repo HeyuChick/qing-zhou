@@ -35,7 +35,7 @@ type ConfigStore interface {
 	BuildUsersByTag(now int64) (map[string][]singbox.User, error)
 	BuildSingboxConfig(base, v2rayListen string, usersByTag map[string][]singbox.User) ([]byte, error)
 	BuildSingboxConfigForServer(serverID int64, base, v2rayListen string, usersByTag map[string][]singbox.User) ([]byte, error)
-	AddUsageByClientName(name string, up, down int64) error
+	AddUsageBatch(deltas map[string]store.UsageDelta) (int, error)
 	ListServers() ([]*store.Server, error)
 	GetServer(id int64) (*store.Server, error)
 }
@@ -352,31 +352,18 @@ func (c *Controller) CollectStats(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n := 0
-	failed := 0
-	var firstErr error
+	// Apply the whole poll in one transaction (one WAL write-lock acquisition
+	// instead of one per identity). AddUsageBatch isolates each identity in a
+	// savepoint, so one bad delta doesn't discard the rest — the reset=true poll
+	// already zeroed sing-box, so a dropped delta is lost for good.
+	deltas := make(map[string]store.UsageDelta, len(m))
 	for name, t := range m {
 		if t.Up == 0 && t.Down == 0 {
 			continue
 		}
-		if err := c.st.AddUsageByClientName(name, t.Up, t.Down); err != nil {
-			// The poll used reset=true, so sing-box has already zeroed this delta —
-			// it will never be reported again. A transient per-user error (e.g. a
-			// SQLITE_BUSY) must NOT abandon the remaining users' deltas too, or one
-			// slow write silently drops a whole minute of everyone's traffic. Record
-			// the first error and keep applying the rest.
-			if firstErr == nil {
-				firstErr = err
-			}
-			failed++
-			continue
-		}
-		n++
+		deltas[name] = store.UsageDelta{Up: t.Up, Down: t.Down}
 	}
-	if firstErr != nil {
-		return n, fmt.Errorf("stats: %d/%d identity updates failed, first: %w", failed, len(m), firstErr)
-	}
-	return n, nil
+	return c.st.AddUsageBatch(deltas)
 }
 
 // Run drives the periodic loop: every interval it collects stats then rebuilds

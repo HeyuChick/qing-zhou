@@ -408,31 +408,124 @@ func (s *Store) AddBucketUsage(statName string, up, down int64) error {
 	// custom proxy_username. Both meter the same bucket. proxy_username can never
 	// equal a client_name (client_names are qz_-prefixed, proxy_usernames may not
 	// be) and is globally unique, so at most one row matches.
-	var bucketID, userID int64
-	err = tx.QueryRow(`SELECT id, user_id FROM user_plans WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
-		statName, statName).Scan(&bucketID, &userID)
+	bucketID, userID, err := resolveStatsIdentity(tx, statName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // unknown identity (e.g. a just-removed bucket) — ignore, rolls back
 	}
 	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`UPDATE user_plans SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
-		up, down, now, now, bucketID); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(`UPDATE users SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
-		up, down, now, now, userID); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(`INSERT INTO traffic_samples (user_id, ts, up, down) VALUES (?, ?, ?, ?)`,
-		userID, now, up, down); err != nil {
+	if err = applyBucketUsage(tx, bucketID, userID, up, down, now); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
 	committed = true
+	return nil
+}
+
+// UsageDelta is one identity's per-poll traffic delta, keyed by its stats name in
+// AddUsageBatch.
+type UsageDelta struct {
+	Up   int64
+	Down int64
+}
+
+// AddUsageBatch applies a whole stats poll's per-identity deltas in ONE
+// transaction. Previously each identity opened its own write transaction, so a
+// 100-user poll grabbed the single SQLite/WAL write lock ~100-200 times a minute,
+// contending with live subscription/purchase writes; this collapses that to one
+// lock acquisition. Each identity's three writes (bucket + mirrored user aggregate
+// + time-series sample) are wrapped in a SAVEPOINT so one failure rolls back just
+// that identity — the poll used reset=true, so the rest of the deltas must still
+// land rather than being discarded with it. Returns how many identities applied,
+// and (if any failed) an error naming the first.
+func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
+	if len(deltas) == 0 {
+		return 0, nil
+	}
+	now := time.Now().Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	applied, failed := 0, 0
+	var firstErr error
+	for name, d := range deltas {
+		if name == "" || (d.Up == 0 && d.Down == 0) {
+			continue
+		}
+		bucketID, userID, rerr := resolveStatsIdentity(tx, name)
+		if errors.Is(rerr, sql.ErrNoRows) {
+			continue // unknown / just-removed identity — skip, not a failure
+		}
+		if rerr != nil {
+			if firstErr == nil {
+				firstErr = rerr
+			}
+			failed++
+			continue
+		}
+		if _, err := tx.Exec(`SAVEPOINT usg`); err != nil {
+			return applied, err // savepoint itself failing means the tx is unusable
+		}
+		if werr := applyBucketUsage(tx, bucketID, userID, d.Up, d.Down, now); werr != nil {
+			_, _ = tx.Exec(`ROLLBACK TO usg`)
+			_, _ = tx.Exec(`RELEASE usg`)
+			if firstErr == nil {
+				firstErr = werr
+			}
+			failed++
+			continue
+		}
+		_, _ = tx.Exec(`RELEASE usg`)
+		applied++
+	}
+	if err := tx.Commit(); err != nil {
+		return applied, err
+	}
+	committed = true
+	if firstErr != nil {
+		return applied, fmt.Errorf("stats: %d identity updates failed, first: %w", failed, firstErr)
+	}
+	return applied, nil
+}
+
+// resolveStatsIdentity maps a sing-box stats name to its bucket. A bucket has up
+// to two identities: client_name (every protocol) and, for mixed inbounds, an
+// optional custom proxy_username. Both meter the same bucket; proxy_username can
+// never equal a client_name (client_names are qz_-prefixed, proxy_usernames may
+// not be) and is globally unique, so at most one row matches.
+func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID int64, err error) {
+	err = tx.QueryRow(`SELECT id, user_id FROM user_plans WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
+		statName, statName).Scan(&bucketID, &userID)
+	return
+}
+
+// applyBucketUsage writes one identity's delta: the bucket counter, the mirrored
+// user aggregate + last_online, and the per-user time-series sample. Caller owns
+// the transaction (or savepoint) so these three land together or not at all.
+func applyBucketUsage(tx txLike, bucketID, userID, up, down, now int64) error {
+	if _, err := tx.Exec(`UPDATE user_plans SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
+		up, down, now, now, bucketID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE users SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
+		up, down, now, now, userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO traffic_samples (user_id, ts, up, down) VALUES (?, ?, ?, ?)`,
+		userID, now, up, down); err != nil {
+		return err
+	}
 	return nil
 }
 

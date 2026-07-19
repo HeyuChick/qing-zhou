@@ -250,6 +250,7 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	onlineWindow := now.Add(-2 * time.Minute).Unix()
+	latest, _ := a.st.GetLatestMetricsForAll() // one query instead of one per server
 	var out []serverResp
 	for _, sv := range servers {
 		maskServerSecrets(sv)
@@ -259,7 +260,7 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 		}
 		var m *store.ServerMetrics
 		if sv.ProbeEnabled {
-			m, _ = a.st.GetLatestMetrics(sv.ID)
+			m = latest[sv.ID]
 		}
 		var dl *int
 		if sv.ExpiryDate > 0 {
@@ -734,6 +735,7 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 		LastSeen int64       `json:"last_seen"`
 	}
 
+	latest, _ := a.st.GetLatestMetricsForAll() // one query instead of one per server (this endpoint is unauthenticated/spammable)
 	var out []pubServer
 	for _, sv := range servers {
 		if !sv.ProbeEnabled {
@@ -744,7 +746,7 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 			status = "online"
 		}
 		var pm *pubMetrics
-		if m, _ := a.st.GetLatestMetrics(sv.ID); m != nil {
+		if m := latest[sv.ID]; m != nil {
 			pm = &pubMetrics{
 				CPUPercent:     m.CPUPercent,
 				MemUsed:        m.MemUsed,
