@@ -185,9 +185,25 @@ func (a *API) provisionClient(u *store.User) error {
 	if err := a.st.SetUserClient(u.ID, 0, name, cr.UUID, cr.Password); err != nil {
 		return err
 	}
-	// The user's primary identity is their traffic-pool bucket (covers free
-	// nodes + any traffic packages); plan purchases add their own buckets.
+	// The user's primary identity is their traffic-pool bucket (paid traffic
+	// packages); plan purchases add their own buckets.
 	if err := a.st.EnsurePoolBucket(u.ID, name, cr.UUID, cr.Password); err != nil {
+		return err
+	}
+	// Free-group access rides its own bucket so its traffic is metered separately
+	// from the paid pool rather than debited against it.
+	if err := a.st.EnsureFreeBucket(u.ID, u.Username); err != nil {
+		return err
+	}
+	// The signup grant has to live in a bucket too — enforcement never reads the
+	// users.* columns registration used to write it to.
+	traffic, _ := a.st.GetSettingInt64("default_traffic", 10<<30)
+	expiryDays, _ := a.st.GetSettingInt64("default_expiry_days", 30)
+	expiry := int64(0)
+	if expiryDays > 0 {
+		expiry = time.Now().Unix() + expiryDays*86400
+	}
+	if err := a.st.EnsureWelcomeBucket(u.ID, u.Username, traffic, expiry); err != nil {
 		return err
 	}
 	return a.sbRebuild()

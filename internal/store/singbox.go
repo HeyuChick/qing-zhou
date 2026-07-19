@@ -909,10 +909,14 @@ type ownedBucket struct {
 func orderBuckets(bs []*Bucket, now, freeGroup int64, planGroups func(int64) []int64) []ownedBucket {
 	allPlanGroups := map[int64]bool{}
 	var plans []*Bucket
-	var pool *Bucket
+	var pool, free *Bucket
 	for _, b := range bs {
-		if b.Kind == "pool" {
+		switch b.Kind {
+		case "pool":
 			pool = b
+			continue
+		case KindFree:
+			free = b
 			continue
 		}
 		plans = append(plans, b)
@@ -939,10 +943,11 @@ func orderBuckets(bs []*Bucket, now, freeGroup int64, planGroups func(int64) []i
 			continue
 		}
 		gs := map[int64]bool{}
-		if b.PackageID == 0 {
-			// Admin manual-grant bucket (no package of its own): scope it like the
-			// pool — the free group plus the union of the user's plan groups — so a
-			// comped allowance works on whatever nodes the user can already reach.
+		if b.PackageID <= 0 {
+			// Grant bucket with no package of its own — the admin comp (package_id=0)
+			// or the signup grant (WelcomePackageID). Scope it like the pool: the free
+			// group plus the union of the user's plan groups, so the allowance works on
+			// whatever nodes the user can already reach.
 			if freeGroup > 0 {
 				gs[freeGroup] = true
 			}
@@ -956,10 +961,16 @@ func orderBuckets(bs []*Bucket, now, freeGroup int64, planGroups func(int64) []i
 		}
 		ord = append(ord, ownedBucket{b: b, groups: gs})
 	}
+	// The free group is carried by the free bucket, never by the pool: they are
+	// separate stats identities, so free traffic is metered on its own instead of
+	// being debited from the pool's paid balance. Falling back to the pool when a
+	// user has no free bucket yet would reintroduce exactly that, so an
+	// un-backfilled account loses free-group access until EnsureFreeBucket runs
+	// rather than silently spending its balance.
+	if free != nil && freeGroup > 0 {
+		ord = append(ord, ownedBucket{b: free, groups: map[int64]bool{freeGroup: true}})
+	}
 	if pool != nil {
-		if freeGroup > 0 {
-			ord = append(ord, ownedBucket{b: pool, groups: map[int64]bool{freeGroup: true}})
-		}
 		if pool.Active(now) && len(allPlanGroups) > 0 {
 			gs := map[int64]bool{}
 			for g := range allPlanGroups {

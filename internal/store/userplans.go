@@ -145,19 +145,119 @@ func subFromPool(tx txLike, userID int64, subBytes, now int64) error {
 // totals stay consistent with what enforcement actually sees. traffic_limit /
 // used_up / used_down are summed across all buckets; expiry_at is the latest
 // plan-bucket expiry (0 when the user holds only the never-expiring pool).
+//
+// Free buckets are excluded from all three sums: they carry no limit, so letting
+// their usage into used_* would count unmetered free-group traffic against the
+// user's paid quota in handleSub's serviceable check — the very coupling the
+// free bucket exists to break.
 func recomputeUserAggregate(tx txLike, userID, now int64) (limit, up, down, expiry int64, err error) {
 	err = tx.QueryRow(`SELECT
-		COALESCE(SUM(traffic_limit),0),
-		COALESCE(SUM(used_up),0),
-		COALESCE(SUM(used_down),0),
+		COALESCE(SUM(CASE WHEN kind=? THEN 0 ELSE traffic_limit END),0),
+		COALESCE(SUM(CASE WHEN kind=? THEN 0 ELSE used_up END),0),
+		COALESCE(SUM(CASE WHEN kind=? THEN 0 ELSE used_down END),0),
 		COALESCE(MAX(CASE WHEN kind='plan' THEN expiry_at ELSE 0 END),0)
-		FROM user_plans WHERE user_id=?`, userID).Scan(&limit, &up, &down, &expiry)
+		FROM user_plans WHERE user_id=?`,
+		KindFree, KindFree, KindFree, userID).Scan(&limit, &up, &down, &expiry)
 	if err != nil {
 		return
 	}
 	_, err = tx.Exec(`UPDATE users SET traffic_limit=?, used_up=?, used_down=?, expiry_at=?, updated_at=? WHERE id=?`,
 		limit, up, down, expiry, now, userID)
 	return
+}
+
+// KindFree is the bucket holding a user's free-group (unmetered) allowance.
+//
+// It exists so free traffic gets its own sing-box stats identity. Metering is
+// identity-based, so when the pool covered the free group the free bytes were
+// debited from the user's PAID balance — and since a top-up only raises
+// traffic_limit and never clears used_*, traffic burned on free nodes before a
+// purchase silently ate into that purchase. A free bucket has no limit and never
+// expires; its usage is recorded for display but excluded from the user's quota
+// aggregate (see recomputeUserAggregate).
+const KindFree = "free"
+
+// WelcomePackageID marks the signup-grant bucket. It is a plan bucket (so the
+// trial actually expires) but belongs to no package, like the admin grant's
+// package_id=0 — orderBuckets scopes both the same way. Distinct from 0 so an
+// admin grant and a signup grant can coexist instead of overwriting each other.
+const WelcomePackageID = -1
+
+// EnsureFreeBucket creates the user's unmetered free-group bucket if it has none
+// yet. Idempotent, so it doubles as the backfill for accounts provisioned before
+// the free bucket existed.
+func (s *Store) EnsureFreeBucket(userID int64, username string) error {
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM user_plans WHERE user_id=? AND kind=? ORDER BY id LIMIT 1`,
+		userID, KindFree).Scan(&id)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	uu, ss := genBucketCreds()
+	_, err = insertBucket(s.db, &Bucket{
+		UserID: userID, Kind: KindFree, Name: "免费流量",
+		ClientName: fmt.Sprintf("qz_%s_free", username), ClientUUID: uu, ClientSecret: ss,
+	})
+	return err
+}
+
+// EnsureWelcomeBucket lands the configured signup grant (default_traffic /
+// default_expiry_days) in a real bucket.
+//
+// Writing it to users.traffic_limit / users.expiry_at — which is what
+// registration used to do — did nothing: those columns are a display mirror
+// recomputed from the buckets, and enforcement reads buckets only. So the grant
+// was invisible to sing-box (a user with no free group configured landed in no
+// inbound at all), and the moment the user bought anything the recompute
+// overwrote expiry_at with the max *plan* expiry — zero for a pool-only buyer —
+// which handleSub reads as "never expires". Same class of bug as the admin grant
+// fixed in 5bea5ad; this is the registration path it missed.
+//
+// No-ops when the grant is disabled (traffic and expiry both zero) or the user
+// already has one. Recomputes the aggregate so the dashboard mirrors the bucket.
+func (s *Store) EnsureWelcomeBucket(userID int64, username string, traffic, expiry int64) error {
+	if traffic <= 0 && expiry <= 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var id int64
+	err = tx.QueryRow(`SELECT id FROM user_plans WHERE user_id=? AND kind='plan' AND package_id=? ORDER BY id LIMIT 1`,
+		userID, WelcomePackageID).Scan(&id)
+	switch {
+	case err == nil:
+		return nil // already granted
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
+	uu, ss := genBucketCreds()
+	if _, err = insertBucket(tx, &Bucket{
+		UserID: userID, Kind: "plan", PackageID: WelcomePackageID, Name: "注册赠送",
+		ClientName: fmt.Sprintf("qz_%s_welcome", username), ClientUUID: uu, ClientSecret: ss,
+		TrafficLimit: traffic, ExpiryAt: expiry,
+	}); err != nil {
+		return err
+	}
+	if _, _, _, _, err = recomputeUserAggregate(tx, userID, time.Now().Unix()); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // EnsurePoolBucket creates the user's pool bucket with the given identity if it
@@ -246,10 +346,14 @@ func (b *Bucket) NotExpired(now int64) bool { return b.ExpiryAt == 0 || b.Expiry
 
 // Active reports whether the bucket can currently carry traffic. A pool is only
 // active when it has a positive, non-exhausted balance (an empty pool is inert);
-// a plan is active while not expired and not over quota.
+// a plan is active while not expired and not over quota; a free bucket is always
+// active — it is the unmetered free-group allowance and has no limit to exhaust.
 func (b *Bucket) Active(now int64) bool {
-	if b.Kind == "pool" {
+	switch b.Kind {
+	case "pool":
 		return b.TrafficLimit > 0 && b.Used() < b.TrafficLimit && b.NotExpired(now)
+	case KindFree:
+		return true
 	}
 	return b.NotExpired(now) && b.HasQuota()
 }

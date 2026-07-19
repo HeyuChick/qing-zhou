@@ -498,7 +498,53 @@ func (s *Store) Migrate() error {
 		return err
 	}
 	// Collapse duplicate plan buckets left by pre-renewal repurchases (idempotent).
-	return s.mergeDuplicatePlanBuckets()
+	if err := s.mergeDuplicatePlanBuckets(); err != nil {
+		return err
+	}
+	// Give every existing provisioned user a free bucket (idempotent). This is
+	// required, not cosmetic: the pool no longer covers the free group, so an
+	// account without a free bucket would lose free-node access entirely.
+	return s.backfillFreeBuckets()
+}
+
+// backfillFreeBuckets creates the free-group bucket for users provisioned before
+// free traffic was split off the pool. Only users who already have a bucket are
+// touched — an unprovisioned account gets its free bucket at provision time, and
+// synthesising an identity for one here would put a user in the sing-box config
+// who was never meant to be there.
+func (s *Store) backfillFreeBuckets() error {
+	rows, err := s.db.Query(`SELECT u.id, u.username FROM users u
+		WHERE EXISTS (SELECT 1 FROM user_plans p WHERE p.user_id = u.id)
+		  AND NOT EXISTS (SELECT 1 FROM user_plans p WHERE p.user_id = u.id AND p.kind = ?)`, KindFree)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		id   int64
+		name string
+	}
+	var todo []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.name); err != nil {
+			rows.Close()
+			return err
+		}
+		todo = append(todo, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range todo {
+		if err := s.EnsureFreeBucket(r.id, r.name); err != nil {
+			return err
+		}
+	}
+	if len(todo) > 0 {
+		log.Printf("migrate: created %d free-traffic buckets", len(todo))
+	}
+	return nil
 }
 
 // backfillProbeTokenHash computes probe_token_hash from the stored token for any
