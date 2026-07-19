@@ -32,9 +32,15 @@ func (a *API) handlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		PackageID int64 `json:"package_id"`
+		PackageID      int64  `json:"package_id"`
+		IdempotencyKey string `json:"idempotency_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PackageID <= 0 {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	// Cap the client key so it can't be abused as unbounded storage.
+	if len(req.IdempotencyKey) > 80 {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
@@ -48,7 +54,7 @@ func (a *API) handlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := a.st.Purchase(u.ID, pkg, func(updated *store.User, resetUsed bool) error {
+	result, err := a.st.Purchase(u.ID, pkg, req.IdempotencyKey, func(updated *store.User, resetUsed bool) error {
 		return a.syncEntitlement(updated, resetUsed)
 	})
 	if err != nil {

@@ -99,7 +99,7 @@ func TestPurchaseRejectsNonMember(t *testing.T) {
 	}
 	outsider := mkUser(t, st, "outsider")
 
-	_, err := st.Purchase(outsider, pkg, noopSync)
+	_, err := st.Purchase(outsider, pkg, "", noopSync)
 	if !errors.Is(err, ErrPackageNotAllowed) {
 		t.Fatalf("want ErrPackageNotAllowed, got %v", err)
 	}
@@ -150,7 +150,7 @@ func TestRevokingMembershipBlocksRebuyButKeepsEntitlement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := st.Purchase(member, pkg, noopSync); !errors.Is(err, ErrPackageNotAllowed) {
+	if _, err := st.Purchase(member, pkg, "", noopSync); !errors.Is(err, ErrPackageNotAllowed) {
 		t.Fatalf("want ErrPackageNotAllowed after removal, got %v", err)
 	}
 	after, _ := st.UserByID(member)

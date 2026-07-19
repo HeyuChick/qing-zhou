@@ -939,8 +939,20 @@ func orderBuckets(bs []*Bucket, now, freeGroup int64, planGroups func(int64) []i
 			continue
 		}
 		gs := map[int64]bool{}
-		for _, g := range planGroups(b.PackageID) {
-			gs[g] = true
+		if b.PackageID == 0 {
+			// Admin manual-grant bucket (no package of its own): scope it like the
+			// pool — the free group plus the union of the user's plan groups — so a
+			// comped allowance works on whatever nodes the user can already reach.
+			if freeGroup > 0 {
+				gs[freeGroup] = true
+			}
+			for g := range allPlanGroups {
+				gs[g] = true
+			}
+		} else {
+			for _, g := range planGroups(b.PackageID) {
+				gs[g] = true
+			}
 		}
 		ord = append(ord, ownedBucket{b: b, groups: gs})
 	}

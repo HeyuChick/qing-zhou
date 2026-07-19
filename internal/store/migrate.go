@@ -460,6 +460,12 @@ func (s *Store) Migrate() error {
 		// expiry (0 = permanent). Empty proxy_username → fall back to client_name, so
 		// existing buckets keep working. proxy_username is an additional sing-box
 		// stats identity for the bucket, so AddBucketUsage matches it too.
+		// Purchase idempotency: a client key (per purchase intent) so a network retry
+		// after a lost response returns the same order instead of double-charging.
+		// The partial unique index only constrains non-empty keys, so legacy/keyless
+		// orders (and admin comps) are unaffected.
+		`ALTER TABLE orders ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idem ON orders(user_id, idempotency_key) WHERE idempotency_key <> ''`,
 		`ALTER TABLE user_plans ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE user_plans ADD COLUMN proxy_password TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE user_plans ADD COLUMN proxy_expires_at INTEGER NOT NULL DEFAULT 0`,

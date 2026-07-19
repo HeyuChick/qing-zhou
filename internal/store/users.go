@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -167,17 +168,100 @@ func (s *Store) DeleteUser(id int64) error {
 	return tx.Commit()
 }
 
-// AdminUpdateUser sets a user's quota/expiry/status, optionally resetting used.
-func (s *Store) AdminUpdateUser(id, trafficLimit, expiryAt int64, status string, resetUsed bool) error {
+// ManualGrant describes an admin's manual "general allowance" for a user. Enabled
+// false removes any existing grant; Traffic 0 = unlimited (plan-bucket semantics);
+// Expiry 0 = never. A nil *ManualGrant passed to AdminUpdateUser leaves the grant
+// untouched (for edits that only change status/reset).
+type ManualGrant struct {
+	Enabled bool
+	Traffic int64
+	Expiry  int64
+}
+
+// AdminUpdateUser applies an admin's edits to a user: status (ban/unban), an
+// optional usage reset, and the manual allowance grant.
+//
+// The manual grant lives in a dedicated, real, metered bucket (kind='plan',
+// package_id=0, "管理员额度") rather than the legacy users.traffic_limit column.
+// That column is only a display mirror recomputed from the buckets, so writing it
+// directly did nothing to enforcement and was silently overwritten on the user's
+// next purchase/refund. Routing the grant into a bucket makes it actually usable
+// (scoped like the pool: free group + the user's plan groups — see orderBuckets)
+// and durable.
+func (s *Store) AdminUpdateUser(id int64, status string, resetUsed bool, manual *ManualGrant) error {
 	now := time.Now().Unix()
-	if resetUsed {
-		_, err := s.db.Exec(`UPDATE users SET traffic_limit=?, expiry_at=?, status=?, used_up=0, used_down=0, updated_at=? WHERE id=?`,
-			trafficLimit, expiryAt, status, now, id)
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE users SET traffic_limit=?, expiry_at=?, status=?, updated_at=? WHERE id=?`,
-		trafficLimit, expiryAt, status, now, id)
-	return err
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.Exec(`UPDATE users SET status=?, updated_at=? WHERE id=?`, status, now, id); err != nil {
+		return err
+	}
+	if resetUsed {
+		// Zero the authoritative bucket counters (not just the users.* mirror, which a
+		// recompute would immediately overwrite back from the buckets).
+		if _, err := tx.Exec(`UPDATE user_plans SET used_up=0, used_down=0, updated_at=? WHERE user_id=?`, now, id); err != nil {
+			return err
+		}
+	}
+
+	if manual != nil {
+		if err := applyManualGrant(tx, id, manual, now); err != nil {
+			return err
+		}
+	}
+
+	// Recompute the legacy users.* aggregate so the dashboard mirrors the buckets.
+	if _, _, _, _, err := recomputeUserAggregate(tx, id, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// applyManualGrant upserts (Enabled) or removes (!Enabled) the user's package_id=0
+// admin-grant bucket within the caller's transaction.
+func applyManualGrant(tx txLike, userID int64, g *ManualGrant, now int64) error {
+	var bid int64
+	qerr := tx.QueryRow(`SELECT id FROM user_plans WHERE user_id=? AND kind='plan' AND package_id=0 ORDER BY id LIMIT 1`, userID).Scan(&bid)
+	switch {
+	case errors.Is(qerr, sql.ErrNoRows):
+		if g.Enabled {
+			var uname string
+			if err := tx.QueryRow(`SELECT username FROM users WHERE id=?`, userID).Scan(&uname); err != nil {
+				return err
+			}
+			uu, ss := genBucketCreds()
+			if _, err := insertBucket(tx, &Bucket{
+				UserID: userID, Kind: "plan", PackageID: 0, Name: "管理员额度",
+				ClientName: fmt.Sprintf("qz_%s_admin", uname), ClientUUID: uu, ClientSecret: ss,
+				TrafficLimit: g.Traffic, ExpiryAt: g.Expiry, CreatedAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	case qerr != nil:
+		return qerr
+	default:
+		if g.Enabled {
+			_, err := tx.Exec(`UPDATE user_plans SET traffic_limit=?, expiry_at=?, updated_at=? WHERE id=?`,
+				g.Traffic, g.Expiry, now, bid)
+			return err
+		}
+		_, err := tx.Exec(`DELETE FROM user_plans WHERE id=?`, bid)
+		return err
+	}
 }
 
 // ListUsers returns users for the admin list, newest first, optional search.

@@ -347,6 +347,7 @@ func (a *API) handleUserPlans(w http.ResponseWriter, r *http.Request) {
 type planView struct {
 	ID           int64  `json:"id"`
 	Kind         string `json:"kind"`
+	PackageID    int64  `json:"package_id"`
 	Name         string `json:"name"`
 	TrafficLimit int64  `json:"traffic_limit"`
 	Used         int64  `json:"used"`
@@ -364,7 +365,7 @@ func buildPlanViews(buckets []*store.Bucket) []planView {
 		if b.Kind == "pool" && b.TrafficLimit == 0 {
 			continue // empty/inert pool — nothing to show
 		}
-		pv := planView{ID: b.ID, Kind: b.Kind, Name: b.Name, TrafficLimit: b.TrafficLimit,
+		pv := planView{ID: b.ID, Kind: b.Kind, PackageID: b.PackageID, Name: b.Name, TrafficLimit: b.TrafficLimit,
 			Used: b.Used(), ExpiryAt: b.ExpiryAt, Remaining: -1}
 		if b.TrafficLimit > 0 {
 			if rem := b.TrafficLimit - b.Used(); rem > 0 {

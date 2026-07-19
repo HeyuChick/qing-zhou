@@ -48,7 +48,7 @@ type PurchaseResult struct {
 //
 // sync receives the updated user snapshot and whether traffic counters should
 // be reset (expired-plan renewal).
-func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, resetUsed bool) error) (*PurchaseResult, error) {
+func (s *Store) Purchase(userID int64, pkg *Package, idemKey string, sync func(updated *User, resetUsed bool) error) (*PurchaseResult, error) {
 	if !pkg.Enabled {
 		return nil, ErrPackageDisabled
 	}
@@ -73,6 +73,24 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 	}
 	if u == nil {
 		return nil, ErrUserNotFound
+	}
+
+	// Idempotency: if this purchase intent (client-supplied key) already produced an
+	// order, return that order without charging again. Guards against a network
+	// retry where the first request committed but its response was lost — the classic
+	// double-charge. The BEGIN IMMEDIATE lock serializes a concurrent duplicate; the
+	// unique (user_id, idempotency_key) index is the backstop if two race past here.
+	if idemKey != "" {
+		var oid int64
+		qerr := tx.QueryRow(`SELECT id FROM orders WHERE user_id=? AND idempotency_key=?`, userID, idemKey).Scan(&oid)
+		if qerr == nil {
+			_ = tx.Rollback() // no writes yet — release the lock
+			o, _ := s.GetOrder(oid)
+			return &PurchaseResult{Order: o, User: u}, nil
+		}
+		if !errors.Is(qerr, sql.ErrNoRows) {
+			return nil, qerr
+		}
 	}
 
 	// Re-read the package INSIDE the transaction. The pkg the handler passed was
@@ -127,8 +145,8 @@ func (s *Store) Purchase(userID int64, pkg *Package, sync func(updated *User, re
 
 	// Order (with package snapshot).
 	snap, _ := json.Marshal(pkg)
-	res, err := tx.Exec(`INSERT INTO orders (user_id, package_id, package_snapshot, price_points, status, created_at)
-		VALUES (?,?,?,?, 'success', ?)`, userID, pkg.ID, string(snap), pkg.PricePoints, now)
+	res, err := tx.Exec(`INSERT INTO orders (user_id, package_id, package_snapshot, price_points, status, idempotency_key, created_at)
+		VALUES (?,?,?,?, 'success', ?, ?)`, userID, pkg.ID, string(snap), pkg.PricePoints, idemKey, now)
 	if err != nil {
 		return nil, err
 	}

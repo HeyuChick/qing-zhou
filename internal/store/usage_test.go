@@ -2,6 +2,39 @@ package store
 
 import "testing"
 
+// A repeated purchase carrying the SAME idempotency key must charge once and return
+// the same order — a client retry after a lost response must not double-charge. A
+// different key (or none) is a distinct purchase.
+func TestPurchase_Idempotent(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "erin")
+	pkg := mkPlan(t, st, "P", 100, 50, 30)
+
+	before := userPoints(t, st, uid)
+	r1, err := st.Purchase(uid, pkg, "key-abc", noopSync)
+	if err != nil {
+		t.Fatalf("first purchase: %v", err)
+	}
+	r2, err := st.Purchase(uid, pkg, "key-abc", noopSync)
+	if err != nil {
+		t.Fatalf("retry purchase: %v", err)
+	}
+	if r1.Order.ID != r2.Order.ID {
+		t.Errorf("retry returned order %d, want same as first %d", r2.Order.ID, r1.Order.ID)
+	}
+	if got := userPoints(t, st, uid); got != before-100 {
+		t.Errorf("charged %d points, want 100 (single charge)", before-got)
+	}
+
+	// A different key is a genuine second purchase (renewal): charges again.
+	if _, err := st.Purchase(uid, pkg, "key-xyz", noopSync); err != nil {
+		t.Fatalf("second distinct purchase: %v", err)
+	}
+	if got := userPoints(t, st, uid); got != before-200 {
+		t.Errorf("after distinct purchase charged total %d, want 200", before-got)
+	}
+}
+
 // AddUsageBatch must apply every known identity's delta in one shot: bucket
 // counter, mirrored user aggregate, and a time-series sample per identity — while
 // silently skipping identities that don't resolve to a bucket (a just-removed

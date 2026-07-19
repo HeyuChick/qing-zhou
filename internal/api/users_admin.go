@@ -161,12 +161,19 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		TrafficLimit *int64   `json:"traffic_limit"`
-		ExpiryAt     *int64   `json:"expiry_at"`
-		Status       *string  `json:"status"`
-		Password     *string  `json:"password"`
-		ResetTraffic bool     `json:"reset_traffic"`
-		GroupIDs     *[]int64 `json:"group_ids"`
+		// Manual "general allowance" grant, stored in a real bucket (see
+		// AdminUpdateUser). ManualEnabled=false removes it; ManualTraffic 0 = unlimited,
+		// ManualExpiry 0 = never. TrafficLimit/ExpiryAt are accepted for backward
+		// compatibility with older clients and mapped onto the grant.
+		ManualEnabled *bool    `json:"manual_enabled"`
+		ManualTraffic *int64   `json:"manual_traffic"`
+		ManualExpiry  *int64   `json:"manual_expiry"`
+		TrafficLimit  *int64   `json:"traffic_limit"`
+		ExpiryAt      *int64   `json:"expiry_at"`
+		Status        *string  `json:"status"`
+		Password      *string  `json:"password"`
+		ResetTraffic  bool     `json:"reset_traffic"`
+		GroupIDs      *[]int64 `json:"group_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -190,14 +197,6 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		_ = a.st.DeleteUserSessions(id)
 	}
 
-	traffic := u.TrafficLimit
-	if req.TrafficLimit != nil && *req.TrafficLimit >= 0 {
-		traffic = *req.TrafficLimit
-	}
-	expiry := u.ExpiryAt
-	if req.ExpiryAt != nil && *req.ExpiryAt >= 0 {
-		expiry = *req.ExpiryAt
-	}
 	status := u.Status
 	if req.Status != nil {
 		if *req.Status != "active" && *req.Status != "banned" {
@@ -207,7 +206,33 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		status = *req.Status
 	}
 
-	if err := a.st.AdminUpdateUser(id, traffic, expiry, status, req.ResetTraffic); err != nil {
+	// Resolve the manual allowance grant. New clients send manual_enabled explicitly;
+	// older clients send traffic_limit/expiry_at, which we map onto the grant. When
+	// none of these are present the edit only touches status/reset, so leave the grant
+	// unchanged (nil) rather than deleting it.
+	var manual *store.ManualGrant
+	switch {
+	case req.ManualEnabled != nil:
+		g := store.ManualGrant{Enabled: *req.ManualEnabled}
+		if req.ManualTraffic != nil && *req.ManualTraffic >= 0 {
+			g.Traffic = *req.ManualTraffic
+		}
+		if req.ManualExpiry != nil && *req.ManualExpiry >= 0 {
+			g.Expiry = *req.ManualExpiry
+		}
+		manual = &g
+	case req.TrafficLimit != nil || req.ExpiryAt != nil:
+		g := store.ManualGrant{Enabled: true}
+		if req.TrafficLimit != nil && *req.TrafficLimit >= 0 {
+			g.Traffic = *req.TrafficLimit
+		}
+		if req.ExpiryAt != nil && *req.ExpiryAt >= 0 {
+			g.Expiry = *req.ExpiryAt
+		}
+		manual = &g
+	}
+
+	if err := a.st.AdminUpdateUser(id, status, req.ResetTraffic, manual); err != nil {
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}

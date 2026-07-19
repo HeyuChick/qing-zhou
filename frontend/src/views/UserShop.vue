@@ -32,9 +32,31 @@ const message = useMessage()
 const dialog = useDialog()
 const packages = ref<any[]>([])
 const buying = ref<number|null>(null)
+function genKey(): string {
+  try { if (crypto?.randomUUID) return crypto.randomUUID() } catch {}
+  return 'k-' + Date.now() + '-' + Math.random().toString(36).slice(2)
+}
+async function purchaseWithRetry(packageId: number, key: string) {
+  try {
+    return await apiPost('/api/user/purchase', { package_id: packageId, idempotency_key: key })
+  } catch (e: any) {
+    // Retry ONCE on a network-level failure (an error with no HTTP status): the first
+    // request may have committed server-side before its response was lost. Reusing the
+    // same key makes the backend return the existing order instead of charging twice.
+    if (e && e.status === undefined) {
+      return await apiPost('/api/user/purchase', { package_id: packageId, idempotency_key: key })
+    }
+    throw e
+  }
+}
 function handleBuy(pkg: any) {
   dialog.warning({ title: '确认购买', content: `确定花费 ${pkg.price_points} 积分购买「${pkg.name}」？`, positiveText: '确定', negativeText: '取消',
-    onPositiveClick: async () => { buying.value = pkg.id; try { await apiPost('/api/user/purchase', { package_id: pkg.id }); message.success('购买成功！'); await auth.fetchMe() } catch (e: any) { message.error(e.message) } finally { buying.value = null } } })
+    onPositiveClick: async () => {
+      buying.value = pkg.id
+      const key = genKey() // one key per confirmed purchase intent; stable across the retry
+      try { await purchaseWithRetry(pkg.id, key); message.success('购买成功！'); await auth.fetchMe() }
+      catch (e: any) { message.error(e.message) } finally { buying.value = null }
+    } })
 }
 onMounted(async () => { try { packages.value = await apiList('/api/user/packages') } catch {} })
 </script>

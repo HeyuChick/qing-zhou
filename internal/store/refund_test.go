@@ -36,7 +36,7 @@ func mkUser(t *testing.T, st *Store, name string) int64 {
 // buy purchases pkg for user and returns the order id.
 func buy(t *testing.T, st *Store, userID int64, pkg *Package) int64 {
 	t.Helper()
-	res, err := st.Purchase(userID, pkg, noopSync)
+	res, err := st.Purchase(userID, pkg, "", noopSync)
 	if err != nil {
 		t.Fatalf("purchase: %v", err)
 	}

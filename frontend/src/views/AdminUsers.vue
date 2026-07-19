@@ -52,9 +52,19 @@
     <n-modal v-model:show="showEdit" preset="card" title="编辑用户" style="max-width:500px;">
       <n-form v-if="editUser" label-placement="left" label-width="80">
         <n-form-item label="用户名"><n-input :value="editUser.username" disabled /></n-form-item>
-        <n-form-item label="不限流量"><n-switch v-model:value="unlimitedTraffic" /></n-form-item>
-        <n-form-item v-if="!unlimitedTraffic" label="流量 (GB)"><n-input-number v-model:value="editTrafficGB" :min="0" style="width:100%;" /></n-form-item>
-        <n-form-item label="到期时间"><n-input v-model:value="editExpiry" type="datetime-local" style="width:100%;" /></n-form-item>
+        <n-form-item label="手动额度">
+          <div style="width:100%;">
+            <n-switch v-model:value="manualEnabled" />
+            <div style="margin-top:4px;font-size:12px;color:var(--text-3);line-height:1.5;">
+              管理员赠送的通用流量，作为一个独立计量的额度桶，作用于该用户「免费分组 + 已购套餐分组」的节点。需要指定具体节点分组请改用「分配计划」。
+            </div>
+          </div>
+        </n-form-item>
+        <template v-if="manualEnabled">
+          <n-form-item label="不限流量"><n-switch v-model:value="unlimitedTraffic" /></n-form-item>
+          <n-form-item v-if="!unlimitedTraffic" label="流量 (GB)"><n-input-number v-model:value="editTrafficGB" :min="0" style="width:100%;" /></n-form-item>
+          <n-form-item label="到期时间"><n-input v-model:value="editExpiry" type="datetime-local" style="width:100%;" /></n-form-item>
+        </template>
         <n-form-item label="用户组">
           <div style="width:100%;">
             <n-select v-model:value="editGroupIDs" :options="userGroupOptions" multiple clearable placeholder="留空 = 只能买公开套餐" />
@@ -156,6 +166,7 @@ async function handleCreate() {
 // --- Edit ---
 const showEdit = ref(false)
 const editUser = ref<any>(null)
+const manualEnabled = ref(false)
 const unlimitedTraffic = ref(false)
 const editTrafficGB = ref(0)
 const editExpiry = ref('')
@@ -163,25 +174,40 @@ const editBanned = ref(false)
 const resetPw = ref('')
 const resetTraffic = ref(false)
 const editGroupIDs = ref<number[]>([])
-function openEdit(u: any) {
+async function openEdit(u: any) {
   editUser.value = { ...u }
-  unlimitedTraffic.value = !u.traffic_limit || u.traffic_limit <= 0
-  editTrafficGB.value = (u.traffic_limit || 0) / (1024 * 1024 * 1024)
-  editExpiry.value = toLocalDatetimeInput(u.expiry_at)
   editBanned.value = u.status === 'banned'
   resetPw.value = ''; resetTraffic.value = false
   editGroupIDs.value = [...(u.group_ids || [])]
+  // Prefill the manual-grant fields from the user's admin-grant bucket itself (not
+  // the aggregate traffic_limit), so saving sets exactly that bucket — no double
+  // counting against their purchased plans, and no accidental grant when there's none.
+  manualEnabled.value = false
+  unlimitedTraffic.value = false
+  editTrafficGB.value = 0
+  editExpiry.value = ''
   showEdit.value = true
+  try {
+    const plans = await apiList(`/api/admin/users/${u.id}/plans`)
+    const grant = plans.find((p: any) => p.kind === 'plan' && p.package_id === 0)
+    if (grant) {
+      manualEnabled.value = true
+      unlimitedTraffic.value = !grant.traffic_limit || grant.traffic_limit <= 0
+      editTrafficGB.value = (grant.traffic_limit || 0) / (1024 * 1024 * 1024)
+      editExpiry.value = toLocalDatetimeInput(grant.expiry_at)
+    }
+  } catch { /* leave the "no grant" defaults on error */ }
 }
 async function handleSave() {
   if (!editUser.value) return
   saving.value = true
   try {
     const body: any = {
-      traffic_limit: unlimitedTraffic.value ? 0 : editTrafficGB.value * 1024 * 1024 * 1024,
       status: editBanned.value ? 'banned' : 'active',
+      manual_enabled: manualEnabled.value,
+      manual_traffic: manualEnabled.value && !unlimitedTraffic.value ? editTrafficGB.value * 1024 * 1024 * 1024 : 0,
+      manual_expiry: manualEnabled.value && editExpiry.value ? Math.floor(new Date(editExpiry.value).getTime() / 1000) : 0,
     }
-    if (editExpiry.value) body.expiry_at = Math.floor(new Date(editExpiry.value).getTime() / 1000)
     if (resetPw.value) body.password = resetPw.value
     if (resetTraffic.value) body.reset_traffic = true
     body.group_ids = editGroupIDs.value
