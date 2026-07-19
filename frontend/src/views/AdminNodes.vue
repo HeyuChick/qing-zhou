@@ -89,7 +89,7 @@
             <n-select v-model:value="nodeForm.inbound_tag" :options="inboundOptions" placeholder="选择入站" />
           </n-form-item>
           <n-form-item v-if="nodeForm.type === 'external'" label="分享链接">
-            <n-input v-model:value="nodeForm.link" type="textarea" :rows="3" placeholder="vless://... 或订阅链接" />
+            <n-input v-model:value="nodeForm.share_link" type="textarea" :rows="3" placeholder="vless://... 或订阅链接" />
           </n-form-item>
           <n-form-item label="分组">
             <n-select v-model:value="nodeForm.group_ids" :options="groupOptions" multiple placeholder="选择分组" />
@@ -208,13 +208,16 @@ const groupedView = computed(() => {
 // --- Nodes ---
 const showNode = ref(false)
 const editingNode = ref<any>(null)
-const nodeForm = reactive({ name: '', type: 'self_built', inbound_tag: '', link: '', group_ids: [] as number[], enabled: true })
+// share_link must match store.Node's JSON tag — it was `link`, so the field was
+// never sent: created external nodes had no link at all, and saving an existing
+// one blanked its stored link.
+const nodeForm = reactive({ name: '', type: 'self_built', inbound_tag: '', share_link: '', group_ids: [] as number[], enabled: true })
 function openNode(n?: any) {
   editingNode.value = n || null
   if (n) {
-    Object.assign(nodeForm, { name: n.name, type: n.type || 'self_built', inbound_tag: n.inbound_tag || '', link: '', group_ids: n.group_ids || [], enabled: n.enabled })
+    Object.assign(nodeForm, { name: n.name, type: n.type || 'self_built', inbound_tag: n.inbound_tag || '', share_link: n.share_link || '', group_ids: n.group_ids || [], enabled: n.enabled })
   } else {
-    Object.assign(nodeForm, { name: '', type: 'self_built', inbound_tag: '', link: '', group_ids: [], enabled: true })
+    Object.assign(nodeForm, { name: '', type: 'self_built', inbound_tag: '', share_link: '', group_ids: [], enabled: true })
   }
   showNode.value = true
 }

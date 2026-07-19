@@ -57,13 +57,21 @@ func (a *API) handleAdminCreateNode(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleAdminUpdateNode(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
-	var n store.Node
-	if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
+	// Decode onto the stored row: UpdateNode writes every column, but the edit
+	// form only posts a few. Into a zero value, saving a node — even just
+	// toggling 启用 — blanked its share_link and protocol, dropping it out of the
+	// generated sing-box config and every user's subscription.
+	n, err := a.st.GetNode(int64(id))
+	if err != nil || n == nil {
+		fail(w, http.StatusNotFound, "节点不存在")
+		return
+	}
+	if err := json.NewDecoder(r.Body).Decode(n); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	n.ID = id
-	if err := a.st.UpdateNode(n); err != nil {
+	n.ID = int64(id)
+	if err := a.st.UpdateNode(*n); err != nil {
 		fail(w, http.StatusInternalServerError, "更新节点失败")
 		return
 	}
@@ -211,16 +219,22 @@ func (a *API) handleAdminCreateSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAdminUpdateSource(w http.ResponseWriter, r *http.Request) {
-	var s store.NodeSource
-	if err := json.NewDecoder(r.Body).Decode(&s); err != nil || s.URL == "" {
+	id := atoi(chi.URLParam(r, "id"))
+	// Decode onto the stored row — see handleAdminUpdateNode.
+	src, err := a.st.GetSource(int64(id))
+	if err != nil || src == nil {
+		fail(w, http.StatusNotFound, "订阅源不存在")
+		return
+	}
+	if err := json.NewDecoder(r.Body).Decode(src); err != nil || src.URL == "" {
 		fail(w, http.StatusBadRequest, "订阅地址不能为空")
 		return
 	}
-	s.ID = atoi(chi.URLParam(r, "id"))
-	if s.Type == "" {
-		s.Type = "base64"
+	src.ID = int64(id)
+	if src.Type == "" {
+		src.Type = "base64"
 	}
-	if err := a.st.UpdateSource(s); err != nil {
+	if err := a.st.UpdateSource(*src); err != nil {
 		fail(w, http.StatusInternalServerError, "更新订阅源失败")
 		return
 	}

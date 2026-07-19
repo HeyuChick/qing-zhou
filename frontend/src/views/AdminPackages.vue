@@ -45,7 +45,7 @@
       <n-form label-placement="left" label-width="100">
         <n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item>
         <n-form-item label="类型">
-          <n-select v-model:value="form.type" :options="[{label:'流量包',value:'traffic'},{label:'订阅计划',value:'plan'},{label:'设备扩展',value:'device'}]" />
+          <n-select v-model:value="form.type" :options="[{label:'流量包',value:'traffic'},{label:'订阅计划',value:'plan'}]" />
         </n-form-item>
         <n-form-item label="描述"><n-input v-model:value="form.description" placeholder="套餐说明" /></n-form-item>
         <n-form-item label="流量 (GB)"><n-input-number v-model:value="form.traffic_gb" :min="0" style="width:100%;" /></n-form-item>

@@ -101,17 +101,25 @@ func (a *API) handleAdminUpdatePackage(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "无效的商品 id")
 		return
 	}
-	var p store.Package
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+	// Decode onto the stored row: UpdatePackage writes every column, but the edit
+	// form posts neither enabled nor sort_order. Into a zero value, editing an
+	// on-sale package (fixing a typo in its name) set enabled=0 and dropped it
+	// out of the user shop, silently, with no warning in the UI.
+	p, err := a.st.GetPackage(int64(id))
+	if err != nil || p == nil {
+		fail(w, http.StatusNotFound, "商品不存在")
+		return
+	}
+	if err := json.NewDecoder(r.Body).Decode(p); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	if msg := validatePackage(&p); msg != "" {
+	if msg := validatePackage(p); msg != "" {
 		fail(w, http.StatusBadRequest, msg)
 		return
 	}
-	p.ID = id
-	if err := a.st.UpdatePackage(p); err != nil {
+	p.ID = int64(id)
+	if err := a.st.UpdatePackage(*p); err != nil {
 		fail(w, http.StatusInternalServerError, "更新商品失败")
 		return
 	}

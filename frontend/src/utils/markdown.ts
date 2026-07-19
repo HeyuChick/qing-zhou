@@ -87,19 +87,27 @@ export function mdToHtml(src: string): string {
   )
 
   // 9) paragraphs
-  const html = src.split(/\n{2,}/).map(p => {
+  let html = src.split(/\n{2,}/).map(p => {
     p = p.trim()
     if (!p) return ''
     if (/^<[a-z]/.test(p)) return p
     return '<p>' + p.replace(/\n/g, '<br>') + '</p>'
   }).join('\n')
 
-  // restore placeholders
-  return html.replace(/\x00(\d+)\x00/g, (_, i) => holds[parseInt(i)] || '')
+  // Restore placeholders repeatedly: a held chunk can itself contain a
+  // placeholder — inline code or a link inside a table cell is held first, then
+  // the whole table is held around it — so a single pass leaves the inner marker
+  // visible as a stray digit. Bounded so a self-referencing hold can't spin.
+  for (let pass = 0; pass < 5 && /\x00\d+\x00/.test(html); pass++) {
+    html = html.replace(/\x00(\d+)\x00/g, (_, i) => holds[parseInt(i)] || '')
+  }
+  return html
 }
 
 function mdTables(src: string, hold: (h: string, b?: boolean) => string): string {
-  return src.replace(/(?:^[ \t]*\|.+\|[ \t]*\n)+/gm, block => {
+  // The last row needs no trailing newline: a table at the very end of a
+  // document otherwise lost its final row, which leaked out as literal "| a | b |".
+  return src.replace(/(?:^[ \t]*\|.+\|[ \t]*(?:\n|$))+/gm, block => {
     const rows = block.trimEnd().split('\n')
     if (rows.length < 2) return block
 

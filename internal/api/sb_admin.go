@@ -711,6 +711,21 @@ var sbInboundTypes = map[string]bool{"vless": true, "hysteria2": true, "tuic": t
 
 func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 	var n store.SbInbound
+	// On update, decode onto the stored row. SaveSbInbound writes every column,
+	// including relay_secret — which is json:"-" and therefore CANNOT come from
+	// the client. Decoding into a zero value blanked it on every save, including
+	// a plain enable/disable toggle: the landing inbound then lazily minted a new
+	// secret while the relay inbound's server kept dialling with the old one, so
+	// the chain stayed down until some unrelated change rebuilt that server.
+	// sort_order was lost the same way.
+	if idStr := chi.URLParam(r, "id"); idStr != "" {
+		cur, err := a.st.GetSbInbound(int64(atoi(idStr)))
+		if err != nil || cur == nil {
+			fail(w, http.StatusNotFound, "入站不存在")
+			return
+		}
+		n = *cur
+	}
 	if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
