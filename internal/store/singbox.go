@@ -497,10 +497,13 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: mergeRelayUser(usersByTag[ib.Tag], landingUsers, ib.Tag)})
 	}
 	// Remote servers may not have v2ray_api compiled in; pass empty to skip.
-	if serverID == 0 {
-		return singbox.GenerateConfigWithRelays([]byte(base), ibs, v2rayListen, relays)
-	}
-	return singbox.GenerateConfigWithRelays([]byte(base), ibs, "", relays)
+	// v2rayListen == "" skips the experimental.v2ray_api block. Remote servers
+	// used to be hardcoded to "" here, on the assumption that they might not have
+	// the plugin compiled in — which meant no remote node ever exposed its stats
+	// API, and so no remote traffic was ever metered. The caller now decides:
+	// it probes each node's build tags (sshctl.SupportsStatsAPI) and passes that
+	// node's own listen address only when the plugin is actually present.
+	return singbox.GenerateConfigWithRelays([]byte(base), ibs, v2rayListen, relays)
 }
 
 // SelfBuiltLink is one generated share-link plus the inbound tag it came from.

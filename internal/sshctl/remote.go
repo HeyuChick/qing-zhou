@@ -316,6 +316,26 @@ func (m *RemoteManager) TestConnection(ctx context.Context, cfg *ServerConfig) (
 	return strings.TrimSpace(out), nil
 }
 
+// SupportsStatsAPI reports whether the remote sing-box was built with the
+// v2ray_api plugin, which the panel needs to read per-user traffic off that node.
+//
+// `sing-box version` prints its build tags, so this is a definitive answer
+// rather than an inference from a failed config load — and it has to be checked:
+// emitting an experimental.v2ray_api block into a config for a binary that lacks
+// the plugin makes `sing-box check` fail, and the panel would then refuse to
+// deploy ANY further config to that node.
+// Returns the raw version output alongside the verdict so a "not supported"
+// answer can be reported with the evidence behind it — otherwise an operator has
+// no way to tell a genuinely feature-less build from a probe that resolved the
+// wrong binary.
+func (m *RemoteManager) SupportsStatsAPI(ctx context.Context, cfg *ServerConfig) (bool, string, error) {
+	out, err := m.TestConnection(ctx, cfg)
+	if err != nil {
+		return false, "", err
+	}
+	return strings.Contains(out, "with_v2ray_api"), out, nil
+}
+
 // RestartService restarts the systemd unit on the remote server.
 func (m *RemoteManager) RestartService(ctx context.Context, cfg *ServerConfig) error {
 	client, err := m.dial(ctx, cfg)

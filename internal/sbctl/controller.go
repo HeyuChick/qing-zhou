@@ -21,13 +21,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"qingzhou/internal/sbproc"
 	"qingzhou/internal/sbstats"
-	"qingzhou/internal/sshctl"
 	"qingzhou/internal/singbox"
+	"qingzhou/internal/sshctl"
 	"qingzhou/internal/store"
 )
 
@@ -68,6 +69,14 @@ type Controller struct {
 	// runs from the per-server goroutines RebuildServer fans out.
 	restartMu     sync.Mutex
 	restartFailed map[int64]bool
+
+	// statsCap caches whether each remote node's sing-box has the v2ray_api
+	// plugin. A node without it must not receive an experimental.v2ray_api block
+	// (`sing-box check` would reject the config and the panel would stop being
+	// able to deploy to that node at all), and must be skipped when collecting
+	// stats so it doesn't log a refused connection every minute.
+	capMu    sync.Mutex
+	statsCap map[int64]bool
 }
 
 // New builds a Controller. baseConfig is the log/dns/route/outbounds template
@@ -76,6 +85,7 @@ func New(st ConfigStore, mgr Applier, stats StatsFetcher, baseConfig, v2rayListe
 	return &Controller{
 		st: st, mgr: mgr, stats: stats, baseConfig: baseConfig, v2rayListen: v2rayListen,
 		restartFailed: map[int64]bool{},
+		statsCap:      map[int64]bool{},
 	}
 }
 
@@ -216,6 +226,69 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 	return nil
 }
 
+// statsListenFor returns the v2ray_api listen address to bake into a server's
+// config, or "" to omit the block entirely.
+//
+// The local instance always gets it. A remote node gets it only if its sing-box
+// actually has the plugin: probing costs one SSH command, and the result is
+// cached, because guessing wrong in the permissive direction breaks config
+// deployment to that node permanently.
+func (c *Controller) statsListenFor(sv *store.Server) string {
+	if sv.ID == 0 || isLocalHost(sv.Host) {
+		return c.v2rayListen
+	}
+	listen := sv.V2rayListen
+	if listen == "" {
+		return "" // no address configured for this node — nothing to expose
+	}
+	if !c.statsSupported(sv) {
+		return ""
+	}
+	return listen
+}
+
+// statsSupported reports (and caches) whether a remote node can serve the stats
+// API. A probe failure is cached as "no" for this cycle rather than retried in
+// line; the next Rebuild re-probes, so a node that was merely unreachable
+// recovers on its own.
+func (c *Controller) statsSupported(sv *store.Server) bool {
+	c.capMu.Lock()
+	if ok, seen := c.statsCap[sv.ID]; seen {
+		c.capMu.Unlock()
+		return ok
+	}
+	c.capMu.Unlock()
+
+	if c.remoteMgr == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ok, version, err := c.remoteMgr.SupportsStatsAPI(ctx, serverConfigFor(sv))
+	if err != nil {
+		log.Printf("sbctl: server %d (%s) stats capability probe failed: %v", sv.ID, sv.Name, err)
+		ok = false
+	} else if !ok {
+		// Include what the probe actually saw: an operator otherwise cannot tell a
+		// build that genuinely lacks the plugin from a probe that resolved the
+		// wrong binary (or none at all, which prints "unknown").
+		log.Printf("sbctl: server %d (%s) sing-box has no v2ray_api plugin — traffic on this node will NOT be metered. `sing-box version` said: %s",
+			sv.ID, sv.Name, strings.Join(strings.Fields(version), " "))
+	}
+	c.capMu.Lock()
+	c.statsCap[sv.ID] = ok
+	c.capMu.Unlock()
+	return ok
+}
+
+// forgetStatsCap drops a cached probe result so the next Rebuild re-probes —
+// used after a node is edited, since its binary or path may have changed.
+func (c *Controller) forgetStatsCap(serverID int64) {
+	c.capMu.Lock()
+	delete(c.statsCap, serverID)
+	c.capMu.Unlock()
+}
+
 // Rebuild regenerates the sing-box config from the current entitlement and
 // applies it (validate + reload). Safe to call on every change; serialized.
 // When multi-server is configured, it iterates over all enabled remote servers
@@ -259,7 +332,7 @@ func (c *Controller) Rebuild() error {
 		if !sv.Enabled {
 			continue
 		}
-		cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.v2rayListen, byTag)
+		cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.statsListenFor(sv), byTag)
 		if err != nil {
 			log.Printf("sbctl: server %d (%s) build config error: %v", sv.ID, sv.Name, err)
 			setErr(fmt.Errorf("server %d build config: %w", sv.ID, err))
@@ -305,6 +378,11 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// This is the admin-triggered path, reached right after a server is edited or
+	// its sing-box reinstalled — so re-probe rather than trusting a cached answer
+	// about a binary that may have just changed.
+	c.forgetStatsCap(serverID)
+
 	byTag, err := c.st.BuildUsersByTag(time.Now().Unix())
 	if err != nil {
 		return err
@@ -333,7 +411,7 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	if sv == nil {
 		return fmt.Errorf("服务器 %d 不存在（可能已被删除）", serverID)
 	}
-	cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.v2rayListen, byTag)
+	cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.statsListenFor(sv), byTag)
 	if err != nil {
 		return fmt.Errorf("server %d build config: %w", sv.ID, err)
 	}
@@ -451,9 +529,12 @@ func (c *Controller) remoteStats(ctx context.Context) []remoteResult {
 		if !sv.Enabled || isLocalHost(sv.Host) {
 			continue // the local instance is polled directly
 		}
-		listen := sv.V2rayListen
+		// Only poll nodes whose config actually carries the stats API. Polling a
+		// node without the v2ray_api plugin just logs a refused connection every
+		// interval; statsListenFor already decided to omit the block for it.
+		listen := c.statsListenFor(sv)
 		if listen == "" {
-			listen = "127.0.0.1:18080"
+			continue
 		}
 		wg.Add(1)
 		go func(sv *store.Server, listen string) {
