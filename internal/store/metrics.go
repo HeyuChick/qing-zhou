@@ -164,10 +164,19 @@ func (s *Store) PruneMetrics(keepDays int) error {
 	return err
 }
 
-// ListAllMetricsSince returns all metrics rows across all servers with ts>=since,
-// ordered by server_id then ts. Used by the heatmap aggregator.
+// maxHeatmapRows caps ListAllMetricsSince. Its callers are reachable
+// unauthenticated (/api/monitor/heatmap, /api/monitor/public/sparklines) and
+// accept a range as wide as 7d; at the default 30s probe interval that is ~2880
+// rows per server per day, so an uncapped query lets an anonymous request
+// materialise hundreds of thousands of rows on a 1H1G box. Everything is then
+// collapsed into a fixed-width matrix anyway, so the tail is discarded.
+const maxHeatmapRows = 200000
+
+// ListAllMetricsSince returns metrics rows across all servers with ts>=since,
+// ordered by server_id then ts, capped at maxHeatmapRows. Used by the heatmap
+// aggregator.
 func (s *Store) ListAllMetricsSince(since int64) ([]*ServerMetrics, error) {
-	rows, err := s.db.Query(`SELECT ` + metricsCols + ` FROM server_metrics WHERE ts>=? ORDER BY server_id, ts`, since)
+	rows, err := s.db.Query(`SELECT `+metricsCols+` FROM server_metrics WHERE ts>=? ORDER BY server_id, ts LIMIT ?`, since, maxHeatmapRows)
 	if err != nil {
 		return nil, err
 	}
@@ -193,9 +202,8 @@ func (s *Store) CountProbeServers() (total, online, expiring int, err error) {
 	err = s.db.QueryRow(`SELECT
 		COUNT(*),
 		COALESCE(SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN expiry_date > 0 AND expiry_date <= ? THEN 1 ELSE 0 END), 0)
-		FROM servers WHERE probe_enabled=1`, onlineWindow, expiringWindow).Scan(&total, &online, &expiring)
-	_ = now
+		COALESCE(SUM(CASE WHEN expiry_date > ? AND expiry_date <= ? THEN 1 ELSE 0 END), 0)
+		FROM servers WHERE probe_enabled=1`, onlineWindow, now, expiringWindow).Scan(&total, &online, &expiring)
 	return
 }
 

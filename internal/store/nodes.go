@@ -9,17 +9,17 @@ import (
 )
 
 type Node struct {
-	ID            int64   `json:"id"`
-	Type          string  `json:"type"` // self_built | external
-	Name          string  `json:"name"`
-	Protocol      string  `json:"protocol"`
+	ID         int64   `json:"id"`
+	Type       string  `json:"type"` // self_built | external
+	Name       string  `json:"name"`
+	Protocol   string  `json:"protocol"`
 	InboundTag string  `json:"inbound_tag"`
-	ShareLink     string  `json:"share_link"`
-	SourceID      int64   `json:"source_id"`
-	Enabled       bool    `json:"enabled"`
-	SortOrder     int64   `json:"sort_order"`
-	CreatedAt     int64   `json:"created_at"`
-	GroupIDs      []int64 `json:"group_ids,omitempty"`
+	ShareLink  string  `json:"share_link"`
+	SourceID   int64   `json:"source_id"`
+	Enabled    bool    `json:"enabled"`
+	SortOrder  int64   `json:"sort_order"`
+	CreatedAt  int64   `json:"created_at"`
+	GroupIDs   []int64 `json:"group_ids,omitempty"`
 }
 
 const nodeCols = `id, type, name, protocol, inbound_tag, share_link, source_id, enabled, sort_order, created_at`
@@ -471,6 +471,13 @@ func (s *Store) DeleteSource(id int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	// Group memberships are keyed by node id and are not ON DELETE CASCADE, so
+	// they must go with the nodes. Source sync runs on a timer and deletes and
+	// reinserts every node under new ids, which otherwise grows this table
+	// without bound (DeleteNode already does this correctly).
+	if _, err := tx.Exec(`DELETE FROM node_group_members WHERE node_id IN (SELECT id FROM nodes WHERE source_id=?)`, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM nodes WHERE source_id=?`, id); err != nil {
 		return err
 	}
@@ -490,6 +497,13 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int6
 	defer tx.Rollback()
 	now := time.Now().Unix()
 	if fetchErr == "" {
+		// Group memberships are keyed by node id and are not ON DELETE CASCADE, so
+		// they must go with the nodes. Source sync runs on a timer and deletes and
+		// reinserts every node under new ids, which otherwise grows this table
+		// without bound (DeleteNode already does this correctly).
+		if _, err := tx.Exec(`DELETE FROM node_group_members WHERE node_id IN (SELECT id FROM nodes WHERE source_id=?)`, sourceID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`DELETE FROM nodes WHERE source_id=?`, sourceID); err != nil {
 			return err
 		}

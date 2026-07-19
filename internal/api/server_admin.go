@@ -75,8 +75,23 @@ func (a *API) handleAdminCreateServer(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleAdminUpdateServer(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
-	var sv store.Server
-	if err := json.NewDecoder(r.Body).Decode(&sv); err != nil {
+
+	// Decode ONTO the stored row, not into a zero value. UpdateServer writes all
+	// 22 columns, while the edit form only posts nine — so decoding into a fresh
+	// struct silently blanked everything it doesn't carry: the SSH key/password,
+	// the probe token (breaking the running agent and flipping probe_enabled
+	// off), and every field owned by the 监控管理 page (expiry_date, provider,
+	// location, spec, price, notes). Renaming a server or changing its port was
+	// enough to destroy its credentials irrecoverably.
+	//
+	// json.Decode leaves fields absent from the payload untouched, so this keeps
+	// stored values for anything the caller didn't send.
+	sv, err := a.st.GetServer(id)
+	if err != nil || sv == nil {
+		fail(w, http.StatusNotFound, "服务器不存在")
+		return
+	}
+	if err := json.NewDecoder(r.Body).Decode(sv); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
@@ -90,26 +105,25 @@ func (a *API) handleAdminUpdateServer(w http.ResponseWriter, r *http.Request) {
 	if sv.Port == 0 {
 		sv.Port = 22
 	}
-	// Preserve existing SSH credentials when the client sends masked "***"
-	if sv.SSHKey == "***" {
-		cur, _ := a.st.GetServer(id)
-		if cur != nil {
-			sv.SSHKey = cur.SSHKey
+	// The list response masks secrets as "***"; a client that echoes the masked
+	// value back must not store the literal. sv already holds the stored value
+	// (it was decoded onto the stored row), so this just undoes the echo.
+	stored, _ := a.st.GetServer(id)
+	if stored != nil {
+		if sv.SSHKey == "***" {
+			sv.SSHKey = stored.SSHKey
+		}
+		if sv.SSHKeyPass == "***" {
+			sv.SSHKeyPass = stored.SSHKeyPass
+		}
+		if sv.SSHPassword == "***" {
+			sv.SSHPassword = stored.SSHPassword
+		}
+		if sv.ProbeToken == "***" {
+			sv.ProbeToken = stored.ProbeToken
 		}
 	}
-	if sv.SSHKeyPass == "***" {
-		cur, _ := a.st.GetServer(id)
-		if cur != nil {
-			sv.SSHKeyPass = cur.SSHKeyPass
-		}
-	}
-	if sv.SSHPassword == "***" {
-		cur, _ := a.st.GetServer(id)
-		if cur != nil {
-			sv.SSHPassword = cur.SSHPassword
-		}
-	}
-	if err := a.st.UpdateServer(sv); err != nil {
+	if err := a.st.UpdateServer(*sv); err != nil {
 		fail(w, http.StatusInternalServerError, "更新服务器失败")
 		return
 	}
