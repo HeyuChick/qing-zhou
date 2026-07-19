@@ -99,12 +99,12 @@ func TestSurgeNameCannotCommentOutNode(t *testing.T) {
 	}
 }
 
-// TestTemplateExcludeAddressPreserved: a custom template arrives via
+// TestTemplateRouteExcludeAddressPreserved: a custom template arrives via
 // json.Unmarshal, so its arrays are []any — a []string type assertion silently
 // yields nil and the admin's own TUN exclusions get overwritten with just the
 // node IPs, quietly routing whatever they had carved out back into the tunnel.
-func TestTemplateExcludeAddressPreserved(t *testing.T) {
-	tpl := `{"inbounds":[{"type":"tun","tag":"tun-in","exclude_address":["10.0.0.0/8","192.168.1.5/32"]}],"outbounds":[]}`
+func TestTemplateRouteExcludeAddressPreserved(t *testing.T) {
+	tpl := `{"inbounds":[{"type":"tun","tag":"tun-in","route_exclude_address":["10.0.0.0/8","192.168.1.5/32"]}],"outbounds":[]}`
 
 	sb, err := Singbox(ParseLinks([]string{"trojan://pw@1.2.3.4:443?sni=a.com#n"}), tpl)
 	if err != nil {
@@ -112,7 +112,7 @@ func TestTemplateExcludeAddressPreserved(t *testing.T) {
 	}
 	var doc struct {
 		Inbounds []struct {
-			ExcludeAddress []string `json:"exclude_address"`
+			RouteExcludeAddress []string `json:"route_exclude_address"`
 		} `json:"inbounds"`
 	}
 	if err := json.Unmarshal([]byte(sb), &doc); err != nil {
@@ -122,12 +122,12 @@ func TestTemplateExcludeAddressPreserved(t *testing.T) {
 		t.Fatalf("expected the template's single tun inbound, got %d", len(doc.Inbounds))
 	}
 	got := map[string]bool{}
-	for _, a := range doc.Inbounds[0].ExcludeAddress {
+	for _, a := range doc.Inbounds[0].RouteExcludeAddress {
 		got[a] = true
 	}
 	for _, want := range []string{"10.0.0.0/8", "192.168.1.5/32", "1.2.3.4/32"} {
 		if !got[want] {
-			t.Errorf("exclude_address lost %q, has %v", want, doc.Inbounds[0].ExcludeAddress)
+			t.Errorf("route_exclude_address lost %q, has %v", want, doc.Inbounds[0].RouteExcludeAddress)
 		}
 	}
 }

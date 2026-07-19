@@ -69,7 +69,7 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 		}
 	}
 
-	// Inject proxy server IPs into tun exclude_address to prevent routing loop.
+	// Inject proxy server IPs into tun route_exclude_address to prevent routing loop.
 	injectSingboxTunExclude(doc, proxies)
 	// Domain-based node servers: keep them out of fake-ip and off the proxy
 	// detour, mirroring the Clash injectNodeDomains fix (otherwise "TUN on → no
@@ -356,11 +356,18 @@ func sbWS(path, host string, maxEarlyData int, edHeader string) map[string]any {
 }
 
 // injectSingboxTunExclude adds proxy server IPs to the TUN inbound's
-// exclude_address to prevent routing loops on the client.
+// route_exclude_address to prevent routing loops on the client.
+//
+// The key is route_exclude_address, NOT exclude_address: sing-box has no field
+// by the latter name, and it rejects unknown config fields fatally — so every
+// sing-box-format subscription failed to load outright with
+// "inbounds[0].exclude_address: json: unknown field". Verified against
+// sing-box 1.13's option/tun.go, which declares route_exclude_address /
+// route_exclude_address_set (plus the inet4_/inet6_ variants).
 func injectSingboxTunExclude(doc map[string]any, proxies []*Proxy) {
 	seen := map[string]bool{}
 	for _, p := range proxies {
-		// exclude_address entries must be CIDR prefixes; only real public IPs
+		// route_exclude_address entries must be CIDR prefixes; only real public IPs
 		// qualify. Bare domains (net.ParseIP == nil) would be invalid and break
 		// the client config, so they are skipped here (see injectRouteExclude).
 		if ip := net.ParseIP(p.Server); ip != nil && !ip.IsPrivate() {
@@ -384,7 +391,7 @@ func injectSingboxTunExclude(doc map[string]any, proxies []*Proxy) {
 		// Same []any-not-[]string trap as the inbounds array above: a template
 		// arrives via json.Unmarshal, so a naked []string assertion always fails
 		// and the admin's own exclusions get overwritten with just the node IPs.
-		existing, present := stringList(ib["exclude_address"])
+		existing, present := stringList(ib["route_exclude_address"])
 		for _, ip := range sortedKeys(seen) {
 			cidr := ensureCIDR(ip)
 			if !present[cidr] {
@@ -392,6 +399,6 @@ func injectSingboxTunExclude(doc map[string]any, proxies []*Proxy) {
 				present[cidr] = true
 			}
 		}
-		ib["exclude_address"] = existing
+		ib["route_exclude_address"] = existing
 	}
 }
