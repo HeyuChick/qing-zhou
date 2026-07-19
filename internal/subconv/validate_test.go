@@ -106,3 +106,29 @@ func TestSingbox_UnknownTransportOmitted(t *testing.T) {
 
 // b64 is the userinfo encoding shadowsocks share links use.
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+
+// hysteria v1 is a different wire protocol from hysteria2 (auth-str, up/down,
+// no `password` key). Rendering it as hysteria2:// yielded an empty credential
+// — "hysteria2://@host:443" — a node that shipped in every subscription and
+// could never connect. It must be dropped, and the nodes around it must survive.
+func TestClashYAML_HysteriaV1Dropped(t *testing.T) {
+	yaml := `proxies:
+  - {name: v1, type: hysteria, server: 1.2.3.4, port: 443, auth-str: secret, up: 50, down: 200}
+  - {name: v2, type: hysteria2, server: 5.6.7.8, port: 443, password: pw, sni: a.com}
+  - {name: tj, type: trojan, server: 9.9.9.9, port: 443, password: pw, sni: b.com}
+`
+	ps := ParseList(yaml)
+	names := map[string]bool{}
+	for _, p := range ps {
+		names[p.Name] = true
+		if strings.Contains(p.Raw, "://@") {
+			t.Errorf("emitted a node with an empty credential: %s", p.Raw)
+		}
+	}
+	if names["v1"] {
+		t.Error("hysteria v1 node was emitted as hysteria2 — it can never connect")
+	}
+	if !names["v2"] || !names["tj"] {
+		t.Errorf("dropping the v1 node took valid nodes with it: %v", names)
+	}
+}

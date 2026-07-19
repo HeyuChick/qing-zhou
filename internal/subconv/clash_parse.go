@@ -142,7 +142,13 @@ func clashToLink(m map[string]any) string {
 		}
 		return "trojan://" + str(m["password"]) + "@" + addr + qstr(q) + frag
 
-	case "hysteria2", "hysteria":
+	// hysteria (v1) is deliberately NOT folded in here: it is a different wire
+	// protocol with different fields (auth-str, up/down), so rendering it as a
+	// hysteria2:// link produced "hysteria2://@host:443" — v1 has no `password`
+	// key, so the credential came out empty. That node then shipped in every
+	// user's subscription and could never connect. Dropping it is the honest
+	// outcome; emitting a broken node is worse than emitting none.
+	case "hysteria2":
 		q := url.Values{}
 		if v := str(m["sni"]); v != "" {
 			q.Set("sni", v)
