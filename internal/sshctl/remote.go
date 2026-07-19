@@ -30,6 +30,41 @@ func parsePrivateKey(pem, passphrase string) (ssh.Signer, error) {
 	return ssh.ParsePrivateKey([]byte(pem))
 }
 
+// tunnelConn is a remote TCP connection carried over SSH. Closing it also closes
+// the SSH client that carries it, so a caller that only holds the net.Conn can't
+// leak the session underneath.
+type tunnelConn struct {
+	net.Conn
+	client *ssh.Client
+}
+
+func (t *tunnelConn) Close() error {
+	err := t.Conn.Close()
+	if cerr := t.client.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// DialTunnel opens a TCP connection to addr *on the remote host*, tunnelled over
+// SSH. It exists so the panel can reach a service the remote box only binds on
+// loopback — notably sing-box's v2ray stats API, whose default listen address is
+// 127.0.0.1:18080 and is therefore unreachable directly.
+//
+// Each call establishes its own SSH client, which the returned conn owns.
+func (m *RemoteManager) DialTunnel(ctx context.Context, cfg *ServerConfig, addr string) (net.Conn, error) {
+	client, err := m.dial(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("ssh connect %s: %w", cfg.Host, err)
+	}
+	conn, err := client.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		client.Close()
+		return nil, fmt.Errorf("tunnel to %s on %s: %w", addr, cfg.Host, err)
+	}
+	return &tunnelConn{Conn: conn, client: client}, nil
+}
+
 // ServerConfig holds the SSH connection details and sing-box paths
 // for a single remote server.
 type ServerConfig struct {
@@ -180,6 +215,17 @@ func (m *RemoteManager) dial(ctx context.Context, cfg *ServerConfig) (*ssh.Clien
 
 	select {
 	case <-ctx.Done():
+		// The dial goroutine outlives this return. Hand the result off to a
+		// reaper instead of abandoning it: a dial that lands after the deadline
+		// would otherwise leave a live *ssh.Client in the buffered channel with
+		// nobody to Close it, leaking the TCP connection and the library's
+		// handshake/mux goroutines. Rebuild runs every minute, so a node that is
+		// slow-but-reachable leaks one of each per cycle.
+		go func() {
+			if r := <-ch; r.client != nil {
+				r.client.Close()
+			}
+		}()
 		return nil, ctx.Err()
 	case r := <-ch:
 		return r.client, r.err
@@ -198,7 +244,10 @@ func (m *RemoteManager) dial(ctx context.Context, cfg *ServerConfig) (*ssh.Clien
 func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, configJSON []byte) error {
 	// Fast path: skip if config hasn't changed since last successful apply.
 	hash := configHash(configJSON)
-	cacheKey := cfg.Host + ":" + cfg.ConfigPath
+	// Keyed by server id, not host+path: two enabled rows can legitimately point
+	// at the same host and config path, and sharing a cache entry between them
+	// makes each one's apply look like a no-op whenever the other just ran.
+	cacheKey := fmt.Sprintf("%d:%s:%s", cfg.ID, cfg.Host, cfg.ConfigPath)
 	m.mu.Lock()
 	if m.lastConfigHash != nil && m.lastConfigHash[cacheKey] == hash {
 		m.mu.Unlock()
@@ -215,7 +264,10 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	// Write to a temp file first, validate it, and only then move it into
 	// place. This keeps the live config intact if the new one is broken or
 	// the transfer is interrupted, so a bad config never takes the node down.
-	tmpPath := cfg.ConfigPath + ".qz-new"
+	// Per-server staging name: Rebuild fans out one goroutine per enabled server,
+	// so a shared ".qz-new" lets two rows targeting the same path interleave
+	// write/validate/mv and publish each other's config.
+	tmpPath := fmt.Sprintf("%s.qz-new-%d", cfg.ConfigPath, cfg.ID)
 	if err := m.writeFile(ctx, client, tmpPath, configJSON); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}

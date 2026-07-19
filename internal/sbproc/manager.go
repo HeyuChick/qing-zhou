@@ -23,6 +23,14 @@ type Manager struct {
 	check      func(path string) error
 	reload     func() error
 	mu         sync.Mutex
+
+	// reloadFailed records that the last reload attempt errored. The config file
+	// is swapped BEFORE the reload runs, so without this the no-op fast path
+	// (which compares against the file on disk) would see the desired bytes
+	// already in place on the next tick and return success forever, leaving
+	// sing-box down until something happened to change the config. Recovery
+	// otherwise required an unrelated user/inbound edit.
+	reloadFailed bool
 }
 
 // New builds a Manager. reload is how sing-box is (re)started after a config
@@ -79,8 +87,13 @@ func (m *Manager) Apply(config []byte) error {
 	// controller calls Apply on a timer; without this it would `sing-box check`
 	// and restart sing-box every tick, dropping every user's connection each
 	// minute. Generated config is deterministic so equal input → equal bytes.
-	if cur, err := os.ReadFile(m.configPath); err == nil && bytes.Equal(cur, config) {
-		return nil
+	//
+	// Skipped while a reload is outstanding: matching bytes on disk only means
+	// the file was swapped, not that sing-box picked it up.
+	if !m.reloadFailed {
+		if cur, err := os.ReadFile(m.configPath); err == nil && bytes.Equal(cur, config) {
+			return nil
+		}
 	}
 
 	if err := m.Validate(config); err != nil {
@@ -109,8 +122,14 @@ func (m *Manager) Apply(config []byte) error {
 	}
 
 	if m.reload != nil {
-		return m.reload()
+		if err := m.reload(); err != nil {
+			// Leave the flag set so the next Apply retries the reload instead of
+			// short-circuiting on the already-swapped file.
+			m.reloadFailed = true
+			return err
+		}
 	}
+	m.reloadFailed = false
 	return nil
 }
 

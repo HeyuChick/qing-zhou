@@ -14,6 +14,7 @@ package sbctl
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -60,12 +61,22 @@ type Controller struct {
 	remoteMgr   *sshctl.RemoteManager // SSH manager for remote servers; nil if not configured
 
 	mu sync.Mutex // serializes Rebuild
+
+	// restartFailed tracks servers whose last local systemctl restart errored, so
+	// applyLocal retries instead of short-circuiting on the already-swapped config
+	// file. Keyed by server id; guarded separately from mu because applyLocal also
+	// runs from the per-server goroutines RebuildServer fans out.
+	restartMu     sync.Mutex
+	restartFailed map[int64]bool
 }
 
 // New builds a Controller. baseConfig is the log/dns/route/outbounds template
 // JSON; v2rayListen is the gRPC stats listen address embedded into the config.
 func New(st ConfigStore, mgr Applier, stats StatsFetcher, baseConfig, v2rayListen string) *Controller {
-	return &Controller{st: st, mgr: mgr, stats: stats, baseConfig: baseConfig, v2rayListen: v2rayListen}
+	return &Controller{
+		st: st, mgr: mgr, stats: stats, baseConfig: baseConfig, v2rayListen: v2rayListen,
+		restartFailed: map[int64]bool{},
+	}
 }
 
 // SetRemoteManager attaches the SSH remote manager for multi-server support.
@@ -83,7 +94,14 @@ func isLocalHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		addrs, err := net.LookupHost(host)
+		// Bounded: this runs inside Rebuild, which holds c.mu, and before the
+		// per-server goroutine fan-out — so an unbounded resolver lookup for one
+		// server row stalls the whole rebuild and every admin-triggered
+		// RebuildServer queued behind the mutex. The 90s per-server apply timeout
+		// sits further down and does not cover this.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		addrs, err := net.DefaultResolver.LookupHost(ctx, host)
 		if err != nil || len(addrs) == 0 {
 			return false
 		}
@@ -140,9 +158,18 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 		unit = "sing-box"
 	}
 
-	// No-op when config is byte-identical to what's already live.
-	if cur, err := os.ReadFile(configPath); err == nil && bytes.Equal(cur, cfg) {
-		return nil
+	// No-op when config is byte-identical to what's already live — but not while a
+	// restart for this server is still outstanding. The config is swapped before
+	// systemctl runs, so matching bytes on disk prove the file landed, not that
+	// sing-box came up on it; short-circuiting there would leave the unit down and
+	// report success on every tick until an unrelated edit changed the config.
+	c.restartMu.Lock()
+	pending := c.restartFailed[sv.ID]
+	c.restartMu.Unlock()
+	if !pending {
+		if cur, err := os.ReadFile(configPath); err == nil && bytes.Equal(cur, cfg) {
+			return nil
+		}
 	}
 
 	// Write to a sibling temp file, validate, then atomic rename.
@@ -176,6 +203,13 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 	rctx, rcancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer rcancel()
 	rout, rerr := exec.CommandContext(rctx, "systemctl", "restart", unit).CombinedOutput()
+	c.restartMu.Lock()
+	if rerr != nil {
+		c.restartFailed[sv.ID] = true
+	} else {
+		delete(c.restartFailed, sv.ID)
+	}
+	c.restartMu.Unlock()
 	if rerr != nil {
 		return fmt.Errorf("systemctl restart %s: %v: %s", unit, rerr, rout)
 	}
@@ -244,21 +278,7 @@ func (c *Controller) Rebuild() error {
 			setErr(fmt.Errorf("server %d apply: remote manager not configured", sv.ID))
 			continue
 		}
-		serverCfg := &sshctl.ServerConfig{
-			ID:          sv.ID,
-			Name:        sv.Name,
-			Host:        sv.Host,
-			Port:        sv.Port,
-			SSHUser:     sv.SSHUser,
-			SSHKey:      sv.SSHKey,
-			SSHKeyPass:  sv.SSHKeyPass,
-			SSHPassword: sv.SSHPassword,
-			ConfigPath:  sv.ConfigPath,
-			SystemdUnit: sv.SystemdUnit,
-			SingBoxBin:  sv.SingBoxBin,
-			V2rayListen: sv.V2rayListen,
-			HostKey:     sv.HostKey,
-		}
+		serverCfg := serverConfigFor(sv)
 		wg.Add(1)
 		go func(sv *store.Server, serverCfg *sshctl.ServerConfig, cfg []byte) {
 			defer wg.Done()
@@ -330,13 +350,7 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	if c.remoteMgr == nil {
 		return fmt.Errorf("remote manager not configured")
 	}
-	serverCfg := &sshctl.ServerConfig{
-		ID: sv.ID, Name: sv.Name, Host: sv.Host, Port: sv.Port,
-		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass,
-		SSHPassword: sv.SSHPassword, ConfigPath: sv.ConfigPath,
-		SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin,
-		V2rayListen: sv.V2rayListen, HostKey: sv.HostKey,
-	}
+	serverCfg := serverConfigFor(sv)
 	applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	if err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg); err != nil {
@@ -345,25 +359,122 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	return nil
 }
 
-// CollectStats polls per-user traffic deltas and accumulates them onto users.
-// Returns the number of users whose usage changed.
+// serverConfigFor projects a stored server row onto the SSH config the remote
+// manager takes. Single definition so a newly-stored field can't reach one call
+// site and silently miss another.
+func serverConfigFor(sv *store.Server) *sshctl.ServerConfig {
+	return &sshctl.ServerConfig{
+		ID: sv.ID, Name: sv.Name, Host: sv.Host, Port: sv.Port,
+		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass,
+		SSHPassword: sv.SSHPassword, ConfigPath: sv.ConfigPath,
+		SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin,
+		V2rayListen: sv.V2rayListen, HostKey: sv.HostKey,
+	}
+}
+
+// CollectStats polls per-user traffic deltas — from the local sing-box and from
+// every enabled remote server — and accumulates them onto users. Returns the
+// number of users whose usage changed.
+//
+// Remote servers each run their own sing-box with their own counters. Polling
+// only the local one (which is all this did) meant traffic through any remote
+// node was never metered, so quota enforcement never fired there: effectively
+// unlimited traffic on every remote node.
+//
+// A per-identity sum is correct across servers: bucket client_names are globally
+// unique, and a user reachable on two nodes should be charged for both.
 func (c *Controller) CollectStats(ctx context.Context) (int, error) {
+	deltas := map[string]store.UsageDelta{}
+	add := func(m map[string]*sbstats.Traffic) {
+		for name, t := range m {
+			if t.Up == 0 && t.Down == 0 {
+				continue
+			}
+			d := deltas[name]
+			d.Up += t.Up
+			d.Down += t.Down
+			deltas[name] = d
+		}
+	}
+
+	var errs []error
 	m, err := c.stats.QueryUserTraffic(ctx)
 	if err != nil {
-		return 0, err
+		errs = append(errs, fmt.Errorf("local stats: %w", err))
+	} else {
+		add(m)
 	}
-	// Apply the whole poll in one transaction (one WAL write-lock acquisition
-	// instead of one per identity). AddUsageBatch isolates each identity in a
-	// savepoint, so one bad delta doesn't discard the rest — the reset=true poll
-	// already zeroed sing-box, so a dropped delta is lost for good.
-	deltas := make(map[string]store.UsageDelta, len(m))
-	for name, t := range m {
-		if t.Up == 0 && t.Down == 0 {
+	for _, rm := range c.remoteStats(ctx) {
+		if rm.err != nil {
+			errs = append(errs, rm.err)
 			continue
 		}
-		deltas[name] = store.UsageDelta{Up: t.Up, Down: t.Down}
+		add(rm.traffic)
 	}
-	return c.st.AddUsageBatch(deltas)
+
+	// Commit whatever was collected even if some server failed. Each successful
+	// poll used reset=true, so its counters are already zeroed on that node —
+	// bailing out here would throw that traffic away permanently.
+	//
+	// Apply the whole poll in one transaction (one WAL write-lock acquisition
+	// instead of one per identity). AddUsageBatch isolates each identity in a
+	// savepoint, so one bad delta doesn't discard the rest.
+	n, err := c.st.AddUsageBatch(deltas)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	return n, errors.Join(errs...)
+}
+
+type remoteResult struct {
+	traffic map[string]*sbstats.Traffic
+	err     error
+}
+
+// remoteStats polls every enabled remote server's stats API through an SSH
+// tunnel, concurrently. A server that fails yields an error rather than aborting
+// the others — its counters were not reset, so its traffic is picked up next poll.
+func (c *Controller) remoteStats(ctx context.Context) []remoteResult {
+	if c.remoteMgr == nil {
+		return nil
+	}
+	servers, err := c.st.ListServers()
+	if err != nil {
+		return []remoteResult{{err: fmt.Errorf("list servers for stats: %w", err)}}
+	}
+	var (
+		wg  sync.WaitGroup
+		mu  sync.Mutex
+		out []remoteResult
+	)
+	for _, sv := range servers {
+		if !sv.Enabled || isLocalHost(sv.Host) {
+			continue // the local instance is polled directly
+		}
+		listen := sv.V2rayListen
+		if listen == "" {
+			listen = "127.0.0.1:18080"
+		}
+		wg.Add(1)
+		go func(sv *store.Server, listen string) {
+			defer wg.Done()
+			cfg := serverConfigFor(sv)
+			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			client := sbstats.NewWithDialer(listen, func(dctx context.Context, _, addr string) (net.Conn, error) {
+				return c.remoteMgr.DialTunnel(dctx, cfg, addr)
+			})
+			t, err := client.QueryUserTraffic(sctx)
+			if err != nil {
+				err = fmt.Errorf("server %d (%s) stats: %w", sv.ID, sv.Name, err)
+			}
+			mu.Lock()
+			out = append(out, remoteResult{traffic: t, err: err})
+			mu.Unlock()
+		}(sv, listen)
+	}
+	wg.Wait()
+	return out
 }
 
 // Run drives the periodic loop: every interval it collects stats then rebuilds

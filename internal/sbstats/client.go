@@ -43,14 +43,26 @@ type Client struct {
 	hc   *http.Client
 }
 
+// DialFunc opens the transport connection to the stats endpoint.
+type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
 // New builds a client for the given v2ray_api listen address (e.g.
-// 127.0.0.1:18080).
+// 127.0.0.1:18080), dialled directly.
 func New(addr string) *Client {
+	return NewWithDialer(addr, func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	})
+}
+
+// NewWithDialer builds a client that reaches the stats endpoint through dial.
+// Remote nodes bind the stats API on loopback, so their traffic can only be
+// collected through an SSH tunnel — see sshctl.RemoteManager.DialTunnel.
+func NewWithDialer(addr string, dial DialFunc) *Client {
 	tr := &http2.Transport{
 		AllowHTTP: true, // h2c: prior-knowledge HTTP/2 over plaintext TCP
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, network, addr)
+			return dial(ctx, network, addr)
 		},
 	}
 	return &Client{addr: addr, hc: &http.Client{Transport: tr, Timeout: 10 * time.Second}}
@@ -174,7 +186,7 @@ func decodeQueryResponse(b []byte) (map[string]int64, error) {
 		wire := tag & 7
 		if field == 1 && wire == 2 { // Stat message
 			l, n := readVarint(b)
-			if n == 0 || int(l) > len(b)-n {
+			if n == 0 || !fitsIn(l, len(b)-n) {
 				return nil, fmt.Errorf("bad Stat length")
 			}
 			b = b[n:]
@@ -204,7 +216,7 @@ func decodeStat(b []byte) (name string, value int64) {
 		switch field, wire := tag>>3, tag&7; {
 		case field == 1 && wire == 2: // name
 			l, n := readVarint(b)
-			if n == 0 || int(l) > len(b)-n {
+			if n == 0 || !fitsIn(l, len(b)-n) {
 				return
 			}
 			b = b[n:]
@@ -236,9 +248,22 @@ func appendVarint(b []byte, v uint64) []byte {
 	return append(b, byte(v))
 }
 
+// readVarint decodes a protobuf varint, returning (value, bytes consumed) or
+// (0, 0) on a malformed one.
+//
+// The 10th byte is rejected unless it is 0 or 1. Without that check a varint can
+// carry bit 63, and every caller here turns the result into an int to bounds-check
+// it — which goes negative, sails past the check, and then panics (or indexes
+// backwards) on the slice that follows. This decoder is pointed at whatever is
+// listening on sb_v2ray_listen, so a hostile or merely buggy listener there must
+// not be able to take the panel down; nothing in this package runs under a
+// recover().
 func readVarint(b []byte) (uint64, int) {
 	var v uint64
 	for i := 0; i < len(b); i++ {
+		if i == 9 && b[i] > 1 {
+			return 0, 0 // would overflow uint64
+		}
 		v |= uint64(b[i]&0x7F) << (7 * i)
 		if b[i] < 0x80 {
 			return v, i + 1
@@ -248,6 +273,13 @@ func readVarint(b []byte) (uint64, int) {
 		}
 	}
 	return 0, 0
+}
+
+// fitsIn reports whether a length varint can address that many bytes of the
+// remaining buffer. Compared as uint64 on both sides — converting the length to
+// int first is what made the old bounds checks unsound.
+func fitsIn(l uint64, remaining int) bool {
+	return remaining >= 0 && l <= uint64(remaining)
 }
 
 func skipField(b []byte, wire uint64) ([]byte, error) {
@@ -265,7 +297,7 @@ func skipField(b []byte, wire uint64) ([]byte, error) {
 		return b[8:], nil
 	case 2: // length-delimited
 		l, n := readVarint(b)
-		if n == 0 || int(l) > len(b)-n {
+		if n == 0 || !fitsIn(l, len(b)-n) {
 			return nil, fmt.Errorf("bad length-delimited")
 		}
 		return b[n+int(l):], nil
