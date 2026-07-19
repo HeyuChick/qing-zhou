@@ -5,8 +5,10 @@
 #
 # 作用：
 #   1. 已装 sing-box → 直接检测并打印版本/路径（不重装，除非 --force）
-#   2. 未装 → 安装官方最新版 sing-box（含 v2ray_api，面板统计依赖它）到
-#      /usr/local/bin/sing-box，建 /etc/sing-box/config.json 占位配置 + systemd
+#   2. 未装 → 安装 sing-box 到 /usr/local/bin/sing-box，建
+#      /etc/sing-box/config.json 占位配置 + systemd。
+#      装的是面板发布页那份：与官方同版本同功能，额外编入 with_v2ray_api ——
+#      官方 release 不含该插件，而面板的流量统计与配额全靠它。
 #   3. 应用网络内核调优（BBR + fq + 缓冲区 + somaxconn 等）
 #   4. 最后打印一段「服务器」信息，照着填进面板即可接管
 #
@@ -78,9 +80,39 @@ SYSCTL
   ok "内核调优完成（拥塞控制：$cc）"
 }
 
+# 面板发布页托管的 sing-box —— 与官方同版本、同功能，额外编入 with_v2ray_api。
+# 官方 release 不含这个插件（上游文档：V2Ray API is not included by default），
+# 而面板正是靠它读取每个用户的流量：装官方版的节点，流量永远统计不到、配额
+# 也永远不会生效，且界面上看不出异常（流量恒为 0）。
+QZ_REPO=${QZ_REPO:-mllt992/qing-zhou}
+
 install_singbox() {
-  local arch tag ver url tmp
+  local arch url tmp
   arch=$(arch_tag)
+  url="https://github.com/${QZ_REPO}/releases/latest/download/sing-box-linux-${arch}"
+  info "下载 sing-box（含流量统计插件，$arch）…"
+  tmp=$(mktemp -d)
+  if curl -fL# "$url" -o "$tmp/sing-box"; then
+    install -m755 "$tmp/sing-box" "$BIN"
+    rm -rf "$tmp"
+    ok "sing-box 已安装 → $BIN ($("$BIN" version | head -1))"
+  else
+    warn "从面板发布页下载失败，回退到 sing-box 官方版本"
+    install_singbox_upstream "$arch" "$tmp"
+  fi
+  # 装完就验一次：这是"流量统计能不能用"的唯一判据，装错了要当场看见，
+  # 而不是等到几天后发现所有用户流量都是 0。
+  if "$BIN" version | grep -q with_v2ray_api; then
+    ok "流量统计插件（v2ray_api）已就绪"
+  else
+    warn "该 sing-box 不含 v2ray_api 插件 —— 本节点的流量将无法统计、配额不会生效。"
+    warn "请改用面板发布页的版本：https://github.com/${QZ_REPO}/releases/latest"
+  fi
+}
+
+# 回退路径：官方 release。能跑代理，但统计不了流量。
+install_singbox_upstream() {
+  local arch=$1 tmp=$2 tag ver url
   info "查询 sing-box 最新版本…"
   tag=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
         | grep -oE '"tag_name":\s*"v[^"]+"' | head -1 | grep -oE 'v[0-9.]+') \
@@ -88,7 +120,6 @@ install_singbox() {
   ver=${tag#v}
   url="https://github.com/SagerNet/sing-box/releases/download/${tag}/sing-box-${ver}-linux-${arch}.tar.gz"
   info "下载 $tag ($arch)…"
-  tmp=$(mktemp -d)
   curl -fL# "$url" -o "$tmp/sb.tgz" || die "下载失败：$url"
   tar -xzf "$tmp/sb.tgz" -C "$tmp"
   install -m755 "$tmp/sing-box-${ver}-linux-${arch}/sing-box" "$BIN"
@@ -159,8 +190,17 @@ TXT
 main() {
   if cur=$(detect_existing) && [ "$FORCE" = 0 ]; then
     ok "检测到已安装 sing-box：$cur （$("$cur" version 2>/dev/null | head -1)）"
-    info "如需重装：在命令后加 --force"
-    [ "$cur" = "$BIN" ] || warn "注意：面板默认二进制路径是 $BIN，当前为 $cur，填面板时请用实际路径"
+    # 已装的很可能是官方版 —— 它不含 v2ray_api，装着能跑但流量统计和配额
+    # 全都不生效，而且面板界面上看不出异常。这种情况必须当场说清楚，
+    # 不能因为"已安装"就静默跳过。
+    if "$cur" version 2>/dev/null | grep -q with_v2ray_api; then
+      ok "流量统计插件（v2ray_api）已就绪"
+      info "如需重装：在命令后加 --force"
+    else
+      warn "但该 sing-box 不含 v2ray_api 插件 —— 本节点流量无法统计、配额不会生效（界面上会一直显示 0）"
+      warn "请重跑本脚本并加 --force 换成面板发布页的版本："
+      warn "  curl -fsSL <面板地址>/install-singbox.sh | bash -s -- --force"
+    fi
     apply_tuning
     write_placeholder_conf
     write_unit

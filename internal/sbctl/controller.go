@@ -76,8 +76,22 @@ type Controller struct {
 	// able to deploy to that node at all), and must be skipped when collecting
 	// stats so it doesn't log a refused connection every minute.
 	capMu    sync.Mutex
-	statsCap map[int64]bool
+	statsCap map[int64]statsProbe
 }
+
+// statsProbe is a cached capability answer plus when it was taken.
+type statsProbe struct {
+	ok bool
+	at time.Time
+}
+
+// negativeProbeTTL re-probes nodes that answered "no". Upgrading a node's
+// sing-box is exactly how an operator fixes an unmeterable node, and without
+// an expiry the panel would keep ignoring that node until someone restarted the
+// panel or hit 重建 on it — the fix would look like it did nothing.
+// A positive answer is kept for the process lifetime: the plugin does not
+// disappear from a binary on its own.
+const negativeProbeTTL = 15 * time.Minute
 
 // New builds a Controller. baseConfig is the log/dns/route/outbounds template
 // JSON; v2rayListen is the gRPC stats listen address embedded into the config.
@@ -85,7 +99,7 @@ func New(st ConfigStore, mgr Applier, stats StatsFetcher, baseConfig, v2rayListe
 	return &Controller{
 		st: st, mgr: mgr, stats: stats, baseConfig: baseConfig, v2rayListen: v2rayListen,
 		restartFailed: map[int64]bool{},
-		statsCap:      map[int64]bool{},
+		statsCap:      map[int64]statsProbe{},
 	}
 }
 
@@ -253,9 +267,9 @@ func (c *Controller) statsListenFor(sv *store.Server) string {
 // recovers on its own.
 func (c *Controller) statsSupported(sv *store.Server) bool {
 	c.capMu.Lock()
-	if ok, seen := c.statsCap[sv.ID]; seen {
+	if p, seen := c.statsCap[sv.ID]; seen && (p.ok || time.Since(p.at) < negativeProbeTTL) {
 		c.capMu.Unlock()
-		return ok
+		return p.ok
 	}
 	c.capMu.Unlock()
 
@@ -276,7 +290,7 @@ func (c *Controller) statsSupported(sv *store.Server) bool {
 			sv.ID, sv.Name, strings.Join(strings.Fields(version), " "))
 	}
 	c.capMu.Lock()
-	c.statsCap[sv.ID] = ok
+	c.statsCap[sv.ID] = statsProbe{ok: ok, at: time.Now()}
 	c.capMu.Unlock()
 	return ok
 }

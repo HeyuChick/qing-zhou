@@ -112,6 +112,42 @@ jobs:
           go run ./tools/sign out/qingzhou-linux-amd64 out/qingzhou-linux-arm64
           ls -l out/*.sig
 
+      # sing-box, built WITH the v2ray_api plugin.
+      #
+      # This has to be built rather than downloaded: official sing-box releases
+      # do not include with_v2ray_api ("V2Ray API is not included by default" —
+      # upstream build-from-source docs), and that plugin is the only way the
+      # panel can read per-user traffic off a node. Installing an official
+      # release therefore produces a node whose traffic is never metered and
+      # whose quotas are never enforced, silently — the panel just shows zero.
+      #
+      # The tag list is exactly what official 1.13.x ships, plus with_v2ray_api
+      # and the with_grpc it needs, so nothing an existing config relies on
+      # (TUN/gvisor, QUIC for hysteria/tuic, uTLS for Reality...) is lost.
+      - name: Build sing-box with v2ray_api
+        env:
+          SB_VERSION: v1.13.14
+        run: |
+          set -e
+          git clone --depth 1 --branch "$SB_VERSION" https://github.com/SagerNet/sing-box.git /tmp/sing-box
+          cd /tmp/sing-box
+          TAGS="with_gvisor,with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api,with_tailscale,with_ccm,with_ocm,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0"
+          for arch in amd64 arm64; do
+            echo "== sing-box linux/$arch =="
+            # -checklinkname=0 is required: sing-box's badtls reaches into
+            # crypto/tls internals via //go:linkname, which the linker rejects by
+            # default on current Go ("invalid reference to
+            # crypto/tls.(*Conn).handlePostHandshakeMessage").
+            GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+              -tags "$TAGS" \
+              -ldflags "-s -w -checklinkname=0 -X github.com/sagernet/sing-box/constant.Version=${SB_VERSION#v}" \
+              -o "$GITHUB_WORKSPACE/out/sing-box-linux-$arch" ./cmd/sing-box
+          done
+          cd "$GITHUB_WORKSPACE"
+          # Fail the release rather than ship a binary that silently can't meter.
+          ./out/sing-box-linux-amd64 version | tee /dev/stderr | grep -q with_v2ray_api \
+            || { echo "::error::built sing-box lacks with_v2ray_api"; exit 1; }
+
       - name: Checksums
         run: (cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
@@ -125,4 +161,6 @@ jobs:
             out/qingzhou-linux-*.sig
             out/probe-linux-amd64
             out/probe-linux-arm64
+            out/sing-box-linux-amd64
+            out/sing-box-linux-arm64
             out/SHA256SUMS.txt
