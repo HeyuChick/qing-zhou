@@ -21,9 +21,9 @@ func testKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 // withKey swaps the compiled-in public key for the duration of a test.
 func withKey(t *testing.T, pub ed25519.PublicKey) {
 	t.Helper()
-	orig := releasePublicKeyOverride
-	releasePublicKeyOverride = base64.StdEncoding.EncodeToString(pub)
-	t.Cleanup(func() { releasePublicKeyOverride = orig })
+	orig := ReleasePublicKey
+	ReleasePublicKey = base64.StdEncoding.EncodeToString(pub)
+	t.Cleanup(func() { ReleasePublicKey = orig })
 }
 
 // The digest the updater checks comes from the same API response as the download
@@ -69,9 +69,9 @@ func TestVerifySignature_AcceptsGenuineRejectsForged(t *testing.T) {
 // caller only invokes it when signingEnabled(), and a silent pass here would be
 // the wrong default if that ever changed.
 func TestVerifySignature_NoKeyIsAnError(t *testing.T) {
-	orig := releasePublicKeyOverride
-	releasePublicKeyOverride = ""
-	t.Cleanup(func() { releasePublicKeyOverride = orig })
+	orig := ReleasePublicKey
+	ReleasePublicKey = ""
+	t.Cleanup(func() { ReleasePublicKey = orig })
 
 	if signingEnabled() {
 		t.Fatal("signing should be disabled with an empty key")

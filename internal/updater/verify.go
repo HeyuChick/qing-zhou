@@ -11,36 +11,28 @@ import (
 	"qingzhou/internal/version"
 )
 
-// ReleasePublicKey is the base64 (std encoding) ed25519 public key that release
-// assets are signed with. Compiled in, so it is part of the artifact an operator
-// already trusts rather than something fetched at update time.
+// ReleasePublicKey is the base64 ed25519 public key that release assets are
+// signed with. It is injected at build time:
 //
-// WHY: the sha256 digest the updater checks comes from the same GitHub API
-// response as the download URL, so it proves the bytes arrived intact — not that
-// the project produced them. Anyone who can publish a release (a compromised
-// repo or maintainer account) can therefore ship arbitrary code to every panel,
-// which then replaces its own binary and execs it. A signature made with a key
-// that never touches CI is what closes that.
+//	go build -ldflags "-X qingzhou/internal/updater.ReleasePublicKey=<base64>"
 //
-// Empty disables verification. It ships empty so upgrading to this build does
-// not break updates for a deployment whose release pipeline does not sign yet.
-// To turn it on:
+// WHY IT EXISTS: the sha256 digest the updater checks comes from the same GitHub
+// API response as the download URL, so it proves the bytes arrived intact — not
+// that this project produced them. Anyone able to publish a release (a
+// compromised repo or maintainer account) could otherwise ship arbitrary code to
+// every panel, which replaces its own binary and execs it. Only a signature made
+// with a key that never touches CI closes that.
 //
-//  1. Generate a key offline (keep the private half off CI):
-//     openssl genpkey -algorithm ed25519 -out release.key
-//     openssl pkey -in release.key -pubout -outform DER | tail -c 32 | base64
-//  2. Paste the printed value here and rebuild.
-//  3. Have the release job publish "<asset>.sig" next to each binary: the raw
-//     64-byte ed25519 signature over the asset's bytes, base64 or hex encoded.
+// WHY IT IS EMPTY BY DEFAULT: `git clone && go build` has to just work. A
+// source build gets no key and therefore no signature requirement — exactly the
+// behaviour before signing existed. The official release workflow injects the
+// key, so published binaries do enforce it. Nobody has to generate or manage a
+// key to use, fork, or hack on this project; only whoever publishes releases
+// does, and .github/workflows/release.yml wires that up from one repo secret.
 //
-// Once non-empty, an unsigned or wrongly-signed release is refused — the
-// fail-closed direction, so a stripped signature cannot silently downgrade the
-// check.
-const ReleasePublicKey = ""
-
-// releasePublicKeyOverride is the key actually consulted. It exists so tests can
-// exercise both the signed and unsigned paths; production never reassigns it.
-var releasePublicKeyOverride = ReleasePublicKey
+// Once non-empty this is fail-closed: a release with no signature asset, or one
+// that doesn't verify, is refused rather than falling back to the digest alone.
+var ReleasePublicKey = ""
 
 // signatureAssetName is the asset holding the detached signature for name.
 func signatureAssetName(name string) string { return name + ".sig" }
@@ -70,7 +62,7 @@ func verifySignature(binary, sig []byte) error {
 }
 
 func releasePublicKey() (ed25519.PublicKey, error) {
-	s := strings.TrimSpace(releasePublicKeyOverride)
+	s := strings.TrimSpace(ReleasePublicKey)
 	if s == "" {
 		return nil, errNoPublicKey
 	}
@@ -140,7 +132,7 @@ func hexVal(c byte) (byte, error) {
 }
 
 // signingEnabled reports whether a public key is compiled in.
-func signingEnabled() bool { return strings.TrimSpace(releasePublicKeyOverride) != "" }
+func signingEnabled() bool { return strings.TrimSpace(ReleasePublicKey) != "" }
 
 // maxAssetBytes caps a release download. The asset size GitHub reports only
 // drove the progress bar, so nothing bounded the write: a wrong or hostile repo

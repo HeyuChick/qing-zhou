@@ -168,6 +168,8 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 
 不设 `QZ_WEB_DIR` 时使用内嵌前端资源，**单文件即可部署**。注意 `frontend/dist` 是在 `go build` 时被内嵌的——改了前端只重编 Go 是没用的，要先 `vite build`。
 
+自己编译出来的二进制不校验发布签名（见下），无需任何额外配置。
+
 ### 三、最小可用部署（单机把面板 + 落地一起跑）
 
 ```bash
@@ -286,6 +288,25 @@ go vet ./...     # 静态检查通过
 ```
 
 数据库为自动建表 + 幂等迁移，改动 schema 请在 `internal/store/migrate.go` 中以幂等方式追加。
+
+### 发布签名（只有发版的人需要看）
+
+面板的「在线更新」会用编进二进制的公钥校验新版本的签名。GitHub 给出的 sha256
+只能证明下载没损坏，不能证明是本项目发的——有了签名，即使发布渠道被攻破也推不动
+恶意版本。
+
+**普通使用者和贡献者不用管这一节**：`go build` 出来的二进制没有公钥，就不校验签名，
+和以前完全一样。
+
+自己 fork 后要发版，一次性配置：
+
+```bash
+go run ./tools/sign -genkey     # 在自己机器上生成，私钥不要进 CI
+```
+
+把私钥存为仓库 Actions secret `RELEASE_SIGNING_KEY`，公钥存为 `RELEASE_PUBLIC_KEY`。
+`.github/workflows/release.yml` 会自动把公钥编进二进制、给产物签名并上传 `.sig`。
+两个 secret 都不配时 workflow 照常发布，只是产物不带签名。
 
 ---
 

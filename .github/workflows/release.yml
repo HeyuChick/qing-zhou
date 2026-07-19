@@ -55,21 +55,65 @@ jobs:
         with:
           go-version: "1.25"
 
+      # Release signing. The sha256 digest GitHub publishes only proves an asset
+      # downloaded intact — it comes from the same API response as the download
+      # URL, so it says nothing about who produced the bytes. Without a
+      # signature, anyone who can publish a release here can ship arbitrary code
+      # to every panel, which replaces its own binary and re-execs.
+      #
+      # Set up once: `go run ./tools/sign -genkey`, put the private key in the
+      # repo secret RELEASE_SIGNING_KEY and the public key in RELEASE_PUBLIC_KEY.
+      # With no secret configured (a fork, or before setup) this step is skipped
+      # and the build behaves exactly as it did before signing existed.
+      - name: Resolve signing key
+        id: sign
+        env:
+          PUBKEY: ${{ secrets.RELEASE_PUBLIC_KEY }}
+        run: |
+          if [ -n "$PUBKEY" ]; then
+            echo "pubkey=$PUBKEY" >> "$GITHUB_OUTPUT"
+            echo "Release signing enabled"
+          else
+            echo "pubkey=" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_PUBLIC_KEY is not set — assets will be unsigned and panels will not verify authorship"
+          fi
+
       - name: Build panel + probe (linux amd64/arm64)
         env:
           TAG: ${{ steps.ver.outputs.tag }}
+          PUBKEY: ${{ steps.sign.outputs.pubkey }}
         run: |
           set -e
           mkdir -p out
           LDFLAGS="-s -w -X qingzhou/internal/version.Version=${TAG}"
+          if [ -n "$PUBKEY" ]; then
+            LDFLAGS="$LDFLAGS -X qingzhou/internal/updater.ReleasePublicKey=${PUBKEY}"
+          fi
           for arch in amd64 arm64; do
             echo "== panel linux/$arch =="
             GOOS=linux GOARCH=$arch go build -ldflags "$LDFLAGS" -o "out/qingzhou-linux-$arch" .
             echo "== probe linux/$arch =="
             GOOS=linux GOARCH=$arch go build -ldflags "-s -w" -o "out/probe-linux-$arch" ./cmd/probe
           done
-          (cd out && sha256sum * > SHA256SUMS.txt)
           ls -lh out
+
+      # Sign AFTER building: the signature covers the exact bytes uploaded.
+      - name: Sign panel binaries
+        if: steps.sign.outputs.pubkey != ''
+        env:
+          QZ_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -e
+          if [ -z "$QZ_SIGNING_KEY" ]; then
+            echo "RELEASE_PUBLIC_KEY is set but RELEASE_SIGNING_KEY is not — panels built here would" >&2
+            echo "require a signature that this job cannot produce, bricking in-panel updates." >&2
+            exit 1
+          fi
+          go run ./tools/sign out/qingzhou-linux-amd64 out/qingzhou-linux-arm64
+          ls -l out/*.sig
+
+      - name: Checksums
+        run: (cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
@@ -78,6 +122,7 @@ jobs:
           files: |
             out/qingzhou-linux-amd64
             out/qingzhou-linux-arm64
+            out/qingzhou-linux-*.sig
             out/probe-linux-amd64
             out/probe-linux-arm64
             out/SHA256SUMS.txt
