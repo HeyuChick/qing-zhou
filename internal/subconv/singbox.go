@@ -175,6 +175,14 @@ func singboxOutbound(p *Proxy) map[string]any {
 		if net := p.param("type"); net == "ws" {
 			o["transport"] = sbWS(p.param("path"), p.param("host"), atoi(p.param("max_early_data")), p.param("early_data_header_name"))
 		}
+		// UDP over VLESS requires an agreed packet encoding. Leaving it unset
+		// makes each client fall back to its own default, which breaks UDP
+		// (and so QUIC downloads) while leaving TCP intact.
+		if enc := p.param("packetEncoding", "packet_encoding"); enc != "" {
+			o["packet_encoding"] = enc
+		} else {
+			o["packet_encoding"] = "xudp"
+		}
 		o["tls"] = sbTLS(p, p.param("security"))
 	case "vmess":
 		o["type"] = "vmess"

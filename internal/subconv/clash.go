@@ -104,6 +104,14 @@ func clashProxy(p *Proxy) map[string]any {
 		m["type"] = "vless"
 		m["uuid"] = p.UUID
 		m["udp"] = true
+		// udp: true alone only opts into UDP relay; VLESS still needs the packet
+		// encoding pinned or UDP silently fails while TCP works. xudp mirrors
+		// packet_encoding on the sing-box side.
+		if enc := p.param("packetEncoding", "packet_encoding"); enc == "" || enc == "xudp" {
+			m["xudp"] = true
+		} else if enc == "packetaddr" {
+			m["packet-addr"] = true
+		}
 		network := p.param("type")
 		if network == "" {
 			network = "tcp"

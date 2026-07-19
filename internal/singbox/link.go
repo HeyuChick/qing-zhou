@@ -164,6 +164,11 @@ func BuildShareLink(p LinkParams) string {
 				q = append(q, "allowInsecure=1")
 			}
 		}
+		// VLESS is the only protocol here whose UDP needs an explicit packet
+		// encoding; without it each client picks its own default and UDP fails
+		// silently while TCP stays healthy (QUIC downloads hang, browsing is
+		// fine). Pin xudp so both ends agree.
+		q = append(q, "packetEncoding=xudp")
 		q = append(q, p.tuningQuery(!visionActive)...) // mux is invalid with vision flow
 		return "vless://" + esc(p.UUID) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "trojan":
