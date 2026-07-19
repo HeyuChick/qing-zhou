@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -229,16 +230,106 @@ func DecodeLinks(blob string) []string {
 	return out
 }
 
+// volatileParams are client-dial tuning knobs a share link may carry that say
+// nothing about *which* node it is. 轻舟 mirrors the inbound's current settings
+// onto every self-built link, so they change whenever an admin retunes a node —
+// or whenever 轻舟 starts emitting a key it didn't before. Excluding them keeps
+// NodeKey pointing at the same node across those changes.
+var volatileParams = map[string]bool{
+	"packetEncoding": true, "packet_encoding": true,
+	"tfo": true, "mptcp": true, "mux": true,
+	"brutal_up": true, "brutal_down": true,
+}
+
 // NodeKey returns a stable per-node identifier derived from a share link,
 // ignoring the #remark (which carries volatile bits like an airport's live
-// speed or the user's remaining-traffic suffix). Used so a user can disable
-// specific nodes without storing the credential-bearing link a second time.
+// speed or the user's remaining-traffic suffix) and the tuning params above.
+// Used so a user can disable specific nodes without storing the
+// credential-bearing link a second time.
+//
+// Self-built links are re-rendered from the sing-box config on every request
+// rather than stored, so anything the hash covers is a key the user's blocklist
+// is pinned to — see NodeDisabled for the compatibility read path.
 func NodeKey(link string) string {
+	return hashKey(canonicalLink(link))
+}
+
+// legacyNodeKey is NodeKey as it hashed before volatile params were excluded:
+// the whole link minus its fragment. Blocklist rows written by older builds
+// still carry these, and the links themselves are gone, so the only way to
+// honor those rows is to recompute the old key from the live link.
+func legacyNodeKey(link string) string {
+	return hashKey(stripFragment(link))
+}
+
+// NodeKeys returns every key a link may already be stored under in a blocklist:
+// the current one first, then the legacy one when it differs. Un-blocking has to
+// clear all of them — deleting only the current key would leave a row written by
+// an older build behind, and the node would stay hidden however many times the
+// user flips the toggle.
+func NodeKeys(link string) []string {
+	k, legacy := NodeKey(link), legacyNodeKey(link)
+	if k == legacy {
+		return []string{k}
+	}
+	return []string{k, legacy}
+}
+
+// NodeDisabled reports whether link is in a user's blocklist, accepting both
+// the current key and the legacy one. Always resolve a link against a blocklist
+// through this rather than indexing the map with NodeKey directly.
+func NodeDisabled(disabled map[string]bool, link string) bool {
+	if len(disabled) == 0 {
+		return false
+	}
+	for _, k := range NodeKeys(link) {
+		if disabled[k] {
+			return true
+		}
+	}
+	return false
+}
+
+func hashKey(s string) string {
+	sum := sha1.Sum([]byte(s))
+	return hex.EncodeToString(sum[:8]) // 16 hex chars
+}
+
+func stripFragment(link string) string {
 	if i := strings.LastIndex(link, "#"); i >= 0 {
 		link = link[:i]
 	}
-	sum := sha1.Sum([]byte(strings.TrimSpace(link)))
-	return hex.EncodeToString(sum[:8]) // 16 hex chars
+	return strings.TrimSpace(link)
+}
+
+// canonicalLink drops the #remark and the volatile tuning params, then sorts
+// what's left so param order can't shift the key either. Params are kept in
+// their raw (still-escaped) form — reserialising through url.Values would make
+// the key sensitive to escaping style instead. Links with no query (vmess://
+// carries a base64 JSON blob, whose alphabet has no '?') are hashed whole.
+func canonicalLink(link string) string {
+	s := stripFragment(link)
+	i := strings.IndexByte(s, '?')
+	if i < 0 {
+		return s
+	}
+	base, rawQuery := s[:i], s[i+1:]
+	parts := strings.Split(rawQuery, "&")
+	kept := make([]string, 0, len(parts))
+	for _, kv := range parts {
+		k := kv
+		if j := strings.IndexByte(kv, '='); j >= 0 {
+			k = kv[:j]
+		}
+		if !volatileParams[k] {
+			kept = append(kept, kv)
+		}
+	}
+	if len(kept) == 0 {
+		return base
+	}
+	sort.Strings(kept)
+	return base + "?" + strings.Join(kept, "&")
 }
 
 // LinkRemark returns the (url-decoded) #fragment remark of a share link.

@@ -16,6 +16,37 @@ func (a *API) userProxies(u *store.User) []*subconv.Proxy {
 	return subconv.ParseLinks(a.collectLinks(u))
 }
 
+// expandEnableKeys maps the keys a client asked to re-enable onto every key the
+// blocklist row might actually be stored under. Clients only ever see the
+// current NodeKey, so without this a row written under the legacy key survives
+// the delete and the node stays hidden. Unknown keys are passed through: a key
+// for a node no longer in the user's subscription should still delete its row.
+func (a *API) expandEnableKeys(u *store.User, keys []string) []string {
+	if len(keys) == 0 {
+		return keys
+	}
+	alias := map[string][]string{}
+	for _, e := range a.computeNodeEntries(u) {
+		all := subconv.NodeKeys(e.Link)
+		alias[all[0]] = all
+	}
+	out := make([]string, 0, len(keys))
+	seen := map[string]bool{}
+	for _, k := range keys {
+		expanded, ok := alias[k]
+		if !ok {
+			expanded = []string{k}
+		}
+		for _, e := range expanded {
+			if !seen[e] {
+				seen[e] = true
+				out = append(out, e)
+			}
+		}
+	}
+	return out
+}
+
 // GET /api/user/nodes — the nodes in the user's current subscription, each with
 // a stable key, group attribution, and the user's own enable/disable state.
 func (a *API) handleUserNodes(w http.ResponseWriter, r *http.Request) {
@@ -32,9 +63,10 @@ func (a *API) handleUserNodes(w http.ResponseWriter, r *http.Request) {
 		if err != nil || p == nil {
 			continue
 		}
-		k := subconv.NodeKey(e.Link)
+		// The key handed to the client is always the current one, so a toggle
+		// round-trip rewrites a legacy row under the new key.
 		out = append(out, J{"name": p.Name, "protocol": p.Protocol, "server": p.Server, "port": p.Port,
-			"key": k, "disabled": disabled[k], "group": e.GroupName})
+			"key": subconv.NodeKey(e.Link), "disabled": subconv.NodeDisabled(disabled, e.Link), "group": e.GroupName})
 	}
 	ok(w, out)
 }
@@ -54,7 +86,12 @@ func (a *API) handleUserToggleNode(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "参数错误")
 		return
 	}
-	if err := a.st.SetNodeDisabled(u.ID, req.Key, req.Disabled); err != nil {
+	if req.Disabled {
+		if err := a.st.SetNodeDisabled(u.ID, req.Key, true); err != nil {
+			fail(w, http.StatusInternalServerError, "保存失败")
+			return
+		}
+	} else if err := a.st.ApplyNodePrefs(u.ID, nil, a.expandEnableKeys(u, []string{req.Key})); err != nil {
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
@@ -97,7 +134,7 @@ func (a *API) handleUserBulkNodes(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "参数错误")
 		return
 	}
-	if err := a.st.ApplyNodePrefs(u.ID, req.Disable, req.Enable); err != nil {
+	if err := a.st.ApplyNodePrefs(u.ID, req.Disable, a.expandEnableKeys(u, req.Enable)); err != nil {
 		fail(w, http.StatusInternalServerError, "操作失败")
 		return
 	}
@@ -152,9 +189,9 @@ func (a *API) handleUserNodesPing(w http.ResponseWriter, r *http.Request) {
 		if err != nil || p == nil {
 			continue
 		}
-		k := subconv.NodeKey(entries[i].Link)
 		out[i] = pingResult{Name: p.Name, Protocol: p.Protocol, Server: p.Server, Port: p.Port,
-			Key: k, Disabled: disabled[k], Group: entries[i].GroupName}
+			Key: subconv.NodeKey(entries[i].Link), Disabled: subconv.NodeDisabled(disabled, entries[i].Link),
+			Group: entries[i].GroupName}
 		if udpProto[p.Protocol] {
 			out[i].UDP = true
 			continue

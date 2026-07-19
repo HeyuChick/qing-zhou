@@ -419,7 +419,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	groups := map[string]string{}
 	if serviceable {
 		for _, e := range a.collectEntries(u) {
-			if len(disabled) > 0 && disabled[subconv.NodeKey(e.Link)] {
+			if subconv.NodeDisabled(disabled, e.Link) {
 				continue
 			}
 			links = append(links, e.Link)
