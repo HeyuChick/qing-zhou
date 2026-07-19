@@ -31,11 +31,25 @@ type autoGroups struct {
 	byGroup []nodeGroup // panel groups worth their own auto-select group
 }
 
-// dedupeNames mutates each proxy's Name so the whole set is unique. Url-test and
-// selector groups reference nodes by name/tag, so duplicates would silently drop
-// or alias nodes. Collisions get a " #N" suffix; empties fall back to server.
+// reservedTags are the outbound tags the renderers emit unconditionally: the
+// two selectors plus the built-in direct outbound each client defines. Nothing
+// derived from a link may take one of these — a node named "direct" would give
+// sing-box two outbounds tagged "direct", and it rejects the *whole* config on a
+// duplicate tag rather than dropping the one node. Node names come from the
+// #fragment, so a remote subscription can carry one without the admin's help.
+func reservedTags() map[string]bool {
+	return map[string]bool{
+		tagProxy: true, tagAuto: true, grpSelectClash: true, grpAutoClash: true,
+		"direct": true, "DIRECT": true, "GLOBAL": true, "REJECT": true, "PASS": true,
+	}
+}
+
+// dedupeNames mutates each proxy's Name so the whole set is unique and free of
+// reserved tags. Url-test and selector groups reference nodes by name/tag, so
+// duplicates would silently drop or alias nodes. Collisions get a " #N" suffix;
+// empties fall back to server.
 func dedupeNames(ps []*Proxy) {
-	seen := map[string]bool{}
+	seen := reservedTags()
 	for _, p := range ps {
 		n := p.Name
 		if n == "" {
@@ -88,10 +102,7 @@ func buildAutoGroups(ps []*Proxy) autoGroups {
 	// must not collide with a reserved selector tag, DIRECT, or a node name — else
 	// the client sees two different things under one tag (duplicate/omitted proxy
 	// or a self-referencing selector). Suffix any colliding group name.
-	used := map[string]bool{
-		tagProxy: true, tagAuto: true, grpSelectClash: true, grpAutoClash: true,
-		"direct": true, "DIRECT": true, "GLOBAL": true,
-	}
+	used := reservedTags()
 	for _, n := range ag.all {
 		used[n] = true
 	}

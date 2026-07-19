@@ -178,9 +178,15 @@ func singboxOutbound(p *Proxy) map[string]any {
 		// UDP over VLESS requires an agreed packet encoding. Leaving it unset
 		// makes each client fall back to its own default, which breaks UDP
 		// (and so QUIC downloads) while leaving TCP intact.
-		if enc := p.param("packetEncoding", "packet_encoding"); enc != "" {
-			o["packet_encoding"] = enc
-		} else {
+		//
+		// Whitelisted, not passed through: these params come from links an admin
+		// pasted or a remote subscription served, and sing-box rejects an
+		// unknown packet_encoding by failing to load the *whole* config — one
+		// bad node would take down every subscriber's profile.
+		switch p.param("packetEncoding", "packet_encoding") {
+		case "packetaddr":
+			o["packet_encoding"] = "packetaddr"
+		default:
 			o["packet_encoding"] = "xudp"
 		}
 		o["tls"] = sbTLS(p, p.param("security"))
@@ -328,11 +334,10 @@ func injectSingboxTunExclude(doc map[string]any, proxies []*Proxy) {
 		if ib["type"] != "tun" {
 			continue
 		}
-		existing, _ := ib["exclude_address"].([]string)
-		present := map[string]bool{}
-		for _, e := range existing {
-			present[e] = true
-		}
+		// Same []any-not-[]string trap as the inbounds array above: a template
+		// arrives via json.Unmarshal, so a naked []string assertion always fails
+		// and the admin's own exclusions get overwritten with just the node IPs.
+		existing, present := stringList(ib["exclude_address"])
 		for _, ip := range sortedKeys(seen) {
 			cidr := ensureCIDR(ip)
 			if !present[cidr] {

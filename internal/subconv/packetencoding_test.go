@@ -69,6 +69,31 @@ func TestVlessPacketEncodingExplicitOverride(t *testing.T) {
 	}
 }
 
+// TestVlessPacketEncodingRejectsUnknown pins the whitelist: an unrecognised
+// encoding (some clients emit packetEncoding=none) must fall back to xudp, not
+// reach the config. sing-box treats an unknown packet_encoding as a fatal
+// config error, so passing one through would break the whole subscription for
+// every user holding that node — and these links come from admin-pasted input
+// and remote subscriptions.
+func TestVlessPacketEncodingRejectsUnknown(t *testing.T) {
+	for _, enc := range []string{"none", "None", "packet-addr", "XUDP", "packetaddr2"} {
+		link := "vless://u@1.2.3.4:443?security=tls&sni=a.com&packetEncoding=" + enc + "#bad"
+
+		sb, _ := Singbox(ParseLinks([]string{link}), "")
+		if !strings.Contains(sb, `"packet_encoding": "xudp"`) {
+			t.Errorf("enc=%q should fall back to xudp:\n%s", enc, sb)
+		}
+		if strings.Contains(sb, `"packet_encoding": "`+enc+`"`) {
+			t.Errorf("enc=%q leaked into the sing-box config:\n%s", enc, sb)
+		}
+
+		clash, _ := Clash(ParseLinks([]string{link}), "")
+		if !strings.Contains(clash, "xudp: true") {
+			t.Errorf("enc=%q should fall back to xudp in clash:\n%s", enc, clash)
+		}
+	}
+}
+
 // TestPacketEncodingIsVlessOnly guards against leaking the option into
 // protocols that carry UDP natively and would reject it.
 func TestPacketEncodingIsVlessOnly(t *testing.T) {

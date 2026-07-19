@@ -58,8 +58,18 @@ func Surge(proxies []*Proxy, subURL string) string {
 }
 
 // surgeName strips characters Surge treats as delimiters in proxy declarations.
+//
+// Newlines matter as much as the delimiters: the Surge renderer builds its
+// output by hand (the Clash/sing-box ones go through yaml/json.Marshal, which
+// escapes for us), and a node name is url-decoded out of the #fragment — so a
+// remark carrying %0A would end the proxy line early and let the rest of the
+// name become its own directive, e.g. a FINAL rule rewriting the user's routing.
+// A leading # or ; would comment the whole line out instead, silently dropping a
+// node the proxy groups still reference. Interior # is left alone: dedupeNames
+// legitimately appends " #2" suffixes.
 func surgeName(s string) string {
-	s = strings.NewReplacer(",", " ", "=", " ").Replace(s)
+	s = strings.NewReplacer(",", " ", "=", " ", "\n", " ", "\r", " ").Replace(s)
+	s = strings.TrimLeft(strings.TrimSpace(s), "#;")
 	if s = strings.TrimSpace(s); s == "" {
 		s = "node"
 	}

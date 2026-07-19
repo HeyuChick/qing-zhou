@@ -107,10 +107,14 @@ func clashProxy(p *Proxy) map[string]any {
 		// udp: true alone only opts into UDP relay; VLESS still needs the packet
 		// encoding pinned or UDP silently fails while TCP works. xudp mirrors
 		// packet_encoding on the sing-box side.
-		if enc := p.param("packetEncoding", "packet_encoding"); enc == "" || enc == "xudp" {
-			m["xudp"] = true
-		} else if enc == "packetaddr" {
+		// Whitelisted the same way as the sing-box side, so an unrecognised value
+		// lands on the same encoding in both outputs instead of one client
+		// getting xudp and the other nothing.
+		switch p.param("packetEncoding", "packet_encoding") {
+		case "packetaddr":
 			m["packet-addr"] = true
+		default:
+			m["xudp"] = true
 		}
 		network := p.param("type")
 		if network == "" {
