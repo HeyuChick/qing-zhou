@@ -157,6 +157,15 @@ dns:
     - "time.*.com"
     - "ntp.*.com"
     - "+.pool.ntp.org"
+    # These STUN entries keep NAT traversal working for games and voice/video
+    # apps — they are NOT a WebRTC-leak defense, and nothing in this file can
+    # be. A browser gathers WebRTC host candidates by enumerating OS network
+    # interfaces directly: no packet is sent, so there is nothing for TUN to
+    # capture or for a rule to route. Private IPv4 candidates are mDNS-masked
+    # by modern browsers, but a global IPv6 address on the physical NIC is not,
+    # and a leak-test page will read it via JS. Fix it in the browser
+    # (Firefox media.peerconnection.ice.default_address_only=true; Chrome
+    # WebRtcIPHandling=disable_non_proxied_udp) or disable IPv6 on the adapter.
     - "+.stun.*.*"
     - "+.stun.*.*.*"
     - "+.stun.*.*.*.*"
@@ -175,6 +184,19 @@ dns:
   #
   # That is exactly the split we want — fake v6 for tunneled traffic, no real v6
   # for the direct/local names in the filter list above.
+  #
+  # KNOWN COST, and the first thing to check if a domain node is unreachable:
+  # injectNodeDomains appends every domain-based node's hostname to the
+  # fake-ip-filter list above, which puts those hostnames on this same
+  # withResolver path — so their AAAA answers are emptied too. A node whose
+  # domain is dual-stack is fine (it falls back to the A record), but a node
+  # whose domain has ONLY an AAAA record cannot be resolved at all, and the
+  # client reports it as a plain connection failure with nothing pointing here.
+  # The tradeoff is deliberate: AAAA-only node domains are rare, whereas the
+  # filter list's direct/local names exist on every client. mihomo has no
+  # per-domain v6 switch, so the alternative is flipping this to true and
+  # handing real IPv6 to *.lan / NTP / Xbox as well. Node domains must have an
+  # A record.
   ipv6: false
   default-nameserver:
     - 223.5.5.5
@@ -236,7 +258,14 @@ tun:
   # (fdfe:dcba:9876::1/126) already matches fake-ip-range6 above and so is left
   # implicit.
   #
-  # route-exclude-address below stays IPv4-only on purpose. auto-route does
+  # The route-exclude-address list written below is IPv4-only on purpose, but
+  # the RENDERED config is not: injectRouteExclude appends each node's own
+  # server IP, and ensureCIDR gives v6 literals a /128 — so a v6 node produces
+  # a v6 entry here. That is wanted (it is the anti-loop carve-out for the
+  # node's own address) and it is safe, because a /128 excludes exactly one
+  # host and can never swallow the fake-ip pool the way a prefix would.
+  #
+  # What stays IPv4-only is the hand-written private-range block. auto-route does
   # install a v6 default route once inet6-address exists, but the kernel's own
   # more-specific on-link routes (fe80::/64 dev <if>) win in the main table, so
   # neighbor discovery and mDNS keep working without an explicit carve-out; any
