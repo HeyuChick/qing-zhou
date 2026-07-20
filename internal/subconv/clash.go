@@ -203,6 +203,56 @@ func clashProxy(p *Proxy) map[string]any {
 		if p.tlsInsecure() {
 			m["skip-cert-verify"] = true
 		}
+	case "anytls":
+		// Requires mihomo >= v1.19.3. An older core does not skip an unknown
+		// proxy type — ParseProxy returns "unsupport proxy type" and parseProxies
+		// fails the whole config — so this node's presence is all-or-nothing for
+		// the subscriber. Same story for sing-box < 1.12.0.
+		m["type"] = "anytls"
+		m["password"] = p.Password
+		m["udp"] = true
+		if v := p.param("sni"); v != "" {
+			m["sni"] = v
+		}
+		if v := p.tlsParam("fp"); v != "" {
+			m["client-fingerprint"] = v
+		}
+		if v := p.tlsParam("alpn"); v != "" {
+			m["alpn"] = strings.Split(v, ",")
+		}
+		if p.tlsInsecure() {
+			m["skip-cert-verify"] = true
+		}
+	case "hysteria":
+		m["type"] = "hysteria"
+		if v := p.param("auth"); v != "" {
+			m["auth-str"] = v // v1 credential; hysteria2's `password` does not apply
+		}
+		// Always emitted — see hysteriaBandwidth for why omitting is fatal.
+		m["up"] = hysteriaBandwidth(p.param("upmbps"))
+		m["down"] = hysteriaBandwidth(p.param("downmbps"))
+		if v := p.param("sni"); v != "" { // normalised from `peer` at parse time
+			m["sni"] = v
+		}
+		if v := p.param("protocol"); v != "" {
+			m["protocol"] = v // udp | wechat-video | faketcp
+		}
+		// The obfs naming is inverted between the two schemas, and swapping them
+		// yields a node that handshakes and then silently fails: in the URI
+		// `obfs` is the MODE (empty or "xplus") and `obfsParam` is the password,
+		// while mihomo's `obfs` is the PASSWORD and `obfs-protocol` is the mode.
+		if v := p.param("obfsParam"); v != "" {
+			m["obfs"] = v
+		}
+		if v := p.param("obfs"); v != "" {
+			m["obfs-protocol"] = v
+		}
+		if v := p.tlsParam("alpn"); v != "" {
+			m["alpn"] = strings.Split(v, ",")
+		}
+		if p.tlsInsecure() {
+			m["skip-cert-verify"] = true
+		}
 	case "tuic":
 		m["type"] = "tuic"
 		m["uuid"] = p.UUID

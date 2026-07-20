@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -181,6 +182,64 @@ func clashToLink(m map[string]any) string {
 		}
 		return "hysteria2://" + str(m["password"]) + "@" + addr + qstr(q) + frag
 
+	case "anytls":
+		// Only sni and insecure are in the official anytls URI scheme; alpn/fp
+		// are 轻舟 extensions that conforming parsers ignore, kept so our own
+		// renderers round-trip without loss.
+		q := url.Values{}
+		if v := str(m["sni"]); v != "" {
+			q.Set("sni", v)
+		}
+		if cbool(m["skip-cert-verify"]) {
+			q.Set("insecure", "1")
+		}
+		if v := str(m["client-fingerprint"]); v != "" {
+			q.Set("fp", v)
+		}
+		if v := alpnStr(m["alpn"]); v != "" {
+			q.Set("alpn", v)
+		}
+		return "anytls://" + url.QueryEscape(str(m["password"])) + "@" + addr + qstr(q) + frag
+
+	case "hysteria":
+		// hysteria v1, NOT hysteria2 — a different wire protocol with auth-str
+		// and mandatory bandwidth instead of a password. It used to fall through
+		// to the default and be dropped, because the alternative at the time was
+		// rendering it as hysteria2:// and shipping a node with an empty
+		// credential that could never connect.
+		q := url.Values{}
+		// No userinfo in this scheme: the credential is the `auth` param.
+		if v := strOr(str(m["auth-str"]), str(m["auth_str"])); v != "" {
+			q.Set("auth", v)
+		}
+		if v := str(m["sni"]); v != "" {
+			q.Set("peer", v) // v1 spells SNI "peer"
+		}
+		if v := hysteriaMbps(m["up"], m["up-speed"]); v != "" {
+			q.Set("upmbps", v)
+		}
+		if v := hysteriaMbps(m["down"], m["down-speed"]); v != "" {
+			q.Set("downmbps", v)
+		}
+		if v := str(m["protocol"]); v != "" {
+			q.Set("protocol", v)
+		}
+		// Inverted naming, same trap as the render side: mihomo's obfs is the
+		// password (URI obfsParam) and obfs-protocol is the mode (URI obfs).
+		if v := str(m["obfs"]); v != "" {
+			q.Set("obfsParam", v)
+		}
+		if v := str(m["obfs-protocol"]); v != "" {
+			q.Set("obfs", v)
+		}
+		if v := alpnStr(m["alpn"]); v != "" {
+			q.Set("alpn", v)
+		}
+		if cbool(m["skip-cert-verify"]) {
+			q.Set("insecure", "1")
+		}
+		return "hysteria://" + addr + qstr(q) + frag
+
 	case "tuic":
 		q := url.Values{}
 		if v := str(m["sni"]); v != "" {
@@ -235,6 +294,28 @@ func joinHostPort(host, port string) string {
 		host = host[1 : len(host)-1]
 	}
 	return net.JoinHostPort(host, port)
+}
+
+// hysteriaMbps extracts a plain Mbps number from mihomo's bandwidth fields.
+//
+// `up`/`down` are strings that may or may not carry a unit ("100", "100 Mbps",
+// "1 Gbps"); `up-speed`/`down-speed` are plain integer Mbps. The v1 URI scheme
+// only has room for a bare Mbps integer, so a non-Mbps unit cannot be preserved
+// — returning "" then lets the renderer fall back to its default rather than
+// emitting a number that means something else.
+func hysteriaMbps(val, speed any) string {
+	if s := strings.TrimSpace(str(val)); s != "" {
+		fields := strings.Fields(s)
+		if n := atoi(fields[0]); n > 0 {
+			if len(fields) == 1 || strings.EqualFold(fields[1], "Mbps") {
+				return strconv.Itoa(n)
+			}
+		}
+	}
+	if n := atoi(str(speed)); n > 0 {
+		return strconv.Itoa(n)
+	}
+	return ""
 }
 
 func cbool(v any) bool {

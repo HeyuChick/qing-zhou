@@ -249,6 +249,34 @@ func singboxOutbound(p *Proxy) map[string]any {
 		o["type"] = "hysteria2"
 		o["password"] = p.Password
 		o["tls"] = sbTLS(p, "tls")
+	case "anytls":
+		// sing-box >= 1.12.0. tls is required by the outbound constructor.
+		o["type"] = "anytls"
+		o["password"] = p.Password
+		o["tls"] = sbTLS(p, "tls")
+	case "hysteria":
+		o["type"] = "hysteria"
+		if v := p.param("auth"); v != "" {
+			o["auth_str"] = v // plaintext form; `auth` is the base64 variant
+		}
+		if v := atoi(p.param("upmbps")); v > 0 {
+			o["up_mbps"] = v
+		}
+		if v := atoi(p.param("downmbps")); v > 0 {
+			o["down_mbps"] = v
+		}
+		// XPlus obfuscation password — the URI's obfsParam, NOT its `obfs`
+		// (which is the mode). sing-box has no field for the mode.
+		if v := p.param("obfsParam"); v != "" {
+			o["obfs"] = v
+		}
+		// Mandatory: NewOutbound rejects the node outright with ErrTLSRequired
+		// when tls is absent or disabled, and that failure happens at startup,
+		// taking the whole config with it.
+		o["tls"] = sbTLS(p, "tls")
+		// recv_window_conn / recv_window / disable_mtu_discovery are deliberately
+		// not emitted: deprecated in 1.14 in favour of the shared QUIC options,
+		// and the minimal field set is what both old and new cores accept.
 	case "tuic":
 		o["type"] = "tuic"
 		o["uuid"] = p.UUID

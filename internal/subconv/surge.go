@@ -126,7 +126,19 @@ func surgeProxy(p *Proxy) string {
 			parts = append(parts, "skip-cert-verify=true")
 		}
 		return strings.Join(parts, ", ")
+	case "anytls":
+		// Surge iOS 5.17.0+ / Mac 6.4.3+. Older builds reject the line.
+		parts := []string{"anytls", p.Server, itoaPort(p.Port), "password=" + p.Password}
+		if v := p.param("sni"); v != "" {
+			parts = append(parts, "sni="+v)
+		}
+		if p.tlsInsecure() {
+			parts = append(parts, "skip-cert-verify=true")
+		}
+		return strings.Join(parts, ", ")
 	default:
-		return "" // vless / tuic unsupported by Surge
+		// vless / tuic / hysteria v1 have no Surge equivalent — Surge's proxy
+		// policy list covers hysteria2 but not v1.
+		return ""
 	}
 }

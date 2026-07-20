@@ -94,7 +94,27 @@ func validate(p *Proxy) error {
 	if p.Protocol == "ss" && !ssMethods[strings.ToLower(strings.TrimSpace(p.Method))] {
 		return fmt.Errorf("unsupported shadowsocks method %q", p.Method)
 	}
+	// mihomo's AnyTLSOption.Password carries no omitempty, so an anytls entry
+	// without one fails the *whole* config rather than just this node — the same
+	// all-or-nothing behaviour this function exists to guard against.
+	if p.Protocol == "anytls" && p.Password == "" {
+		return fmt.Errorf("anytls without password")
+	}
 	return nil
+}
+
+// hysteriaBandwidth renders mihomo's up/down value.
+//
+// Those two fields are the one place where "omit when unknown" is the wrong
+// instinct: HysteriaOption declares them without omitempty, so mihomo's decoder
+// reports `has unset fields: down, up` and refuses the ENTIRE config — every
+// node gone, not just this one. A guessed number only costs some congestion
+// control accuracy, so a default is strictly better than an omission here.
+func hysteriaBandwidth(mbps string) string {
+	if n := atoi(mbps); n > 0 {
+		return strconv.Itoa(n) + " Mbps"
+	}
+	return "100 Mbps"
 }
 
 func parseLinkRaw(raw string) (*Proxy, error) {
@@ -108,6 +128,10 @@ func parseLinkRaw(raw string) (*Proxy, error) {
 		return parseURLStyle(raw, "hysteria2")
 	case strings.HasPrefix(raw, "hy2://"):
 		return parseURLStyle(strings.Replace(raw, "hy2://", "hysteria2://", 1), "hysteria2")
+	case strings.HasPrefix(raw, "anytls://"):
+		return parseURLStyle(raw, "anytls")
+	case strings.HasPrefix(raw, "hysteria://"):
+		return parseURLStyle(raw, "hysteria")
 	case strings.HasPrefix(raw, "tuic://"):
 		return parseTuic(raw)
 	case strings.HasPrefix(raw, "vmess://"):
@@ -163,10 +187,19 @@ func parseURLStyle(raw, proto string) (*Proxy, error) {
 	switch proto {
 	case "vless":
 		p.UUID = u.User.Username()
-	case "trojan", "hysteria2":
+	case "trojan", "hysteria2", "anytls":
 		// password lives in the userinfo
 		if pw := u.User.Username(); pw != "" {
 			p.Password = pw
+		}
+	case "hysteria":
+		// hysteria v1 has no userinfo at all — the credential is the `auth`
+		// query param (per the v1 URI scheme, which the upstream docs adopted
+		// from Shadowrocket). It also spells SNI `peer`; normalise that to `sni`
+		// here so every renderer and sbTLS can look it up the usual way instead
+		// of special-casing this one protocol.
+		if peer := p.Params.Get("peer"); peer != "" && p.Params.Get("sni") == "" {
+			p.Params.Set("sni", peer)
 		}
 	}
 	if p.Name == "" {
