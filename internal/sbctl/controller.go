@@ -559,6 +559,12 @@ func (c *Controller) remoteStats(ctx context.Context) []remoteResult {
 			client := sbstats.NewWithDialer(listen, func(dctx context.Context, _, addr string) (net.Conn, error) {
 				return c.remoteMgr.DialTunnel(dctx, cfg, addr)
 			})
+			// This client is built fresh every poll, so it must be released:
+			// each tunnel it dials carries its own *ssh.Client, which stays
+			// alive — as a live sshd session on the node — until the connection
+			// is closed. One poll per minute per server otherwise piles up
+			// sshd processes on the node until it runs out of memory.
+			defer client.Close()
 			t, err := client.QueryUserTraffic(sctx)
 			if err != nil {
 				err = fmt.Errorf("server %d (%s) stats: %w", sv.ID, sv.Name, err)
