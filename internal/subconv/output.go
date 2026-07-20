@@ -113,6 +113,28 @@ const DefaultClashTemplate = `
 # behavior instead of failing to start. true is already the built-in default —
 # stated explicitly because everything below is inert without it.
 ipv6: true
+# Persist across client restarts. Without a profile block at all (the previous
+# state), every restart threw away the user's manually picked node and reset the
+# selector to its default — a daily annoyance for anyone who switches nodes, and
+# one that reads as "this service is unstable" rather than as a missing config
+# key. store-fake-ip additionally keeps the fake-ip mapping stable, so apps and
+# OS caches still holding a pre-restart fake address resolve to the right domain
+# instead of misrouting until the entry is re-learned.
+profile:
+  store-selected: true
+  store-fake-ip: true
+# Measure latency consistently (excluding the initial handshake) so the url-test
+# groups compare nodes on equal terms. Only matters because the rendered config
+# has url-test auto-groups; a single-node user gains nothing.
+#
+# Deliberately NOT setting tcp-concurrent here, though it is commonly paired
+# with the above: it races connections across the several IPs a hostname
+# resolves to, and in this topology there are none. With fake-ip and no CN
+# bypass, mihomo never resolves the destination locally — it hands the hostname
+# to the node — so the only address it dials itself is the proxy server's. The
+# option would be inert. Left out on purpose; do not add it back as an
+# oversight.
+unified-delay: true
 dns:
   enable: true
   # Route the DNS module's own upstream connections through the same rule
@@ -241,8 +263,18 @@ tun:
   stack: gvisor
   auto-route: true
   auto-detect-interface: true
+  # TCP:53 as well as UDP. This is a consistency patch, NOT a leak fix — worth
+  # being precise about, because it looks like one. A DNS server inside
+  # route-exclude-address below (the usual case: the LAN router at
+  # 192.168.1.1) never enters TUN at all, so no dns-hijack entry can reach it
+  # on either protocol; only strict-route's firewall rules stop that path. What
+  # this does cover is a DNS server that IS routed into TUN — a public resolver
+  # statically configured on an adapter, say. Without the tcp:// entry, its
+  # TCP:53 queries pass through and get a real answer instead of a fake-ip one,
+  # which is inconsistent rather than leaky.
   dns-hijack:
     - "any:53"
+    - "tcp://any:53"
   # Windows sends DNS queries to every active network adapter at once ("smart
   # multi-homed name resolution") — physical NIC included — and dns-hijack
   # alone doesn't stop that. strict-route makes mihomo add the Windows
