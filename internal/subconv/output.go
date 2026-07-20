@@ -117,14 +117,16 @@ dns:
   enable: true
   # Route the DNS module's own upstream connections through the same rule
   # table as regular traffic (GEOSITE/GEOIP/MATCH below), instead of dialing
-  # nameserver/fallback directly off-tunnel. Without this, every DNS query —
-  # including foreign-domain fallback lookups — exits via the real network
-  # interface, which is what a DNS-leak-test site actually measures (it sees
-  # the resolver's egress ASN, not whether the query bytes were encrypted).
-  # CN entries (doh.pub/alidns) still hit GEOSITE,cn,DIRECT and go direct;
-  # foreign fallback (1.1.1.1/8.8.8.8/dns.google) falls through to MATCH and
-  # gets tunneled through the proxy. Requires proxy-server-nameserver below
-  # to avoid a resolution loop when dialing the proxy node itself.
+  # nameserver directly off-tunnel. Without this, every DNS query exits via
+  # the real network interface, which is what a DNS-leak-test site actually
+  # measures (it sees the resolver's egress ASN, not whether the query bytes
+  # were encrypted). With no CN bypass in the rules below, every nameserver
+  # entry falls through to MATCH and is tunneled through the proxy.
+  #
+  # Requires proxy-server-nameserver below to avoid a resolution loop when
+  # dialing the proxy node itself: that key (and default-nameserver) is always
+  # dialed directly, never through this rule table, which is what breaks the
+  # circularity of "resolve the node's address by asking through the node".
   respect-rules: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
@@ -201,27 +203,27 @@ dns:
   default-nameserver:
     - 223.5.5.5
     - 119.29.29.29
-  # DoH only — mihomo races every nameserver entry concurrently, so a plain
+  # DoH/DoT only — mihomo races every nameserver entry concurrently, so a plain
   # UDP:53 entry here leaks every queried domain in cleartext on the local
   # network (it isn't tunneled through the proxy). default-nameserver/
-  # proxy-server-nameserver above stay plain IP: they only bootstrap-resolve
-  # the DoH hostnames themselves, which is low-sensitivity.
+  # proxy-server-nameserver stay plain IP: they only bootstrap-resolve the DoH
+  # hostnames and the node's own address, which is low-sensitivity.
+  #
+  # These are all foreign resolvers, spanning two vendors on purpose — a single
+  # provider outage or a single provider logging everything are both worth
+  # avoiding. There is deliberately no CN resolver here: with no CN bypass in
+  # the rules below, a domestic DoH would be dialed through a foreign node,
+  # which is slower and pointless.
+  #
+  # No fallback/fallback-filter block: that mechanism exists to cross-check a
+  # domestic resolver's answer against GeoIP and re-query abroad when it looks
+  # polluted. With no domestic resolver and no CN bypass, there is nothing to
+  # cross-check — every answer already comes from these servers over the tunnel.
   nameserver:
-    - https://doh.pub/dns-query
-    - https://dns.alidns.com/dns-query
-  fallback:
     - https://1.1.1.1/dns-query
     - https://dns.google/dns-query
     - tls://1.1.1.1:853
     - tls://8.8.8.8:853
-  fallback-filter:
-    geoip: true
-    geoip-code: CN
-    ipcidr:
-      - 240.0.0.0/4
-      - 0.0.0.0/32
-      - 127.0.0.0/8
-      - 198.18.0.0/15
   proxy-server-nameserver:
     - 223.5.5.5
     - 119.29.29.29
@@ -283,21 +285,29 @@ tun:
     - 169.254.0.0/16
     - 224.0.0.0/4
     - 255.255.255.255/32
+# No default CN bypass: there is deliberately no "GEOSITE,cn,DIRECT" or
+# "GEOIP,CN,DIRECT" here, so everything that isn't ad-blocked or LAN-local
+# falls through to MATCH and goes out the proxy. Domestic sites are therefore
+# slower and a few geo-restricted ones (banking, payments, licensed video) may
+# refuse a foreign egress IP outright — that is the accepted cost of having no
+# split, not a bug to work around by re-adding a CN rule.
+#
+# The two "private" rules below are NOT a geographic bypass and must stay: they
+# keep the LAN reachable (router admin page, NAS, printers) and stop TUN from
+# looping traffic aimed at the local network back through itself.
 rules:
   - GEOSITE,category-ads-all,REJECT
   - GEOSITE,private,DIRECT
-  - GEOIP,private,DIRECT,no-resolve
-  - GEOSITE,cn,DIRECT
   # no-resolve: match only an ALREADY-known IP (e.g. literal-IP connections),
   # never force a fresh local DNS resolution just to evaluate this rule.
-  # Without it, every foreign fake-ip'd domain not caught by GEOSITE,cn above
-  # forces mihomo to resolve it locally via nameserver/fallback before it can
-  # even reach MATCH — and mihomo has an open bug where respect-rules doesn't
-  # reliably tunnel that resolution (MetaCubeX/mihomo#2971), so it leaks out
-  # the real network instead. With no-resolve, those domains skip straight to
-  # MATCH untouched; the destination hostname travels through the tunnel and
-  # is resolved server-side by the node, never locally.
-  - GEOIP,CN,DIRECT,no-resolve
+  # Without it, every fake-ip'd domain would be resolved locally via nameserver
+  # before it could even reach MATCH — and mihomo has an open bug where
+  # respect-rules doesn't reliably tunnel that resolution
+  # (MetaCubeX/mihomo#2971), so it leaks out the real network instead. With
+  # no-resolve, those domains skip straight to MATCH untouched; the destination
+  # hostname travels through the tunnel and is resolved server-side by the node,
+  # never locally.
+  - GEOIP,private,DIRECT,no-resolve
 `
 
 // DefaultSingboxTemplate carries the sing-box anti-leak dns+route with built-in

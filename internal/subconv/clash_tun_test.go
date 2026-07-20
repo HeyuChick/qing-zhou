@@ -62,22 +62,16 @@ func contains(list []string, want string) bool {
 }
 
 // TestDefaultClashTemplateDNS verifies the built-in anti-leak template has a
-// sane DNS configuration: fallback resolvers span multiple vendors,
-// fake-ip-filter covers common edge cases, and fallback-filter ipcidr catches
-// polluted responses.
+// sane DNS configuration: resolvers are encrypted, span multiple vendors, are
+// all foreign (the template has no CN bypass, so a domestic resolver would be
+// dialed through a foreign node), and fake-ip-filter covers common edge cases.
 func TestDefaultClashTemplateDNS(t *testing.T) {
 	var doc struct {
 		DNS struct {
-			RespectRules   bool     `yaml:"respect-rules"`
-			Nameserver     []string `yaml:"nameserver"`
-			FakeIPFilter   []string `yaml:"fake-ip-filter"`
-			Fallback       []string `yaml:"fallback"`
-			ProxyServerNS  []string `yaml:"proxy-server-nameserver"`
-			FallbackFilter struct {
-				GeoIP     bool     `yaml:"geoip"`
-				GeoIPCode string   `yaml:"geoip-code"`
-				IPCIDR    []string `yaml:"ipcidr"`
-			} `yaml:"fallback-filter"`
+			RespectRules  bool     `yaml:"respect-rules"`
+			Nameserver    []string `yaml:"nameserver"`
+			FakeIPFilter  []string `yaml:"fake-ip-filter"`
+			ProxyServerNS []string `yaml:"proxy-server-nameserver"`
 		} `yaml:"dns"`
 	}
 	if err := yaml.Unmarshal([]byte(DefaultClashTemplate), &doc); err != nil {
@@ -105,9 +99,12 @@ func TestDefaultClashTemplateDNS(t *testing.T) {
 		t.Error("dns.proxy-server-nameserver must be set when respect-rules is true (avoids a resolution loop)")
 	}
 
-	// --- fallback DNS: must not be dominated by a single vendor ---
+	// --- nameserver: must not be dominated by a single vendor. Vendor
+	// diversity used to live in the fallback list; with no CN bypass there is
+	// no domestic/foreign split left to justify a separate fallback block, so
+	// the requirement moved here. ---
 	cf, google := 0, 0
-	for _, s := range doc.DNS.Fallback {
+	for _, s := range doc.DNS.Nameserver {
 		if strings.Contains(s, "cloudflare") || strings.Contains(s, "1.1.1.1") {
 			cf++
 		}
@@ -116,10 +113,21 @@ func TestDefaultClashTemplateDNS(t *testing.T) {
 		}
 	}
 	if cf > 2 {
-		t.Errorf("fallback has %d Cloudflare entries (should be ≤2 to avoid single-vendor risk): %v", cf, doc.DNS.Fallback)
+		t.Errorf("nameserver has %d Cloudflare entries (should be ≤2 to avoid single-vendor risk): %v", cf, doc.DNS.Nameserver)
 	}
 	if google == 0 {
-		t.Errorf("fallback has no Google DNS entries — missing vendor diversity: %v", doc.DNS.Fallback)
+		t.Errorf("nameserver has no Google DNS entries — missing vendor diversity: %v", doc.DNS.Nameserver)
+	}
+
+	// --- no domestic resolver: with no CN bypass in the rules, a CN DoH entry
+	// would be dialed through a foreign node — slower, and it hands the full
+	// query stream to a domestic provider for no benefit. ---
+	for _, s := range doc.DNS.Nameserver {
+		for _, cn := range []string{"doh.pub", "alidns", "119.29.29.29", "223.5.5.5"} {
+			if strings.Contains(s, cn) {
+				t.Errorf("dns.nameserver has domestic resolver %q — pointless without a CN bypass rule", s)
+			}
+		}
 	}
 
 	// --- fake-ip-filter: essential entries must be present ---
@@ -140,11 +148,24 @@ func TestDefaultClashTemplateDNS(t *testing.T) {
 		}
 	}
 
-	// --- fallback-filter.ipcidr: must catch common polluted ranges ---
-	mustCIDR := []string{"240.0.0.0/4", "0.0.0.0/32", "127.0.0.0/8", "198.18.0.0/15"}
-	for _, cidr := range mustCIDR {
-		if !contains(doc.DNS.FallbackFilter.IPCIDR, cidr) {
-			t.Errorf("fallback-filter.ipcidr missing %q", cidr)
+}
+
+// TestDefaultClashTemplateNoCNBypass verifies the template routes domestic
+// traffic through the proxy like everything else. The "private" rules are a
+// LAN carve-out, not a geographic one, and are expected to stay; a CN rule is
+// what this guards against, because re-adding one silently sends every
+// domestic domain (and its DNS) out the real interface again.
+func TestDefaultClashTemplateNoCNBypass(t *testing.T) {
+	var doc struct {
+		Rules []string `yaml:"rules"`
+	}
+	if err := yaml.Unmarshal([]byte(DefaultClashTemplate), &doc); err != nil {
+		t.Fatalf("parse DefaultClashTemplate: %v", err)
+	}
+	for _, r := range doc.Rules {
+		upper := strings.ToUpper(r)
+		if strings.HasPrefix(upper, "GEOSITE,CN,") || strings.HasPrefix(upper, "GEOIP,CN,") {
+			t.Errorf("rule %q reintroduces a CN bypass — template is meant to have no geographic split", r)
 		}
 	}
 }
