@@ -94,7 +94,27 @@ func validate(p *Proxy) error {
 	if p.Protocol == "ss" && !ssMethods[strings.ToLower(strings.TrimSpace(p.Method))] {
 		return fmt.Errorf("unsupported shadowsocks method %q", p.Method)
 	}
+	// mihomo's AnyTLSOption.Password carries no omitempty, so an anytls entry
+	// without one fails the *whole* config rather than just this node — the same
+	// all-or-nothing behaviour this function exists to guard against.
+	if p.Protocol == "anytls" && p.Password == "" {
+		return fmt.Errorf("anytls without password")
+	}
 	return nil
+}
+
+// hysteriaBandwidth renders mihomo's up/down value.
+//
+// Those two fields are the one place where "omit when unknown" is the wrong
+// instinct: HysteriaOption declares them without omitempty, so mihomo's decoder
+// reports `has unset fields: down, up` and refuses the ENTIRE config — every
+// node gone, not just this one. A guessed number only costs some congestion
+// control accuracy, so a default is strictly better than an omission here.
+func hysteriaBandwidth(mbps string) string {
+	if n := atoi(mbps); n > 0 {
+		return strconv.Itoa(n) + " Mbps"
+	}
+	return "100 Mbps"
 }
 
 func parseLinkRaw(raw string) (*Proxy, error) {
@@ -108,6 +128,10 @@ func parseLinkRaw(raw string) (*Proxy, error) {
 		return parseURLStyle(raw, "hysteria2")
 	case strings.HasPrefix(raw, "hy2://"):
 		return parseURLStyle(strings.Replace(raw, "hy2://", "hysteria2://", 1), "hysteria2")
+	case strings.HasPrefix(raw, "anytls://"):
+		return parseURLStyle(raw, "anytls")
+	case strings.HasPrefix(raw, "hysteria://"):
+		return parseURLStyle(raw, "hysteria")
 	case strings.HasPrefix(raw, "tuic://"):
 		return parseTuic(raw)
 	case strings.HasPrefix(raw, "vmess://"):
@@ -163,10 +187,19 @@ func parseURLStyle(raw, proto string) (*Proxy, error) {
 	switch proto {
 	case "vless":
 		p.UUID = u.User.Username()
-	case "trojan", "hysteria2":
+	case "trojan", "hysteria2", "anytls":
 		// password lives in the userinfo
 		if pw := u.User.Username(); pw != "" {
 			p.Password = pw
+		}
+	case "hysteria":
+		// hysteria v1 has no userinfo at all — the credential is the `auth`
+		// query param (per the v1 URI scheme, which the upstream docs adopted
+		// from Shadowrocket). It also spells SNI `peer`; normalise that to `sni`
+		// here so every renderer and sbTLS can look it up the usual way instead
+		// of special-casing this one protocol.
+		if peer := p.Params.Get("peer"); peer != "" && p.Params.Get("sni") == "" {
+			p.Params.Set("sni", peer)
 		}
 	}
 	if p.Name == "" {
@@ -445,6 +478,48 @@ func (p *Proxy) param(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// tlsParam reads a TLS-related setting from whichever namespace the proxy has:
+// the URL query for url-style links, or the vmess JSON map, which is where a
+// vmess:// link keeps the same information.
+//
+// This is deliberately NOT folded into param(). The two namespaces collide on
+// "type" — in a url-style link it names the transport (ws/grpc/httpupgrade),
+// while in vmess JSON it is the obfuscation header type ("none") — so a blanket
+// fallthrough would make sbTransport read a vmess node's header type as its
+// transport. Only the TLS keys, which mean the same thing in both, fall through.
+func (p *Proxy) tlsParam(keys ...string) string {
+	if v := p.param(keys...); v != "" {
+		return v
+	}
+	if p.VMess != nil {
+		for _, k := range keys {
+			if v := str(p.VMess[k]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// tlsInsecure reports whether the node opts out of certificate verification.
+//
+// Centralised for two reasons. The spelling varies by dialect — url-style links
+// use allowInsecure or insecure, sing-box config uses allow_insecure — and each
+// renderer previously accepted its own subset, so the same imported node came
+// out with skip-cert-verify in one format and without it in another.
+//
+// The value form varies too. 轻舟 writes the string "1", but a vmess link from
+// another panel routinely carries a JSON boolean, which str() renders as "true";
+// comparing against "1" alone silently dropped the exemption and left a
+// self-signed node failing certificate verification with nothing to explain why.
+func (p *Proxy) tlsInsecure() bool {
+	switch p.tlsParam("insecure", "allowInsecure", "allow_insecure") {
+	case "1", "true":
+		return true
+	}
+	return false
 }
 
 // tuning is the TCP/multiplex client-dial tuning carried by a link (see

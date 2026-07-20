@@ -594,14 +594,15 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		p := singbox.LinkParams{
 			Type: ib.Type, Tag: remark + subInfoSuffixBucket(owner), Host: nodeHost, Port: ib.ListenPort,
 			UUID: owner.ClientUUID, Password: owner.ClientSecret,
+			TLS:         ib.TlsID != 0,
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
 			Insecure:    mapBool(client, "insecure"),
 			Congestion:  mapStr(opts, "congestion_control"),
 			ZeroRTT:     mapBool(opts, "zero_rtt_handshake"), // tuic 0-RTT
 			Method:      mapStr(opts, "method"),              // shadowsocks
-			ServerKey:   mapStr(opts, "password"), // shadowsocks-2022 server PSK
-			UpMbps:      mapInt(opts, "up_mbps"),  // hysteria v1
+			ServerKey:   mapStr(opts, "password"),            // shadowsocks-2022 server PSK
+			UpMbps:      mapInt(opts, "up_mbps"),             // hysteria v1
 			DownMbps:    mapInt(opts, "down_mbps"),
 			TCPFastOpen: mapBool(opts, "tcp_fast_open"),
 			MPTCP:       mapBool(opts, "tcp_multi_path"),

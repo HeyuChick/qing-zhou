@@ -174,6 +174,7 @@ func (s *Store) relayOutbound(landing *SbInbound, serverCache map[int64]*Server,
 	lp := singbox.LinkParams{
 		Type: landing.Type, Tag: "relay", Host: host, Port: landing.ListenPort,
 		UUID: uuid, Password: pw,
+		TLS:         landing.TlsID != 0,
 		SNI:         mapStr(server, "server_name"),
 		Fingerprint: nestedStr(client, "utls", "fingerprint"),
 		Insecure:    mapBool(client, "insecure"),
