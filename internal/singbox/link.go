@@ -137,6 +137,30 @@ func (p LinkParams) transportQuery() []string {
 	}
 }
 
+// joinHostPort builds the authority of a share-link URI, bracketing an IPv6
+// literal as RFC 3986 requires.
+//
+// Two traps make this more than a call to net.JoinHostPort.
+//
+// First, plain concatenation is not actually harmless here. Go's url.Parse is
+// forgiving — it splits host and port at the *last* colon, so it recovers
+// "…@2001:db8::1:443" correctly and 轻舟's own pipeline round-trips it — but
+// that tolerance is Go's, not the spec's. v2rayN, mihomo and sing-box parse the
+// authority per RFC 3986, where an unbracketed IPv6 literal is malformed. So the
+// symptom is a node that looks fine in the panel and fails only in the client.
+//
+// Second, net.JoinHostPort brackets any host containing a colon without checking
+// whether it is already bracketed. An admin who writes [2001:db8::1] — which is
+// the natural way to type it, and what a Clash YAML often carries — would get
+// [[2001:db8::1]]:443, which really is unparseable everywhere, including here.
+// Strip a matched pair first.
+func joinHostPort(host, port string) string {
+	if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, port)
+}
+
 // BuildShareLink renders a vless/tuic/hysteria2 URI matching the format clients
 // already use, so existing imports keep working after the cutover.
 func BuildShareLink(p LinkParams) string {
@@ -152,12 +176,7 @@ func BuildShareLink(p LinkParams) string {
 	// prevents a stray reserved char (#/?&@) from producing a malformed or
 	// ambiguous link.
 	esc := url.QueryEscape
-	// JoinHostPort, not concatenation: it brackets an IPv6 literal. Without that,
-	// a node at 2001:db8::1 rendered "…@2001:db8::1:443", whose port url.Parse
-	// cannot recover — so subconv's own validate() rejected it as "port out of
-	// range" and the node vanished from every subscription with no error shown.
-	// vmess is unaffected either way, since its JSON keeps add/port apart.
-	hp := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
+	hp := joinHostPort(p.Host, strconv.Itoa(p.Port))
 	frag := "#" + url.QueryEscape(p.Tag)
 
 	tcp := p.Network == "" || p.Network == "tcp"

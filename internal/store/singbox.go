@@ -601,8 +601,8 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			Congestion:  mapStr(opts, "congestion_control"),
 			ZeroRTT:     mapBool(opts, "zero_rtt_handshake"), // tuic 0-RTT
 			Method:      mapStr(opts, "method"),              // shadowsocks
-			ServerKey:   mapStr(opts, "password"), // shadowsocks-2022 server PSK
-			UpMbps:      mapInt(opts, "up_mbps"),  // hysteria v1
+			ServerKey:   mapStr(opts, "password"),            // shadowsocks-2022 server PSK
+			UpMbps:      mapInt(opts, "up_mbps"),             // hysteria v1
 			DownMbps:    mapInt(opts, "down_mbps"),
 			TCPFastOpen: mapBool(opts, "tcp_fast_open"),
 			MPTCP:       mapBool(opts, "tcp_multi_path"),

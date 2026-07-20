@@ -232,31 +232,61 @@ func validateCertKeyPair(certPEM, keyPEM string) error {
 // 3 samples and reports min/avg/max + resolve info. Used by the TLS editor to
 // preview how well a candidate SNI domain performs before saving, and by the
 // Reality handshake target test (which may use a non-443 port).
+// normalizeSniAddr turns a user-supplied host (and optional explicit port) into
+// a dialable host:port, or reports that the host is malformed.
+//
+// "是否已经带端口了" 曾用 strings.Contains(host, ":") 判断，裸 IPv6 字面量天生
+// 含冒号，于是既不补端口、后面的 SplitHostPort 又解析不了，任何 IPv6 host 都
+// 直接被判 "host 格式错误"。改用 SplitHostPort 试解析：成功即说明已带端口。
+//
+// 但只做这一步会让校验变宽松：JoinHostPort 会给任何含冒号的 host 加方括号，
+// 于是 "a:b:c" 这类垃圾会被包成 "[a:b:c]:443" 一路通过，最终以 "无法连接"
+// 而不是 "格式错误" 报错，掩盖了真正的原因。所以含冒号的 host 必须真的能被
+// ParseIP 解析成 IP 才放行。
+func normalizeSniAddr(host, port string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("empty host")
+	}
+	// 已经是 host:port（含 [v6]:port）就原样用，显式 port 参数让位于内联端口。
+	// 注意 SplitHostPort(":443") 是成功的（host 为空），必须单独挡掉。
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		if h == "" {
+			return "", fmt.Errorf("empty host in %q", host)
+		}
+		return host, nil
+	}
+	if port == "" {
+		port = "443"
+	}
+	h := host
+	if len(h) > 1 && h[0] == '[' && h[len(h)-1] == ']' {
+		h = h[1 : len(h)-1]
+	}
+	if h == "" {
+		return "", fmt.Errorf("empty host")
+	}
+	// 到这里 h 应当是域名或 IP 字面量。域名和 IPv4 都不含冒号；含冒号就只能是
+	// IPv6，必须解析得出来——否则是 "a:b:c" / "[2001:db8::1"（括号未闭合）之类。
+	if strings.Contains(h, ":") && net.ParseIP(h) == nil {
+		return "", fmt.Errorf("malformed host %q", host)
+	}
+	return net.JoinHostPort(h, port), nil
+}
+
 func (a *API) handleAdminSniTest(w http.ResponseWriter, r *http.Request) {
 	host := strings.TrimSpace(r.URL.Query().Get("host"))
 	if host == "" {
 		fail(w, http.StatusBadRequest, "缺少 host 参数")
 		return
 	}
-	// 显式 port 参数优先；否则从 host:port 解析；都没有则默认 443
-	//
-	// "已经带端口了吗" 不能用 strings.Contains(host, ":") 判断：裸 IPv6 字面量
-	// 天生含冒号，于是既不会被补端口，SplitHostPort 又解析不了，直接返回
-	// "host 格式错误"。改用 SplitHostPort 试解析——成功即说明已带端口。
-	addr := host
-	if _, _, err := net.SplitHostPort(host); err != nil {
-		port := strings.TrimSpace(r.URL.Query().Get("port"))
-		if port == "" {
-			port = "443"
-		}
-		addr = net.JoinHostPort(strings.Trim(host, "[]"), port)
-	}
-	// Validate hostname: reject obviously bad input.
-	h, _, err := net.SplitHostPort(addr)
-	if err != nil || h == "" {
+	addr, err := normalizeSniAddr(host, strings.TrimSpace(r.URL.Query().Get("port")))
+	if err != nil {
 		fail(w, http.StatusBadRequest, "host 格式错误")
 		return
 	}
+	// 回显给前端的是不带端口的主机名；normalizeSniAddr 已保证 addr 可拆分。
+	h, _, _ := net.SplitHostPort(addr)
 
 	type sample struct {
 		MS    float64 `json:"ms"`

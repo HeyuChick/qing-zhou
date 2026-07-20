@@ -106,55 +106,87 @@ func TestStringListAcceptsBothShapes(t *testing.T) {
 
 // --- IPv6 node addresses ----------------------------------------------------
 
-// An IPv6 node address must be bracketed in the share link. Concatenating
-// host+":"+port yielded "…@2001:db8::1:443", whose port url.Parse cannot
-// recover, so validate() rejected it as "port out of range" and the node
-// disappeared from every subscription format with nothing shown to the user.
-func TestIPv6NodeSurvivesLinkRoundTrip(t *testing.T) {
-	for _, typ := range []string{"vless", "trojan", "vmess", "hysteria2", "tuic"} {
+// hpProtocols are the share-link types whose authority goes through
+// joinHostPort. vmess is deliberately absent: its base64 JSON keeps add and port
+// in separate fields, so it never builds a host:port string at all.
+var hpProtocols = []string{"vless", "trojan", "hysteria2", "tuic", "shadowsocks", "anytls", "hysteria"}
+
+// An IPv6 authority must be bracketed, per RFC 3986.
+//
+// The assertion is on the link TEXT on purpose. Asserting a parse round-trip
+// proves nothing here: Go's url.Parse splits host and port at the LAST colon, so
+// it recovers "…@2001:db8::1:443" perfectly and this package round-trips the
+// unbracketed form just fine. The clients do not — v2rayN, mihomo and sing-box
+// parse the authority per spec — so the bug is invisible to a round-trip test
+// and only shows up in the client.
+func TestIPv6LinkAuthorityIsBracketed(t *testing.T) {
+	for _, typ := range hpProtocols {
 		link := singbox.BuildShareLink(singbox.LinkParams{
 			Type: typ, Tag: "v6", Host: "2001:db8::1", Port: 443, UUID: "u",
-			Password: "pw", TLS: true, SNI: "a.com",
+			Password: "pw", Method: "2022-blake3-aes-128-gcm", TLS: true, SNI: "a.com",
 		})
 		if link == "" {
 			t.Errorf("%s: no link built", typ)
 			continue
 		}
-		proxies := ParseLinks([]string{link})
+		if !strings.Contains(link, "[2001:db8::1]:443") {
+			t.Errorf("%s: authority not bracketed: %q", typ, link)
+		}
+	}
+}
+
+// A host that already carries brackets must not gain a second pair. This is the
+// regression the naive net.JoinHostPort introduced: [2001:db8::1] became
+// [[2001:db8::1]]:443, which really is unparseable everywhere — so a node that
+// worked before started being dropped.
+func TestAlreadyBracketedIPv6HostNotDoubled(t *testing.T) {
+	for _, typ := range hpProtocols {
+		link := singbox.BuildShareLink(singbox.LinkParams{
+			Type: typ, Tag: "v6", Host: "[2001:db8::1]", Port: 443, UUID: "u",
+			Password: "pw", Method: "2022-blake3-aes-128-gcm", TLS: true, SNI: "a.com",
+		})
+		if strings.Contains(link, "[[") {
+			t.Errorf("%s: host double-bracketed: %q", typ, link)
+		}
+		if !strings.Contains(link, "[2001:db8::1]:443") {
+			t.Errorf("%s: authority not bracketed exactly once: %q", typ, link)
+		}
+	}
+}
+
+// An IPv4 host or a domain must never acquire brackets.
+func TestNonIPv6HostUnbracketed(t *testing.T) {
+	for _, host := range []string{"1.2.3.4", "example.com"} {
+		for _, typ := range hpProtocols {
+			link := singbox.BuildShareLink(singbox.LinkParams{
+				Type: typ, Tag: "n", Host: host, Port: 443, UUID: "u",
+				Password: "pw", Method: "2022-blake3-aes-128-gcm", TLS: true, SNI: "a.com",
+			})
+			if strings.Contains(link, "[") {
+				t.Errorf("%s/%s: host was bracketed: %q", typ, host, link)
+			}
+		}
+	}
+}
+
+// The Clash-YAML import path applies the same rules, for both input shapes.
+func TestClashImportBracketsIPv6Authority(t *testing.T) {
+	for _, server := range []string{`"2001:db8::1"`, `"[2001:db8::1]"`} {
+		yaml := "proxies:\n  - {name: v6, type: trojan, server: " + server +
+			", port: 443, password: pw, sni: a.com}\n"
+		proxies := ParseList(yaml)
 		if len(proxies) != 1 {
-			t.Errorf("%s: node dropped during parse — link was %q", typ, link)
-			continue
+			t.Fatalf("server %s: node dropped on import, got %d proxies", server, len(proxies))
+		}
+		if strings.Contains(proxies[0].Raw, "[[") {
+			t.Errorf("server %s: double-bracketed link %q", server, proxies[0].Raw)
+		}
+		if !strings.Contains(proxies[0].Raw, "[2001:db8::1]:443") {
+			t.Errorf("server %s: authority not bracketed: %q", server, proxies[0].Raw)
 		}
 		if got := proxies[0].Server; got != "2001:db8::1" {
-			t.Errorf("%s: server = %q, want 2001:db8::1", typ, got)
+			t.Errorf("server %s: parsed server = %q", server, got)
 		}
-		if got := proxies[0].Port; got != 443 {
-			t.Errorf("%s: port = %d, want 443", typ, got)
-		}
-	}
-}
-
-// An IPv4 node must not acquire brackets.
-func TestIPv4NodeLinkUnbracketed(t *testing.T) {
-	link := singbox.BuildShareLink(singbox.LinkParams{
-		Type: "trojan", Tag: "v4", Host: "1.2.3.4", Port: 443, Password: "pw", TLS: true,
-	})
-	if strings.Contains(link, "[") {
-		t.Errorf("IPv4 host was bracketed: %q", link)
-	}
-}
-
-// The Clash-YAML import path has the same bracketing requirement on re-export.
-func TestClashImportOfIPv6NodeRoundTrips(t *testing.T) {
-	yaml := `proxies:
-  - {name: v6, type: trojan, server: "2001:db8::1", port: 443, password: pw, sni: a.com}
-`
-	proxies := ParseList(yaml)
-	if len(proxies) != 1 {
-		t.Fatalf("IPv6 node dropped on Clash import, got %d proxies", len(proxies))
-	}
-	if got := proxies[0].Server; got != "2001:db8::1" {
-		t.Errorf("server = %q, want 2001:db8::1", got)
 	}
 }
 

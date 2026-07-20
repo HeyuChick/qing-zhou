@@ -47,8 +47,8 @@ func sbOutboundTLS(t *testing.T, cfg, outboundType string) map[string]any {
 	return nil
 }
 
-// The regression this whole file exists for: TLS used to be inferred from
-// "SNI != ''". server_name is optional — self-signed certs and bare-IP inbounds
+// The regression this whole file exists for: TLS used to be inferred from a
+// non-empty SNI. server_name is optional — self-signed certs and bare-IP inbounds
 // routinely leave it empty — so a TLS inbound rendered as tls:"" and the node
 // was dialled in plaintext. Every renderer keys off this one field, so the
 // damage was not limited to the base64/v2rayN path.

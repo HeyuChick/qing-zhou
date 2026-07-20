@@ -54,10 +54,15 @@ func clashToLink(m map[string]any) string {
 	if server == "" || port == "" {
 		return ""
 	}
-	// Same IPv6 bracketing requirement as singbox.BuildShareLink: an imported
-	// Clash node with server 2001:db8::1 produced an unparseable URI, so those
-	// nodes were dropped on re-export instead of round-tripping.
-	addr := net.JoinHostPort(server, port)
+	// Same bracketing rules as singbox.joinHostPort — see the reasoning there.
+	// Kept as a local copy rather than shared: it is five lines, and reaching
+	// across into the singbox package for it would invert the dependency.
+	//
+	// The already-bracketed case is the one that matters most on this path:
+	// Clash YAML in the wild carries both `server: 2001:db8::1` and
+	// `server: "[2001:db8::1]"`, and a naive JoinHostPort turns the second into
+	// [[…]] and drops the node.
+	addr := joinHostPort(server, port)
 	frag := ""
 	if name := str(m["name"]); name != "" {
 		frag = "#" + url.QueryEscape(name)
@@ -221,6 +226,15 @@ func alpnStr(v any) string {
 		return x
 	}
 	return ""
+}
+
+// joinHostPort mirrors singbox.joinHostPort: bracket an IPv6 literal for a URI
+// authority, and tolerate a host that already carries brackets.
+func joinHostPort(host, port string) string {
+	if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func cbool(v any) bool {
