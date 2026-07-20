@@ -48,6 +48,8 @@ func adminUserViewWithGroups(u *store.User, groupIDs []int64) J {
 	if groupIDs == nil {
 		groupIDs = []int64{}
 	}
+	// online is computed here rather than in the frontend so the whole panel
+	// shares one definition of the window (see onlineWindow in stats.go).
 	return J{
 		"id":             u.ID,
 		"username":       u.Username,
@@ -61,6 +63,8 @@ func adminUserViewWithGroups(u *store.User, groupIDs []int64) J {
 		"expiry_at":      u.ExpiryAt,
 		"has_client":     u.ClientID.Valid,
 		"created_at":     u.CreatedAt,
+		"last_online_at": u.LastOnlineAt,
+		"online":         u.LastOnlineAt > 0 && time.Now().Unix()-u.LastOnlineAt <= onlineWindow,
 		"group_ids":      groupIDs,
 	}
 }

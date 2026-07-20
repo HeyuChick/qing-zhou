@@ -29,11 +29,16 @@ type User struct {
 	ExpiryAt      int64
 	CreatedAt     int64
 	UpdatedAt     int64
+	// LastOnlineAt is bumped by the stats poll whenever this user shows a
+	// non-zero traffic delta, so it doubles as the proxy-side liveness signal.
+	// Panel logins do not touch it — see sessions for that.
+	LastOnlineAt int64
 }
 
 const userCols = `id, username, email, password_hash, role, status, email_verified, points,
 	client_id, client_name, client_uuid, client_secret, sub_token, current_plan_id,
-	traffic_limit, device_limit, used_up, used_down, expiry_at, created_at, updated_at`
+	traffic_limit, device_limit, used_up, used_down, expiry_at, created_at, updated_at,
+	last_online_at`
 
 type scanner interface{ Scan(...any) error }
 
@@ -42,7 +47,7 @@ func scanUser(sc scanner) (*User, error) {
 	err := sc.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Status,
 		&u.EmailVerified, &u.Points, &u.ClientID, &u.ClientName, &u.ClientUUID,
 		&u.ClientSecret, &u.SubToken, &u.CurrentPlanID, &u.TrafficLimit, &u.DeviceLimit,
-		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt)
+		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt, &u.LastOnlineAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

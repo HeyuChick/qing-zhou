@@ -3,6 +3,7 @@
     <h2 class="page-title">用户管理</h2>
     <div class="page-toolbar">
       <n-input v-model:value="search" placeholder="搜索用户名/邮箱" style="width:260px;max-width:60%;" clearable />
+      <n-checkbox v-model:checked="onlineOnly">只看在线 ({{ onlineCount }})</n-checkbox>
       <span class="spacer" />
       <n-button type="primary" @click="openCreate">创建用户</n-button>
     </div>
@@ -11,10 +12,12 @@
         <div v-for="u in filtered" :key="u.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title">{{ u.username }}</span>
+            <n-tag v-if="u.online" type="success" size="tiny" bordered="false">在线</n-tag>
             <n-tag :type="u.status === 'banned' ? 'error' : 'success'" size="tiny" bordered="false">{{ u.status === 'banned' ? '封禁' : '正常' }}</n-tag>
           </div>
           <div class="lc-meta">
             <span class="kv">邮箱 <b>{{ u.email || '—' }}</b></span>
+            <span class="kv">最后在线 <b>{{ timeAgo(u.last_online_at) }}</b></span>
             <span class="kv">积分 <b>{{ u.points }}</b></span>
             <span class="kv">流量 <b>{{ fmtBytes(u.used) }} / {{ fmtTotal(u.traffic_limit) }}</b></span>
             <span class="kv">到期 <b>{{ fmtDate(u.expiry_at) }}</b></span>
@@ -31,7 +34,7 @@
           </div>
         </div>
       </div>
-      <n-empty v-else-if="!loading" description="暂无用户" style="padding:40px 0;" />
+      <n-empty v-else-if="!loading" :description="onlineOnly ? '当前无在线用户' : '暂无用户'" style="padding:40px 0;" />
     </n-spin>
 
     <!-- 创建用户 -->
@@ -135,10 +138,10 @@
 import { ref, computed, reactive, onMounted } from 'vue'
 import {
   NSpin, NInput, NInputNumber, NButton, NModal, NForm, NFormItem,
-  NSwitch, NTag, NSelect, NEmpty, useMessage, useDialog
+  NSwitch, NTag, NSelect, NEmpty, NCheckbox, useMessage, useDialog
 } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
-import { fmtBytes, fmtTotal, fmtDate, fmtDateTime, toLocalDatetimeInput } from '@/utils/format'
+import { fmtBytes, fmtTotal, fmtDate, fmtDateTime, timeAgo, toLocalDatetimeInput } from '@/utils/format'
 import RefundDialog from '@/components/RefundDialog.vue'
 
 const message = useMessage()
@@ -147,11 +150,16 @@ const users = ref<any[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const search = ref('')
+const onlineOnly = ref(false)
+
+const onlineCount = computed(() => users.value.filter((u: any) => u.online).length)
 
 const filtered = computed(() => {
-  if (!search.value) return users.value
+  let list = users.value
+  if (onlineOnly.value) list = list.filter((u: any) => u.online)
+  if (!search.value) return list
   const q = search.value.toLowerCase()
-  return users.value.filter((u: any) => u.username?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q))
+  return list.filter((u: any) => u.username?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q))
 })
 
 // --- Create ---
