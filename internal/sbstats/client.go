@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -38,9 +39,20 @@ type Traffic struct {
 const fullMethod = "/v2ray.core.app.stats.command.StatsService/QueryStats"
 
 // Client queries a sing-box v2ray_api gRPC endpoint over cleartext HTTP/2.
+//
+// A Client owns its transport and every connection that transport dialled, so a
+// caller that builds one per poll MUST Close it — see Close for why.
 type Client struct {
 	addr string // host:port of experimental.v2ray_api.listen
 	hc   *http.Client
+	tr   *http2.Transport
+
+	// dialed records every connection handed to the transport so Close can
+	// force them shut. The transport pools connections and never drops them on
+	// its own, and nothing here is reachable once the Client goes out of scope —
+	// GC does not close sockets.
+	mu     sync.Mutex
+	dialed []net.Conn
 }
 
 // DialFunc opens the transport connection to the stats endpoint.
@@ -59,13 +71,52 @@ func New(addr string) *Client {
 // Remote nodes bind the stats API on loopback, so their traffic can only be
 // collected through an SSH tunnel — see sshctl.RemoteManager.DialTunnel.
 func NewWithDialer(addr string, dial DialFunc) *Client {
-	tr := &http2.Transport{
+	c := &Client{addr: addr}
+	c.tr = &http2.Transport{
 		AllowHTTP: true, // h2c: prior-knowledge HTTP/2 over plaintext TCP
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			return dial(ctx, network, addr)
+			conn, err := dial(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			c.mu.Lock()
+			c.dialed = append(c.dialed, conn)
+			c.mu.Unlock()
+			return conn, nil
 		},
 	}
-	return &Client{addr: addr, hc: &http.Client{Transport: tr, Timeout: 10 * time.Second}}
+	c.hc = &http.Client{Transport: c.tr, Timeout: 10 * time.Second}
+	return c
+}
+
+// Close releases every connection this Client opened. Callers that build a
+// Client per poll must call it; a long-lived Client (the local instance, which
+// dials 127.0.0.1 directly) can skip it and keep its pooled connection.
+//
+// This matters far beyond a stray socket when the dialer is an SSH tunnel:
+// sshctl's tunnelConn owns the *ssh.Client carrying it, so a connection that is
+// never closed keeps a full SSH session alive on the remote node. Stats polling
+// runs every minute per server, so skipping Close leaks one sshd process per
+// node per minute — enough to exhaust a small VPS in hours.
+func (c *Client) Close() error {
+	// Graceful path: hands pooled connections back so the transport stops
+	// tracking them.
+	c.tr.CloseIdleConnections()
+
+	// Force path: a request that failed mid-flight (context deadline, tunnel
+	// hiccup) can leave its connection marked busy, where CloseIdleConnections
+	// will not touch it. Closing directly is what actually guarantees the SSH
+	// session underneath goes away. Errors are ignored: a connection the
+	// graceful path already closed reports net.ErrClosed here, which is the
+	// expected case rather than a failure.
+	c.mu.Lock()
+	conns := c.dialed
+	c.dialed = nil
+	c.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+	return nil
 }
 
 // QueryUserTraffic returns each user's up/down delta since the previous call
