@@ -89,7 +89,7 @@ func surgeProxy(p *Proxy) string {
 		if v := p.param("sni", "peer"); v != "" {
 			parts = append(parts, "sni="+v)
 		}
-		if p.param("allowInsecure", "insecure") == "1" {
+		if p.tlsInsecure() {
 			parts = append(parts, "skip-cert-verify=true")
 		}
 		parts = append(parts, "udp-relay=true")
@@ -110,6 +110,11 @@ func surgeProxy(p *Proxy) string {
 			if sni := str(p.VMess["sni"]); sni != "" {
 				parts = append(parts, "sni="+sni)
 			}
+			// Matches the trojan/hysteria2 branches; vmess was the only TLS
+			// protocol here with no way to accept a self-signed certificate.
+			if p.tlsInsecure() {
+				parts = append(parts, "skip-cert-verify=true")
+			}
 		}
 		return strings.Join(parts, ", ")
 	case "hysteria2":
@@ -117,7 +122,7 @@ func surgeProxy(p *Proxy) string {
 		if v := p.param("sni"); v != "" {
 			parts = append(parts, "sni="+v)
 		}
-		if p.param("insecure", "allowInsecure") == "1" {
+		if p.tlsInsecure() {
 			parts = append(parts, "skip-cert-verify=true")
 		}
 		return strings.Join(parts, ", ")

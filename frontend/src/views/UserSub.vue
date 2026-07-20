@@ -51,7 +51,11 @@
         <n-button size="small" @click="copy(sub.formats?.clash)">Clash</n-button>
         <n-button size="small" @click="copy(sub.formats?.singbox)">sing-box</n-button>
         <n-button size="small" @click="copy(sub.formats?.surge)">Surge</n-button>
-        <n-button size="small" @click="copy(sub.formats?.default)">通用</n-button>
+        <!-- formats.base64, not formats.default: default has no ?format= and so
+             picks its output from the client's User-Agent, which silently hands
+             YAML to anything whose UA contains "clash". This button is for
+             v2rayN / NekoBox / Shadowrocket, so it must pin the link list. -->
+        <n-button size="small" @click="copy(sub.formats?.base64 || sub.formats?.default)">通用 / v2rayN</n-button>
         <n-button size="small" @click="showQr=!showQr">{{ showQr?'隐藏':'显示' }}二维码</n-button>
         <n-button size="small" type="error" @click="handleResetSub">重置链接</n-button>
       </div>

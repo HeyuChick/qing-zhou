@@ -447,6 +447,48 @@ func (p *Proxy) param(keys ...string) string {
 	return ""
 }
 
+// tlsParam reads a TLS-related setting from whichever namespace the proxy has:
+// the URL query for url-style links, or the vmess JSON map, which is where a
+// vmess:// link keeps the same information.
+//
+// This is deliberately NOT folded into param(). The two namespaces collide on
+// "type" — in a url-style link it names the transport (ws/grpc/httpupgrade),
+// while in vmess JSON it is the obfuscation header type ("none") — so a blanket
+// fallthrough would make sbTransport read a vmess node's header type as its
+// transport. Only the TLS keys, which mean the same thing in both, fall through.
+func (p *Proxy) tlsParam(keys ...string) string {
+	if v := p.param(keys...); v != "" {
+		return v
+	}
+	if p.VMess != nil {
+		for _, k := range keys {
+			if v := str(p.VMess[k]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// tlsInsecure reports whether the node opts out of certificate verification.
+//
+// Centralised for two reasons. The spelling varies by dialect — url-style links
+// use allowInsecure or insecure, sing-box config uses allow_insecure — and each
+// renderer previously accepted its own subset, so the same imported node came
+// out with skip-cert-verify in one format and without it in another.
+//
+// The value form varies too. 轻舟 writes the string "1", but a vmess link from
+// another panel routinely carries a JSON boolean, which str() renders as "true";
+// comparing against "1" alone silently dropped the exemption and left a
+// self-signed node failing certificate verification with nothing to explain why.
+func (p *Proxy) tlsInsecure() bool {
+	switch p.tlsParam("insecure", "allowInsecure", "allow_insecure") {
+	case "1", "true":
+		return true
+	}
+	return false
+}
+
 // tuning is the TCP/multiplex client-dial tuning carried by a link (see
 // singbox.LinkParams.tuningQuery). Values live in Params for url-style protocols
 // and in the vmess JSON map, so tuning() reads from whichever a Proxy has.

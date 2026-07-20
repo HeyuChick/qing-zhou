@@ -294,6 +294,11 @@ func (a *API) handleSubscription(w http.ResponseWriter, r *http.Request) {
 			"clash":   base + "?format=clash",
 			"singbox": base + "?format=singbox",
 			"surge":   base + "?format=surge",
+			// The base64 link list (v2rayN / NekoBox / Shadowrocket / Quantumult).
+			// "default" also yields it today, but only by User-Agent fallback — a
+			// client that sends a UA containing "clash" silently gets YAML instead.
+			// This entry pins the format regardless of UA.
+			"base64": base + "?format=base64",
 		},
 	})
 }

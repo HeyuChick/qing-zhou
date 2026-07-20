@@ -14,6 +14,14 @@ const (
 )
 
 // NormalizeFormat maps user-facing format names to canonical ones.
+//
+// Anything not named below yields the base64 link list, so "base64", "v2ray",
+// "v2rayn" and friends all resolve to it. They are documented here rather than
+// as explicit cases because a case list returning the same value as the default
+// would be dead code that documents nothing the code actually enforces — a typo
+// like "?format=v2rya" behaves identically either way. Falling back rather than
+// erroring is deliberate: a subscription that 404s on a typo is worse than one
+// that returns the format every client can read.
 func NormalizeFormat(f string) string {
 	switch strings.ToLower(f) {
 	case "clash", "mihomo", "meta":
@@ -98,6 +106,13 @@ func ParseLinks(links []string) []*Proxy {
 // at render time — this is server-side data (the nodes the server defines),
 // not client-side configuration.
 const DefaultClashTemplate = `
+# The real IPv6 master switch. mihomo's parseIPV6 nulls out BOTH dns.fake-ip-range6
+# and tun.inet6-address unless this is true AND verifyIP6() finds a global-unicast
+# IPv6 on a host interface. That runtime probe is why this is safe to ship on by
+# default: a v4-only client silently collapses to the old "no IPv6 anywhere"
+# behavior instead of failing to start. true is already the built-in default —
+# stated explicitly because everything below is inert without it.
+ipv6: true
 dns:
   enable: true
   # Route the DNS module's own upstream connections through the same rule
@@ -113,6 +128,27 @@ dns:
   respect-rules: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
+  # Without a v6 pool, fake-ip answers AAAA with an empty record and every
+  # IPv6-only hostname is unreachable. With it, AAAA gets a *fake* v6 that must
+  # traverse TUN and is re-resolved at the node — so no real IPv6 ever reaches
+  # the application, and a v4-only node still serves the domain over v4.
+  #
+  # This value must stay in the fdfe:dcba:9876::/64 prefix. Unlike IPv4 — where
+  # tun.inet4-address is derived from fake-ip-range narrowed to /30 — mihomo does
+  # NOT derive inet6-address from this key; it is an independent hardcoded default
+  # (fdfe:dcba:9876::1/126) that merely happens to sit inside this prefix.
+  #
+  # What the overlap buys is pool hygiene, not routability: mihomo masks the
+  # prefix and starts allocating at ::4 (component/fakeip/pool.go), so the ::0-::3
+  # block the TUN itself occupies can never be handed out as a fake address. That
+  # mirrors the IPv4 arrangement exactly (198.18.0.1/16 pool, 198.18.0.1/30 TUN,
+  # first allocation 198.18.0.4). Point this key elsewhere and you must set
+  # tun.inet6-address to match, or the pool can allocate the TUN's own address.
+  #
+  # Unknown to cores older than v1.19.16, and mihomo parses config with non-strict
+  # yaml.Unmarshal (no KnownFields), so old clients drop the key and degrade to the
+  # previous empty-AAAA behavior rather than failing to load.
+  fake-ip-range6: fdfe:dcba:9876::1/64
   fake-ip-filter:
     - "*.lan"
     - "*.local"
@@ -130,6 +166,15 @@ dns:
     - "+.stun.playstation.net"
     - "+.xboxlive.com"
     - "localhost.ptlogin2.qq.com"
+  # NOT a global IPv6 kill switch, despite the name. mihomo threads this flag to
+  # withResolver only — withFakeIP never sees it (dns/middleware.go), so with
+  # fake-ip-range6 set above, fake AAAA answers are unaffected. What it still
+  # governs is the one escape hatch: a domain matched by fake-ip-filter skips
+  # fake-ip, reaches the real resolver, and would otherwise be handed a genuine
+  # IPv6. Keeping it false collapses those to an empty answer.
+  #
+  # That is exactly the split we want — fake v6 for tunneled traffic, no real v6
+  # for the direct/local names in the filter list above.
   ipv6: false
   default-nameserver:
     - 223.5.5.5
@@ -183,7 +228,25 @@ tun:
   # clash-verge-rev#3133). false only helped avoid breaking niche apps like
   # VirtualBox; the leak it causes is worse.
   strict-route: true
-  ipv6: false
+  # NOTE: there is deliberately no "ipv6" key here. mihomo has never had a
+  # tun.ipv6 option at any version — it is a sing-box option name, and yaml.v3
+  # non-strict parsing meant the "ipv6: false" that used to sit here was dropped
+  # on the floor, suppressing nothing while reading as if it did. The real
+  # controls are the top-level ipv6 switch and tun.inet6-address, whose default
+  # (fdfe:dcba:9876::1/126) already matches fake-ip-range6 above and so is left
+  # implicit.
+  #
+  # route-exclude-address below stays IPv4-only on purpose. auto-route does
+  # install a v6 default route once inet6-address exists, but the kernel's own
+  # more-specific on-link routes (fe80::/64 dev <if>) win in the main table, so
+  # neighbor discovery and mDNS keep working without an explicit carve-out; any
+  # remaining private v6 destination is sent DIRECT by the GEOIP,private rule.
+  # (The sing-box default inbound does list fe80::/10 and ff00::/8 — same
+  # reasoning, it is legibility there rather than necessity.)
+  #
+  # Above all, fc00::/7 must never be added here: fake-ip-range6 is allocated
+  # from inside it, and excluding the parent prefix would route every fake IPv6
+  # back out of the tunnel — undoing the fix entirely.
   route-exclude-address:
     - 192.168.0.0/16
     - 10.0.0.0/8

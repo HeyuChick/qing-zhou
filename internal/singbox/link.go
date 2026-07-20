@@ -3,6 +3,7 @@ package singbox
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -19,6 +20,13 @@ type LinkParams struct {
 	UUID     string
 	Password string
 
+	// TLS reports whether the inbound actually has a TLS config attached
+	// (sb_inbounds.tls_id != 0). It is NOT derivable from SNI: server_name is
+	// optional and routinely empty on self-signed or bare-IP inbounds, so
+	// inferring TLS from "SNI != ''" silently renders those nodes as plaintext.
+	// vless/trojan sidestep this by being unconditionally TLS; vmess is the one
+	// protocol whose link has to carry the flag explicitly.
+	TLS         bool
 	SNI         string
 	PublicKey   string // reality pbk
 	ShortID     string // reality sid
@@ -144,7 +152,12 @@ func BuildShareLink(p LinkParams) string {
 	// prevents a stray reserved char (#/?&@) from producing a malformed or
 	// ambiguous link.
 	esc := url.QueryEscape
-	hp := p.Host + ":" + strconv.Itoa(p.Port)
+	// JoinHostPort, not concatenation: it brackets an IPv6 literal. Without that,
+	// a node at 2001:db8::1 rendered "…@2001:db8::1:443", whose port url.Parse
+	// cannot recover — so subconv's own validate() rejected it as "port out of
+	// range" and the node vanished from every subscription with no error shown.
+	// vmess is unaffected either way, since its JSON keeps add/port apart.
+	hp := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 	frag := "#" + url.QueryEscape(p.Tag)
 
 	tcp := p.Network == "" || p.Network == "tcp"
@@ -222,9 +235,31 @@ func BuildShareLink(p LinkParams) string {
 		if p.Network == "grpc" {
 			m["path"] = p.ServiceName
 		}
-		if p.SNI != "" {
+		// Drive TLS off the inbound's real tls_id, not off SNI. An inbound with a
+		// certificate but no server_name (self-signed, bare IP) used to render
+		// tls:"" here, and every renderer downstream keys off this field —
+		// clash.go, singbox.go and surge.go all test VMess["tls"] == "tls" — so
+		// one empty server_name produced a plaintext node in *all four*
+		// subscription formats, not just the base64 one.
+		if p.TLS {
 			m["tls"] = "tls"
-			m["sni"] = p.SNI
+			if p.SNI != "" {
+				m["sni"] = p.SNI
+			}
+			// Unconditional, matching vless/trojan/tuic/hysteria2, which all
+			// append fp= with the same "chrome" default. fp is never empty here
+			// (it is defaulted above), so vmess nodes now always advertise a uTLS
+			// fingerprint where they previously advertised none.
+			m["fp"] = fp
+			if p.ALPN != "" {
+				m["alpn"] = p.ALPN
+			}
+			if p.Insecure {
+				// Not part of the v2rayN vmess schema (it has no such key), but
+				// 轻舟's own renderers read it back via Proxy.param, which falls
+				// through to the vmess JSON map. Clients that don't know it ignore it.
+				m["allowInsecure"] = "1"
+			}
 		} else {
 			m["tls"] = ""
 		}

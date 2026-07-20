@@ -64,7 +64,34 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 
 	if _, ok := doc["inbounds"]; !ok {
 		doc["inbounds"] = []map[string]any{
-			{"type": "tun", "tag": "tun-in", "address": []string{"172.19.0.1/30"}, "auto_route": true, "strict_route": false, "stack": "gvisor"},
+			// The IPv6 prefix is not decorative: the DNS template answers AAAA with
+			// a fake address out of fakeip.inet6_range (fc00::/18). Without an
+			// inet6 address on the TUN, auto_route installs no IPv6 route, so that
+			// fake address is unroutable — every AAAA-resolved connection dies with
+			// ENETUNREACH, and an IPv6-only domain (no A record) is simply
+			// unreachable. With it, IPv6 traffic enters the tunnel and the *node*
+			// resolves the domain, so a v4-only node still serves it over v4.
+			//
+			// Capturing v6 also closes the leak: with no IPv6 route, anything that
+			// reaches an IPv6 literal without asking DNS — BitTorrent, WebRTC/STUN,
+			// a hardcoded address — bypasses the tunnel out the physical NIC.
+			{"type": "tun", "tag": "tun-in",
+				"address":    []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
+				"auto_route": true, "strict_route": false, "stack": "gvisor",
+				// Defensive, not load-bearing: auto_route installs ::/0, which
+				// nominally covers link-local and multicast, but the kernel's own
+				// more-specific on-link routes (fe80::/64 dev <if>) win in the main
+				// table either way — so neighbor discovery and mDNS survive with or
+				// without this. Listed explicitly because it costs nothing and makes
+				// the intent legible. (The Clash template omits the equivalent for
+				// the same reason it is safe to omit here.)
+				//
+				// fc00::/7 must NOT be listed, however. That one is load-bearing:
+				// fakeip hands out fc00::/18 from inside it, so excluding the parent
+				// prefix would route every fake IPv6 straight back out of the tunnel,
+				// reintroducing the exact breakage the inet6 address above fixes.
+				"route_exclude_address": []string{"fe80::/10", "ff00::/8"},
+			},
 			{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080},
 		}
 	}
@@ -198,12 +225,12 @@ func singboxOutbound(p *Proxy) map[string]any {
 		if str(p.VMess["net"]) == "ws" {
 			o["transport"] = sbWS(str(p.VMess["path"]), str(p.VMess["host"]), 0, "")
 		}
+		// Was a hand-rolled block that set only server_name, so alpn / utls
+		// fingerprint / insecure were dropped for vmess alone. sbTLS reads all of
+		// them through p.param, which falls through to the vmess JSON map, so
+		// vmess now gets the same TLS treatment as every other protocol.
 		if str(p.VMess["tls"]) == "tls" {
-			tls := map[string]any{"enabled": true}
-			if sni := str(p.VMess["sni"]); sni != "" {
-				tls["server_name"] = sni
-			}
-			o["tls"] = tls
+			o["tls"] = sbTLS(p, "tls")
 		}
 	case "ss":
 		o["type"] = "shadowsocks"
@@ -269,14 +296,16 @@ func sbTLS(p *Proxy, sec string) map[string]any {
 	if sec != "tls" && sec != "reality" {
 		return map[string]any{"enabled": false}
 	}
+	// tlsParam, not param: these keys must also resolve for vmess, whose link
+	// carries them in its JSON payload rather than a query string.
 	tls := map[string]any{"enabled": true}
-	if sni := p.param("sni"); sni != "" {
+	if sni := p.tlsParam("sni"); sni != "" {
 		tls["server_name"] = sni
 	}
-	if alpn := p.param("alpn"); alpn != "" {
+	if alpn := p.tlsParam("alpn"); alpn != "" {
 		tls["alpn"] = strings.Split(alpn, ",")
 	}
-	if fp := p.param("fp"); fp != "" {
+	if fp := p.tlsParam("fp"); fp != "" {
 		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
 	}
 	if sec == "reality" {
@@ -289,7 +318,7 @@ func sbTLS(p *Proxy, sec string) map[string]any {
 		}
 		tls["reality"] = re
 	}
-	if p.param("insecure", "allowInsecure", "allow_insecure") == "1" {
+	if p.tlsInsecure() {
 		tls["insecure"] = true
 	}
 	return tls
@@ -370,7 +399,7 @@ func injectSingboxTunExclude(doc map[string]any, proxies []*Proxy) {
 		// route_exclude_address entries must be CIDR prefixes; only real public IPs
 		// qualify. Bare domains (net.ParseIP == nil) would be invalid and break
 		// the client config, so they are skipped here (see injectRouteExclude).
-		if ip := net.ParseIP(p.Server); ip != nil && !ip.IsPrivate() {
+		if isPublicIP(p.Server) {
 			seen[p.Server] = true
 		}
 	}

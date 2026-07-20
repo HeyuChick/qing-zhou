@@ -3,6 +3,7 @@ package subconv
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/url"
 	"strings"
 
@@ -53,7 +54,10 @@ func clashToLink(m map[string]any) string {
 	if server == "" || port == "" {
 		return ""
 	}
-	addr := server + ":" + port
+	// Same IPv6 bracketing requirement as singbox.BuildShareLink: an imported
+	// Clash node with server 2001:db8::1 produced an unparseable URI, so those
+	// nodes were dropped on re-export instead of round-tripping.
+	addr := net.JoinHostPort(server, port)
 	frag := ""
 	if name := str(m["name"]); name != "" {
 		frag = "#" + url.QueryEscape(name)
@@ -118,6 +122,20 @@ func clashToLink(m map[string]any) string {
 			j["tls"] = "tls"
 			if v := str(m["servername"]); v != "" {
 				j["sni"] = v
+			}
+			// The mirror of the render-side gap: vmess stopped at servername here
+			// while vless and trojan above already carried skip-cert-verify across.
+			// Importing a Clash subscription with a self-signed vmess node dropped
+			// the exemption at parse time, so no amount of fixing the renderers
+			// could bring it back on re-export.
+			if cbool(m["skip-cert-verify"]) {
+				j["allowInsecure"] = "1"
+			}
+			if v := str(m["client-fingerprint"]); v != "" {
+				j["fp"] = v
+			}
+			if v := alpnStr(m["alpn"]); v != "" {
+				j["alpn"] = v
 			}
 		}
 		if strOr(str(m["network"]), "tcp") == "ws" {

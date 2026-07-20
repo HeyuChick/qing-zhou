@@ -145,7 +145,7 @@ func clashProxy(p *Proxy) map[string]any {
 			m["reality-opts"] = ro
 		}
 		clashWS(m, p, network, p.param("path"), p.param("host"))
-		if p.param("allowInsecure", "insecure") == "1" {
+		if p.tlsInsecure() {
 			m["skip-cert-verify"] = true
 		}
 	case "vmess":
@@ -164,6 +164,19 @@ func clashProxy(p *Proxy) map[string]any {
 			if sni := str(p.VMess["sni"]); sni != "" {
 				m["servername"] = sni
 			}
+			// vmess used to stop at servername, so a self-signed inbound failed
+			// certificate verification here with no way to express the exemption
+			// the other protocols already had. tlsParam reaches into the vmess
+			// JSON map, where a vmess:// link keeps these instead of a query.
+			if v := p.tlsParam("fp"); v != "" {
+				m["client-fingerprint"] = v
+			}
+			if v := p.tlsParam("alpn"); v != "" {
+				m["alpn"] = strings.Split(v, ",")
+			}
+			if p.tlsInsecure() {
+				m["skip-cert-verify"] = true
+			}
 		}
 		clashWS(m, p, network, str(p.VMess["path"]), str(p.VMess["host"]))
 	case "ss":
@@ -178,7 +191,7 @@ func clashProxy(p *Proxy) map[string]any {
 		if v := p.param("sni", "peer"); v != "" {
 			m["sni"] = v
 		}
-		if p.param("allowInsecure", "insecure") == "1" {
+		if p.tlsInsecure() {
 			m["skip-cert-verify"] = true
 		}
 	case "hysteria2":
@@ -187,7 +200,7 @@ func clashProxy(p *Proxy) map[string]any {
 		if v := p.param("sni"); v != "" {
 			m["sni"] = v
 		}
-		if p.param("insecure", "allowInsecure") == "1" {
+		if p.tlsInsecure() {
 			m["skip-cert-verify"] = true
 		}
 	case "tuic":
@@ -206,7 +219,7 @@ func clashProxy(p *Proxy) map[string]any {
 		if p.param("zero_rtt", "reduce_rtt") == "1" {
 			m["reduce-rtt"] = true
 		}
-		if p.param("allow_insecure", "insecure", "allowInsecure") == "1" {
+		if p.tlsInsecure() {
 			m["skip-cert-verify"] = true
 		}
 	default:
@@ -274,7 +287,7 @@ func injectRouteExclude(doc map[string]any, proxies []*Proxy) {
 		// every entry as a CIDR, so a bare domain (net.ParseIP == nil) would be
 		// an invalid entry that breaks config loading and kills TUN entirely.
 		// Domain nodes are handled by injectNodeDomains instead.
-		if ip := net.ParseIP(p.Server); ip != nil && !ip.IsPrivate() {
+		if isPublicIP(p.Server) {
 			seen[p.Server] = true
 		}
 	}
@@ -330,12 +343,25 @@ func injectNodeDomains(doc map[string]any, proxies []*Proxy) {
 func stringList(v any) ([]string, map[string]bool) {
 	out := []string{}
 	present := map[string]bool{}
-	if list, ok := v.([]any); ok {
+	add := func(s string) {
+		out = append(out, s)
+		present[s] = true
+	}
+	// Both shapes must be handled, exactly as in mapSlice: an admin template
+	// arrives through json.Unmarshal and yields []any, while the Go-built
+	// default inbounds carry a literal []string. Handling only []any silently
+	// drops the built-in exclusions (fe80::/10, ff00::/8) the moment anything
+	// appends to the list, since the caller writes `existing` back wholesale.
+	switch list := v.(type) {
+	case []any:
 		for _, item := range list {
 			if s, ok := item.(string); ok {
-				out = append(out, s)
-				present[s] = true
+				add(s)
 			}
+		}
+	case []string:
+		for _, s := range list {
+			add(s)
 		}
 	}
 	return out, present
@@ -350,6 +376,22 @@ func sortedKeys(set map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// isPublicIP reports whether s is an IP literal that can sensibly appear in a
+// route-exclude list — i.e. a routable unicast address.
+//
+// net.IP.IsPrivate alone is not that test. For IPv6 it only covers ULA
+// (fc00::/7), so a link-local node address (fe80::/10) passes it and gets
+// injected as an exclusion; the same goes for loopback and IPv4 link-local
+// (169.254.0.0/16). Those are never valid node addresses, and excluding them
+// from the tunnel is at best meaningless.
+func isPublicIP(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return false
+	}
+	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast()
 }
 
 // ensureCIDR appends "/32" (IPv4) or "/128" (IPv6) to bare IP addresses.

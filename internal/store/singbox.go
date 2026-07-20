@@ -594,6 +594,7 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		p := singbox.LinkParams{
 			Type: ib.Type, Tag: remark + subInfoSuffixBucket(owner), Host: nodeHost, Port: ib.ListenPort,
 			UUID: owner.ClientUUID, Password: owner.ClientSecret,
+			TLS:         ib.TlsID != 0,
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
 			Insecure:    mapBool(client, "insecure"),

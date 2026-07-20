@@ -239,11 +239,17 @@ func (a *API) handleAdminSniTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 显式 port 参数优先；否则从 host:port 解析；都没有则默认 443
+	//
+	// "已经带端口了吗" 不能用 strings.Contains(host, ":") 判断：裸 IPv6 字面量
+	// 天生含冒号，于是既不会被补端口，SplitHostPort 又解析不了，直接返回
+	// "host 格式错误"。改用 SplitHostPort 试解析——成功即说明已带端口。
 	addr := host
-	if port := strings.TrimSpace(r.URL.Query().Get("port")); port != "" && !strings.Contains(host, ":") {
-		addr = host + ":" + port
-	} else if !strings.Contains(host, ":") {
-		addr = host + ":443"
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		port := strings.TrimSpace(r.URL.Query().Get("port"))
+		if port == "" {
+			port = "443"
+		}
+		addr = net.JoinHostPort(strings.Trim(host, "[]"), port)
 	}
 	// Validate hostname: reject obviously bad input.
 	h, _, err := net.SplitHostPort(addr)
