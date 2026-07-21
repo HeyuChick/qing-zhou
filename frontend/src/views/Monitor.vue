@@ -580,7 +580,7 @@ onUnmounted(() => {
   animation: cardIn .5s cubic-bezier(.22,1,.36,1) backwards; animation-delay: calc(var(--i) * 45ms);
 }
 @keyframes cardIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
-.server-card:hover { box-shadow: var(--shadow); transform: translateY(-3px); border-color: #ddd9cf; }
+.server-card:hover { box-shadow: var(--shadow); transform: translateY(-3px); border-color: #d5d5d5; }
 
 .card-top-line { height: 3px; }
 .card-top-line.online { background: linear-gradient(90deg, #5c7c63, #8fb097); }

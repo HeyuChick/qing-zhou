@@ -2,7 +2,7 @@
   <n-modal :show="show" @update:show="$emit('update:show', $event)" preset="card" style="max-width: 400px;" title="">
     <div style="text-align: center; margin-bottom: 16px;">
       <div style="display: inline-flex; align-items: center; gap: 10px; font-weight: 750; font-size: 20px;">
-        <div style="width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, #6f8f76, #5c7c63); display: grid; place-items: center; color: #fff; font-size: 18px;">舟</div>
+        <div style="width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent-strong)); display: grid; place-items: center; color: #fff; font-size: 18px;">舟</div>
         轻舟
       </div>
     </div>

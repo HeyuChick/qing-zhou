@@ -15,10 +15,10 @@ import { useConfigStore } from '@/stores/config'
 
 const themeOverrides: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#6f8f76',
-    primaryColorHover: '#5c7c63',
-    primaryColorPressed: '#4a6a51',
-    primaryColorSuppl: '#e9f0eb',
+    primaryColor: '#2b2b2b',
+    primaryColorHover: '#1a1a1a',
+    primaryColorPressed: '#000000',
+    primaryColorSuppl: '#ececec',
     borderRadius: '10px',
   },
 }

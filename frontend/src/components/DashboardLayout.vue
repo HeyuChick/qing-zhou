@@ -191,8 +191,8 @@ function handleAdminSelect(key: string) { router.push(key) }
 .app-shell { display: flex; min-height: 100vh; }
 .app-sider {
   width: 220px; flex-shrink: 0;
-  background: #faf9f5;
-  border-right: 1px solid #ece9e1;
+  background: var(--bg-soft);
+  border-right: 1px solid var(--border);
   position: sticky; top: 0; height: 100vh;
   display: flex; flex-direction: column;
 }
@@ -204,7 +204,7 @@ function handleAdminSelect(key: string) { router.push(key) }
 }
 .sidebar-logo {
   width: 30px; height: 30px; border-radius: 9px;
-  background: linear-gradient(135deg, #6f8f76, #5c7c63);
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
   display: grid; place-items: center; color: #fff; font-size: 16px; font-weight: 700;
   flex-shrink: 0;
 }
@@ -215,8 +215,8 @@ function handleAdminSelect(key: string) { router.push(key) }
 .layout-header {
   height: 56px; display: flex; align-items: center; justify-content: space-between;
   padding: 0 24px;
-  border-bottom: 1px solid #ece9e1;
-  background: rgba(250, 249, 245, 0.85);
+  border-bottom: 1px solid var(--border);
+  background: rgba(250, 250, 250, 0.85);
   backdrop-filter: blur(8px);
   position: sticky; top: 0; z-index: 10;
 }

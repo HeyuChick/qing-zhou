@@ -225,14 +225,14 @@ onUnmounted(() => { if (pollTimer) window.clearTimeout(pollTimer) })
   background: #fff; border: 1px solid var(--border); border-radius: 12px;
   padding: 16px 18px; display: flex; flex-direction: column; gap: 6px;
 }
-.ver-card.hot { border-color: #6f8f76; box-shadow: 0 0 0 3px rgba(111,143,118,.12); }
+.ver-card.hot { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,0,0,.08); }
 .ver-label { font-size: 12px; color: var(--text-3); }
 .ver-value { font-size: 22px; font-weight: 750; letter-spacing: -0.02em; }
 .ver-arrow { display: grid; place-items: center; color: var(--text-3); font-size: 20px; }
 
 .toolbar { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
 .toolbar .spacer { flex: 1; }
-.release-link { font-size: 13px; color: #5c7c63; text-decoration: none; }
+.release-link { font-size: 13px; color: var(--accent-strong); text-decoration: none; }
 .release-link:hover { text-decoration: underline; }
 
 .progress-box {
@@ -251,7 +251,7 @@ onUnmounted(() => { if (pollTimer) window.clearTimeout(pollTimer) })
 }
 .cl-head {
   display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-  padding: 14px 18px; border-bottom: 1px solid var(--border); background: #faf9f5;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); background: var(--bg-soft);
 }
 .cl-title { font-weight: 700; }
 .cl-date { font-size: 12px; color: var(--text-3); }
