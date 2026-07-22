@@ -378,11 +378,16 @@ type planView struct {
 }
 
 // buildPlanViews shapes a user's buckets for the UI: each plan + the pool (if it
-// has any balance), with remaining traffic and a derived status.
+// has any balance), with remaining traffic and a derived status. The free bucket
+// is excluded — it is an internal unmetered metering identity, not a package the
+// user bought, so surfacing it as a permanent "不限" row only confuses.
 func buildPlanViews(buckets []*store.Bucket) []planView {
 	now := time.Now().Unix()
 	out := []planView{}
 	for _, b := range buckets {
+		if b.Kind == store.KindFree {
+			continue // internal unmetered metering identity, not a user-facing package
+		}
 		if b.Kind == "pool" && b.TrafficLimit == 0 {
 			continue // empty/inert pool — nothing to show
 		}
