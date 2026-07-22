@@ -7,6 +7,20 @@
     <n-alert v-else-if="dash.expiry_at && dash.expiry_at*1000 < Date.now()" type="warning" style="margin-bottom:14px;">账号已过期，请<router-link to="/shop">续费</router-link></n-alert>
     <n-alert v-else-if="dash.traffic?.total > 0 && dash.traffic?.used >= dash.traffic?.total" type="warning" style="margin-bottom:14px;">流量已用尽，请<router-link to="/shop">购买流量包</router-link></n-alert>
 
+    <n-card v-if="notices.length" title="最新公告" size="small" style="margin-bottom:20px;">
+      <template #header-extra>
+        <router-link to="/notices" style="font-size:12px;">查看全部</router-link>
+      </template>
+      <n-list bordered>
+        <n-list-item v-for="n in notices.slice(0,3)" :key="n.id" style="cursor:pointer;" @click="openNotice(n)">
+          <n-thing>
+            <template #header><span style="font-weight:600;">{{ n.title }}</span><n-tag v-if="n.pinned" size="tiny" type="warning" style="margin-left:6px;">置顶</n-tag></template>
+            <template #header-extra><span style="font-size:11px;color:var(--text-3);">{{ fmtDate(n.created_at) }}</span></template>
+          </n-thing>
+        </n-list-item>
+      </n-list>
+    </n-card>
+
     <div class="dash-top">
       <n-card size="small" style="display:flex;align-items:center;justify-content:center;">
         <div style="position:relative;width:140px;height:140px;margin:0 auto;">
@@ -71,29 +85,28 @@
       </n-input-group>
     </n-card>
 
-    <n-card v-if="notices.length" title="最新公告" size="small">
-      <n-list bordered>
-        <n-list-item v-for="n in notices.slice(0,3)" :key="n.id">
-          <n-thing>
-            <template #header><span style="font-weight:600;">{{ n.title }}</span><n-tag v-if="n.pinned" size="tiny" type="warning" style="margin-left:6px;">置顶</n-tag></template>
-            <template #header-extra><span style="font-size:11px;color:var(--text-3);">{{ fmtDate(n.created_at) }}</span></template>
-          </n-thing>
-        </n-list-item>
-      </n-list>
-    </n-card>
+    <n-modal v-model:show="showNotice" preset="card" style="max-width:640px;" :title="activeNotice?.title">
+      <template #header-extra v-if="activeNotice">
+        <span style="font-size:12px;color:var(--text-3);">{{ fmtDate(activeNotice.created_at) }}</span>
+      </template>
+      <div class="md" v-html="mdToHtml(activeNotice?.content || '')" />
+    </n-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NAlert, NInputGroup, NInput, NButton, NList, NListItem, NThing, NTag, NRadioGroup, NRadioButton, NProgress, useMessage } from 'naive-ui'
+import { NCard, NAlert, NInputGroup, NInput, NButton, NList, NListItem, NThing, NTag, NRadioGroup, NRadioButton, NProgress, NModal, useMessage } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { apiGet, apiList } from '@/api'
 import { fmtBytes, fmtTotal, fmtDate, daysLeft, yuan, pct } from '@/utils/format'
+import { mdToHtml } from '@/utils/markdown'
 
 const router = useRouter(); const auth = useAuthStore(); const message = useMessage()
 const dash = ref<any>({}); const notices = ref<any[]>([]); const trendRange = ref('7d'); const trendData = ref<any[]>([])
+const showNotice = ref(false); const activeNotice = ref<any>(null)
+function openNotice(n: any) { activeNotice.value = n; showNotice.value = true }
 
 const dl = computed(() => daysLeft(dash.value.expiry_at))
 const plans = computed<any[]>(() => dash.value.plans || [])
