@@ -2,34 +2,38 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
 type Package struct {
-	ID           int64  `json:"id"`
-	Type         string `json:"type"` // traffic | plan | device
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	PricePoints  int64  `json:"price_points"`
-	TrafficBytes int64  `json:"traffic_bytes"`
-	DeviceAdd    int64  `json:"device_add"`
-	DurationDays int64  `json:"duration_days"`
-	Stock        int64  `json:"stock"` // -1 = unlimited
-	Enabled      bool    `json:"enabled"`
-	SortOrder    int64   `json:"sort_order"`
-	CreatedAt    int64   `json:"created_at"`
-	GroupIDs     []int64 `json:"group_ids,omitempty"`      // plan↔node-groups: which nodes it grants (not a column)
-	UserGroupIDs []int64 `json:"user_group_ids,omitempty"` // package↔user-groups: who may buy it; empty = public (not a column)
-	Subscribers  int64   `json:"subscribers,omitempty"`    // users currently on this plan (not a column)
+	ID           int64    `json:"id"`
+	Type         string   `json:"type"` // traffic | plan | device
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Highlights   []string `json:"highlights"` // selling-point bullets shown in the shop
+	PricePoints  int64    `json:"price_points"`
+	TrafficBytes int64    `json:"traffic_bytes"`
+	DeviceAdd    int64    `json:"device_add"`
+	DurationDays int64    `json:"duration_days"`
+	Stock        int64    `json:"stock"` // -1 = unlimited
+	Enabled      bool     `json:"enabled"`
+	SortOrder    int64    `json:"sort_order"`
+	CreatedAt    int64    `json:"created_at"`
+	GroupIDs     []int64  `json:"group_ids,omitempty"`      // plan↔node-groups: which nodes it grants (not a column)
+	UserGroupIDs []int64  `json:"user_group_ids,omitempty"` // package↔user-groups: who may buy it; empty = public (not a column)
+	Subscribers  int64    `json:"subscribers,omitempty"`    // users currently on this plan (not a column)
 }
 
-const pkgCols = `id, type, name, description, price_points, traffic_bytes, device_add,
+const pkgCols = `id, type, name, description, highlights, price_points, traffic_bytes, device_add,
 	duration_days, stock, enabled, sort_order, created_at`
 
 func scanPackage(sc scanner) (*Package, error) {
 	var p Package
-	err := sc.Scan(&p.ID, &p.Type, &p.Name, &p.Description, &p.PricePoints, &p.TrafficBytes,
+	var highlights string
+	err := sc.Scan(&p.ID, &p.Type, &p.Name, &p.Description, &highlights, &p.PricePoints, &p.TrafficBytes,
 		&p.DeviceAdd, &p.DurationDays, &p.Stock, &p.Enabled, &p.SortOrder, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -37,7 +41,38 @@ func scanPackage(sc scanner) (*Package, error) {
 	if err != nil {
 		return nil, err
 	}
+	p.Highlights = decodeHighlights(highlights)
 	return &p, nil
+}
+
+// decodeHighlights parses the stored JSON array of selling points. A blank value
+// (legacy rows, or a package with none) yields nil rather than an error.
+func decodeHighlights(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// encodeHighlights serialises the selling-point list for storage, dropping blank
+// entries so the shop never renders an empty bullet. Empty list → "" (not "[]"),
+// so a package with no highlights reads back as nil.
+func encodeHighlights(h []string) string {
+	clean := make([]string, 0, len(h))
+	for _, x := range h {
+		if t := strings.TrimSpace(x); t != "" {
+			clean = append(clean, t)
+		}
+	}
+	if len(clean) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(clean)
+	return string(b)
 }
 
 func (s *Store) GetPackage(id int64) (*Package, error) {
@@ -95,9 +130,9 @@ func (s *Store) ListPackagesForUser(userID int64) ([]*Package, error) {
 
 func (s *Store) CreatePackage(p Package) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO packages
-		(type, name, description, price_points, traffic_bytes, device_add, duration_days, stock, enabled, sort_order, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		p.Type, p.Name, p.Description, p.PricePoints, p.TrafficBytes, p.DeviceAdd,
+		(type, name, description, highlights, price_points, traffic_bytes, device_add, duration_days, stock, enabled, sort_order, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes, p.DeviceAdd,
 		p.DurationDays, p.Stock, boolToInt(p.Enabled), p.SortOrder, time.Now().Unix())
 	if err != nil {
 		return 0, err
@@ -107,9 +142,9 @@ func (s *Store) CreatePackage(p Package) (int64, error) {
 
 func (s *Store) UpdatePackage(p Package) error {
 	_, err := s.db.Exec(`UPDATE packages SET
-		type=?, name=?, description=?, price_points=?, traffic_bytes=?, device_add=?,
+		type=?, name=?, description=?, highlights=?, price_points=?, traffic_bytes=?, device_add=?,
 		duration_days=?, stock=?, enabled=?, sort_order=? WHERE id=?`,
-		p.Type, p.Name, p.Description, p.PricePoints, p.TrafficBytes, p.DeviceAdd,
+		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes, p.DeviceAdd,
 		p.DurationDays, p.Stock, boolToInt(p.Enabled), p.SortOrder, p.ID)
 	return err
 }

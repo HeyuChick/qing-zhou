@@ -30,6 +30,9 @@
             <span class="kv">仅限 <b>{{ userGroupNames(p.user_group_ids) }}</b> 购买</span>
           </div>
           <div v-if="p.description" class="lc-meta" style="color:var(--text-3);">{{ p.description }}</div>
+          <div v-if="p.highlights?.length" class="lc-meta" style="color:var(--text-3);gap:4px 10px;">
+            <span v-for="(h, i) in p.highlights" :key="i" class="kv">✓ {{ h }}</span>
+          </div>
           <div class="lc-foot" style="flex-wrap:wrap;">
             <n-button size="tiny" @click="openForm(p)">编辑</n-button>
             <n-button v-if="p.enabled !== false" size="tiny" type="warning" @click="handleRetire(p)">下架</n-button>
@@ -47,7 +50,15 @@
         <n-form-item label="类型">
           <n-select v-model:value="form.type" :options="[{label:'流量包',value:'traffic'},{label:'订阅计划',value:'plan'}]" />
         </n-form-item>
-        <n-form-item label="描述"><n-input v-model:value="form.description" placeholder="套餐说明" /></n-form-item>
+        <n-form-item label="描述"><n-input v-model:value="form.description" type="textarea" :autosize="{ minRows: 1, maxRows: 3 }" placeholder="套餐一句话说明" /></n-form-item>
+        <n-form-item label="亮点">
+          <div style="width:100%;">
+            <n-dynamic-input v-model:value="form.highlights" :max="8" placeholder="一条卖点，如：全球 50+ 节点 / 不限速 / 7×24 客服" />
+            <div style="margin-top:4px;font-size:12px;color:var(--text-3);line-height:1.5;">
+              一行一个卖点，商城里会以清单形式展示，最多 8 条。留空则不显示。
+            </div>
+          </div>
+        </n-form-item>
         <n-form-item label="流量 (GB)"><n-input-number v-model:value="form.traffic_gb" :min="0" style="width:100%;" /></n-form-item>
         <n-form-item label="天数"><n-input-number v-model:value="form.days" :min="0" style="width:100%;" /></n-form-item>
         <n-form-item v-if="form.type==='device'" label="设备数"><n-input-number v-model:value="form.device_add" :min="1" style="width:100%;" /></n-form-item>
@@ -82,7 +93,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import {
   NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber,
-  NSelect, NTag, NEmpty, useMessage, useDialog
+  NSelect, NTag, NEmpty, NDynamicInput, useMessage, useDialog
 } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
 import { fmtTotal, yuan } from '@/utils/format'
@@ -96,7 +107,7 @@ const loading = ref(false)
 const saving = ref(false)
 const showForm = ref(false)
 const editing = ref<any>(null)
-const form = reactive({ name: '', type: 'traffic', description: '', traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [] as number[], user_group_ids: [] as number[] })
+const form = reactive({ name: '', type: 'traffic', description: '', highlights: [] as string[], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [] as number[], user_group_ids: [] as number[] })
 
 // groups = node groups (which nodes a plan grants); userGroups = who may buy it.
 const groupOptions = computed(() => groups.value.map(g => ({ label: g.name, value: g.id })))
@@ -114,12 +125,13 @@ function openForm(pkg?: any) {
   if (pkg) {
     Object.assign(form, {
       name: pkg.name, type: pkg.type, description: pkg.description || '',
+      highlights: Array.isArray(pkg.highlights) ? [...pkg.highlights] : [],
       traffic_gb: (pkg.traffic_bytes || 0) / (1024 * 1024 * 1024), days: pkg.duration_days || 0,
       device_add: pkg.device_add || 1, price: pkg.price_points || 0, stock: pkg.stock ?? -1,
       group_ids: pkg.group_ids || [], user_group_ids: pkg.user_group_ids || [],
     })
   } else {
-    Object.assign(form, { name: '', type: 'traffic', description: '', traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [], user_group_ids: [] })
+    Object.assign(form, { name: '', type: 'traffic', description: '', highlights: [], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [], user_group_ids: [] })
   }
   showForm.value = true
 }

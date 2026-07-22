@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS packages (
   type          TEXT    NOT NULL,            -- traffic | plan | device
   name          TEXT    NOT NULL,
   description   TEXT    NOT NULL DEFAULT '',
+  highlights    TEXT    NOT NULL DEFAULT '',   -- JSON array of selling-point bullets
   price_points  INTEGER NOT NULL DEFAULT 0,
   traffic_bytes INTEGER NOT NULL DEFAULT 0,
   device_add    INTEGER NOT NULL DEFAULT 0,
@@ -405,6 +406,8 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE announcements ADD COLUMN start_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE announcements ADD COLUMN end_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE node_sources ADD COLUMN group_ids TEXT NOT NULL DEFAULT ''`,
+		// Shop selling-point bullets, stored as a JSON array of strings.
+		`ALTER TABLE packages ADD COLUMN highlights TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_inbounds ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
 		// Relay chaining: an inbound with upstream_inbound_id != 0 forwards its
 		// traffic to that landing inbound instead of exiting directly. relay_secret
