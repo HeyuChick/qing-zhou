@@ -126,6 +126,24 @@ func (s *Store) UpdateNode(n Node) error {
 	return nil
 }
 
+// ReorderNodes sets sort_order to each id's position in the given slice, so the
+// node page and generated subscriptions (both ORDER BY sort_order) render in this
+// exact order. Nodes group by membership but sort_order is global, so callers
+// reorder by swapping global positions; ids not listed keep their old value.
+func (s *Store) ReorderNodes(ids []int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for i, id := range ids {
+		if _, err := tx.Exec(`UPDATE nodes SET sort_order=? WHERE id=?`, i, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteNode(id int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {

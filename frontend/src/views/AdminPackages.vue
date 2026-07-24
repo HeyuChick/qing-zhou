@@ -7,7 +7,7 @@
     </div>
     <n-spin :show="loading">
       <div v-if="packages.length" class="card-grid">
-        <div v-for="p in packages" :key="p.id" class="list-card">
+        <div v-for="(p, idx) in packages" :key="p.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title">{{ p.name || '—' }}</span>
             <n-tag v-if="p.user_group_ids?.length" type="warning" size="tiny" bordered="false" :title="userGroupNames(p.user_group_ids)">
@@ -34,6 +34,8 @@
             <span v-for="(h, i) in p.highlights" :key="i" class="kv">✓ {{ h }}</span>
           </div>
           <div class="lc-foot" style="flex-wrap:wrap;">
+            <n-button size="tiny" :disabled="idx === 0 || reordering" title="前移（在商城/列表更靠前）" @click="movePackage(idx, -1)">←</n-button>
+            <n-button size="tiny" :disabled="idx === packages.length - 1 || reordering" title="后移" @click="movePackage(idx, 1)">→</n-button>
             <n-button size="tiny" @click="openForm(p)">编辑</n-button>
             <n-button v-if="p.enabled !== false" size="tiny" type="warning" @click="handleRetire(p)">下架</n-button>
             <n-button v-else size="tiny" type="success" @click="handleEnable(p.id)">上架</n-button>
@@ -105,6 +107,7 @@ const groups = ref<any[]>([])
 const userGroups = ref<any[]>([])
 const loading = ref(false)
 const saving = ref(false)
+const reordering = ref(false)
 const showForm = ref(false)
 const editing = ref<any>(null)
 const form = reactive({ name: '', type: 'traffic', description: '', highlights: [] as string[], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [] as number[], user_group_ids: [] as number[] })
@@ -145,6 +148,23 @@ async function handleSave() {
     else await apiPost('/api/admin/packages', body)
     message.success('保存成功'); showForm.value = false; editing.value = null; await load()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
+}
+
+// 调整套餐在商城/列表中的展示顺序：把第 idx 个套餐前移(-1)/后移(+1)一位，
+// 乐观更新本地数组后把完整 id 顺序提交给后端（写入 sort_order）。
+async function movePackage(idx: number, dir: -1 | 1) {
+  const target = idx + dir
+  if (target < 0 || target >= packages.value.length || reordering.value) return
+  const arr = [...packages.value]
+  const [moved] = arr.splice(idx, 1)
+  arr.splice(target, 0, moved)
+  packages.value = arr
+  reordering.value = true
+  try {
+    await apiPost('/api/admin/packages/reorder', { ids: arr.map(p => p.id) })
+  } catch (e: any) {
+    message.error(e.message || '排序失败'); await load()
+  } finally { reordering.value = false }
 }
 
 // 下架 refunds every holder and clears their plan — irreversible and moves points,

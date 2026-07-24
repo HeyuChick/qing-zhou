@@ -23,7 +23,7 @@
               </template>
               <div v-if="gv.description" class="group-desc">{{ gv.description }}</div>
               <div v-if="gv.nodes.length" class="card-grid">
-                <div v-for="r in gv.nodes" :key="r.id" class="list-card">
+                <div v-for="(r, idx) in gv.nodes" :key="r.id" class="list-card">
                   <div class="lc-head">
                     <span class="lc-title">{{ r.name || '—' }}</span>
                     <n-tag :type="r.enabled ? 'success' : 'default'" size="tiny" bordered="false">{{ r.enabled ? '启用' : '禁用' }}</n-tag>
@@ -34,6 +34,8 @@
                   </div>
                   <div v-if="(r.group_ids || []).length > 1" class="lc-meta"><span class="kv">分组 <b>{{ groupNames(r.group_ids) }}</b></span></div>
                   <div class="lc-foot">
+                    <n-button size="tiny" :disabled="idx === 0 || reordering" title="前移（订阅/列表更靠前）" @click="moveNodeInGroup(gv, idx, -1)">←</n-button>
+                    <n-button size="tiny" :disabled="idx === gv.nodes.length - 1 || reordering" title="后移" @click="moveNodeInGroup(gv, idx, 1)">→</n-button>
                     <n-button size="tiny" @click="openNode(r)">编辑</n-button>
                     <n-button size="tiny" type="error" @click="handleDeleteNode(r.id)">删除</n-button>
                   </div>
@@ -156,6 +158,7 @@ const message = useMessage()
 const tab = ref('nodes')
 const loading = ref(false)
 const saving = ref(false)
+const reordering = ref(false)
 
 // 抽屉宽度：移动端全屏，桌面 460px
 const isMobile = ref(false)
@@ -236,6 +239,28 @@ async function handleSaveNode() {
 }
 async function handleDeleteNode(id: number) {
   try { await apiDelete(`/api/admin/nodes/${id}`); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) }
+}
+
+// 调整节点在分组内（及订阅/列表中）的顺序。节点按全局 sort_order 排，分组只是按
+// 归属过滤，因此「组内前移/后移」= 把该节点与组内相邻节点在全局数组里对调位置，
+// 再把完整 id 顺序提交后端。乐观更新，失败回滚重载。
+async function moveNodeInGroup(gv: any, idx: number, dir: -1 | 1) {
+  const target = idx + dir
+  if (target < 0 || target >= gv.nodes.length || reordering.value) return
+  const aId = gv.nodes[idx].id
+  const bId = gv.nodes[target].id
+  const arr = [...nodes.value]
+  const gi = arr.findIndex(n => n.id === aId)
+  const gj = arr.findIndex(n => n.id === bId)
+  if (gi < 0 || gj < 0) return
+  ;[arr[gi], arr[gj]] = [arr[gj], arr[gi]]
+  nodes.value = arr
+  reordering.value = true
+  try {
+    await apiPost('/api/admin/nodes/reorder', { ids: arr.map(n => n.id) })
+  } catch (e: any) {
+    message.error(e.message || '排序失败'); await load()
+  } finally { reordering.value = false }
 }
 
 // --- Bulk import ---

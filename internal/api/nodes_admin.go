@@ -25,6 +25,26 @@ func (a *API) handleAdminListNodes(w http.ResponseWriter, r *http.Request) {
 	ok(w, nodes)
 }
 
+// handleAdminReorderNodes persists a new display order for the node page and the
+// subscriptions it generates. Body: {"ids":[...]} — node ids in the desired
+// global order. Only sort_order is rewritten. No sing-box rebuild is needed
+// (server config keys off inbounds, not node order), but subscriptions render in
+// this order, so refresh the link cache by touching nothing else.
+func (a *API) handleAdminReorderNodes(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.IDs) == 0 {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := a.st.ReorderNodes(req.IDs); err != nil {
+		fail(w, http.StatusInternalServerError, "保存排序失败")
+		return
+	}
+	ok(w, J{"count": len(req.IDs)})
+}
+
 func (a *API) handleAdminCreateNode(w http.ResponseWriter, r *http.Request) {
 	var n store.Node
 	if err := json.NewDecoder(r.Body).Decode(&n); err != nil {

@@ -99,6 +99,29 @@ func (s *Store) ListPackages() ([]*Package, error) {
 	return out, rows.Err()
 }
 
+// PackageNames returns id→current name for every package, so a user's plan
+// buckets can display the package's live name instead of the snapshot taken at
+// purchase (renaming a package should propagate to everyone who holds it). Only
+// real packages appear; buckets for the pool/free/welcome/admin grants have no
+// package row and keep their own name.
+func (s *Store) PackageNames() (map[int64]string, error) {
+	rows, err := s.db.Query(`SELECT id, name FROM packages`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]string{}
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
 // ListPackagesForUser returns the on-sale packages userID is allowed to buy:
 // the public ones (no user-group bindings) plus those bound to a group the user
 // belongs to. Restricted packages the user has no claim on are hidden outright.
@@ -147,6 +170,24 @@ func (s *Store) UpdatePackage(p Package) error {
 		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes, p.DeviceAdd,
 		p.DurationDays, p.Stock, boolToInt(p.Enabled), p.SortOrder, p.ID)
 	return err
+}
+
+// ReorderPackages sets sort_order to each id's position in the given slice, so
+// the shop and admin list (both ORDER BY sort_order) render in this exact order.
+// Ids not present keep their old sort_order and thus sort after the reordered
+// ones (or interleave by their stale value) — callers pass the full list.
+func (s *Store) ReorderPackages(ids []int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for i, id := range ids {
+		if _, err := tx.Exec(`UPDATE packages SET sort_order=? WHERE id=?`, i, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeletePackage(id int64) error {
