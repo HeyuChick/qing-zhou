@@ -762,6 +762,14 @@ func (a *API) handleAdminSaveSbEgress(w http.ResponseWriter, r *http.Request) {
 	e.Name = strings.TrimSpace(e.Name)
 	e.Host = strings.TrimSpace(e.Host)
 	e.Username = strings.TrimSpace(e.Username)
+	// 供应商常给 "host:443" 整串，贴进地址栏而端口留表单默认值时，生成的
+	// outbound server 是个解析不了的假主机名，该出口的所有流量都会超时。
+	// 自动把地址里的端口拆出来，以地址中的端口为准（也兼容 [v6]:port）。
+	if h, p, err := net.SplitHostPort(e.Host); err == nil && h != "" {
+		if n := atoi(p); n > 0 && n <= 65535 {
+			e.Host, e.Port = h, int(n)
+		}
+	}
 	if e.Type != "socks" && e.Type != "http" {
 		fail(w, http.StatusBadRequest, "类型仅支持 socks / http")
 		return

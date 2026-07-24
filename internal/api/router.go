@@ -51,10 +51,17 @@ func (a *API) sbRebuild() error {
 // error instead of discarding it. A failed push (unreachable node, local
 // sing-box check failure) then leaves a breadcrumb for incident debugging; the
 // periodic controller loop re-applies within one interval, so this self-heals.
+//
+// Runs in the background: a full rebuild pushes config to every server over SSH
+// (up to 90s per unreachable machine), and callers respond to the admin/user
+// right after the DB write — holding the HTTP response open that long got cut
+// off by the reverse proxy (「无法加载响应数据」) even though the save succeeded.
 func (a *API) sbRebuildLog() {
-	if err := a.sbRebuild(); err != nil {
-		log.Printf("sing-box rebuild failed (will retry on next controller tick): %v", err)
-	}
+	go func() {
+		if err := a.sbRebuild(); err != nil {
+			log.Printf("sing-box rebuild failed (will retry on next controller tick): %v", err)
+		}
+	}()
 }
 
 func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
