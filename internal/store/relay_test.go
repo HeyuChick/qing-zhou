@@ -98,6 +98,94 @@ func TestRelayChaining(t *testing.T) {
 	}
 }
 
+// TestRelayMultiHopChain exercises a full multi-hop chain with an egress tail:
+// A (server 1) → B (server 2) → C (server 3) → proxy egress. Per-server wiring
+// must compose: each hop routes its inbound into the next hop's outbound, and
+// each landing injects the relay credential of whoever dials it.
+func TestRelayMultiHopChain(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv1, _ := st.CreateServer(Server{Name: "s1", Host: "1.1.1.1", Enabled: true})
+	srv2, _ := st.CreateServer(Server{Name: "s2", Host: "2.2.2.2", Enabled: true})
+	srv3, _ := st.CreateServer(Server{Name: "s3", Host: "3.3.3.3", Enabled: true})
+
+	egID, err := st.SaveSbEgress(&SbEgress{Name: "static-ip", Type: "socks", Host: "9.9.9.9", Port: 1080})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// C: terminal landing on server 3, exits through the purchased proxy.
+	cID, err := st.SaveSbInbound(&SbInbound{
+		ServerID: srv3, Type: "vless", Tag: "C-vless", ListenPort: 443,
+		Options: `{}`, Enabled: true, EgressID: egID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// B: middle hop on server 2 — landing for A, relay toward C.
+	bID, err := st.SaveSbInbound(&SbInbound{
+		ServerID: srv2, Type: "trojan", Tag: "B-trojan", ListenPort: 8443,
+		Options: `{}`, Enabled: true, UpstreamInboundID: cID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A: entry on server 1.
+	if _, err := st.SaveSbInbound(&SbInbound{
+		ServerID: srv1, Type: "vless", Tag: "A-vless", ListenPort: 443,
+		Options: `{}`, Enabled: true, UpstreamInboundID: bID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	users := map[string][]singbox.User{
+		"A-vless": {{Name: "u1", UUID: "11111111-1111-1111-1111-111111111111"}},
+	}
+	cfgFor := func(sid int64) map[string]any {
+		raw, err := st.BuildSingboxConfigForServer(sid, singbox.DefaultBaseConfig, "", users)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	// Server 1: A routes into relay-to-B.
+	c1 := cfgFor(srv1)
+	if !hasOutbound(c1, "relay-to-"+itoa(bID)) || !hasRouteToOutbound(c1, "relay-to-"+itoa(bID), "A-vless") {
+		t.Errorf("server1 missing A→B wiring: %v", c1["route"])
+	}
+
+	// Server 2: B carries A's relay user AND routes into relay-to-C.
+	c2 := cfgFor(srv2)
+	b2, _ := json.Marshal(c2)
+	if !strings.Contains(string(b2), "relay_"+itoa(bID)) {
+		t.Errorf("server2 missing injected relay user relay_%d", bID)
+	}
+	if !hasOutbound(c2, "relay-to-"+itoa(cID)) || !hasRouteToOutbound(c2, "relay-to-"+itoa(cID), "B-trojan") {
+		t.Errorf("server2 missing B→C wiring: %v", c2["route"])
+	}
+
+	// Server 3: C carries B's relay user AND routes into the egress outbound.
+	c3 := cfgFor(srv3)
+	b3, _ := json.Marshal(c3)
+	if !strings.Contains(string(b3), "relay_"+itoa(cID)) {
+		t.Errorf("server3 missing injected relay user relay_%d", cID)
+	}
+	if !hasOutbound(c3, "egress-"+itoa(egID)) || !hasRouteToOutbound(c3, "egress-"+itoa(egID), "C-vless") {
+		t.Errorf("server3 missing C→egress wiring: %v", c3["route"])
+	}
+}
+
 func itoa(n int64) string {
 	return strings.TrimSpace(string(jsonNumber(n)))
 }

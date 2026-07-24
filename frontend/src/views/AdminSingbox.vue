@@ -170,28 +170,30 @@
                   <span class="topo-proto">{{ (r.type || '').toUpperCase() }}</span>
                   <span class="topo-port">:{{ r.listen_port }}</span>
                 </span>
-                <template v-if="landingOf(r)">
-                  <span class="topo-arrow relay">⇢ 中转 ⇢</span>
-                  <span class="topo-node landing">
-                    <b>{{ landingOf(r).tag }}</b>
-                    <span class="topo-proto">{{ (landingOf(r).type || '').toUpperCase() }}</span>
-                    <span class="topo-loc">@ {{ serverName(landingOf(r).server_id) }}</span>
-                  </span>
+                <template v-for="(seg, si) in chainOf(r)" :key="si">
+                  <template v-if="seg.kind === 'landing'">
+                    <span class="topo-arrow relay">⇢ 中转 ⇢</span>
+                    <span class="topo-node landing">
+                      <b>{{ seg.ib.tag }}</b>
+                      <span class="topo-proto">{{ (seg.ib.type || '').toUpperCase() }}</span>
+                      <span class="topo-loc">@ {{ serverName(seg.ib.server_id) }}</span>
+                    </span>
+                  </template>
+                  <template v-else-if="seg.kind === 'egress'">
+                    <span class="topo-arrow egress">⇢ 代理出口 ⇢</span>
+                    <span class="topo-node egress">
+                      <b>{{ seg.eg.name }}</b>
+                      <span class="topo-proto">{{ (seg.eg.type || '').toUpperCase() }}</span>
+                      <span class="topo-loc">{{ showTopoIp ? seg.eg.host : maskHost(seg.eg.host) }}</span>
+                    </span>
+                  </template>
+                  <span v-else-if="seg.kind === 'broken-landing'" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
+                  <span v-else-if="seg.kind === 'broken-egress'" class="topo-arrow relay warn">⇢ 出口已失效 ⇢</span>
                 </template>
-                <span v-else-if="r.upstream_inbound_id" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
-                <template v-else-if="egressOf(r)">
-                  <span class="topo-arrow egress">⇢ 代理出口 ⇢</span>
-                  <span class="topo-node egress">
-                    <b>{{ egressOf(r).name }}</b>
-                    <span class="topo-proto">{{ (egressOf(r).type || '').toUpperCase() }}</span>
-                    <span class="topo-loc">{{ showTopoIp ? egressOf(r).host : maskHost(egressOf(r).host) }}</span>
-                  </span>
-                </template>
-                <span v-else-if="r.egress_id" class="topo-arrow relay warn">⇢ 出口已失效 ⇢</span>
                 <span class="topo-arrow">→</span>
                 <span class="topo-node inet">🌐 互联网</span>
                 <span class="topo-actions">
-                  <n-button v-if="!r.upstream_inbound_id && !r.egress_id && !landingTargetIds.has(r.id)" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
+                  <n-button v-if="!r.upstream_inbound_id && !r.egress_id" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
                   <n-button v-else-if="r.upstream_inbound_id" size="tiny" quaternary type="warning" @click="unlinkRelay(r)">解除中转</n-button>
                   <n-button v-else-if="r.egress_id" size="tiny" quaternary type="warning" @click="unlinkEgress(r)">解除出口</n-button>
                 </span>
@@ -596,11 +598,45 @@ const serverOpts = computed(() => [{ label: '本机', value: 0 }, ...servers.val
 const RELAY_LANDING_TYPES = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic']
 const inboundById = computed(() => { const m: Record<number, any> = {}; for (const n of inbounds.value) m[n.id] = n; return m })
 function landingOf(r: any) { return r && r.upstream_inbound_id ? (inboundById.value[r.upstream_inbound_id] || null) : null }
+// 从某入站出发沿 upstream 链走到头，返回拓扑段列表（多级中转 + 末端出口），防环。
+function chainOf(r: any) {
+  const segs: any[] = []
+  const seen = new Set<number>([r.id])
+  let cur = r
+  while (cur.upstream_inbound_id) {
+    const next = inboundById.value[cur.upstream_inbound_id]
+    if (!next || seen.has(next.id)) { segs.push({ kind: 'broken-landing' }); return segs }
+    seen.add(next.id)
+    segs.push({ kind: 'landing', ib: next })
+    cur = next
+  }
+  if (cur.egress_id) {
+    const e = egressById.value[cur.egress_id]
+    segs.push(e ? { kind: 'egress', eg: e } : { kind: 'broken-egress' })
+  }
+  return segs
+}
+// 判断沿 start 的 upstream 链是否会到达 target（选择落地时用来排除会成环的选项）。
+function chainReaches(startId: number, targetId: number): boolean {
+  const seen = new Set<number>()
+  let cur = inboundById.value[startId]
+  while (cur) {
+    if (cur.id === targetId) return true
+    if (seen.has(cur.id)) return false
+    seen.add(cur.id)
+    cur = cur.upstream_inbound_id ? inboundById.value[cur.upstream_inbound_id] : null
+  }
+  return false
+}
 const landingOpts = computed(() => [
   { label: '直接出网（本入站即落地）', value: 0 },
   ...inbounds.value
-    .filter(n => n.id !== ie.id && n.enabled && RELAY_LANDING_TYPES.includes(n.type) && !n.upstream_inbound_id)
-    .map(n => ({ label: `${n.tag} · ${(n.type || '').toUpperCase()} @ ${serverName(n.server_id)}`, value: n.id })),
+    .filter(n => n.id !== ie.id && n.enabled && RELAY_LANDING_TYPES.includes(n.type) && !(ie.id && chainReaches(n.id, ie.id)))
+    .map(n => ({
+      label: `${n.tag} · ${(n.type || '').toUpperCase()} @ ${serverName(n.server_id)}`
+        + (n.upstream_inbound_id || n.egress_id ? '（继续转发）' : ''),
+      value: n.id,
+    })),
 ])
 // value 0 = 未绑定；显式给个「无」选项，否则 n-select 会把裸值 0 显示出来。
 const tlsOpts = computed(() => [{ label: '无', value: 0 }, ...tlsList.value.map(t => ({ label: t.name + ' (' + t.mode + ')', value: t.id }))])
@@ -828,8 +864,6 @@ const presetType = ref<string | null>(null)
 // 若 > 0：本次「添加入站」保存后，把该源入站的落地(upstream)指向新建入站，形成中转链路。
 const chainSourceId = ref(0)
 const chainSourceName = computed(() => { const s = inbounds.value.find(n => n.id === chainSourceId.value); return s ? s.tag : '' })
-// 已被别的入站当作落地目标的入站 id 集合（用于禁止在其后再串联，避免多级链式）。
-const landingTargetIds = computed(() => { const s = new Set<number>(); for (const n of inbounds.value) if (n.upstream_inbound_id) s.add(n.upstream_inbound_id); return s })
 
 // 从拓扑图为某入站串联一个落地：打开「添加入站」抽屉，保存后自动把源入站的落地指向新入站。
 function addLandingAfter(r: any) {

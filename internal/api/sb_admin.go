@@ -940,6 +940,9 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Relay validation: the upstream must be an existing, different inbound.
+	// Multi-hop chains (落地机自己再挂下一跳落地/出口) are allowed — per-server
+	// wiring handles them naturally — but the chain must not loop back onto this
+	// inbound, or traffic would circulate between machines forever.
 	if n.UpstreamInboundID != 0 {
 		if n.UpstreamInboundID == n.ID {
 			fail(w, http.StatusBadRequest, "落地入站不能是自己")
@@ -950,9 +953,17 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusBadRequest, "所选落地入站不存在")
 			return
 		}
-		if up.UpstreamInboundID != 0 {
-			fail(w, http.StatusBadRequest, "落地入站本身是中转入站，不支持多级链式")
-			return
+		seen := map[int64]bool{n.ID: true}
+		for cur := up; cur != nil; {
+			if seen[cur.ID] || len(seen) > 16 {
+				fail(w, http.StatusBadRequest, "落地链路存在环路（或层级过深），流量会在机器间死循环")
+				return
+			}
+			seen[cur.ID] = true
+			if cur.UpstreamInboundID == 0 {
+				break
+			}
+			cur, _ = a.st.GetSbInbound(cur.UpstreamInboundID)
 		}
 	}
 	// Capture the pre-save upstream so a rebuild also reaches the OLD landing
