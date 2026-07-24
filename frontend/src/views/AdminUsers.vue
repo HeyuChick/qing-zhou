@@ -213,7 +213,7 @@ async function handleSave() {
     const body: any = {
       status: editBanned.value ? 'banned' : 'active',
       manual_enabled: manualEnabled.value,
-      manual_traffic: manualEnabled.value && !unlimitedTraffic.value ? editTrafficGB.value * 1024 * 1024 * 1024 : 0,
+      manual_traffic: manualEnabled.value && !unlimitedTraffic.value ? Math.round(editTrafficGB.value * 1024 * 1024 * 1024) : 0,
       manual_expiry: manualEnabled.value && editExpiry.value ? Math.floor(new Date(editExpiry.value).getTime() / 1000) : 0,
     }
     if (resetPw.value) body.password = resetPw.value

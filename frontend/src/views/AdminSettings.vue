@@ -197,7 +197,7 @@ async function handleSave() {
       email_verify_required: emailVerify.value ? 'true' : 'false',
       points_per_cny: String(pointsRate.value),
       signup_bonus_points: String(signupBonus.value),
-      default_traffic: String(defaultTraffic.value * 1024 * 1024 * 1024),
+      default_traffic: String(Math.round(defaultTraffic.value * 1024 * 1024 * 1024)),
       default_expiry_days: String(defaultExpiry.value),
       free_group_id: freeGroupId.value ? String(freeGroupId.value) : '',
       alert_cpu_threshold: String(alertCpu.value),

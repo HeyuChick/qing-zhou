@@ -140,7 +140,7 @@ async function handleSave() {
   saving.value = true
   try {
     const { traffic_gb, days, price, ...rest } = form
-    const body = { ...rest, traffic_bytes: traffic_gb * 1024 * 1024 * 1024, duration_days: days, price_points: price }
+    const body = { ...rest, traffic_bytes: Math.round(traffic_gb * 1024 * 1024 * 1024), duration_days: days, price_points: price }
     if (editing.value) await apiPut(`/api/admin/packages/${editing.value.id}`, body)
     else await apiPost('/api/admin/packages', body)
     message.success('保存成功'); showForm.value = false; editing.value = null; await load()
