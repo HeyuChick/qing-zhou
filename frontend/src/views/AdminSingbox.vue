@@ -95,6 +95,7 @@
                     <span class="kv">端口 <b>{{ r.listen_port }}</b></span>
                     <span class="kv">用户 <b>{{ r.user_count ?? 0 }}</b></span>
                     <span class="kv">TLS <b>{{ tlsName(r.tls_id) }}</b></span>
+                    <span v-if="r.egress_id" class="kv">出口 <b>{{ egressName(r.egress_id) }}</b></span>
                   </div>
                   <div class="lc-foot">
                     <n-button size="tiny" @click="openInbound(r)">编辑</n-button>
@@ -116,6 +117,33 @@
         </n-spin>
       </n-tab-pane>
 
+      <n-tab-pane name="egress" tab="代理出口">
+        <div class="page-toolbar">
+          <span class="spacer" />
+          <n-button size="small" type="primary" @click="openEgress()">添加出口</n-button>
+        </div>
+        <n-spin :show="loading">
+          <div v-if="egresses.length" class="card-grid">
+            <div v-for="r in egresses" :key="r.id" class="list-card">
+              <div class="lc-head">
+                <span class="lc-title">{{ r.name }}</span>
+                <n-tag size="tiny" type="info" bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag>
+              </div>
+              <div class="lc-meta">
+                <span class="kv">地址 <b>{{ r.host }}:{{ r.port }}</b></span>
+                <span class="kv">用户名 <b>{{ r.username || '—' }}</b></span>
+                <span class="kv">入站数 <b>{{ r.inbound_count ?? 0 }}</b></span>
+              </div>
+              <div class="lc-foot">
+                <n-button size="tiny" @click="openEgress(r)">编辑</n-button>
+                <n-button size="tiny" type="error" @click="deleteEgress(r.id)">删除</n-button>
+              </div>
+            </div>
+          </div>
+          <n-empty v-else-if="!loading" description="暂无代理出口。购买的静态 IP（SOCKS5 / HTTP 代理）在这里录入，之后在入站上选择它作为出口即可。" style="padding:40px 0;" />
+        </n-spin>
+      </n-tab-pane>
+
       <n-tab-pane name="topology" tab="链路拓扑">
         <n-spin :show="loading">
           <div v-if="inbounds.length" class="topo">
@@ -123,6 +151,7 @@
               <span><i class="dot client"></i>客户端</span>
               <span><i class="dot entry"></i>入口 / 线路机入站</span>
               <span><i class="dot landing"></i>落地入站</span>
+              <span><i class="dot egress"></i>代理出口</span>
               <span><i class="dot inet"></i>互联网</span>
               <span style="flex:1;"></span>
               <n-button size="tiny" quaternary @click="showTopoIp = !showTopoIp">{{ showTopoIp ? '🙈 隐藏 IP' : '👁 显示 IP' }}</n-button>
@@ -150,11 +179,21 @@
                   </span>
                 </template>
                 <span v-else-if="r.upstream_inbound_id" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
+                <template v-else-if="egressOf(r)">
+                  <span class="topo-arrow egress">⇢ 代理出口 ⇢</span>
+                  <span class="topo-node egress">
+                    <b>{{ egressOf(r).name }}</b>
+                    <span class="topo-proto">{{ (egressOf(r).type || '').toUpperCase() }}</span>
+                    <span class="topo-loc">{{ showTopoIp ? egressOf(r).host : maskHost(egressOf(r).host) }}</span>
+                  </span>
+                </template>
+                <span v-else-if="r.egress_id" class="topo-arrow relay warn">⇢ 出口已失效 ⇢</span>
                 <span class="topo-arrow">→</span>
                 <span class="topo-node inet">🌐 互联网</span>
                 <span class="topo-actions">
-                  <n-button v-if="!r.upstream_inbound_id && !landingTargetIds.has(r.id)" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
+                  <n-button v-if="!r.upstream_inbound_id && !r.egress_id && !landingTargetIds.has(r.id)" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
                   <n-button v-else-if="r.upstream_inbound_id" size="tiny" quaternary type="warning" @click="unlinkRelay(r)">解除中转</n-button>
+                  <n-button v-else-if="r.egress_id" size="tiny" quaternary type="warning" @click="unlinkEgress(r)">解除出口</n-button>
                 </span>
               </div>
             </div>
@@ -294,6 +333,26 @@
       </n-drawer-content>
     </n-drawer>
 
+    <!-- 代理出口编辑抽屉 -->
+    <n-drawer v-model:show="showEg" :width="drawerW" placement="right">
+      <n-drawer-content :title="ee.id ? '编辑代理出口' : '添加代理出口'" closable>
+        <n-form label-placement="left" label-width="100">
+          <n-form-item label="名称"><n-input v-model:value="ee.name" placeholder="如：静态IP-香港" /></n-form-item>
+          <n-form-item label="类型">
+            <n-radio-group v-model:value="ee.type">
+              <n-radio value="socks">SOCKS5</n-radio>
+              <n-radio value="http">HTTP</n-radio>
+            </n-radio-group>
+          </n-form-item>
+          <n-form-item label="服务器地址"><n-input v-model:value="ee.host" placeholder="IP 或域名" /></n-form-item>
+          <n-form-item label="端口"><n-input-number v-model:value="ee.port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
+          <n-form-item label="用户名"><n-input v-model:value="ee.username" placeholder="无认证则留空" /></n-form-item>
+          <n-form-item label="密码"><n-input v-model:value="ee.password" type="password" show-password-on="click" :placeholder="ee.id ? '*** 表示保持原密码不变' : '无认证则留空'" /></n-form-item>
+        </n-form>
+        <n-button type="primary" block :loading="saving" @click="saveEgress">保存</n-button>
+      </n-drawer-content>
+    </n-drawer>
+
     <!-- 入站编辑抽屉 -->
     <n-drawer v-model:show="showInb" :width="drawerW" placement="right">
       <n-drawer-content :title="ie.id ? '编辑入站' : '添加入站'" closable>
@@ -312,8 +371,14 @@
           <n-form-item label="所属服务器"><n-select v-model:value="ie.server_id" :options="serverOpts" placeholder="本机" clearable /></n-form-item>
           <n-form-item label="落地 / 中转">
             <div style="width:100%;">
-              <n-select v-model:value="ie.upstream_inbound_id" :options="landingOpts" />
+              <n-select v-model:value="ie.upstream_inbound_id" :options="landingOpts" @update:value="(v: number) => { if (v) ie.egress_id = 0 }" />
               <div class="form-tip">直接出网＝本入站即落地机；选择某入站＝本入站作为线路机，流量转发到该落地入站再出网。</div>
+            </div>
+          </n-form-item>
+          <n-form-item label="代理出口">
+            <div style="width:100%;">
+              <n-select v-model:value="ie.egress_id" :options="egressOpts" @update:value="(v: number) => { if (v) ie.upstream_inbound_id = 0 }" />
+              <div class="form-tip">选择后本入站的流量经该 SOCKS5/HTTP 代理（如购买的静态 IP）出网，出口 IP 即代理的 IP；与「落地 / 中转」二选一。出口在「代理出口」页管理。</div>
             </div>
           </n-form-item>
           <n-form-item v-if="ie.type !== 'shadowsocks'" label="TLS / Reality"><n-select v-model:value="ie.tls_id" :options="tlsOpts" placeholder="无" clearable /></n-form-item>
@@ -405,6 +470,7 @@ onUnmounted(() => window.removeEventListener('resize', checkMobile))
 const tlsList = ref<any[]>([])
 const inbounds = ref<any[]>([])
 const servers = ref<any[]>([])
+const egresses = ref<any[]>([])
 const previewJson = ref('')
 const previewLoading = ref(false)
 const previewSid = ref<number | null>(null)
@@ -722,6 +788,40 @@ async function saveTls() {
 
 async function deleteTls(id: number) { try { await apiDelete('/api/admin/sb/tls/' + id); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) } }
 
+// ========== Egress（第三方代理出口，如购买的静态 IP SOCKS5/HTTP） ==========
+const showEg = ref(false)
+const ee = reactive({ id: 0, name: '', type: 'socks', host: '', port: 1080, username: '', password: '' })
+function openEgress(r?: any) {
+  Object.assign(ee, r
+    ? { id: r.id, name: r.name, type: r.type, host: r.host, port: r.port, username: r.username || '', password: r.password || '' }
+    : { id: 0, name: '', type: 'socks', host: '', port: 1080, username: '', password: '' })
+  showEg.value = true
+}
+async function saveEgress() {
+  saving.value = true
+  try {
+    const body = { name: ee.name, type: ee.type, host: ee.host, port: ee.port, username: ee.username, password: ee.password }
+    if (ee.id) await apiPut('/api/admin/sb/egresses/' + ee.id, body)
+    else await apiPost('/api/admin/sb/egresses', body)
+    message.success('保存成功'); showEg.value = false; await load()
+  } catch (e: any) { message.error(e.message) } finally { saving.value = false }
+}
+async function deleteEgress(id: number) { try { await apiDelete('/api/admin/sb/egresses/' + id); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) } }
+const egressById = computed(() => { const m: Record<number, any> = {}; for (const e of egresses.value) m[e.id] = e; return m })
+function egressOf(r: any) { return r && r.egress_id ? (egressById.value[r.egress_id] || null) : null }
+function egressName(id: number) { const e = egressById.value[id]; return e ? e.name : '—' }
+const egressOpts = computed(() => [
+  { label: '不使用（直接出网）', value: 0 },
+  ...egresses.value.map(e => ({ label: `${e.name} · ${(e.type || '').toUpperCase()} ${e.host}:${e.port}`, value: e.id })),
+])
+// 解除某入站的代理出口，恢复直接出网。
+async function unlinkEgress(r: any) {
+  try {
+    await apiPut('/api/admin/sb/inbounds/' + r.id, { type: r.type, tag: r.tag, listen: r.listen || '::', listen_port: r.listen_port, tls_id: r.tls_id, server_id: r.server_id, enabled: r.enabled, upstream_inbound_id: 0, egress_id: 0, options: JSON.stringify(jp(r.options)) })
+    message.success('已解除出口'); await load()
+  } catch (e: any) { message.error(e.message) }
+}
+
 // ========== Inbound ==========
 const showInb = ref(false)
 const presetType = ref<string | null>(null)
@@ -769,7 +869,7 @@ function resetIe() {
     net: 'tcp', ws_path: '/', ws_host: '', ws_early_data: 0, grpc_service: '', grpc_multi: false,
     ss_method: '2022-blake3-aes-128-gcm', flow: 'xtls-rprx-vision',
     anytls_idle_check: 0, anytls_idle_timeout: 0, anytls_min_idle: 0,
-    mux: false, brutal: false, brutal_up: 0, brutal_down: 0, upstream_inbound_id: 0,
+    mux: false, brutal: false, brutal_up: 0, brutal_down: 0, upstream_inbound_id: 0, egress_id: 0,
   })
 }
 
@@ -788,7 +888,7 @@ function openInbound(n?: any, clone = false) {
       ss_method: o.method || '2022-blake3-aes-128-gcm', flow: normFlow(o.flow),
       anytls_idle_check: o.idle_session_check_interval || 0, anytls_idle_timeout: o.idle_session_timeout || 0, anytls_min_idle: o.min_idle_session || 0,
       mux: !!mx.enabled, brutal: !!br.enabled, brutal_up: br.up_mbps || 0, brutal_down: br.down_mbps || 0,
-      upstream_inbound_id: n.upstream_inbound_id || 0,
+      upstream_inbound_id: n.upstream_inbound_id || 0, egress_id: n.egress_id || 0,
     })
   } else {
     resetIe()
@@ -854,7 +954,7 @@ async function saveInbound() {
       }
       if (ie.mux) { o.multiplex = { enabled: true }; if (ie.brutal) o.multiplex.brutal = { enabled: true, up_mbps: ie.brutal_up, down_mbps: ie.brutal_down } }
     }
-    const body = { type: ie.type, tag: ie.tag, listen: ie.listen || '::', listen_port: ie.listen_port, tls_id: ie.type === 'shadowsocks' ? 0 : (ie.tls_id || 0), server_id: ie.server_id || 0, enabled: ie.enabled, upstream_inbound_id: ie.upstream_inbound_id || 0, options: JSON.stringify(o) }
+    const body = { type: ie.type, tag: ie.tag, listen: ie.listen || '::', listen_port: ie.listen_port, tls_id: ie.type === 'shadowsocks' ? 0 : (ie.tls_id || 0), server_id: ie.server_id || 0, enabled: ie.enabled, upstream_inbound_id: ie.upstream_inbound_id || 0, egress_id: ie.egress_id || 0, options: JSON.stringify(o) }
     const fn = ie.id ? apiPut : apiPost
     const url = ie.id ? '/api/admin/sb/inbounds/' + ie.id : '/api/admin/sb/inbounds'
     const created = await fn(url, body)
@@ -984,8 +1084,8 @@ function copy(text: string) { if (text) { navigator.clipboard.writeText(text); m
 async function load() {
   loading.value = true
   try {
-    const [t, i, s] = await Promise.all([apiList('/api/admin/sb/tls'), apiList('/api/admin/sb/inbounds'), apiList('/api/admin/servers')])
-    tlsList.value = t; inbounds.value = i; servers.value = s
+    const [t, i, s, e] = await Promise.all([apiList('/api/admin/sb/tls'), apiList('/api/admin/sb/inbounds'), apiList('/api/admin/servers'), apiList('/api/admin/sb/egresses')])
+    tlsList.value = t; inbounds.value = i; servers.value = s; egresses.value = e
     // 首次加载后默认展开所有机器；之后保留用户的折叠状态。
     if (!expandedInit) { expandedMachines.value = machines.value.map(m => m.id); expandedInit = true }
   } catch {} finally { loading.value = false }
@@ -1006,6 +1106,7 @@ async function load() {
 .dot.client { background: #909399; }
 .dot.entry { background: #2080f0; }
 .dot.landing { background: #f0a020; }
+.dot.egress { background: #7c3aed; }
 .dot.inet { background: #18a058; }
 .topo-machine { border: 1px solid var(--n-border-color, #e6e6ec); border-radius: 8px; padding: 12px 14px; }
 .topo-mhead { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
@@ -1016,12 +1117,14 @@ async function load() {
 .topo-node.client { background: rgba(144, 147, 153, 0.14); color: var(--text-2, #666); }
 .topo-node.entry { background: rgba(32, 128, 240, 0.12); border-color: rgba(32, 128, 240, 0.35); }
 .topo-node.landing { background: rgba(240, 160, 32, 0.13); border-color: rgba(240, 160, 32, 0.4); }
+.topo-node.egress { background: rgba(124, 58, 237, 0.11); border-color: rgba(124, 58, 237, 0.38); }
 .topo-node.inet { background: rgba(24, 160, 88, 0.12); color: #18a058; }
 .topo-node b { font-weight: 650; }
 .topo-proto { font-size: 11px; opacity: 0.75; }
 .topo-port, .topo-loc { font-size: 11px; opacity: 0.6; }
 .topo-arrow { color: var(--text-3, #aaa); font-size: 13px; user-select: none; }
 .topo-arrow.relay { color: #f0a020; font-weight: 600; font-size: 12px; }
+.topo-arrow.egress { color: #7c3aed; font-weight: 600; font-size: 12px; }
 .topo-arrow.relay.warn { color: #d03050; }
 .topo-actions { margin-left: auto; display: inline-flex; gap: 6px; }
 @media (max-width: 600px) { .topo-actions { margin-left: 0; } }

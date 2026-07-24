@@ -289,6 +289,21 @@ CREATE TABLE IF NOT EXISTS sb_inbounds (
   updated_at  INTEGER NOT NULL
 );
 
+-- Third-party proxy egresses (e.g. a purchased static-IP SOCKS5/HTTP proxy).
+-- An inbound with egress_id != 0 routes its traffic out through this proxy
+-- instead of exiting directly. password is encrypted at rest.
+CREATE TABLE IF NOT EXISTS sb_egresses (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT    NOT NULL,
+  type       TEXT    NOT NULL DEFAULT 'socks',      -- socks | http
+  host       TEXT    NOT NULL,
+  port       INTEGER NOT NULL,
+  username   TEXT    NOT NULL DEFAULT '',
+  password   TEXT    NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 -- A "bucket" = an independently-metered unit a user holds: either a purchased
 -- subscription plan or the shared traffic-package pool. Each bucket has its OWN
 -- sing-box identity (client_name/uuid/secret) so sing-box's per-identity traffic
@@ -415,6 +430,9 @@ func (s *Store) Migrate() error {
 		// relay credential is derived.
 		`ALTER TABLE sb_inbounds ADD COLUMN upstream_inbound_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sb_inbounds ADD COLUMN relay_secret TEXT NOT NULL DEFAULT ''`,
+		// Third-party proxy egress: an inbound with egress_id != 0 exits through
+		// that sb_egresses row (static-IP SOCKS5/HTTP proxy) instead of directly.
+		`ALTER TABLE sb_inbounds ADD COLUMN egress_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE servers ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_tls ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,

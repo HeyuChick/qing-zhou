@@ -129,7 +129,60 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound) ([]si
 	for _, id := range order {
 		relays = append(relays, *byLanding[id])
 	}
+
+	// Third-party proxy egresses: inbounds with EgressID exit through a purchased
+	// SOCKS5/HTTP proxy (e.g. a static IP). Same wiring shape as a relay — one
+	// outbound per egress shared by all its inbounds, plus a route rule. A
+	// dangling egress id is skipped (traffic falls through to route.final); the
+	// admin API refuses to delete an egress still in use, so that shouldn't occur.
+	egCache := map[int64]*SbEgress{}
+	byEgress := map[int64]*singbox.Relay{}
+	var egOrder []int64
+	for _, r := range serverInbounds {
+		if !r.Enabled || r.EgressID == 0 {
+			continue
+		}
+		if existing, ok := byEgress[r.EgressID]; ok {
+			existing.InboundTags = append(existing.InboundTags, r.Tag)
+			continue
+		}
+		eg, ok := egCache[r.EgressID]
+		if !ok {
+			eg, _ = s.GetSbEgress(r.EgressID)
+			egCache[r.EgressID] = eg
+		}
+		if eg == nil {
+			continue
+		}
+		byEgress[r.EgressID] = &singbox.Relay{Outbound: egressOutbound(eg), InboundTags: []string{r.Tag}}
+		egOrder = append(egOrder, r.EgressID)
+	}
+	for _, id := range egOrder {
+		relays = append(relays, *byEgress[id])
+	}
 	return relays, landingUsers, nil
+}
+
+// egressOutbound renders a proxy egress as a sing-box socks/http outbound. On a
+// DecryptFailed egress the password is empty, so traffic fails closed at the
+// proxy instead of silently exiting with the wrong (direct) IP.
+func egressOutbound(e *SbEgress) map[string]interface{} {
+	ob := map[string]interface{}{
+		"type":        e.Type,
+		"tag":         fmt.Sprintf("egress-%d", e.ID),
+		"server":      e.Host,
+		"server_port": e.Port,
+	}
+	if e.Type == "socks" {
+		ob["version"] = "5"
+	}
+	if e.Username != "" {
+		ob["username"] = e.Username
+	}
+	if e.Password != "" || e.DecryptFailed {
+		ob["password"] = e.Password
+	}
+	return ob
 }
 
 // relayOutbound builds the sing-box outbound that dials a landing inbound, using

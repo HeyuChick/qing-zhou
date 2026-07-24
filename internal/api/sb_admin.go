@@ -710,6 +710,98 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 	ok(w, saved)
 }
 
+// ---- sb_egresses ----
+
+// maskEgress copies an egress with its password masked as "***" (same
+// convention as server SSH credentials): the plaintext never leaves the
+// server; a client sending "***" back on save means "keep the stored value".
+func maskEgress(e *store.SbEgress) *store.SbEgress {
+	cp := *e
+	if cp.Password != "" || cp.DecryptFailed {
+		cp.Password = "***"
+	}
+	return &cp
+}
+
+func (a *API) handleAdminListSbEgresses(w http.ResponseWriter, r *http.Request) {
+	list, err := a.st.ListSbEgresses()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "读取失败")
+		return
+	}
+	// 附带每个出口被多少个入站引用，前端用来提示删除限制。
+	inbounds, _ := a.st.ListSbInbounds()
+	refs := map[int64]int{}
+	for _, ib := range inbounds {
+		if ib.EgressID != 0 {
+			refs[ib.EgressID]++
+		}
+	}
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, e := range list {
+		m := maskEgress(e)
+		out = append(out, map[string]interface{}{
+			"id": m.ID, "name": m.Name, "type": m.Type, "host": m.Host, "port": m.Port,
+			"username": m.Username, "password": m.Password,
+			"inbound_count": refs[m.ID],
+			"created_at":    m.CreatedAt, "updated_at": m.UpdatedAt,
+		})
+	}
+	ok(w, out)
+}
+
+func (a *API) handleAdminSaveSbEgress(w http.ResponseWriter, r *http.Request) {
+	var e store.SbEgress
+	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if idStr := chi.URLParam(r, "id"); idStr != "" {
+		e.ID = int64(atoi(idStr))
+	}
+	e.Name = strings.TrimSpace(e.Name)
+	e.Host = strings.TrimSpace(e.Host)
+	e.Username = strings.TrimSpace(e.Username)
+	if e.Type != "socks" && e.Type != "http" {
+		fail(w, http.StatusBadRequest, "类型仅支持 socks / http")
+		return
+	}
+	if e.Name == "" || e.Host == "" || e.Port <= 0 || e.Port > 65535 {
+		fail(w, http.StatusBadRequest, "名称、地址必填，端口需在 1-65535")
+		return
+	}
+	// "***" 表示客户端未改动密码：保留库中原值。
+	if e.Password == "***" && e.ID != 0 {
+		if stored, _ := a.st.GetSbEgress(e.ID); stored != nil {
+			e.Password = stored.Password
+		}
+	}
+	newID, err := a.st.SaveSbEgress(&e)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "保存失败")
+		return
+	}
+	// 凭据/地址变更影响所有引用此出口的服务器配置，全量重建兜底。
+	a.sbRebuildLog()
+	if saved, _ := a.st.GetSbEgress(newID); saved != nil {
+		ok(w, maskEgress(saved))
+		return
+	}
+	ok(w, nil)
+}
+
+func (a *API) handleAdminDeleteSbEgress(w http.ResponseWriter, r *http.Request) {
+	if err := a.st.DeleteSbEgress(int64(atoi(chi.URLParam(r, "id")))); err != nil {
+		if errors.Is(err, store.ErrInUse) {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		fail(w, http.StatusInternalServerError, "删除失败")
+		return
+	}
+	ok(w, nil)
+}
+
 // ---- sb_inbounds ----
 
 func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) {
@@ -734,6 +826,7 @@ func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) 
 			"enabled":             n.Enabled,
 			"sort_order":          n.SortOrder,
 			"upstream_inbound_id": n.UpstreamInboundID,
+			"egress_id":           n.EgressID,
 			"created_at":          n.CreatedAt,
 			"updated_at":          n.UpdatedAt,
 			"user_count":          len(usersByTag[n.Tag]),
@@ -824,6 +917,18 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 					n.Options = string(b)
 				}
 			}
+		}
+	}
+	// 落地中转与第三方代理出口是两种互斥的出网方式。
+	if n.UpstreamInboundID != 0 && n.EgressID != 0 {
+		fail(w, http.StatusBadRequest, "落地入站与代理出口只能二选一")
+		return
+	}
+	if n.EgressID != 0 {
+		eg, err := a.st.GetSbEgress(n.EgressID)
+		if err != nil || eg == nil {
+			fail(w, http.StatusBadRequest, "所选代理出口不存在")
+			return
 		}
 	}
 	// Relay validation: the upstream must be an existing, different inbound.
