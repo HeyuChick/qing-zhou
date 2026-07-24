@@ -294,6 +294,20 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	return nil
 }
 
+// RunCommand dials the server and runs one shell command, returning its combined
+// stdout+stderr. For ad-hoc, non-mutating diagnostics that must originate from
+// the node itself — e.g. testing a proxy egress so an IP-whitelisted upstream
+// sees the node's address, not the panel's. The caller is responsible for a
+// bounded ctx; the command string must already be shell-safe.
+func (m *RemoteManager) RunCommand(ctx context.Context, cfg *ServerConfig, cmd string) (string, error) {
+	client, err := m.dial(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("ssh connect %s: %w", cfg.Host, err)
+	}
+	defer client.Close()
+	return m.run(ctx, client, cmd)
+}
+
 // TestConnection verifies SSH connectivity and returns the remote
 // sing-box version string on success.
 func (m *RemoteManager) TestConnection(ctx context.Context, cfg *ServerConfig) (string, error) {

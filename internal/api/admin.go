@@ -106,3 +106,15 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	a.handleGetSettings(w, r)
 }
+
+// handleGetDefaultTemplates returns the built-in Clash/sing-box subscription
+// templates, so the settings UI can show the actual default (and let the admin
+// load it to edit) instead of a blank box. Saving either field back equal to its
+// default clears the override — see handlePutSettings — so the built-in stays
+// live and future updates take effect.
+func (a *API) handleGetDefaultTemplates(w http.ResponseWriter, r *http.Request) {
+	ok(w, J{
+		"clash":   subconv.DefaultClashTemplate,
+		"singbox": subconv.DefaultSingboxTemplate,
+	})
+}

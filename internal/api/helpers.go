@@ -26,6 +26,17 @@ func atoi(s string) int64 {
 	return n
 }
 
+func parseFloat(s string) float64 {
+	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return f
+}
+
+// shellQuoteAPI wraps s in single quotes (escaping embedded ones) so it is safe
+// to interpolate into a /bin/sh command line built in the API layer.
+func shellQuoteAPI(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // normalizeBase cleans a user-entered panel address into scheme://host form.
 // A value without a scheme is assumed to be HTTPS (the common panel setup behind
 // TLS); enter an explicit http:// for plain-HTTP IP:port access. Trailing

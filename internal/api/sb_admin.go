@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -212,7 +213,7 @@ func (a *API) handleAdminAcmeCert(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "证书已申请，但保存配置失败")
 		return
 	}
-	_ = a.sbctl.RebuildServer(req.ServerID)
+	a.sbScheduleServer(req.ServerID)
 	saved, _ := a.st.GetSbTls(id)
 	ok(w, saved)
 }
@@ -810,6 +811,120 @@ func (a *API) handleAdminDeleteSbEgress(w http.ResponseWriter, r *http.Request) 
 	ok(w, nil)
 }
 
+// egressProxyURL renders an egress as a curl --proxy URL. socks uses socks5h so
+// DNS resolves at the proxy (matching how sing-box dials it); http stays http.
+// Credentials are percent-encoded via url.URL.
+func egressProxyURL(e *store.SbEgress) string {
+	scheme := "http"
+	if e.Type == "socks" {
+		scheme = "socks5h"
+	}
+	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(e.Host, fmt.Sprintf("%d", e.Port))}
+	if e.Username != "" {
+		u.User = url.UserPassword(e.Username, e.Password)
+	}
+	return u.String()
+}
+
+// handleAdminTestSbEgress runs a live connectivity check THROUGH a proxy egress,
+// executed on a node that will actually route through it (?server_id=), because
+// many static-IP proxies allow only whitelisted client IPs — a test from the
+// panel host would give a misleading result. Absent server_id, it auto-picks the
+// first inbound bound to this egress; falling back to the panel host (0).
+func (a *API) handleAdminTestSbEgress(w http.ResponseWriter, r *http.Request) {
+	id := int64(atoi(chi.URLParam(r, "id")))
+	eg, err := a.st.GetSbEgress(id)
+	if err != nil || eg == nil {
+		fail(w, http.StatusNotFound, "代理出口不存在")
+		return
+	}
+	if eg.DecryptFailed {
+		fail(w, http.StatusBadRequest, "该出口的密码无法解密（QZ_SECRET_KEY 变更？），请重新编辑保存后再测试")
+		return
+	}
+	if a.sbctl == nil {
+		fail(w, http.StatusServiceUnavailable, "sing-box 控制器未启用，无法测试")
+		return
+	}
+
+	// Pick the node to test from.
+	var serverID int64
+	var picked bool
+	if s := r.URL.Query().Get("server_id"); s != "" {
+		serverID = int64(atoi(s))
+		picked = true
+	} else if ibs, _ := a.st.ListSbInbounds(); ibs != nil {
+		for _, ib := range ibs {
+			if ib.EgressID == id {
+				serverID, picked = ib.ServerID, true
+				break
+			}
+		}
+	}
+	viaName := "本机（面板）"
+	if serverID != 0 {
+		if sv, _ := a.st.GetServer(serverID); sv != nil {
+			viaName = sv.Name
+		}
+	}
+
+	// curl through the proxy to an IP-echo service, trying a few in case one is
+	// blocked; -w appends the total time. -f makes an HTTP error (e.g. 407 bad
+	// auth) a non-zero exit so we report failure rather than echoing an error page.
+	proxy := egressProxyURL(eg)
+	script := `P=` + shellQuoteAPI(proxy) + `
+for U in https://api.ip.sb/ip https://ifconfig.me/ip https://ipinfo.io/ip; do
+  OUT=$(curl -fsS -m 10 --proxy "$P" -w '\n%{time_total}' "$U" 2>&1) && { printf '%s' "$OUT"; exit 0; }
+done
+printf '%s' "$OUT" >&2; exit 1`
+
+	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+	defer cancel()
+	out, runErr := a.sbctl.RunOnServer(ctx, serverID, script)
+	out = strings.TrimSpace(out)
+
+	resp := J{"via_server_id": serverID, "via_server": viaName, "auto_picked": !picked}
+	if runErr != nil {
+		resp["ok"] = false
+		if out == "" {
+			out = runErr.Error()
+		}
+		if len(out) > 500 {
+			out = out[:500]
+		}
+		resp["output"] = out
+		ok(w, resp)
+		return
+	}
+	// Success: last line is time_total (seconds), the rest is the exit IP.
+	ip, latencyMs := out, 0
+	if nl := strings.LastIndexByte(out, '\n'); nl >= 0 {
+		ip = strings.TrimSpace(out[:nl])
+		if f := parseFloat(strings.TrimSpace(out[nl+1:])); f > 0 {
+			latencyMs = int(f * 1000)
+		}
+	}
+	resp["ok"] = true
+	resp["ip"] = ip
+	resp["latency_ms"] = latencyMs
+	ok(w, resp)
+}
+
+// handleAdminSbSyncStatus returns the last config-apply outcome per server, so
+// the UI can show a sync badge after an async (non-blocking) rebuild. Keys are
+// server ids as strings (0 = local panel, -1 = full rebuild).
+func (a *API) handleAdminSbSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if a.sbctl == nil {
+		ok(w, J{})
+		return
+	}
+	out := map[string]interface{}{}
+	for id, st := range a.sbctl.SyncStatuses() {
+		out[fmt.Sprintf("%d", id)] = st
+	}
+	ok(w, out)
+}
+
 // ---- sb_inbounds ----
 
 func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) {
@@ -979,34 +1094,31 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "保存失败（tag 可能重复）")
 		return
 	}
-	if err := a.sbctl.RebuildServer(n.ServerID); err != nil {
-		fail(w, http.StatusBadGateway, "已保存，但应用到 sing-box 失败："+err.Error())
-		return
-	}
+	// Push config asynchronously: a synchronous per-server SSH push can exceed the
+	// reverse proxy timeout on a slow/unreachable node, and the admin then sees a
+	// save error even though the row is committed (「第一次报错第二次成功」). The
+	// scheduler applies in the background; the 入站/拓扑 page polls sync status.
 	// A relay inbound's landing lives on another server that must also rebuild to
 	// inject (or drop) the relay credential in its users[].
-	a.rebuildLandingServers(n.UpstreamInboundID, oldUpstream)
+	a.sbScheduleServer(append([]int64{n.ServerID}, a.landingServerIDs(n.UpstreamInboundID, oldUpstream)...)...)
 	saved, _ := a.st.GetSbInbound(newID)
 	ok(w, saved)
 }
 
-// rebuildLandingServers rebuilds the server(s) hosting the given landing
-// inbound(s) so their users[] pick up (or drop) the relay credential. Duplicate
-// and zero ids are ignored, as is the case where the landing shares the server
-// just rebuilt by the caller.
-func (a *API) rebuildLandingServers(landingIDs ...int64) {
-	seen := map[int64]bool{}
+// landingServerIDs maps landing inbound id(s) to the server(s) hosting them, so
+// those servers can be rebuilt to pick up (or drop) the relay credential in
+// their users[]. Zero ids are ignored.
+func (a *API) landingServerIDs(landingIDs ...int64) []int64 {
+	var out []int64
 	for _, id := range landingIDs {
 		if id == 0 {
 			continue
 		}
-		up, _ := a.st.GetSbInbound(id)
-		if up == nil || seen[up.ServerID] {
-			continue
+		if up, _ := a.st.GetSbInbound(id); up != nil {
+			out = append(out, up.ServerID)
 		}
-		seen[up.ServerID] = true
-		_ = a.sbctl.RebuildServer(up.ServerID)
 	}
+	return out
 }
 
 func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request) {
@@ -1018,10 +1130,9 @@ func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if ib != nil {
-		_ = a.sbctl.RebuildServer(ib.ServerID)
-		// If this was a relay inbound, its landing server must rebuild to drop the
-		// now-unused relay credential.
-		a.rebuildLandingServers(ib.UpstreamInboundID)
+		// If this was a relay inbound, its landing server must also rebuild to drop
+		// the now-unused relay credential. Async — see handleAdminSaveSbInbound.
+		a.sbScheduleServer(append([]int64{ib.ServerID}, a.landingServerIDs(ib.UpstreamInboundID)...)...)
 	} else {
 		// 查不到归属服务器（异常情况）时全量重建兜底，避免被删的 inbound
 		// 残留在某个运行中的配置里。

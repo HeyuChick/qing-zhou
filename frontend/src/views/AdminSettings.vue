@@ -109,15 +109,28 @@
       </n-card>
 
       <n-card title="订阅模板" size="small" style="margin-bottom:16px;">
-        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">自定义 Clash/sing-box 订阅输出模板。留空使用内置默认模板。</p>
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">自定义 Clash/sing-box 订阅输出模板。留空使用内置默认模板；改过之后会一直沿用你的版本（升级带来的新版内置模板不会自动生效），点「恢复内置默认」即可清空覆盖、跟随内置。</p>
         <n-form label-placement="left" label-width="120">
           <n-form-item label="Clash 模板 (YAML)">
-            <n-input v-model:value="form.sub_clash_template" type="textarea" :rows="8" placeholder="留空用内置模板" style="font-family:monospace;font-size:12px;" />
+            <div style="width:100%;">
+              <n-input v-model:value="form.sub_clash_template" type="textarea" :rows="8" placeholder="留空用内置模板" style="font-family:monospace;font-size:12px;" />
+              <n-space size="small" style="margin-top:6px;">
+                <n-button size="tiny" @click="loadDefaultTemplate('clash')">载入内置默认（可编辑）</n-button>
+                <n-button size="tiny" @click="form.sub_clash_template = ''">恢复内置默认（清空）</n-button>
+              </n-space>
+            </div>
           </n-form-item>
           <n-form-item label="sing-box 模板 (JSON)">
-            <n-input v-model:value="form.sub_singbox_template" type="textarea" :rows="8" placeholder="留空用内置模板" style="font-family:monospace;font-size:12px;" />
+            <div style="width:100%;">
+              <n-input v-model:value="form.sub_singbox_template" type="textarea" :rows="8" placeholder="留空用内置模板" style="font-family:monospace;font-size:12px;" />
+              <n-space size="small" style="margin-top:6px;">
+                <n-button size="tiny" @click="loadDefaultTemplate('singbox')">载入内置默认（可编辑）</n-button>
+                <n-button size="tiny" @click="form.sub_singbox_template = ''">恢复内置默认（清空）</n-button>
+              </n-space>
+            </div>
           </n-form-item>
         </n-form>
+        <p style="font-size:12px;color:var(--text-3);margin-top:4px;">改动需点下方「保存设置」后生效。</p>
       </n-card>
 
       <n-card title="监控告警阈值" size="small" style="margin-bottom:16px;">
@@ -210,6 +223,18 @@ async function handleSave() {
     await apiPut('/api/admin/settings', body)
     message.success('保存成功')
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
+}
+
+// 载入内置默认模板到输入框，方便对照/微调。保存时若与内置完全一致，后端会存为
+// 空（保留「留空用内置」语义），因此载入后原样保存也不会锁死在旧版本。
+let defaultTemplates: { clash?: string; singbox?: string } | null = null
+async function loadDefaultTemplate(which: 'clash' | 'singbox') {
+  try {
+    if (!defaultTemplates) defaultTemplates = await apiGet('/api/admin/settings/default-templates')
+    if (which === 'clash') form.sub_clash_template = defaultTemplates?.clash || ''
+    else form.sub_singbox_template = defaultTemplates?.singbox || ''
+    message.success('已载入内置默认，可编辑后保存')
+  } catch (e: any) { message.error(e.message || '载入失败') }
 }
 
 async function handleTestSMTP() {

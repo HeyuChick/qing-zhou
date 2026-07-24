@@ -134,7 +134,12 @@
                 <span class="kv">用户名 <b>{{ r.username || '—' }}</b></span>
                 <span class="kv">入站数 <b>{{ r.inbound_count ?? 0 }}</b></span>
               </div>
+              <div v-if="r._test" class="egress-test" :class="r._test.ok ? 'ok' : 'err'">
+                <template v-if="r._test.ok">✅ 出口 IP <b>{{ r._test.ip }}</b> · {{ r._test.latency_ms }}ms · 经 {{ r._test.via_server }}</template>
+                <template v-else>❌ 不通（经 {{ r._test.via_server }}）：{{ r._test.output }}</template>
+              </div>
               <div class="lc-foot">
+                <n-button size="tiny" :loading="r._testing" @click="testEgress(r)">测试连通</n-button>
                 <n-button size="tiny" @click="openEgress(r)">编辑</n-button>
                 <n-button size="tiny" type="error" @click="deleteEgress(r.id)">删除</n-button>
               </div>
@@ -161,6 +166,9 @@
                 <span class="machine-name">{{ g.machine.name }}</span>
                 <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
                 <span class="machine-host">{{ showTopoIp ? g.machine.host : maskHost(g.machine.host) }}</span>
+                <n-tag v-if="syncBadge(g.machine.id)" size="tiny" :type="syncBadge(g.machine.id)!.type" :bordered="false" :title="syncBadge(g.machine.id)!.title">
+                  {{ syncBadge(g.machine.id)!.text }}
+                </n-tag>
               </div>
               <div v-for="r in g.items" :key="r.id" class="topo-row" :class="{ off: !r.enabled }">
                 <span class="topo-node client">👤 客户端</span>
@@ -194,6 +202,9 @@
                 <span class="topo-node inet">🌐 互联网</span>
                 <span class="topo-actions">
                   <n-button v-if="!r.upstream_inbound_id && !r.egress_id" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
+                  <n-popselect v-if="!r.upstream_inbound_id && !r.egress_id && egresses.length" :options="egressPopOpts" @update:value="(v: number) => attachEgress(r, v)">
+                    <n-button size="tiny" quaternary type="primary">＋ 挂出口</n-button>
+                  </n-popselect>
                   <n-button v-else-if="r.upstream_inbound_id" size="tiny" quaternary type="warning" @click="unlinkRelay(r)">解除中转</n-button>
                   <n-button v-else-if="r.egress_id" size="tiny" quaternary type="warning" @click="unlinkEgress(r)">解除出口</n-button>
                 </span>
@@ -381,6 +392,9 @@
             <div style="width:100%;">
               <n-select v-model:value="ie.egress_id" :options="egressOpts" @update:value="(v: number) => { if (v) ie.upstream_inbound_id = 0 }" />
               <div class="form-tip">选择后本入站的流量经该 SOCKS5/HTTP 代理（如购买的静态 IP）出网，出口 IP 即代理的 IP；与「落地 / 中转」二选一。出口在「代理出口」页管理。</div>
+              <n-alert v-if="selectedEgressType === 'http'" type="warning" :show-icon="false" style="margin-top:8px;">
+                所选是 <b>HTTP 代理出口</b>，只转发 TCP。<b>UDP 会静默失败</b>：TUIC / Hysteria / QUIC、以及依赖 UDP 的游戏和音视频将连不上。若本入站需要 UDP，请改选 <b>SOCKS5</b> 出口。
+              </n-alert>
             </div>
           </n-form-item>
           <n-form-item v-if="ie.type !== 'shadowsocks'" label="TLS / Reality"><n-select v-model:value="ie.tls_id" :options="tlsOpts" placeholder="无" clearable /></n-form-item>
@@ -450,7 +464,8 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import {
   NTabs, NTabPane, NDrawer, NDrawerContent, NButton, NForm, NFormItem, NInput, NInputNumber, NInputGroup,
-  NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCode, NCheckbox, NCollapse, NCollapseItem, useMessage
+  NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCode, NCheckbox, NCollapse, NCollapseItem,
+  NAlert, NPopselect, useMessage
 } from 'naive-ui'
 import { apiList, apiGet, apiGetRaw, apiPost, apiPut, apiDelete } from '@/api'
 
@@ -466,8 +481,39 @@ const genLoading = ref(false)
 const isMobile = ref(false)
 const drawerW = computed(() => isMobile.value ? '100%' : 500)
 function checkMobile() { isMobile.value = window.matchMedia('(max-width: 768px)').matches }
-onMounted(() => { checkMobile(); window.addEventListener('resize', checkMobile); load() })
-onUnmounted(() => window.removeEventListener('resize', checkMobile))
+onMounted(() => { checkMobile(); window.addEventListener('resize', checkMobile); load(); refreshSyncStatus() })
+onUnmounted(() => { window.removeEventListener('resize', checkMobile); if (syncTimer) clearInterval(syncTimer) })
+
+// ===== 配置同步状态：入站保存后是异步推送到各机器，这里回显每台机的下发结果 =====
+const syncStatus = ref<Record<string, any>>({})
+let syncTimer: any = null
+async function refreshSyncStatus() {
+  try { syncStatus.value = (await apiGet<Record<string, any>>('/api/admin/sb/sync-status')) || {} } catch {}
+}
+// 保存/挂载/解除后短暂轮询，直到所有目标不再处于 pending/running。
+function pollSyncStatus() {
+  if (syncTimer) clearInterval(syncTimer)
+  let ticks = 0
+  syncTimer = setInterval(async () => {
+    await refreshSyncStatus()
+    ticks++
+    const busy = Object.values(syncStatus.value).some((s: any) => s && (s.state === 'pending' || s.state === 'running'))
+    if (!busy || ticks >= 20) { clearInterval(syncTimer); syncTimer = null }
+  }, 1500)
+}
+// 某台机器（含本机 id=0）的下发状态徽标。
+type SyncBadge = { type: 'default' | 'success' | 'warning' | 'error' | 'info' | 'primary'; text: string; title: string }
+function syncBadge(machineId: number): SyncBadge | null {
+  const s = syncStatus.value[String(machineId)]
+  if (!s || !s.state) return null
+  switch (s.state) {
+    case 'pending': return { type: 'default', text: '待下发', title: '排队等待推送配置' }
+    case 'running': return { type: 'warning', text: '下发中…', title: '正在推送配置到该机器' }
+    case 'ok': return { type: 'success', text: '已同步', title: '配置已成功下发' }
+    case 'failed': return { type: 'error', text: '下发失败', title: s.error || '推送失败，将在下个周期自动重试' }
+    default: return null
+  }
+}
 
 const tlsList = ref<any[]>([])
 const inbounds = ref<any[]>([])
@@ -850,11 +896,35 @@ const egressOpts = computed(() => [
   { label: '不使用（直接出网）', value: 0 },
   ...egresses.value.map(e => ({ label: `${e.name} · ${(e.type || '').toUpperCase()} ${e.host}:${e.port}`, value: e.id })),
 ])
+// 拓扑图「＋ 挂出口」的候选列表（不含「不使用」项）。
+const egressPopOpts = computed(() => egresses.value.map(e => ({ label: `${e.name} · ${(e.type || '').toUpperCase()} ${e.host}:${e.port}`, value: e.id })))
+// 编辑抽屉中当前所选出口的类型，用于 HTTP 出口的 UDP 警告。
+const selectedEgressType = computed(() => { const e = egressById.value[ie.egress_id]; return e ? e.type : '' })
+
+// 测试代理出口连通性：后端在引用该出口的节点机上（匹配 IP 白名单）经代理访问 IP 回显服务。
+async function testEgress(r: any) {
+  r._testing = true
+  try {
+    r._test = await apiPost(`/api/admin/sb/egresses/${r.id}/test`, {})
+  } catch (e: any) {
+    r._test = { ok: false, via_server: '—', output: e.message }
+  } finally { r._testing = false }
+}
+
+// 从拓扑图直接给某入站挂上代理出口，无需进编辑抽屉。
+async function attachEgress(r: any, egId: number) {
+  if (!egId) return
+  try {
+    await apiPut('/api/admin/sb/inbounds/' + r.id, { type: r.type, tag: r.tag, listen: r.listen || '::', listen_port: r.listen_port, tls_id: r.tls_id, server_id: r.server_id, enabled: r.enabled, upstream_inbound_id: 0, egress_id: egId, options: JSON.stringify(jp(r.options)) })
+    message.success('已挂出口，配置推送中…'); await load(); pollSyncStatus()
+  } catch (e: any) { message.error(e.message) }
+}
+
 // 解除某入站的代理出口，恢复直接出网。
 async function unlinkEgress(r: any) {
   try {
     await apiPut('/api/admin/sb/inbounds/' + r.id, { type: r.type, tag: r.tag, listen: r.listen || '::', listen_port: r.listen_port, tls_id: r.tls_id, server_id: r.server_id, enabled: r.enabled, upstream_inbound_id: 0, egress_id: 0, options: JSON.stringify(jp(r.options)) })
-    message.success('已解除出口'); await load()
+    message.success('已解除出口，配置推送中…'); await load(); pollSyncStatus()
   } catch (e: any) { message.error(e.message) }
 }
 
@@ -892,7 +962,7 @@ const ie = reactive({
   net: 'tcp', ws_path: '/', ws_host: '', ws_early_data: 0, grpc_service: '', grpc_multi: false,
   ss_method: '2022-blake3-aes-128-gcm', flow: 'xtls-rprx-vision',
   anytls_idle_check: 0, anytls_idle_timeout: 0, anytls_min_idle: 0,
-  mux: false, brutal: false, brutal_up: 0, brutal_down: 0, upstream_inbound_id: 0,
+  mux: false, brutal: false, brutal_up: 0, brutal_down: 0, upstream_inbound_id: 0, egress_id: 0,
 })
 
 function resetIe() {
@@ -1000,17 +1070,18 @@ async function saveInbound() {
       }
     }
     chainSourceId.value = 0
-    message.success('保存成功'); showInb.value = false; await load()
+    message.success('已保存，配置推送中…'); showInb.value = false; await load(); pollSyncStatus()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
 }
 
-async function deleteInbound(id: number) { try { await apiDelete('/api/admin/sb/inbounds/' + id); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) } }
+async function deleteInbound(id: number) { try { await apiDelete('/api/admin/sb/inbounds/' + id); message.success('已删除，配置推送中…'); await load(); pollSyncStatus() } catch (e: any) { message.error(e.message) } }
 
 async function toggleInbound(n: any) {
   try {
     const o = jp(n.options)
     await apiPut('/api/admin/sb/inbounds/' + n.id, { type: n.type, tag: n.tag, listen: n.listen || '::', listen_port: n.listen_port, tls_id: n.tls_id, server_id: n.server_id, enabled: !n.enabled, upstream_inbound_id: n.upstream_inbound_id || 0, options: JSON.stringify(o) })
     n.enabled = !n.enabled
+    pollSyncStatus()
   } catch (e: any) { message.error(e.message) }
 }
 
@@ -1131,6 +1202,10 @@ async function load() {
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
 
 .form-tip { font-size: 12px; color: var(--text-3, #999); margin-top: 4px; line-height: 1.5; }
+
+.egress-test { font-size: 12px; margin: 6px 0 2px; padding: 6px 8px; border-radius: 6px; line-height: 1.5; word-break: break-all; }
+.egress-test.ok { background: rgba(24, 160, 88, 0.1); color: #18a058; }
+.egress-test.err { background: rgba(208, 48, 80, 0.1); color: #d03050; }
 
 /* 链路拓扑 */
 .topo { display: flex; flex-direction: column; gap: 18px; padding: 4px 2px; }

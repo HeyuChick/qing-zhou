@@ -77,6 +77,17 @@ type Controller struct {
 	// stats so it doesn't log a refused connection every minute.
 	capMu    sync.Mutex
 	statsCap map[int64]statsProbe
+
+	// Async rebuild scheduler: admin-triggered saves push config over SSH (up to
+	// 90s per unreachable node), too slow to hold an HTTP response open. The API
+	// schedules a rebuild and returns immediately; this coalesces bursts (one
+	// in-flight pass + at most one queued follow-up) and records a per-target
+	// SyncStatus the UI can poll. See schedule.go.
+	schedMu       sync.Mutex
+	schedRunning  bool
+	pendingAll    bool
+	pendingServer map[int64]bool
+	syncStatus    map[int64]SyncStatus
 }
 
 // statsProbe is a cached capability answer plus when it was taken.
@@ -100,6 +111,8 @@ func New(st ConfigStore, mgr Applier, stats StatsFetcher, baseConfig, v2rayListe
 		st: st, mgr: mgr, stats: stats, baseConfig: baseConfig, v2rayListen: v2rayListen,
 		restartFailed: map[int64]bool{},
 		statsCap:      map[int64]statsProbe{},
+		pendingServer: map[int64]bool{},
+		syncStatus:    map[int64]SyncStatus{},
 	}
 }
 

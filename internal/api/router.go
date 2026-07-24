@@ -2,7 +2,6 @@ package api
 
 import (
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -47,21 +46,34 @@ func (a *API) sbRebuild() error {
 	return a.sbctl.Rebuild()
 }
 
-// sbRebuildLog triggers a rebuild after an already-committed change and LOGS any
-// error instead of discarding it. A failed push (unreachable node, local
-// sing-box check failure) then leaves a breadcrumb for incident debugging; the
-// periodic controller loop re-applies within one interval, so this self-heals.
-//
-// Runs in the background: a full rebuild pushes config to every server over SSH
-// (up to 90s per unreachable machine), and callers respond to the admin/user
-// right after the DB write — holding the HTTP response open that long got cut
-// off by the reverse proxy (「无法加载响应数据」) even though the save succeeded.
+// sbRebuildLog triggers a rebuild after an already-committed change, without
+// blocking the HTTP response. A full rebuild pushes config to every server over
+// SSH (up to 90s per unreachable machine); holding the response open that long
+// got cut off by the reverse proxy (「无法加载响应数据」) even though the save
+// succeeded. The scheduler coalesces bursts and records a per-target status the
+// admin UI can poll; a failed push self-heals on the next controller tick.
 func (a *API) sbRebuildLog() {
-	go func() {
-		if err := a.sbRebuild(); err != nil {
-			log.Printf("sing-box rebuild failed (will retry on next controller tick): %v", err)
+	if a.sbctl == nil {
+		return
+	}
+	a.sbctl.ScheduleRebuild()
+}
+
+// sbScheduleServer queues an async rebuild of specific servers (0 = local panel),
+// deduplicating and skipping zero ids. Used by save/delete paths that previously
+// blocked on a synchronous per-server SSH push and could time out.
+func (a *API) sbScheduleServer(serverIDs ...int64) {
+	if a.sbctl == nil {
+		return
+	}
+	seen := map[int64]bool{}
+	for _, id := range serverIDs {
+		if seen[id] {
+			continue
 		}
-	}()
+		seen[id] = true
+		a.sbctl.ScheduleRebuildServer(id)
+	}
 }
 
 func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
@@ -180,6 +192,7 @@ func (a *API) Router() http.Handler {
 		ar.Use(a.requireAdmin)
 		ar.Get("/api/admin/settings", a.handleGetSettings)
 		ar.Put("/api/admin/settings", a.handlePutSettings)
+		ar.Get("/api/admin/settings/default-templates", a.handleGetDefaultTemplates)
 		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
 		ar.Get("/api/admin/update/check", a.handleUpdateCheck)
@@ -223,6 +236,8 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/sb/egresses", a.handleAdminSaveSbEgress)
 		ar.Put("/api/admin/sb/egresses/{id}", a.handleAdminSaveSbEgress)
 		ar.Delete("/api/admin/sb/egresses/{id}", a.handleAdminDeleteSbEgress)
+		ar.Post("/api/admin/sb/egresses/{id}/test", a.handleAdminTestSbEgress)
+		ar.Get("/api/admin/sb/sync-status", a.handleAdminSbSyncStatus)
 		ar.Get("/api/admin/sb/inbounds", a.handleAdminListSbInbounds)
 		ar.Post("/api/admin/sb/inbounds", a.handleAdminSaveSbInbound)
 		ar.Put("/api/admin/sb/inbounds/{id}", a.handleAdminSaveSbInbound)
