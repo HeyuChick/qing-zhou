@@ -95,6 +95,24 @@ func (a *API) handleAdminCreatePackage(w http.ResponseWriter, r *http.Request) {
 	ok(w, created)
 }
 
+// handleAdminReorderPackages persists a new display order for the shop/admin
+// package list. Body: {"ids":[...]} — the full set of package ids in the desired
+// order. sort_order is rewritten to match; no other package field is touched.
+func (a *API) handleAdminReorderPackages(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.IDs) == 0 {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := a.st.ReorderPackages(req.IDs); err != nil {
+		fail(w, http.StatusInternalServerError, "保存排序失败")
+		return
+	}
+	ok(w, J{"count": len(req.IDs)})
+}
+
 func (a *API) handleAdminUpdatePackage(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	if id <= 0 {
@@ -285,7 +303,8 @@ func (a *API) handleAdminUserPlans(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "读取套餐失败")
 		return
 	}
-	ok(w, buildPlanViews(buckets))
+	pkgNames, _ := a.st.PackageNames()
+	ok(w, buildPlanViews(buckets, pkgNames))
 }
 
 // DELETE /api/admin/orders/{id} — purge an order record. Only allowed for

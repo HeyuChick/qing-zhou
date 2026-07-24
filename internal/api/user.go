@@ -242,6 +242,7 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// surface per-plan remaining/expiry from here so multiple plans don't merge
 	// into one number.
 	buckets, _ := a.st.ListBuckets(u.ID)
+	pkgNames, _ := a.st.PackageNames()
 	ok(w, J{
 		"username": u.Username,
 		"email":    nsOr(u.Email),
@@ -252,7 +253,7 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			"total":     u.TrafficLimit, // 0 = unlimited
 			"remaining": remaining,
 		},
-		"plans":            buildPlanViews(buckets),
+		"plans":            buildPlanViews(buckets, pkgNames),
 		"expiry_at":        u.ExpiryAt,
 		"current_plan":     plan,
 		"subscription_url": a.subURL(r, u),
@@ -362,7 +363,8 @@ func (a *API) handleUserPlans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	buckets, _ := a.st.ListBuckets(u.ID)
-	ok(w, buildPlanViews(buckets))
+	pkgNames, _ := a.st.PackageNames()
+	ok(w, buildPlanViews(buckets, pkgNames))
 }
 
 type planView struct {
@@ -381,7 +383,13 @@ type planView struct {
 // has any balance), with remaining traffic and a derived status. The free bucket
 // is excluded — it is an internal unmetered metering identity, not a package the
 // user bought, so surfacing it as a permanent "不限" row only confuses.
-func buildPlanViews(buckets []*store.Bucket) []planView {
+//
+// pkgNames maps package id → current name. A plan bucket for a real package
+// (PackageID > 0) shows that live name so an admin rename reaches everyone who
+// holds it; the stored name is only a snapshot from purchase time. Buckets with
+// no package row (pool / welcome id -1 / admin grant id 0) keep their own name.
+// Pass nil to fall back to the snapshot everywhere.
+func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planView {
 	now := time.Now().Unix()
 	out := []planView{}
 	for _, b := range buckets {
@@ -391,7 +399,13 @@ func buildPlanViews(buckets []*store.Bucket) []planView {
 		if b.Kind == "pool" && b.TrafficLimit == 0 {
 			continue // empty/inert pool — nothing to show
 		}
-		pv := planView{ID: b.ID, Kind: b.Kind, PackageID: b.PackageID, Name: b.Name, TrafficLimit: b.TrafficLimit,
+		name := b.Name
+		if b.PackageID > 0 {
+			if live, ok := pkgNames[b.PackageID]; ok && live != "" {
+				name = live
+			}
+		}
+		pv := planView{ID: b.ID, Kind: b.Kind, PackageID: b.PackageID, Name: name, TrafficLimit: b.TrafficLimit,
 			Used: b.Used(), ExpiryAt: b.ExpiryAt, Remaining: -1}
 		if b.TrafficLimit > 0 {
 			if rem := b.TrafficLimit - b.Used(); rem > 0 {
