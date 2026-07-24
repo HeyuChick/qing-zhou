@@ -1,7 +1,6 @@
 package store
 
 import (
-	"strings"
 	"testing"
 
 	"qingzhou/internal/subconv"
@@ -41,9 +40,10 @@ func TestSelfBuiltLinks_RemarkUsesNodeName(t *testing.T) {
 	if links[0].Tag != "vless-in" {
 		t.Fatalf("link must carry its inbound tag, got %q", links[0].Tag)
 	}
-	remark := subconv.LinkRemark(links[0].Link)
-	if !strings.HasPrefix(remark, "香港 01 ") {
-		t.Fatalf("remark should start with the node name %q, got %q", "香港 01", remark)
+	// Exactly the node name, no dynamic quota/expiry suffix — clients persist
+	// manual node selection by name, so the remark must be stable across refreshes.
+	if remark := subconv.LinkRemark(links[0].Link); remark != "香港 01" {
+		t.Fatalf("remark should be the node name %q, got %q", "香港 01", remark)
 	}
 }
 
@@ -66,7 +66,7 @@ func TestSelfBuiltLinks_RemarkFallsBackToTag(t *testing.T) {
 	if len(links) != 1 {
 		t.Fatalf("want 1 link, got %d", len(links))
 	}
-	if remark := subconv.LinkRemark(links[0].Link); !strings.HasPrefix(remark, "orphan-in ") {
+	if remark := subconv.LinkRemark(links[0].Link); remark != "orphan-in" {
 		t.Fatalf("unbound inbound should fall back to its tag, got %q", remark)
 	}
 }

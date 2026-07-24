@@ -595,8 +595,11 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		if n := nodeNames[ib.Tag]; n != "" {
 			remark = n
 		}
+		// 节点名必须稳定：客户端（Clash Verge/v2rayNG）按名字记住手动选中的
+		// 节点，名字带动态剩余流量/天数时每次订阅刷新都会改名，手动选择随即
+		// 失效、分组回退自动选择。剩余流量/到期由 Subscription-Userinfo 头承载。
 		p := singbox.LinkParams{
-			Type: ib.Type, Tag: remark + subInfoSuffixBucket(owner), Host: nodeHost, Port: ib.ListenPort,
+			Type: ib.Type, Tag: remark, Host: nodeHost, Port: ib.ListenPort,
 			UUID: owner.ClientUUID, Password: owner.ClientSecret,
 			TLS:         ib.TlsID != 0,
 			SNI:         mapStr(server, "server_name"),
@@ -738,32 +741,6 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 		})
 	}
 	return out
-}
-
-// subInfoSuffixBucket appends a node's owning plan/pool remaining traffic + days
-// to its remark (e.g. " 208.67GB📊 58Days⏳"), so per-plan nodes show per-plan
-// info — matching what sing-box's sub server used to show for the whole account.
-func subInfoSuffixBucket(b *Bucket) string {
-	var traffic, expiry string
-	if b.TrafficLimit > 0 {
-		rem := b.TrafficLimit - b.Used()
-		if rem < 0 {
-			rem = 0
-		}
-		traffic = fmt.Sprintf("%.2fGB📊", float64(rem)/(1<<30))
-	} else {
-		traffic = "不限📊"
-	}
-	if b.ExpiryAt > 0 {
-		days := (b.ExpiryAt - time.Now().Unix()) / 86400
-		if days < 0 {
-			days = 0
-		}
-		expiry = fmt.Sprintf("%dDays⏳", days)
-	} else {
-		expiry = "永久⏳"
-	}
-	return " " + traffic + " " + expiry
 }
 
 func mapStr(m map[string]interface{}, k string) string {
