@@ -226,23 +226,48 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "未登录")
 		return
 	}
-	used := u.UsedUp + u.UsedDown
-	remaining := int64(0)
-	if u.TrafficLimit > used {
-		remaining = u.TrafficLimit - used
+	buckets, _ := a.st.ListBuckets(u.ID)
+	pkgNames, _ := a.st.PackageNames()
+	now := time.Now().Unix()
+
+	// Top-line traffic = currently-owned metered traffic, EXCLUDING queued份 (paid
+	// but not yet active) and the unmetered free bucket. This mirrors the legacy
+	// users.* roll-up minus queued, so the big number isn't inflated by traffic the
+	// user can't use yet. Enforcement (handleSub) still reads the full aggregate /
+	// buckets — this is display-only.
+	var total, used int64
+	for _, b := range buckets {
+		if b.Kind == store.KindFree || (b.Kind == "plan" && b.Status == "queued") {
+			continue
+		}
+		total += b.TrafficLimit
+		used += b.Used()
 	}
+	remaining := int64(0)
+	if total > used {
+		remaining = total - used
+	}
+	// Current plan = the plan actually in use, derived from the active bucket rather
+	// than the legacy current_plan_id pointer (which a queued repeat-purchase would
+	// mislabel, and which a ticker promotion never updates).
 	plan := ""
-	if u.CurrentPlanID.Valid {
+	for _, b := range buckets {
+		if b.Kind != "plan" || b.Status == "queued" || !b.Active(now) {
+			continue
+		}
+		plan = b.Name
+		if b.PackageID > 0 {
+			if live, ok := pkgNames[b.PackageID]; ok && live != "" {
+				plan = live
+			}
+		}
+		break
+	}
+	if plan == "" && u.CurrentPlanID.Valid {
 		if p, _ := a.st.GetPackage(u.CurrentPlanID.Int64); p != nil {
 			plan = p.Name
 		}
 	}
-	// Per-plan breakdown (each bucket metered independently). The traffic block
-	// above is the legacy roll-up kept for back-compat; the dashboard should
-	// surface per-plan remaining/expiry from here so multiple plans don't merge
-	// into one number.
-	buckets, _ := a.st.ListBuckets(u.ID)
-	pkgNames, _ := a.st.PackageNames()
 	ok(w, J{
 		"username": u.Username,
 		"email":    nsOr(u.Email),
@@ -250,7 +275,7 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"status":   u.Status,
 		"traffic": J{
 			"used":      used,
-			"total":     u.TrafficLimit, // 0 = unlimited
+			"total":     total, // 0 = unlimited; excludes queued份 (not yet usable)
 			"remaining": remaining,
 		},
 		"plans":            buildPlanViews(buckets, pkgNames),
