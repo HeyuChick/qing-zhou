@@ -106,6 +106,17 @@ func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
 		}
 		changed = true
 	}
+	// A promotion changes the user's effective expiry (the newly-active份 starts its
+	// countdown now). Recompute the legacy users.* aggregate so the dashboard's
+	// top-line expiry/"已过期" alert reflects the fresh plan instead of the retired
+	// head's now-past date. Enforcement reads buckets and is already correct; this
+	// only keeps the display mirror in sync when promotion happens outside a
+	// purchase/refund (i.e. the periodic ticker).
+	if changed {
+		if _, _, _, _, err := recomputeUserAggregate(tx, userID, now); err != nil {
+			return changed, err
+		}
+	}
 	return changed, nil
 }
 

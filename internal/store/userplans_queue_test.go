@@ -135,6 +135,35 @@ func TestQueue_AdvanceOnExpiry(t *testing.T) {
 	}
 }
 
+// After a ticker-driven promotion, the legacy users.expiry_at aggregate must be
+// refreshed to the newly-active份's expiry — otherwise the dashboard would keep
+// showing the retired head's now-past date and a false "已过期" alert.
+func TestQueue_PromotionRefreshesExpiry(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "frank")
+	pkg := mkPlan(t, st, "100G/30d", 100, 100, 30)
+	buy(t, st, uid, pkg) // active head
+	buy(t, st, uid, pkg) // queued
+
+	now := time.Now().Unix()
+	// Simulate the head having expired, with the aggregate already reflecting that
+	// past date (as it would after the head's real expiry was recomputed at purchase).
+	if _, err := st.db.Exec(`UPDATE user_plans SET expiry_at=? WHERE user_id=? AND kind='plan' AND status='active'`, now-100, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE users SET expiry_at=? WHERE id=?`, now-100, uid); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.AdvanceAllQueues(); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := st.UserByID(uid)
+	if u.ExpiryAt <= now {
+		t.Fatalf("users.expiry_at=%d not refreshed after promotion (want future) — dashboard would falsely show 已过期", u.ExpiryAt)
+	}
+}
+
 // Different packages are NOT queued — they stay independent and both active.
 func TestQueue_DifferentPackagesParallel(t *testing.T) {
 	st := newRefundStore(t)
