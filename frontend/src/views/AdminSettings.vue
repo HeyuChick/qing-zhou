@@ -108,10 +108,20 @@
         </n-form>
       </n-card>
 
-      <n-card title="证书 / ACME（Cloudflare）" size="small" style="margin-bottom:16px;">
-        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">
-          在此填写 Cloudflare API Token（权限 <b>Zone → DNS → Edit</b>），「证书管理」页即可用 Cloudflare DNS 方式在面板本机一键申请 / 自动续期真实证书（DNS 验证无需节点参与，远程节点也能用）。Token 加密存储，保存后显示为 <code>***</code>。
+      <n-card title="证书 / ACME（Cloudflare 自动证书）" size="small" style="margin-bottom:16px;">
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
+          填写 Cloudflare API Token 后，「证书管理」页即可用 Cloudflare DNS 方式在面板本机一键申请 / 自动续期真实证书（DNS 验证无需节点参与，远程节点也能用）。
         </p>
+        <div class="cf-guide">
+          <div class="cf-guide-t">如何获取 Cloudflare API Token（约 1 分钟）</div>
+          <ol>
+            <li>打开 <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener">Cloudflare → 我的个人资料 → API 令牌</a>，点<b>「创建令牌」</b>。</li>
+            <li>选用模板 <b>「编辑区域 DNS（Edit zone DNS）」</b> —— 它已自带所需权限。<br>（若手动创建，需添加两条权限：<b>区域 · DNS · 编辑</b> 和 <b>区域 · 区域 · 读取</b>。）</li>
+            <li>「区域资源」选 <b>包含 → 特定区域 → 你的域名</b>（或「所有区域」）。</li>
+            <li>「继续以显示摘要」→ <b>创建令牌</b> → 复制生成的令牌，粘贴到下方。</li>
+          </ol>
+          <div class="cf-guide-n">✓ 只需 DNS 编辑权限，<b>不要用 Global API Key</b>（那是全账户权限，不安全）。令牌加密存储，保存后显示为 <code>***</code>。</div>
+        </div>
         <n-form label-placement="left" label-width="160">
           <n-form-item label="Cloudflare API Token">
             <n-input v-model:value="form.cf_api_token" type="password" show-password-on="click" placeholder="留空表示未配置；显示 *** 表示已设置" />
@@ -292,4 +302,11 @@ onMounted(async () => {
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 4px; }
 .page-sub { color: var(--text-2); margin-bottom: 22px; }
+.cf-guide { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+.cf-guide-t { font-size: 12.5px; font-weight: 650; color: var(--text); margin-bottom: 8px; }
+.cf-guide ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.cf-guide li { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+.cf-guide a { color: var(--accent-strong); }
+.cf-guide-n { margin-top: 10px; font-size: 12px; color: var(--text-3); line-height: 1.55; }
+.cf-guide code { background: var(--border); padding: 0 4px; border-radius: 4px; }
 </style>
