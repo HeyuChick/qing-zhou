@@ -64,7 +64,8 @@ import {
   ReceiptOutline, WalletOutline, MegaphoneOutline, BookOutline,
   PersonOutline, PeopleOutline, PeopleCircleOutline, ArchiveOutline, ServerOutline,
   SettingsOutline, KeyOutline, NotificationsOutline, DocumentTextOutline,
-  PulseOutline, HardwareChipOutline, HomeOutline, LogOutOutline, CloudDownloadOutline
+  PulseOutline, HardwareChipOutline, HomeOutline, LogOutOutline, CloudDownloadOutline,
+  ShieldCheckmarkOutline
 } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
@@ -122,6 +123,7 @@ const adminOpsItems: MenuOption[] = [
 const adminNodeItems: MenuOption[] = [
   { label: '节点管理', key: '/admin/nodes', icon: renderIcon(ServerOutline) },
   { label: 'sing-box', key: '/admin/singbox', icon: renderIcon(HardwareChipOutline) },
+  { label: '证书管理', key: '/admin/certs', icon: renderIcon(ShieldCheckmarkOutline) },
   { label: '服务器', key: '/admin/servers', icon: renderIcon(ServerOutline) },
   { label: '监控管理', key: '/admin/monitor', icon: renderIcon(PulseOutline) },
 ]
@@ -157,7 +159,7 @@ const titleMap: Record<string, string> = {
   '/': '首页', '/dashboard': '控制台', '/sub': '订阅管理', '/shop': '积分商城',
   '/orders': '订单记录', '/points': '积分明细', '/notices': '公告通知', '/help': '帮助中心', '/account': '账户设置',
   '/admin': '管理概览', '/admin/users': '用户管理', '/admin/user-groups': '用户组', '/admin/packages': '套餐管理', '/admin/nodes': '节点管理',
-  '/admin/singbox': 'sing-box', '/admin/orders': '订单管理', '/admin/servers': '服务器', '/admin/monitor': '监控管理',
+  '/admin/singbox': 'sing-box', '/admin/certs': '证书管理', '/admin/orders': '订单管理', '/admin/servers': '服务器', '/admin/monitor': '监控管理',
   '/admin/settings': '系统设置', '/admin/reg-codes': '注册码', '/admin/announcements': '公告管理', '/admin/help': '帮助文档',
   '/admin/update': '在线更新',
 }
