@@ -22,48 +22,137 @@ type execer interface {
 type txLike interface {
 	Exec(query string, args ...any) (sql.Result, error)
 	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
 }
 
-// insertPlanBucket creates a fresh, independently-metered plan bucket with its
-// own sing-box identity (qz_<user>_p<order>). Called inside the purchase tx.
-func insertPlanBucket(ex execer, userID int64, username string, pkg *Package, orderID, now int64) error {
+// enqueuePlanBucket mints a fresh, independently-metered plan bucket in the
+// 'queued' state for a plan purchase. Unlike the old stacking model, buying the
+// SAME package again does NOT merge into one bucket — each purchase is its own
+// bucket with its own identity and quota. A queued bucket does not count down
+// (expiry_at=0) and is invisible to the config until advanceUserQueues promotes
+// it. The caller runs advanceUserQueues right after, so a first purchase (no
+// active head yet) activates immediately while a repeat purchase waits in line.
+func enqueuePlanBucket(ex execer, userID int64, username string, pkg *Package, orderID, now int64) error {
 	uu, ss := genBucketCreds()
 	_, err := insertBucket(ex, &Bucket{
 		UserID: userID, Kind: "plan", PackageID: pkg.ID, Name: pkg.Name,
 		ClientName:   fmt.Sprintf("qz_%s_p%d", username, orderID),
 		ClientUUID:   uu, ClientSecret: ss,
-		TrafficLimit: pkg.TrafficBytes, ExpiryAt: now + pkg.DurationDays*86400,
+		TrafficLimit: pkg.TrafficBytes,
+		Status:       "queued", ExpiryAt: 0, DurationDays: pkg.DurationDays,
 		OrderID: orderID, CreatedAt: now,
 	})
 	return err
 }
 
-// upsertPlanBucket renews the user's existing bucket for this package if one
-// exists, otherwise creates a fresh one. Renewal is the correct model for
-// repurchasing the SAME plan: it keeps a single metered identity and stacks —
-// traffic quota is added and expiry extended from whichever is later (now or the
-// current expiry, so an expired plan renews from now, not the past). Buying a
-// DIFFERENT plan still mints its own independent bucket. This is what makes a
-// repeat purchase show as one renewed row, not many duplicates.
-func upsertPlanBucket(tx txLike, userID int64, username string, pkg *Package, orderID, now int64) error {
-	var id, limit, expiry int64
-	err := tx.QueryRow(`SELECT id, traffic_limit, expiry_at FROM user_plans
-		WHERE user_id=? AND kind='plan' AND package_id=? ORDER BY id LIMIT 1`, userID, pkg.ID).Scan(&id, &limit, &expiry)
-	if errors.Is(err, sql.ErrNoRows) {
-		return insertPlanBucket(tx, userID, username, pkg, orderID, now)
-	}
+// advanceUserQueues promotes queued plan buckets whose slot is now free. For each
+// package the user has a queued bucket for, if there is no currently-USABLE active
+// head (same package, status='active', not expired, has quota), the oldest queued
+// bucket is promoted: status='active' and its expiry_at starts counting now
+// (now + duration_days). Idempotent — a usable head means no change. Returns
+// whether anything was promoted so callers can trigger a config rebuild.
+func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
+	rows, err := tx.Query(`SELECT DISTINCT package_id FROM user_plans
+		WHERE user_id=? AND kind='plan' AND status='queued' AND package_id>0`, userID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	base := now
-	if expiry > now {
-		base = expiry // still active: extend from current expiry
+	var pkgIDs []int64
+	for rows.Next() {
+		var p int64
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return false, err
+		}
+		pkgIDs = append(pkgIDs, p)
 	}
-	newExpiry := base + pkg.DurationDays*86400
-	newLimit := limit + pkg.TrafficBytes
-	_, err = tx.Exec(`UPDATE user_plans SET traffic_limit=?, expiry_at=?, order_id=?, updated_at=? WHERE id=?`,
-		newLimit, newExpiry, orderID, now, id)
-	return err
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+
+	changed := false
+	for _, pkgID := range pkgIDs {
+		// A usable active head blocks promotion: not expired AND has quota.
+		var usable int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM user_plans
+			WHERE user_id=? AND kind='plan' AND package_id=? AND status='active'
+			  AND (expiry_at=0 OR expiry_at>?)
+			  AND (traffic_limit=0 OR used_up+used_down<traffic_limit)`,
+			userID, pkgID, now).Scan(&usable); err != nil {
+			return changed, err
+		}
+		if usable > 0 {
+			continue
+		}
+		// Promote the oldest queued bucket for this package.
+		var id, dur int64
+		err := tx.QueryRow(`SELECT id, duration_days FROM user_plans
+			WHERE user_id=? AND kind='plan' AND package_id=? AND status='queued'
+			ORDER BY id LIMIT 1`, userID, pkgID).Scan(&id, &dur)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return changed, err
+		}
+		newExpiry := int64(0) // duration 0 = unlimited-duration plan → never expires
+		if dur > 0 {
+			newExpiry = now + dur*86400
+		}
+		if _, err := tx.Exec(`UPDATE user_plans SET status='active', expiry_at=?, updated_at=? WHERE id=?`,
+			newExpiry, now, id); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+	return changed, nil
+}
+
+// AdvanceAllQueues promotes due queued buckets across every user (exhausted or
+// expired heads free their slot). Each user is advanced in its own transaction so
+// one failure doesn't abort the rest. Returns the users whose queue changed, so
+// the caller can push fresh config only where an identity actually activated.
+func (s *Store) AdvanceAllQueues() ([]int64, error) {
+	now := time.Now().Unix()
+	rows, err := s.db.Query(`SELECT DISTINCT user_id FROM user_plans
+		WHERE kind='plan' AND status='queued' AND package_id>0`)
+	if err != nil {
+		return nil, err
+	}
+	var userIDs []int64
+	for rows.Next() {
+		var uid int64
+		if err := rows.Scan(&uid); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		userIDs = append(userIDs, uid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var changed []int64
+	for _, uid := range userIDs {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return changed, err
+		}
+		ch, aerr := advanceUserQueues(tx, uid, now)
+		if aerr != nil {
+			_ = tx.Rollback()
+			return changed, aerr
+		}
+		if err := tx.Commit(); err != nil {
+			return changed, err
+		}
+		if ch {
+			changed = append(changed, uid)
+		}
+	}
+	return changed, nil
 }
 
 // reversePlanBucket undoes one plan order's contribution to its package bucket
@@ -95,6 +184,38 @@ func reversePlanBucket(tx txLike, userID, packageID, trafficBytes, durationDays,
 		return err
 	}
 	_, err = tx.Exec(`UPDATE user_plans SET traffic_limit=?, expiry_at=?, updated_at=? WHERE id=?`, newLimit, newExpiry, now, id)
+	return err
+}
+
+// reverseOrderBucket undoes ONE order's plan entitlement on refund. In the queue
+// model each purchase is its own bucket, so a refund removes exactly that bucket
+// (found by order_id) and then advances the queue — if the removed bucket was the
+// active head, the next queued same-package bucket takes over. Falls back to the
+// legacy package-based clamped reversal (reversePlanBucket) when no bucket carries
+// this order_id (a pre-queue account) or when the matched bucket still holds more
+// than this one order's quota (a legacy merged bucket whose order_id points here),
+// so refunding an old stacked order never wipes several orders' entitlement.
+func reverseOrderBucket(tx txLike, orderID, userID, packageID, trafficBytes, durationDays, now int64) error {
+	var id, limit int64
+	var status string
+	err := tx.QueryRow(`SELECT id, traffic_limit, status FROM user_plans
+		WHERE kind='plan' AND user_id=? AND order_id=? ORDER BY id LIMIT 1`, userID, orderID).Scan(&id, &limit, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return reversePlanBucket(tx, userID, packageID, trafficBytes, durationDays, now)
+	}
+	if err != nil {
+		return err
+	}
+	// A single-order (queue-model) bucket holds exactly this order's quota; a legacy
+	// merged bucket holds the sum of several stacked orders (limit > this order's
+	// bytes) — reverse that the old, clamped way instead of deleting it wholesale.
+	if status == "active" && trafficBytes > 0 && limit > trafficBytes {
+		return reversePlanBucket(tx, userID, packageID, trafficBytes, durationDays, now)
+	}
+	if _, err := tx.Exec(`DELETE FROM user_plans WHERE id=?`, id); err != nil {
+		return err
+	}
+	_, err = advanceUserQueues(tx, userID, now)
 	return err
 }
 
@@ -298,6 +419,13 @@ type Bucket struct {
 	OrderID      int64  `json:"order_id"`
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
+	// Status is the queue state of a plan bucket: 'active' (the current head that
+	// meters/renders) or 'queued' (a same-package purchase waiting its turn; not
+	// yet counting down and not in any config). pool/free are always 'active'.
+	// DurationDays is the package duration a queued bucket applies to its expiry
+	// when it is promoted to active.
+	Status       string `json:"status"`
+	DurationDays int64  `json:"duration_days"`
 	// Mixed (HTTP/SOCKS5) proxy credential — a proxy-only account, unrelated to the
 	// login account. Empty ProxyUsername → fall back to ClientName/ClientSecret.
 	// ProxyExpiresAt 0 = permanent. See migrate.go for the schema.
@@ -360,14 +488,14 @@ func (b *Bucket) Active(now int64) bool {
 
 const bucketCols = `id, user_id, kind, package_id, name, client_name, client_uuid, client_secret,
 	traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, created_at, updated_at,
-	proxy_username, proxy_password, proxy_expires_at`
+	proxy_username, proxy_password, proxy_expires_at, status, duration_days`
 
 func scanBucket(sc scanner) (*Bucket, error) {
 	var b Bucket
 	err := sc.Scan(&b.ID, &b.UserID, &b.Kind, &b.PackageID, &b.Name, &b.ClientName, &b.ClientUUID,
 		&b.ClientSecret, &b.TrafficLimit, &b.UsedUp, &b.UsedDown, &b.ExpiryAt, &b.LastOnlineAt,
 		&b.OrderID, &b.CreatedAt, &b.UpdatedAt,
-		&b.ProxyUsername, &b.ProxyPassword, &b.ProxyExpiresAt)
+		&b.ProxyUsername, &b.ProxyPassword, &b.ProxyExpiresAt, &b.Status, &b.DurationDays)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -472,12 +600,16 @@ func insertBucket(ex execer, b *Bucket) (int64, error) {
 	if b.CreatedAt == 0 {
 		b.CreatedAt = now
 	}
+	status := b.Status
+	if status == "" {
+		status = "active" // pool/free/grant buckets are active on creation
+	}
 	res, err := ex.Exec(`INSERT INTO user_plans
 		(user_id, kind, package_id, name, client_name, client_uuid, client_secret,
-		 traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, status, duration_days, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		b.UserID, b.Kind, b.PackageID, b.Name, b.ClientName, b.ClientUUID, b.ClientSecret,
-		b.TrafficLimit, b.UsedUp, b.UsedDown, b.ExpiryAt, b.LastOnlineAt, b.OrderID, b.CreatedAt, now)
+		b.TrafficLimit, b.UsedUp, b.UsedDown, b.ExpiryAt, b.LastOnlineAt, b.OrderID, status, b.DurationDays, b.CreatedAt, now)
 	if err != nil {
 		return 0, err
 	}
@@ -642,9 +774,11 @@ func applyBucketUsage(tx txLike, bucketID, userID, up, down, now int64) error {
 // each (user, package) has a single row and the query matches nothing. The
 // users.* aggregate is unchanged because the survivor holds the summed totals.
 func (s *Store) mergeDuplicatePlanBuckets() error {
+	// Only collapse legacy 'active' duplicates. Never touch 'queued' buckets —
+	// merging them would re-create the very stacking the queue model removes.
 	rows, err := s.db.Query(`SELECT user_id, package_id, MIN(id),
 		SUM(traffic_limit), SUM(used_up), SUM(used_down), MAX(expiry_at)
-		FROM user_plans WHERE kind='plan' AND package_id>0
+		FROM user_plans WHERE kind='plan' AND package_id>0 AND status='active'
 		GROUP BY user_id, package_id HAVING COUNT(*)>1`)
 	if err != nil {
 		return err
@@ -671,7 +805,7 @@ func (s *Store) mergeDuplicatePlanBuckets() error {
 			d.limit, d.up, d.down, d.expiry, now, d.keepID); err != nil {
 			return err
 		}
-		if _, err := s.db.Exec(`DELETE FROM user_plans WHERE kind='plan' AND user_id=? AND package_id=? AND id<>?`,
+		if _, err := s.db.Exec(`DELETE FROM user_plans WHERE kind='plan' AND user_id=? AND package_id=? AND id<>? AND status='active'`,
 			d.userID, d.packageID, d.keepID); err != nil {
 			return err
 		}

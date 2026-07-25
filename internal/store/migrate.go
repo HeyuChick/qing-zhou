@@ -272,6 +272,28 @@ CREATE TABLE IF NOT EXISTS sb_tls (
   updated_at  INTEGER NOT NULL
 );
 
+-- Managed certificates: a first-class, reusable resource. Unlike a PEM inlined
+-- into one sb_tls row, one certificate is referenced by many sb_tls (mode=tls)
+-- profiles via sb_tls.cert_id, so a renewal updates a SINGLE row and every
+-- inbound that references it picks up the new cert on the next config build.
+-- Issued on the PANEL HOST (DNS-01 needs no access to the node), so remote
+-- nodes get real certs + auto-renew too. cert_pem/key_pem are stored ENCRYPTED.
+CREATE TABLE IF NOT EXISTS certificates (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT    NOT NULL,
+  domain        TEXT    NOT NULL DEFAULT '',        -- primary domain/SAN; used as SNI + for renewal
+  source        TEXT    NOT NULL DEFAULT 'acme',     -- acme | paste | selfsigned
+  acme_method   TEXT    NOT NULL DEFAULT '',         -- dns-cf | http-01 | webroot
+  cert_pem      TEXT    NOT NULL DEFAULT '',         -- encrypted fullchain PEM
+  key_pem       TEXT    NOT NULL DEFAULT '',         -- encrypted private key PEM
+  not_after     INTEGER NOT NULL DEFAULT 0,          -- expiry (unix), parsed from cert_pem
+  auto_renew    INTEGER NOT NULL DEFAULT 1,
+  last_renew_at INTEGER NOT NULL DEFAULT 0,
+  last_error    TEXT    NOT NULL DEFAULT '',
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
 -- sing-box server inbounds owned by 轻舟. options holds extra inbound fields
 -- (transport, congestion_control, masquerade, ...) as JSON. A self_built node's
 -- inbound_tag links to sb_inbounds.tag, so grouping/subscription keep working.
@@ -435,6 +457,10 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE sb_inbounds ADD COLUMN egress_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE servers ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_tls ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
+		// Certificate center: a mode=tls profile references a managed certificate
+		// by id instead of inlining its PEM, so one cert serves many inbounds and a
+		// renewal touches a single row. 0 = legacy inline PEM (backfilled below).
+		`ALTER TABLE sb_tls ADD COLUMN cert_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,
 		// Rename legacy columns to neutral names on DBs created before the
 		// rename. Errors ("no such column") are expected on fresh/up-to-date DBs
@@ -490,6 +516,13 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE user_plans ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE user_plans ADD COLUMN proxy_password TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE user_plans ADD COLUMN proxy_expires_at INTEGER NOT NULL DEFAULT 0`,
+		// Multi-plan queue: buying the same package again no longer stacks into one
+		// bucket. Each purchase is its own bucket; among same-package plan buckets
+		// only the head is 'active', the rest are 'queued' and activate (their
+		// duration_days starting to count) when the head is exhausted or expires.
+		// Existing rows default to 'active' so their behavior is unchanged.
+		`ALTER TABLE user_plans ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
+		`ALTER TABLE user_plans ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0`,
 		// A proxy_username must be globally unique (it becomes a stats identity);
 		// partial index so the many empty defaults don't collide.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_proxy_username ON user_plans(proxy_username) WHERE proxy_username <> ''`,
@@ -525,7 +558,12 @@ func (s *Store) Migrate() error {
 	// Give every existing provisioned user a free bucket (idempotent). This is
 	// required, not cosmetic: the pool no longer covers the free group, so an
 	// account without a free bucket would lose free-node access entirely.
-	return s.backfillFreeBuckets()
+	if err := s.backfillFreeBuckets(); err != nil {
+		return err
+	}
+	// Extract inline-PEM sb_tls (mode=tls) profiles into managed certificates
+	// rows and repoint them via cert_id (idempotent).
+	return s.backfillCerts()
 }
 
 // backfillFreeBuckets creates the free-group bucket for users provisioned before

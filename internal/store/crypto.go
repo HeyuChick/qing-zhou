@@ -12,7 +12,7 @@ import (
 const encPrefix = "enc:v1:"
 
 // encKeys are settings stored encrypted at rest.
-var encKeys = map[string]bool{"smtp_pass": true}
+var encKeys = map[string]bool{"smtp_pass": true, "cf_api_token": true}
 
 // SetSecretKey derives the AES key used to encrypt secret settings. Pass
 // QZ_SECRET_KEY (recommended, kept outside the DB) or fall back to jwt_secret.
@@ -88,6 +88,22 @@ func (s *Store) CountUndecryptableSecrets() int {
 			var v string
 			if rows.Scan(&v) == nil {
 				if _, ok := s.decryptOK(v); !ok {
+					n++
+				}
+			}
+		}
+		rows.Close()
+	}
+	// Managed certificates hold encrypted cert_pem/key_pem; an undecryptable one
+	// makes its referencing inbounds refuse to build (never plaintext), so count
+	// it the same way as sb_tls above.
+	if rows, err := s.db.Query(`SELECT cert_pem, key_pem FROM certificates`); err == nil {
+		for rows.Next() {
+			var cp, kp string
+			if rows.Scan(&cp, &kp) == nil {
+				if _, ok := s.decryptOK(cp); !ok {
+					n++
+				} else if _, ok := s.decryptOK(kp); !ok {
 					n++
 				}
 			}

@@ -108,6 +108,20 @@
         </n-form>
       </n-card>
 
+      <n-card title="证书 / ACME（Cloudflare）" size="small" style="margin-bottom:16px;">
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">
+          在此填写 Cloudflare API Token（权限 <b>Zone → DNS → Edit</b>），「证书管理」页即可用 Cloudflare DNS 方式在面板本机一键申请 / 自动续期真实证书（DNS 验证无需节点参与，远程节点也能用）。Token 加密存储，保存后显示为 <code>***</code>。
+        </p>
+        <n-form label-placement="left" label-width="160">
+          <n-form-item label="Cloudflare API Token">
+            <n-input v-model:value="form.cf_api_token" type="password" show-password-on="click" placeholder="留空表示未配置；显示 *** 表示已设置" />
+          </n-form-item>
+          <n-form-item label="ACME 账户邮箱">
+            <n-input v-model:value="form.acme_email" placeholder="可选，建议填写（Let's Encrypt 到期提醒）" />
+          </n-form-item>
+        </n-form>
+      </n-card>
+
       <n-card title="订阅模板" size="small" style="margin-bottom:16px;">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">自定义 Clash/sing-box 订阅输出模板。留空使用内置默认模板；改过之后会一直沿用你的版本（升级带来的新版内置模板不会自动生效），点「恢复内置默认」即可清空覆盖、跟随内置。</p>
         <n-form label-placement="left" label-width="120">

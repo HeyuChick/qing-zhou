@@ -94,14 +94,31 @@
     </n-modal>
 
     <!-- 分配计划 -->
-    <n-modal v-model:show="showAssign" preset="card" title="分配计划" style="max-width:400px;">
+    <n-modal v-model:show="showAssign" preset="card" title="分配计划" style="max-width:440px;">
       <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">用户：{{ assignUser?.username }}</p>
+
+      <!-- 当前套餐一览：便于判断分配后是排队还是立即生效 -->
+      <div v-if="assignPlanList.length" style="margin-bottom:14px;">
+        <div style="font-size:12px;color:var(--text-3);margin-bottom:6px;">当前套餐</div>
+        <div v-for="p in assignPlanList" :key="p.id" style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg-soft);border-radius:8px;margin-bottom:6px;">
+          <span style="flex:1;font-size:13px;font-weight:550;">{{ p.name }}</span>
+          <n-tag :type="planStatusOf(p).type" size="tiny" bordered="false">{{ planStatusOf(p).label }}</n-tag>
+          <span style="font-size:11px;color:var(--text-3);white-space:nowrap;">{{ planTimeOf(p) }}</span>
+        </div>
+      </div>
+      <n-empty v-else-if="!loadingAssignPlans" description="该用户暂无套餐" size="small" style="padding:8px 0 14px;" />
+
       <n-form label-placement="left" label-width="60">
         <n-form-item label="套餐">
           <n-select v-model:value="assignPkgId" :options="pkgOptions" placeholder="选择套餐" />
         </n-form-item>
       </n-form>
-      <n-button type="primary" block :loading="saving" @click="handleAssign">分配（不扣积分）</n-button>
+      <n-alert v-if="assignWillQueue" type="info" size="small" style="margin-bottom:12px;">
+        该用户已在使用此套餐，分配后将<b>排队</b>，在当前份用完或到期后自动启用。
+      </n-alert>
+      <n-button type="primary" block :loading="saving" @click="handleAssign">
+        {{ assignWillQueue ? '分配（排队 · 不扣积分）' : '分配（不扣积分）' }}
+      </n-button>
     </n-modal>
 
     <!-- 订单历史 -->
@@ -138,10 +155,11 @@
 import { ref, computed, reactive, onMounted } from 'vue'
 import {
   NSpin, NInput, NInputNumber, NButton, NModal, NForm, NFormItem,
-  NSwitch, NTag, NSelect, NEmpty, NCheckbox, useMessage, useDialog
+  NSwitch, NTag, NSelect, NEmpty, NCheckbox, NAlert, useMessage, useDialog
 } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
 import { fmtBytes, fmtTotal, fmtDate, fmtDateTime, timeAgo, toLocalDatetimeInput } from '@/utils/format'
+import { planStatusMeta, planTimeText } from '@/utils/plan'
 import RefundDialog from '@/components/RefundDialog.vue'
 
 const message = useMessage()
@@ -243,19 +261,34 @@ const showAssign = ref(false)
 const assignUser = ref<any>(null)
 const assignPkgId = ref<number | null>(null)
 const pkgOptions = ref<any[]>([])
-function openAssign(u: any) { assignUser.value = u; assignPkgId.value = null; showAssign.value = true; loadPackages() }
+const assignPlans = ref<any[]>([])
+const loadingAssignPlans = ref(false)
+const assignPlanList = computed(() => assignPlans.value.filter((p: any) => p.kind === 'plan'))
+// The chosen package already has a usable (active) bucket → the grant will queue.
+const assignWillQueue = computed(() =>
+  !!assignPkgId.value && assignPlanList.value.some((p: any) => p.package_id === assignPkgId.value && p.status === 'active'))
+function openAssign(u: any) {
+  assignUser.value = u; assignPkgId.value = null; showAssign.value = true
+  loadPackages(); loadAssignPlans(u.id)
+}
 async function loadPackages() {
   try {
     const pkgs = await apiList<any>('/api/admin/packages')
     pkgOptions.value = pkgs.map((p: any) => ({ label: `${p.name} (${p.type})`, value: p.id }))
   } catch {}
 }
+async function loadAssignPlans(uid: number) {
+  loadingAssignPlans.value = true
+  try { assignPlans.value = await apiList(`/api/admin/users/${uid}/plans`) } catch {} finally { loadingAssignPlans.value = false }
+}
+function planStatusOf(p: any) { return planStatusMeta(p) }
+function planTimeOf(p: any) { return planTimeText(p, fmtDate) }
 async function handleAssign() {
   if (!assignPkgId.value) { message.warning('请选择套餐'); return }
   saving.value = true
   try {
     await apiPost(`/api/admin/users/${assignUser.value.id}/assign-plan`, { package_id: assignPkgId.value })
-    message.success('分配成功'); showAssign.value = false; await load()
+    message.success(assignWillQueue.value ? '已分配并加入队列' : '分配成功'); showAssign.value = false; await load()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
 }
 

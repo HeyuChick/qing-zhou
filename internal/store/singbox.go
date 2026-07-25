@@ -22,8 +22,11 @@ type SbTls struct {
 	Mode       string `json:"mode"` // reality | tls
 	ServerJSON string `json:"server_json"`
 	ClientJSON string `json:"client_json"`
-	CreatedAt  int64  `json:"created_at"`
-	UpdatedAt  int64  `json:"updated_at"`
+	// CertID references a managed certificate (certificates.id) for mode=tls
+	// profiles. 0 = none / legacy inline PEM held in ServerJSON.
+	CertID    int64 `json:"cert_id"`
+	CreatedAt int64 `json:"created_at"`
+	UpdatedAt int64 `json:"updated_at"`
 	// DecryptFailed is set when ServerJSON was stored encrypted but could not be
 	// decrypted (typically a changed/wrong QZ_SECRET_KEY). The config builder MUST
 	// refuse to emit such an inbound rather than downgrade it to a plaintext one.
@@ -61,7 +64,7 @@ type SbInbound struct {
 // ---- sb_tls ----
 
 func (s *Store) ListSbTls() ([]*SbTls, error) {
-	rows, err := s.db.Query(`SELECT id, server_id, name, mode, server_json, client_json, created_at, updated_at
+	rows, err := s.db.Query(`SELECT id, server_id, name, mode, server_json, client_json, cert_id, created_at, updated_at
 		FROM sb_tls ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -70,7 +73,7 @@ func (s *Store) ListSbTls() ([]*SbTls, error) {
 	out := []*SbTls{}
 	for rows.Next() {
 		var t SbTls
-		if err := rows.Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CertID, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		var ok bool
@@ -83,8 +86,8 @@ func (s *Store) ListSbTls() ([]*SbTls, error) {
 
 func (s *Store) GetSbTls(id int64) (*SbTls, error) {
 	var t SbTls
-	err := s.db.QueryRow(`SELECT id, server_id, name, mode, server_json, client_json, created_at, updated_at
-		FROM sb_tls WHERE id=?`, id).Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CreatedAt, &t.UpdatedAt)
+	err := s.db.QueryRow(`SELECT id, server_id, name, mode, server_json, client_json, cert_id, created_at, updated_at
+		FROM sb_tls WHERE id=?`, id).Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CertID, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -104,15 +107,15 @@ func (s *Store) SaveSbTls(t *SbTls) (int64, error) {
 	now := time.Now().Unix()
 	enc := s.encrypt(t.ServerJSON)
 	if t.ID == 0 {
-		res, err := s.db.Exec(`INSERT INTO sb_tls (server_id, name, mode, server_json, client_json, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?)`, t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, now, now)
+		res, err := s.db.Exec(`INSERT INTO sb_tls (server_id, name, mode, server_json, client_json, cert_id, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,?,?)`, t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, t.CertID, now, now)
 		if err != nil {
 			return 0, err
 		}
 		return res.LastInsertId()
 	}
-	_, err := s.db.Exec(`UPDATE sb_tls SET server_id=?, name=?, mode=?, server_json=?, client_json=?, updated_at=? WHERE id=?`,
-		t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, now, t.ID)
+	_, err := s.db.Exec(`UPDATE sb_tls SET server_id=?, name=?, mode=?, server_json=?, client_json=?, cert_id=?, updated_at=? WHERE id=?`,
+		t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, t.CertID, now, t.ID)
 	return t.ID, err
 }
 
@@ -131,6 +134,63 @@ func (s *Store) DeleteSbTls(id int64) error {
 	}
 	_, err := s.db.Exec(`DELETE FROM sb_tls WHERE id=?`, id)
 	return err
+}
+
+// resolveTlsBlock builds the sing-box "tls" block for an inbound's TLS profile.
+// When the profile references a managed certificate (cert_id != 0) it injects
+// that cert's certificate/key/server_name into the block, so one renewed cert
+// flows to every inbound that uses it. Returns (nil, nil) when the inbound has
+// no TLS. Fails CLOSED on any undecryptable secret or a dangling cert reference:
+// emitting the inbound without its TLS block would downgrade it to plaintext and
+// leak all its traffic, which is worse than refusing to build. The caches are
+// per-build to avoid re-decrypting the same profile/cert for every inbound.
+func (s *Store) resolveTlsBlock(tlsID int64, tag string, tlsCache map[int64]*SbTls, certCache map[int64]*Cert) (map[string]interface{}, error) {
+	if tlsID == 0 {
+		return nil, nil
+	}
+	tls, ok := tlsCache[tlsID]
+	if !ok {
+		tls, _ = s.GetSbTls(tlsID)
+		tlsCache[tlsID] = tls
+	}
+	if tls == nil {
+		return nil, nil
+	}
+	if tls.DecryptFailed {
+		return nil, fmt.Errorf("入站 %s 的 TLS 配置(id=%d)无法解密，已拒绝生成配置以避免降级为明文入站——请确认 QZ_SECRET_KEY 与加密时一致", tag, tlsID)
+	}
+	var tj map[string]interface{}
+	if tls.ServerJSON != "" {
+		if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err != nil {
+			tj = nil
+		}
+	}
+	if tls.CertID != 0 {
+		cert, ok := certCache[tls.CertID]
+		if !ok {
+			cert, _ = s.GetCert(tls.CertID)
+			certCache[tls.CertID] = cert
+		}
+		if cert == nil {
+			return nil, fmt.Errorf("入站 %s 的 TLS 配置(id=%d)引用的证书(id=%d)不存在，已拒绝生成配置", tag, tlsID, tls.CertID)
+		}
+		if cert.DecryptFailed {
+			return nil, fmt.Errorf("入站 %s 引用的证书(id=%d)无法解密，已拒绝生成配置以避免降级为明文入站——请确认 QZ_SECRET_KEY 与加密时一致", tag, tls.CertID)
+		}
+		if tj == nil {
+			tj = map[string]interface{}{"enabled": true}
+		}
+		// A managed cert supplies inline PEM; drop any stale path fields that
+		// would otherwise shadow it, and pin the SNI to the cert's domain.
+		delete(tj, "certificate_path")
+		delete(tj, "key_path")
+		tj["certificate"] = cert.CertPEM
+		tj["key"] = cert.KeyPEM
+		if cert.Domain != "" {
+			tj["server_name"] = cert.Domain
+		}
+	}
+	return tj, nil
 }
 
 // ---- sb_inbounds ----
@@ -389,6 +449,7 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 		return nil, err
 	}
 	tlsCache := map[int64]*SbTls{}
+	certCache := map[int64]*Cert{}
 	var ibs []singbox.Inbound
 	for _, ib := range inbounds {
 		if !ib.Enabled {
@@ -408,27 +469,12 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 				}
 			}
 		}
-		if ib.TlsID != 0 {
-			tls := tlsCache[ib.TlsID]
-			if tls == nil {
-				tls, _ = s.GetSbTls(ib.TlsID)
-				tlsCache[ib.TlsID] = tls
-			}
-			if tls != nil {
-				if tls.DecryptFailed {
-					// A wrong/changed QZ_SECRET_KEY left this TLS profile
-					// undecryptable. Refuse to build rather than emit the inbound
-					// without its TLS block, which would downgrade a Reality/TLS
-					// node to plaintext and leak all its traffic in the clear.
-					return nil, fmt.Errorf("入站 %s 的 TLS 配置(id=%d)无法解密，已拒绝生成配置以避免降级为明文入站——请确认 QZ_SECRET_KEY 与加密时一致", ib.Tag, ib.TlsID)
-				}
-				if tls.ServerJSON != "" {
-					var tj map[string]interface{}
-					if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err == nil {
-						baseMap["tls"] = tj
-					}
-				}
-			}
+		tlsBlock, err := s.resolveTlsBlock(ib.TlsID, ib.Tag, tlsCache, certCache)
+		if err != nil {
+			return nil, err
+		}
+		if tlsBlock != nil {
+			baseMap["tls"] = tlsBlock
 		}
 		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: mergeRelayUser(usersByTag[ib.Tag], landingUsers, ib.Tag)})
 	}
@@ -457,6 +503,7 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 		return nil, err
 	}
 	tlsCache := map[int64]*SbTls{}
+	certCache := map[int64]*Cert{}
 	var ibs []singbox.Inbound
 	for _, ib := range inbounds {
 		if !ib.Enabled {
@@ -476,27 +523,12 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 				}
 			}
 		}
-		if ib.TlsID != 0 {
-			tls := tlsCache[ib.TlsID]
-			if tls == nil {
-				tls, _ = s.GetSbTls(ib.TlsID)
-				tlsCache[ib.TlsID] = tls
-			}
-			if tls != nil {
-				if tls.DecryptFailed {
-					// A wrong/changed QZ_SECRET_KEY left this TLS profile
-					// undecryptable. Refuse to build rather than emit the inbound
-					// without its TLS block, which would downgrade a Reality/TLS
-					// node to plaintext and leak all its traffic in the clear.
-					return nil, fmt.Errorf("入站 %s 的 TLS 配置(id=%d)无法解密，已拒绝生成配置以避免降级为明文入站——请确认 QZ_SECRET_KEY 与加密时一致", ib.Tag, ib.TlsID)
-				}
-				if tls.ServerJSON != "" {
-					var tj map[string]interface{}
-					if err := json.Unmarshal([]byte(tls.ServerJSON), &tj); err == nil {
-						baseMap["tls"] = tj
-					}
-				}
-			}
+		tlsBlock, err := s.resolveTlsBlock(ib.TlsID, ib.Tag, tlsCache, certCache)
+		if err != nil {
+			return nil, err
+		}
+		if tlsBlock != nil {
+			baseMap["tls"] = tlsBlock
 		}
 		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: mergeRelayUser(usersByTag[ib.Tag], landingUsers, ib.Tag)})
 	}
@@ -896,6 +928,12 @@ func orderBuckets(bs []*Bucket, now, freeGroup int64, planGroups func(int64) []i
 	var plans []*Bucket
 	var pool, free *Bucket
 	for _, b := range bs {
+		// A queued plan bucket (a same-package purchase waiting its turn) is not yet
+		// usable: it carries no identity into any inbound and contributes no group
+		// access until advanceUserQueues promotes it to 'active'.
+		if b.Status == "queued" {
+			continue
+		}
 		switch b.Kind {
 		case "pool":
 			pool = b

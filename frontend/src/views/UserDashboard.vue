@@ -47,15 +47,19 @@
 
     <!-- 分套餐资源：每个套餐独立计量，分别显示剩余流量与到期 -->
     <n-card v-if="plans.length" title="我的套餐" size="small" style="margin-bottom:20px;">
-      <div v-for="p in plans" :key="p.id" style="margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px;">
+      <p v-if="hasQueued" style="font-size:12px;color:var(--text-3);margin:-2px 0 10px;line-height:1.5;">
+        同一套餐购买多份会自动<b>排队</b>：一次只用一份，当前份流量用完或到期后，下一份自动启用（有效期届时才开始计算）。
+      </p>
+      <div v-for="p in plans" :key="p.id" class="plan-row" :class="{ queued: p.status === 'queued' }">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
           <span style="font-weight:600;">{{ p.name || '套餐 #' + p.id }}</span>
           <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
         </div>
-        <n-progress type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
+        <n-progress v-if="p.status !== 'queued'" type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
+        <div v-else style="height:6px;border-radius:3px;background:repeating-linear-gradient(45deg,var(--border),var(--border) 4px,transparent 4px,transparent 8px);"></div>
         <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;">
-          <span>剩余 {{ p.remaining < 0 ? '不限' : fmtBytes(p.remaining) }}（{{ fmtBytes(p.used) }} / {{ fmtTotal(p.traffic_limit) }}）</span>
-          <span>{{ p.expiry_at ? fmtDate(p.expiry_at) : '不过期' }}</span>
+          <span>{{ p.status === 'queued' ? '待用流量 ' + (p.traffic_limit>0 ? fmtTotal(p.traffic_limit) : '不限') : '剩余 ' + (p.remaining < 0 ? '不限' : fmtBytes(p.remaining)) + '（' + fmtBytes(p.used) + ' / ' + fmtTotal(p.traffic_limit) + '）' }}</span>
+          <span>{{ planTime(p) }}</span>
         </div>
       </div>
     </n-card>
@@ -102,6 +106,7 @@ import { useAuthStore } from '@/stores/auth'
 import { apiGet, apiList } from '@/api'
 import { fmtBytes, fmtTotal, fmtDate, daysLeft, yuan, pct } from '@/utils/format'
 import { mdToHtml } from '@/utils/markdown'
+import { planStatusMeta, planTimeText, planSortKey } from '@/utils/plan'
 
 const router = useRouter(); const auth = useAuthStore(); const message = useMessage()
 const dash = ref<any>({}); const notices = ref<any[]>([]); const trendRange = ref('7d'); const trendData = ref<any[]>([])
@@ -109,13 +114,17 @@ const showNotice = ref(false); const activeNotice = ref<any>(null)
 function openNotice(n: any) { activeNotice.value = n; showNotice.value = true }
 
 const dl = computed(() => daysLeft(dash.value.expiry_at))
-const plans = computed<any[]>(() => dash.value.plans || [])
-function planPct(p: any) { return pct(p.used, p.traffic_limit) }
-function planStatus(p: any) {
-  if (p.status === 'expired' || (p.expiry_at && p.expiry_at * 1000 < Date.now())) return { type: 'error' as const, label: '已过期' }
-  if (p.status === 'exhausted' || (p.traffic_limit > 0 && p.used >= p.traffic_limit)) return { type: 'warning' as const, label: '已用尽' }
-  return { type: 'success' as const, label: '正常' }
-}
+// Read: 使用中 first, then 排队中 (by soonest activation), then finished — so the
+// current份 and what's next are always at the top.
+const plans = computed<any[]>(() => {
+  const list = [...(dash.value.plans || [])]
+  list.sort((a, b) => planSortKey(a) - planSortKey(b) || (a.activate_by || a.expiry_at || 0) - (b.activate_by || b.expiry_at || 0))
+  return list
+})
+const hasQueued = computed(() => plans.value.some(p => p.status === 'queued'))
+function planPct(p: any) { return p.status === 'queued' ? 0 : pct(p.used, p.traffic_limit) }
+const planStatus = planStatusMeta
+const planTime = (p: any) => planTimeText(p, fmtDate)
 const usedPct = computed(() => pct(dash.value.traffic?.used, dash.value.traffic?.total))
 const ringColor = computed(() => usedPct.value > 90 ? '#c2685c' : usedPct.value > 70 ? '#bf9540' : '#6f8f76')
 const circumference = 2 * Math.PI * 58
@@ -149,4 +158,6 @@ a{color:var(--accent-strong)}
 .dash-top{display:grid;grid-template-columns:200px 1fr;gap:16px;margin-bottom:20px}
 .dash-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
 @media (max-width:640px){.dash-top{grid-template-columns:1fr}}
+.plan-row{margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px}
+.plan-row.queued{opacity:.72;border:1px dashed var(--border);background:transparent}
 </style>

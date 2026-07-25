@@ -376,7 +376,65 @@ type planView struct {
 	Used         int64  `json:"used"`
 	Remaining    int64  `json:"remaining"` // -1 = unlimited
 	ExpiryAt     int64  `json:"expiry_at"`
-	Status       string `json:"status"` // active | expired | exhausted
+	Status       string `json:"status"` // active | queued | expired | exhausted
+	// ActivateBy is a queued plan's estimated LATEST activation time (unix): the
+	// current head's expiry plus the durations of the queued份 ahead of it. It may
+	// activate sooner if the head's traffic runs out first. 0 = unknown (the head
+	// has no expiry, so only exhaustion triggers the next). Only set for queued.
+	ActivateBy int64 `json:"activate_by,omitempty"`
+}
+
+// queueActivations estimates, for each queued plan bucket, the LATEST time it
+// will activate: from the usable head's expiry, walking the same-package queue in
+// id order and adding each份's duration. 0 = unknown (unlimited-duration head →
+// only exhaustion advances it). When a package's head has already ended but isn't
+// promoted yet (the ~2min ticker gap), the oldest queued份 is treated as due now.
+func queueActivations(buckets []*store.Bucket, now int64) map[int64]int64 {
+	type pkgQ struct {
+		base    int64 // head's expiry (0 = never/unlimited)
+		hasHead bool
+		queued  []*store.Bucket
+	}
+	byPkg := map[int64]*pkgQ{}
+	for _, b := range buckets {
+		if b.Kind != "plan" || b.PackageID <= 0 {
+			continue
+		}
+		q := byPkg[b.PackageID]
+		if q == nil {
+			q = &pkgQ{}
+			byPkg[b.PackageID] = q
+		}
+		switch {
+		case b.Status == "queued":
+			q.queued = append(q.queued, b) // ListBuckets is id-ordered → FIFO
+		case b.Status == "active" && b.NotExpired(now) && b.HasQuota():
+			q.hasHead = true
+			if b.ExpiryAt > q.base {
+				q.base = b.ExpiryAt
+			}
+		}
+	}
+	out := map[int64]int64{}
+	for _, q := range byPkg {
+		cursor := q.base
+		known := true
+		switch {
+		case !q.hasHead:
+			cursor = now // head already ended; promotion imminent
+		case q.base == 0:
+			known = false // unlimited-duration head → activation only on exhaustion
+		}
+		for _, b := range q.queued {
+			if known {
+				out[b.ID] = cursor
+				cursor += b.DurationDays * 86400
+			} else {
+				out[b.ID] = 0
+			}
+		}
+	}
+	return out
 }
 
 // buildPlanViews shapes a user's buckets for the UI: each plan + the pool (if it
@@ -391,6 +449,7 @@ type planView struct {
 // Pass nil to fall back to the snapshot everywhere.
 func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planView {
 	now := time.Now().Unix()
+	acts := queueActivations(buckets, now)
 	out := []planView{}
 	for _, b := range buckets {
 		if b.Kind == store.KindFree {
@@ -415,6 +474,9 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 			}
 		}
 		switch {
+		case b.Status == "queued":
+			pv.Status = "queued" // a same-package purchase waiting for the head to finish
+			pv.ActivateBy = acts[b.ID]
 		case !b.NotExpired(now):
 			pv.Status = "expired"
 		case !b.HasQuota():

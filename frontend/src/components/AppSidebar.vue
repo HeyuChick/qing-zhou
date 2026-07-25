@@ -39,7 +39,7 @@ import {
   ReceiptOutline, WalletOutline, MegaphoneOutline, BookOutline,
   PersonOutline, PeopleOutline, ArchiveOutline, ServerOutline,
   SettingsOutline, KeyOutline, NotificationsOutline, DocumentTextOutline,
-  PulseOutline, HardwareChipOutline
+  PulseOutline, HardwareChipOutline, ShieldCheckmarkOutline
 } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
@@ -73,6 +73,7 @@ const adminMenuItems: MenuOption[] = [
   { label: '套餐管理', key: '/admin/packages', icon: renderIcon(ArchiveOutline) },
   { label: '节点管理', key: '/admin/nodes', icon: renderIcon(ServerOutline) },
   { label: 'sing-box', key: '/admin/singbox', icon: renderIcon(HardwareChipOutline) },
+  { label: '证书管理', key: '/admin/certs', icon: renderIcon(ShieldCheckmarkOutline) },
   { label: '服务器', key: '/admin/servers', icon: renderIcon(ServerOutline) },
   { label: '监控管理', key: '/admin/monitor', icon: renderIcon(PulseOutline) },
   { label: '订单管理', key: '/admin/orders', icon: renderIcon(ReceiptOutline) },

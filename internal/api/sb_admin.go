@@ -385,14 +385,22 @@ func (a *API) handleAdminListSbTls(w http.ResponseWriter, r *http.Request) {
 			"mode":        t.Mode,
 			"server_json": t.ServerJSON,
 			"client_json": t.ClientJSON,
+			"cert_id":     t.CertID,
 			"created_at":  t.CreatedAt,
 			"updated_at":  t.UpdatedAt,
 		}
 		if t.Mode == "tls" {
-			var sj map[string]interface{}
-			if json.Unmarshal([]byte(t.ServerJSON), &sj) == nil {
-				if cert, ok := sj["certificate"].(string); ok && cert != "" {
-					m["cert_info"] = certInfoFromPEM(cert)
+			if t.CertID != 0 {
+				// Managed cert: expiry comes from the certificates row, not inline PEM.
+				if c, _ := a.st.GetCert(t.CertID); c != nil && !c.DecryptFailed {
+					m["cert_info"] = certInfoFromPEM(c.CertPEM)
+				}
+			} else {
+				var sj map[string]interface{}
+				if json.Unmarshal([]byte(t.ServerJSON), &sj) == nil {
+					if cert, ok := sj["certificate"].(string); ok && cert != "" {
+						m["cert_info"] = certInfoFromPEM(cert)
+					}
 				}
 			}
 		}
@@ -637,6 +645,7 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 		ServerName  string   `json:"server_name"`
 		Certificate string   `json:"certificate"`
 		Key         string   `json:"key"`
+		CertID      int64    `json:"cert_id"` // reference a managed certificate instead of inline PEM
 		Insecure    bool     `json:"insecure"`
 		ALPN        []string `json:"alpn"`
 		Fingerprint string   `json:"fingerprint"`
@@ -656,6 +665,51 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 	var id int64
 	if p := chi.URLParam(r, "id"); p != "" {
 		id = atoi(p)
+	}
+	// A profile referencing a managed certificate carries no inline PEM: the cert
+	// bytes are injected at build time from the certificates table (single source
+	// of truth), and its client params are pinned to a real, verified cert.
+	if req.CertID != 0 {
+		cert, err := a.st.GetCert(req.CertID)
+		if err != nil || cert == nil {
+			fail(w, http.StatusBadRequest, "引用的证书不存在")
+			return
+		}
+		sni := req.ServerName
+		if cert.Domain != "" {
+			sni = cert.Domain // SNI must match the cert; the cert's domain wins
+		}
+		server := map[string]interface{}{"enabled": true, "server_name": sni}
+		if len(req.ALPN) > 0 {
+			server["alpn"] = req.ALPN
+		}
+		if v := tlsVersion(req.MinVersion); v != "" {
+			server["min_version"] = v
+		}
+		if v := tlsVersion(req.MaxVersion); v != "" {
+			server["max_version"] = v
+		}
+		// A real (verified) cert means the client must NOT skip verification;
+		// self-signed certs referenced here still honor the caller's insecure flag.
+		insecure := req.Insecure
+		if cert.Source == "acme" || cert.Source == "paste" {
+			insecure = false
+		}
+		client := map[string]interface{}{
+			"insecure": insecure,
+			"utls":     map[string]interface{}{"enabled": true, "fingerprint": fpOrDefault(req.Fingerprint)},
+		}
+		sj, _ := json.Marshal(server)
+		cj, _ := json.Marshal(client)
+		newID, err := a.st.SaveSbTls(&store.SbTls{ID: id, ServerID: req.ServerID, Name: req.Name, Mode: "tls", CertID: req.CertID, ServerJSON: string(sj), ClientJSON: string(cj)})
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "保存失败")
+			return
+		}
+		a.sbRebuildLog()
+		saved, _ := a.st.GetSbTls(newID)
+		ok(w, saved)
+		return
 	}
 	// On edit, keep existing cert/key when the form leaves them blank.
 	if id != 0 && (req.Certificate == "" || req.Key == "") {

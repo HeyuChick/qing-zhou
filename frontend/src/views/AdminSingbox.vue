@@ -305,10 +305,17 @@
             </n-form-item>
           </template>
           <template v-if="te.mode === 'tls'">
+            <n-form-item label="引用证书">
+              <n-select :value="te.cert_id" :options="certOpts" @update:value="onCertPick" />
+            </n-form-item>
+            <n-form-item v-if="te.cert_id" label=" ">
+              <n-tag type="success" size="small" style="white-space:normal;height:auto;">已引用「证书管理」中的证书：SNI 自动取证书域名，真实证书自动关闭「允许不安全」；续期与管理请到证书管理页。</n-tag>
+            </n-form-item>
+            <template v-if="!te.cert_id">
             <n-form-item label=" ">
               <div style="display:flex;flex-direction:column;gap:4px;width:100%;">
                 <n-button :loading="genCertLoading" @click="genSelfSigned">一键生成自签证书（按 SNI）</n-button>
-                <span style="font-size:11px;color:var(--text-3);">自签证书适用于 TUIC / Hysteria2 等允许 insecure 或证书指纹的客户端。大多数节点用 Reality（无需证书）或自签即可；需可信证书再展开下方 ACME 或粘贴 PEM。</span>
+                <span style="font-size:11px;color:var(--text-3);">自签证书适用于 TUIC / Hysteria2 等允许 insecure 或证书指纹的客户端。需可信证书建议到「证书管理」页申请后在上方引用。</span>
               </div>
             </n-form-item>
             <n-form-item v-if="te.server_id === 0" label=" ">
@@ -334,6 +341,7 @@
             </n-form-item>
             <n-form-item label="证书 PEM"><n-input v-model:value="te.certificate" type="textarea" :rows="3" placeholder="-----BEGIN CERTIFICATE-----" /></n-form-item>
             <n-form-item label="私钥 PEM"><n-input v-model:value="te.key" type="textarea" :rows="3" placeholder="-----BEGIN PRIVATE KEY-----" /></n-form-item>
+            </template>
             <n-form-item label="ALPN">
               <n-select v-model:value="te.alpn" :options="[{label:'h3',value:'h3'},{label:'h2',value:'h2'},{label:'http/1.1',value:'http/1.1'}]" multiple />
             </n-form-item>
@@ -516,6 +524,7 @@ function syncBadge(machineId: number): SyncBadge | null {
 }
 
 const tlsList = ref<any[]>([])
+const certList = ref<any[]>([])
 const inbounds = ref<any[]>([])
 const servers = ref<any[]>([])
 const egresses = ref<any[]>([])
@@ -735,6 +744,7 @@ const te = reactive({
   handshake_server: '', handshake_port: 443, fingerprint: 'chrome',
   private_key: '', public_key: '', short_ids: [] as string[],
   certificate: '', key: '', alpn: [] as string[], min_version: '', max_version: '', insecure: false,
+  cert_id: 0,
 })
 
 function openTls(t?: any, clone = false) {
@@ -756,7 +766,7 @@ function openTls(t?: any, clone = false) {
       short_ids: sids.length ? sids : [''],
       certificate: Array.isArray(s.certificate) ? s.certificate.join('\n') : (s.certificate || ''), key: Array.isArray(s.key) ? s.key.join('\n') : (s.key || ''),
       alpn: s.alpn || [], min_version: s.min_version || '', max_version: s.max_version || '',
-      insecure: !!c.insecure,
+      insecure: !!c.insecure, cert_id: t.cert_id || 0,
     })
   } else {
     Object.assign(te, {
@@ -764,12 +774,25 @@ function openTls(t?: any, clone = false) {
       handshake_server: '', handshake_port: 443, fingerprint: 'chrome',
       private_key: '', public_key: '', short_ids: [''],
       certificate: '', key: '', alpn: ['h3', 'h2', 'http/1.1'], min_version: '', max_version: '', insecure: false,
+      cert_id: 0,
     })
   }
   showTls.value = true
 }
 
 function cloneTls(t: any) { openTls(t, true) }
+
+// 证书中心的证书可被 TLS 配置引用（cert_id）：选中后由构建时注入真实 PEM，
+// 一张证书续期后所有引用它的入站自动生效。0 = 不引用，手动粘贴/自签。
+const certOpts = computed(() => [
+  { label: '不引用（手动粘贴 / 自签，见下方）', value: 0 },
+  ...certList.value.map(c => ({ label: `${c.name}（${c.domain || '无域名'}·${c.source === 'acme' ? '真实证书' : c.source === 'paste' ? '导入' : '自签'}）`, value: c.id })),
+])
+function onCertPick(id: number) {
+  te.cert_id = id
+  const c = certList.value.find(x => x.id === id)
+  if (c && c.domain) te.server_name = c.domain // SNI 必须与证书域名一致
+}
 
 // --- SNI 延迟测试 ---
 const sniTesting = ref(false)
@@ -862,7 +885,7 @@ async function saveTls() {
     const fn = te.id ? apiPut : apiPost
     const body = te.mode === 'reality'
       ? { name: te.name, server_id: te.server_id, server_name: te.server_name, handshake_server: te.handshake_server, handshake_port: te.handshake_port, fingerprint: te.fingerprint, private_key: te.private_key, public_key: te.public_key, short_ids: te.short_ids.filter(s => s.trim()) }
-      : { name: te.name, server_id: te.server_id, server_name: te.server_name, certificate: te.certificate, key: te.key, insecure: te.insecure, alpn: te.alpn, fingerprint: te.fingerprint, min_version: te.min_version, max_version: te.max_version }
+      : { name: te.name, server_id: te.server_id, server_name: te.server_name, cert_id: te.cert_id || 0, certificate: te.certificate, key: te.key, insecure: te.insecure, alpn: te.alpn, fingerprint: te.fingerprint, min_version: te.min_version, max_version: te.max_version }
     await fn(url, body)
     message.success('保存成功'); showTls.value = false; await load()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
@@ -1189,8 +1212,8 @@ function copy(text: string) { if (text) { navigator.clipboard.writeText(text); m
 async function load() {
   loading.value = true
   try {
-    const [t, i, s, e] = await Promise.all([apiList('/api/admin/sb/tls'), apiList('/api/admin/sb/inbounds'), apiList('/api/admin/servers'), apiList('/api/admin/sb/egresses')])
-    tlsList.value = t; inbounds.value = i; servers.value = s; egresses.value = e
+    const [t, i, s, e, c] = await Promise.all([apiList('/api/admin/sb/tls'), apiList('/api/admin/sb/inbounds'), apiList('/api/admin/servers'), apiList('/api/admin/sb/egresses'), apiList('/api/admin/certs').catch(() => [])])
+    tlsList.value = t; inbounds.value = i; servers.value = s; egresses.value = e; certList.value = c
     // 首次加载后默认展开所有机器；之后保留用户的折叠状态。
     if (!expandedInit) { expandedMachines.value = machines.value.map(m => m.id); expandedInit = true }
   } catch {} finally { loading.value = false }

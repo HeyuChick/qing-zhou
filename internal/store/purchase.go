@@ -157,7 +157,12 @@ func (s *Store) Purchase(userID int64, pkg *Package, idemKey string, sync func(u
 	// up the shared pool. The legacy users.* fields above are kept as a rough
 	// aggregate for back-compat; buckets are authoritative for enforcement.
 	if pkg.Type == "plan" {
-		if err = upsertPlanBucket(tx, userID, u.Username, pkg, orderID, now); err != nil {
+		if err = enqueuePlanBucket(tx, userID, u.Username, pkg, orderID, now); err != nil {
+			return nil, err
+		}
+		// Promote immediately when there's no active head yet (first purchase of this
+		// package); a repeat purchase stays queued behind the current head.
+		if _, err = advanceUserQueues(tx, userID, now); err != nil {
 			return nil, err
 		}
 	} else if pkg.Type == "traffic" {
@@ -275,7 +280,12 @@ func (s *Store) AssignPackage(userID int64, pkg *Package, operatorID int64, sync
 
 	// Bucket model (same as Purchase): plan → renew/create metered bucket, traffic → pool.
 	if pkg.Type == "plan" {
-		if err = upsertPlanBucket(tx, userID, u.Username, pkg, orderID, now); err != nil {
+		if err = enqueuePlanBucket(tx, userID, u.Username, pkg, orderID, now); err != nil {
+			return nil, err
+		}
+		// Promote immediately when there's no active head yet (first purchase of this
+		// package); a repeat purchase stays queued behind the current head.
+		if _, err = advanceUserQueues(tx, userID, now); err != nil {
 			return nil, err
 		}
 	} else if pkg.Type == "traffic" {
@@ -427,7 +437,7 @@ func (s *Store) RefundOrder(orderID, operatorID int64, mode string, sync func(up
 	if mode == "full" || mode == "prorated" {
 		pol.Mode = mode
 	}
-	quote, err := computeRefundQuote(tx, userID, pkgID, sp, price, pol, now)
+	quote, err := computeRefundQuote(tx, orderID, userID, pkgID, sp, price, pol, now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -462,7 +472,7 @@ func (s *Store) RefundOrder(orderID, operatorID int64, mode string, sync func(up
 	// renewed/stacked) plan bucket, or claw the traffic top-up back out of the
 	// pool (both clamped to what's already used).
 	if sp.Type == "plan" {
-		if err = reversePlanBucket(tx, userID, pkgID, sp.TrafficBytes, sp.DurationDays, now); err != nil {
+		if err = reverseOrderBucket(tx, orderID, userID, pkgID, sp.TrafficBytes, sp.DurationDays, now); err != nil {
 			return nil, nil, err
 		}
 		// If the bucket was fully removed and the current-plan pointer referenced

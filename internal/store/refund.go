@@ -89,7 +89,7 @@ func minI64(a, b int64) int64 {
 // bucket_limit - bucket_used)" clamp the reversal applies, so points and
 // entitlement stay consistent, and it composes correctly across stacked
 // renewals (each refund shrinks the bucket, so the next one sees less unused).
-func computeRefundQuote(q txLike, userID, packageID int64, snap orderSnapshot, price int64, pol RefundPolicy, now int64) (*RefundQuote, error) {
+func computeRefundQuote(q txLike, orderID, userID, packageID int64, snap orderSnapshot, price int64, pol RefundPolicy, now int64) (*RefundQuote, error) {
 	quote := &RefundQuote{
 		OrderID: 0, PricePoints: price, Mode: pol.Mode, Basis: pol.Basis,
 		Type: snap.Type, Name: snap.Name, TotalTraffic: snap.TrafficBytes,
@@ -103,19 +103,41 @@ func computeRefundQuote(q txLike, userID, packageID int64, snap orderSnapshot, p
 		return quote, nil
 	}
 
-	// Read the live bucket this order fed (plan bucket keyed by package, or the
+	// Read the live bucket this order fed (its own plan bucket by order_id, or the
 	// shared pool). A missing bucket (fully consumed & expired → deleted) means
 	// nothing is left to refund.
 	var limit, used, expiry int64
 	var found bool
 	if snap.Type == "plan" {
-		err := q.QueryRow(`SELECT traffic_limit, used_up+used_down, expiry_at FROM user_plans
-			WHERE user_id=? AND kind='plan' AND package_id=? ORDER BY id LIMIT 1`, userID, packageID).
-			Scan(&limit, &used, &expiry)
-		if err == nil {
+		// Queue model: one purchase = one bucket, so prefer this order's own bucket.
+		var status string
+		oerr := q.QueryRow(`SELECT traffic_limit, used_up+used_down, expiry_at, status FROM user_plans
+			WHERE kind='plan' AND user_id=? AND order_id=? ORDER BY id LIMIT 1`, userID, orderID).
+			Scan(&limit, &used, &expiry, &status)
+		switch {
+		case oerr == nil && status == "queued":
+			// Never activated, nothing consumed → fully refundable (fee still applies).
+			quote.RefundTraffic = snap.TrafficBytes
+			quote.Ratio = applyFee(1, pol.FeePercent)
+			quote.RefundPoints = roundRefund(price, quote.Ratio)
+			return quote, nil
+		case oerr == nil && !(status == "active" && snap.TrafficBytes > 0 && limit > snap.TrafficBytes):
+			// This order's own (single-order) active bucket: use its live values.
 			found = true
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
+		default:
+			// No order bucket, or a legacy merged bucket (limit > this order's quota):
+			// fall back to the package's head bucket for a clamped, compatible quote.
+			if oerr != nil && !errors.Is(oerr, sql.ErrNoRows) {
+				return nil, oerr
+			}
+			perr := q.QueryRow(`SELECT traffic_limit, used_up+used_down, expiry_at FROM user_plans
+				WHERE user_id=? AND kind='plan' AND package_id=? ORDER BY id LIMIT 1`, userID, packageID).
+				Scan(&limit, &used, &expiry)
+			if perr == nil {
+				found = true
+			} else if !errors.Is(perr, sql.ErrNoRows) {
+				return nil, perr
+			}
 		}
 	} else { // traffic → pool (never expires)
 		err := q.QueryRow(`SELECT traffic_limit, used_up+used_down FROM user_plans
@@ -241,7 +263,7 @@ func (s *Store) RefundPreview(orderID int64, modeOverride string) (*RefundQuote,
 	if modeOverride == "full" || modeOverride == "prorated" {
 		pol.Mode = modeOverride
 	}
-	q, err := computeRefundQuote(s.db, userID, pkgID, snap, price, pol, time.Now().Unix())
+	q, err := computeRefundQuote(s.db, orderID, userID, pkgID, snap, price, pol, time.Now().Unix())
 	if err != nil {
 		return nil, err
 	}

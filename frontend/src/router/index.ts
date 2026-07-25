@@ -28,6 +28,7 @@ const router = createRouter({
         { path: 'admin/user-groups', name: 'admin-user-groups', component: () => import('@/views/AdminUserGroups.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/nodes', name: 'admin-nodes', component: () => import('@/views/AdminNodes.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/singbox', name: 'admin-singbox', component: () => import('@/views/AdminSingbox.vue'), meta: { requiresAdmin: true } },
+        { path: 'admin/certs', name: 'admin-certs', component: () => import('@/views/AdminCerts.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/orders', name: 'admin-orders', component: () => import('@/views/AdminOrders.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/servers', name: 'admin-servers', component: () => import('@/views/AdminServers.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/monitor', name: 'admin-monitor', component: () => import('@/views/AdminMonitor.vue'), meta: { requiresAdmin: true } },

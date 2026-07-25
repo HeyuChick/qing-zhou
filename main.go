@@ -99,6 +99,8 @@ func main() {
 	app.StartSourceSync(ctx, time.Hour)
 	app.StartMaintenance(ctx, time.Hour)
 	app.StartMonitorTasks(ctx)
+	app.StartCertRenew(ctx, 12*time.Hour)
+	app.StartQueueAdvance(ctx, 2*time.Minute)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

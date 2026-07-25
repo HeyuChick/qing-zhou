@@ -25,6 +25,7 @@
         </div>
 
         <div class="sc-foot">
+          <div v-if="willQueue(pkg)" class="sc-queue-note">✓ 已在使用 · 再买将排队，当前份结束后自动启用</div>
           <div class="sc-price">
             <span class="sc-points">{{ pkg.price_points }}</span>
             <span class="sc-unit">积分</span>
@@ -56,6 +57,17 @@ const message = useMessage()
 const dialog = useDialog()
 const packages = ref<any[]>([])
 const buying = ref<number|null>(null)
+// Package ids the user already has an ACTIVE plan bucket for — buying one of
+// these again queues behind the current份 instead of stacking, so we set that
+// expectation on the card and in the confirm/success copy.
+const heldActive = ref<Set<number>>(new Set())
+async function loadHeld() {
+  try {
+    const plans = await apiList<any>('/api/user/plans')
+    heldActive.value = new Set(plans.filter((p: any) => p.kind === 'plan' && p.status === 'active' && p.package_id > 0).map((p: any) => p.package_id))
+  } catch {}
+}
+function willQueue(pkg: any): boolean { return pkg.type === 'plan' && heldActive.value.has(pkg.id) }
 
 function typeMeta(type: string) {
   if (type === 'traffic') return { label: '流量包', cls: 't-traffic' }
@@ -96,15 +108,23 @@ async function purchaseWithRetry(packageId: number, key: string) {
   }
 }
 function handleBuy(pkg: any) {
-  dialog.warning({ title: '确认购买', content: `确定花费 ${pkg.price_points} 积分购买「${pkg.name}」？`, positiveText: '确定', negativeText: '取消',
+  const queue = willQueue(pkg)
+  const content = queue
+    ? `确定花费 ${pkg.price_points} 积分购买「${pkg.name}」？\n你已在使用该套餐，本次购买将排队，在当前份用完或到期后自动启用（有效期届时才开始计算）。`
+    : `确定花费 ${pkg.price_points} 积分购买「${pkg.name}」？`
+  dialog.warning({ title: '确认购买', content, positiveText: '确定', negativeText: '取消',
     onPositiveClick: async () => {
       buying.value = pkg.id
       const key = genKey() // one key per confirmed purchase intent; stable across the retry
-      try { await purchaseWithRetry(pkg.id, key); message.success('购买成功！'); await auth.fetchMe() }
+      try {
+        await purchaseWithRetry(pkg.id, key)
+        message.success(queue ? '已购买并加入队列，将在当前套餐结束后自动启用' : '购买成功，已生效！')
+        await auth.fetchMe(); await loadHeld()
+      }
       catch (e: any) { message.error(e.message) } finally { buying.value = null }
     } })
 }
-onMounted(async () => { try { packages.value = await apiList('/api/user/packages') } catch {} })
+onMounted(async () => { try { packages.value = await apiList('/api/user/packages') } catch {}; loadHeld() })
 </script>
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 4px; }
@@ -186,5 +206,6 @@ onMounted(async () => { try { packages.value = await apiList('/api/user/packages
 .sc-yuan { font-size: 12px; color: var(--text-3); margin-top: 2px; }
 .sc-stock { font-size: 11px; color: var(--text-3); margin-top: 6px; }
 .sc-stock.hot { color: var(--warn); }
+.sc-queue-note { font-size: 11px; color: #4b7a5c; background: #edf4ef; border: 1px solid #d9e8df; border-radius: 8px; padding: 5px 8px; margin-bottom: 10px; line-height: 1.4; }
 .sc-buy { margin-top: 12px; }
 </style>

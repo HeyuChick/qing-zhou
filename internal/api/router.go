@@ -233,6 +233,17 @@ func (a *API) Router() http.Handler {
 		ar.Put("/api/admin/sb/tls/cert/{id}", a.handleAdminSaveCertTls)
 		ar.Put("/api/admin/sb/tls/{id}", a.handleAdminSaveSbTls)
 		ar.Delete("/api/admin/sb/tls/{id}", a.handleAdminDeleteSbTls)
+
+		// Certificate center: managed, reusable certificates issued on the panel
+		// host (DNS-01) and referenced by TLS profiles via cert_id.
+		ar.Get("/api/admin/certs", a.handleAdminListCerts)
+		ar.Post("/api/admin/certs/acme", a.handleAdminCertAcme)
+		ar.Post("/api/admin/certs/paste", a.handleAdminCertPaste)
+		ar.Post("/api/admin/certs/self-signed", a.handleAdminCertSelfSigned)
+		ar.Post("/api/admin/certs/{id}/renew", a.handleAdminCertRenew)
+		ar.Get("/api/admin/certs/{id}/export", a.handleAdminExportCert)
+		ar.Put("/api/admin/certs/{id}", a.handleAdminUpdateCert)
+		ar.Delete("/api/admin/certs/{id}", a.handleAdminDeleteCert)
 		ar.Get("/api/admin/sb/egresses", a.handleAdminListSbEgresses)
 		ar.Post("/api/admin/sb/egresses", a.handleAdminSaveSbEgress)
 		ar.Put("/api/admin/sb/egresses/{id}", a.handleAdminSaveSbEgress)

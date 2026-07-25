@@ -11,8 +11,9 @@ import (
 
 // secretSettings are never returned in plaintext and cannot be cleared blindly.
 var secretSettings = map[string]bool{
-	"jwt_secret": true,
-	"smtp_pass":  true,
+	"jwt_secret":   true,
+	"smtp_pass":    true,
+	"cf_api_token": true,
 }
 
 // immutableSettings cannot be written through the settings API at all.

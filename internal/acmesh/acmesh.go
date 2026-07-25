@@ -239,6 +239,49 @@ func Issue(ctx context.Context, r Runner, o IssueOpts) (*IssueResult, error) {
 	return &IssueResult{CertPath: certPath, KeyPath: keyPath}, nil
 }
 
+// ReadPEM returns the contents of the installed fullchain and key files via the
+// runner. 轻舟 stores these bytes in the DB (encrypted) rather than pointing
+// sing-box at the files, so a certificate issued on the panel host can be pushed
+// to any node — including a remote one that never ran acme.sh.
+func ReadPEM(ctx context.Context, r Runner, res *IssueResult) (certPEM, keyPEM string, err error) {
+	certPEM, err = r.Run(ctx, "cat "+shellQuote(res.CertPath))
+	if err != nil {
+		return "", "", fmt.Errorf("read cert file: %v: %s", err, certPEM)
+	}
+	keyPEM, err = r.Run(ctx, "cat "+shellQuote(res.KeyPath))
+	if err != nil {
+		return "", "", fmt.Errorf("read key file: %v: %s", err, keyPEM)
+	}
+	return certPEM, keyPEM, nil
+}
+
+// Renew renews an already-issued domain and returns the install paths so the
+// caller can re-read the refreshed PEM. force=true passes --force (manual "renew
+// now"); force=false lets acme.sh's own threshold decide (scheduled sweep).
+// acme.sh re-runs the recorded --install-cert on a successful renewal, so the
+// files at the returned paths are refreshed in place.
+func Renew(ctx context.Context, r Runner, o IssueOpts, force bool) (*IssueResult, error) {
+	domain := strings.TrimSpace(o.Domain)
+	if domain == "" {
+		return nil, fmt.Errorf("domain is required")
+	}
+	cmd := acmeBin + " --renew -d " + shellQuote(domain)
+	if force {
+		cmd += " --force"
+	}
+	env := map[string]string{}
+	if o.Method == MethodCFDNS && strings.TrimSpace(o.CFToken) != "" {
+		env["CF_Token"] = strings.TrimSpace(o.CFToken)
+	}
+	if out, err := runEnv(ctx, r, cmd, env); err != nil {
+		if !alreadyUpToDate(out) {
+			return nil, fmt.Errorf("acme.sh renew failed: %v: %s", err, out)
+		}
+	}
+	certPath, keyPath := certPaths(o.CertDir, domain)
+	return &IssueResult{CertPath: certPath, KeyPath: keyPath}, nil
+}
+
 // alreadyUpToDate reports whether acme.sh declined to reissue because the
 // existing certificate is still valid. acme.sh emits these as whole lines
 // prefixed with a timestamp, so the match is anchored to line starts after the
