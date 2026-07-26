@@ -18,11 +18,13 @@
 
 - **🪶 单文件部署** —— 一个 Go 二进制内嵌了 Vue 前端和 SQLite 驱动，无需 Node 构建、无需 CGO、无需外部数据库。丢到服务器上配个 systemd 就能跑。
 - **🔌 不依赖任何外部面板** —— 轻舟**自管原生 sing-box**：面板直接生成 `config.json`、下发、reload，并通过 sing-box 官方 `v2ray_api` 读回每用户流量。不套壳、不二次代理别的面板。
-- **🎛️ 8 协议纯可视化** —— 下拉、开关、零手写 JSON 即可管理 TLS / Reality 和入站，覆盖 **vless / vmess / trojan / tuic / hysteria2 / shadowsocks / anytls / hysteria**，含传输层（ws/grpc/httpupgrade）与 uTLS / ALPN / Mux / Brutal。
+- **🎛️ 9 协议纯可视化** —— 下拉、开关、零手写 JSON 即可管理 TLS / Reality 和入站，覆盖 **vless / vmess / trojan / tuic / hysteria2 / shadowsocks / anytls / hysteria**，外加 **mixed（HTTP/SOCKS5 代理账号）**；含传输层（ws/grpc/httpupgrade）与 uTLS / ALPN / Mux / Brutal。
+- **📜 证书中心** —— 面板内一键 **ACME 签发真实证书**（Let's Encrypt · Cloudflare DNS-01，只填一个 CF Token），或粘贴已有证书 / 一键自签；证书全局复用、被入站引用、**到期自动续期并推送到各落地机**。
+- **🌉 第三方静态 IP 出口** —— 入站可指定一个购买来的 **SOCKS5 / HTTP 代理**作为出口，流量经它出网、出口 IP 即代理 IP；密码库内加密、失效则「fail-closed」不回落直连。
 - **📱 订阅多端自适应** —— 同一条链接按客户端 `User-Agent` 自动返回 **Clash / sing-box / Surge**，其余回退 base64；内置 **URLTest 智能优选**（全局选最快 / 锁定 IP 只切协议）与**防泄漏分流模板**（国内直连 / 广告拦截 / 其余代理），开箱即用。
 - **⚡ 面向网速/延迟的调优下发** —— **Brutal / Mux / TCP Fast Open / MPTCP、tuic 0-RTT、ws early-data** 从入站自动镜像到客户端出站——这些两端对称才生效的项，以前配了却在订阅里丢掉，现在端到端对齐（vless vision flow 时自动避让 mux）。
-- **🔀 中转 / 落地链路** —— 入站可设「落地 / 中转」：选一个落地入站，本入站即变**线路机**，流量转发到**落地机**再出网（`客户端 → 线路机 → 落地机 → 互联网`）；复用已有落地入站、自动派生并注入中转凭据，无需手工配隧道，**链路拓扑图**可视化。
-- **🧾 多套餐独立计费（桶模型）** —— 一个用户可同时持有多个套餐，每个套餐是独立的「桶」（各自流量 / 到期 / 节点 / 计量身份）；某套餐到期只下线它名下的节点，互不影响。重复购买同套餐自动**续费叠加**，退款按**剩余流量/时间比例**结算（详见[计费与退款业务说明](docs/计费与退款业务说明.md)）。
+- **🔀 中转 / 落地链路（多级链式）** —— 入站可设「落地 / 中转」：选一个落地入站，本入站即变**线路机**，流量转发到**落地机**再出网（`客户端 → 线路机 → 落地机 → 互联网`）；支持**多级串联**（A→B→C→…）与末端接第三方代理出口；复用已有落地入站、自动派生并注入中转凭据，无需手工配隧道，**链路拓扑图**可视化。
+- **🧾 多套餐独立计费（桶模型）** —— 一个用户可同时持有多个套餐，每个套餐是独立的「桶」（各自流量 / 到期 / 节点 / 计量身份）；某套餐到期只下线它名下的节点，互不影响。重复购买**同一套餐自动排队**（不再叠加：一次只跑一份，用完/到期后下一份自动顶上），退款按**剩余流量/时间比例**结算（详见[计费与退款业务说明](docs/计费与退款业务说明.md)）。
 - **🌐 多落地服务器** —— 面板在中心机，通过 SSH 把配置下发到多台落地 sing-box，统一管理。
 - **📊 服务器监控** —— 内置探针，多机 CPU / 内存 / 磁盘 / 负载 / 流量实时采集，可用性热力图 + 每机趋势卡片。
 - **🔒 安全内建** —— 敏感配置（SMTP 密码 / Reality 私钥等）库内 **AES-256-GCM 加密**；登录 / 注册 / 找回按 IP 限流；JWT 绑 `jti` 支持会话吊销。
@@ -75,9 +77,9 @@
 - 用户管理：新建 / 充值 / 改额度·到期·封禁 / 重置密码 / 删除
 - 套餐运营：直接开通（赠送）、**按剩余比例退款**（退款前预览 + 撤销权益）、消费总览
 - 商品：流量包 / 订阅套餐 CRUD，套餐绑定节点分组
-- **原生 sing-box 管理**：可视化管 TLS/Reality + 8 协议入站
-- **链路拓扑**：客户端→入站→(中转→落地)→互联网，一键串联落地 / 解除中转
-- 节点 & 分组：按分组卡片聚合；自建 + 外部机场源抓取（base64 / Clash YAML）
+- **原生 sing-box 管理**：可视化管 TLS/Reality + 9 协议入站；**证书中心**（ACME/粘贴/自签、自动续期）；**代理出口**（第三方静态 IP）
+- **链路拓扑**：客户端→入站→(多级中转→落地→代理出口)→互联网，一键串联落地 / 解除中转
+- 节点 & 分组：按分组卡片聚合、可手动排序；自建 + 外部机场源抓取（base64 / Clash YAML）
 - **服务器监控**：多机资源 / 流量 / 负载 / 可用性热力图
 - 注册码、公告、帮助文档（Markdown 实时预览）、系统设置
 
@@ -108,7 +110,7 @@
 
 - **面板与 sing-box 可同机**（最简单）**，也可分离**：面板在中心机，落地 sing-box 在多台机器，面板用 SSH 下发。
 - 轻舟生成 sing-box 的 `config.json` → `sing-box check` 校验 → 原子替换 → reload；再按 `v2ray_api` 采集每用户上下行流量。
-- **中转链路（可选）**：某个入站可指定「落地入站」，其流量经出站转发到另一台机器的落地入站再出网 —— `客户端 → 线路机入站 → 落地机入站 → 互联网`，per-user 计量在入口侧完成。
+- **中转链路（可选）**：某个入站可指定「落地入站」，其流量经出站转发到另一台机器的落地入站再出网 —— `客户端 → 线路机入站 → 落地机入站 → 互联网`；可**多级串联**，末端还能接第三方代理出口，per-user 计量在入口侧完成。
 
 ---
 
@@ -120,7 +122,17 @@
 - 一台 **Linux amd64** 服务器（落地节点用）；面板本身跨平台
 - 可选：域名 + HTTPS 证书（生产强烈建议）、SMTP（邮箱验证 / 找回密码用）
 
-### 〇、Docker 一键部署（最省事）
+### 〇、脚本一键安装 / 更新（Linux 裸机推荐）
+
+自动识别架构（amd64/arm64）、下载 GitHub 最新 release、SHA-256 校验、交互式引导配置（监听地址 / 访问地址 / 管理员账号，密钥自动生成）、装好 systemd 并启动；**已安装则原地升级**（配置与数据库不动，二进制原子替换）：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/mllt992/qing-zhou/main/install.sh)
+```
+
+常用选项：`--version vX.Y.Z` 装指定版本；`--force` 同版本强制重装；`--proxy https://mirror.ghproxy.com/` 国内下载加速；`uninstall` 卸载（数据默认保留）。装完后升级可重跑脚本，或直接用面板内「在线更新」。
+
+### 一、Docker 一键部署（最省事）
 
 面板是中心机、SSH 管远程落地，容器不需要跑 sing-box；镜像内置两架构探针，支持 amd64/arm64。
 
@@ -133,7 +145,7 @@ docker compose logs -f qingzhou     # 首启打印随机管理员密码（未设
 
 或直接用镜像：`docker run -d -p 8081:8081 -e QZ_SECRET_KEY=$(openssl rand -hex 32) -v qingzhou-data:/data ghcr.io/mllt992/qing-zhou:latest`。**Docker 用「拉新镜像 + 重建容器」升级**，详见 [Wiki · Docker 部署](https://github.com/mllt992/qing-zhou/wiki/Docker-部署)。
 
-### 一、本地开发运行
+### 二、本地开发运行
 
 前端产物不入库（仓库里 `frontend/dist` 只有一个占位文件），所以**先构建一次前端**，否则面板是白页：
 
@@ -158,7 +170,7 @@ Windows PowerShell 可直接用 `./start.ps1`（已设好上述环境变量）�
 - 用户名默认 `mllt992`（可用 `QZ_ADMIN_USER` 指定）
 - 未设 `QZ_ADMIN_PASS` 时，会**随机生成密码并打印到启动日志**（请到终端查看并首登后立即改密）
 
-### 二、编译生产二进制（单文件，内嵌前端）
+### 三、编译生产二进制（单文件，内嵌前端）
 
 ```bash
 cd frontend && npx vite build && cd ..     # 前端产物会被编译进二进制，必须先构建
@@ -170,7 +182,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 
 自己编译出来的二进制不校验发布签名（见下），无需任何额外配置。
 
-### 三、最小可用部署（单机把面板 + 落地一起跑）
+### 四、最小可用部署（单机把面板 + 落地一起跑，手动版）
 
 ```bash
 # 1) 在落地服务器上一键安装 sing-box（官方含 v2ray_api 版 + systemd + 内核调优）
@@ -209,8 +221,8 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 登录后台后，按此顺序一次配好即可对外服务：
 
 1. **服务器** —— 单机落地用默认值即可；多落地则「新增」，填一键脚本输出的 host / SSH / 路径。
-2. **TLS / Reality** —— 一键生成 Reality 密钥对 + short_id，填个借用域名（如 `www.microsoft.com`），抗封锁且无需自有证书。
-3. **入站（节点）** —— 选协议建入站并绑定上一步的 TLS；同机可建多协议入站，订阅会自动聚成「锁定 IP·切协议」优选组。需要中转时，在入站的「落地 / 中转」里选一个落地入站即可（或在 sing-box→链路拓扑里一键「串联落地」）。
+2. **TLS / Reality** —— 一键生成 Reality 密钥对 + short_id，填个借用域名（如 `www.microsoft.com`），抗封锁且无需自有证书。需要真实证书（套 CDN 的 WS-TLS 等）时，去 **sing-box → 证书管理** 一键 ACME 签发（Let's Encrypt，填 Cloudflare Token 走 DNS-01）或粘贴已有证书，再在入站里「引用证书」。
+3. **入站（节点）** —— 选协议建入站并绑定上一步的 TLS；同机可建多协议入站，订阅会自动聚成「锁定 IP·切协议」优选组。需要中转时，在入站的「落地 / 中转」里选一个落地入站即可（或在 sing-box→链路拓扑里一键「串联落地」，支持多级）；想让某入站从**购买的静态 IP** 出网，则在「代理出口」页录入该 SOCKS5/HTTP 代理后，在入站上选它作出口。
 4. **分组** —— 把节点归类（免费 / 高级…），订阅与套餐都按分组授权；在「设置」里可指定**免费分组**（所有用户可见）。
 5. **套餐（商品）** —— 建流量包 / 订阅套餐并绑定可访问的分组。
 6. **机场订阅源（可选）** —— 粘贴外部机场订阅链接，定时抓取聚合进来。
@@ -255,7 +267,7 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 | 后端 | Go 1.25，路由 `go-chi/v5`，鉴权 `golang-jwt/v5` |
 | 数据库 | SQLite（`modernc.org/sqlite`，纯 Go 免 CGO，WAL 模式） |
 | 前端 | Vue 3（无构建步骤，`embed.FS` 内嵌），手绘 SVG 图表 + `qrcode-generator` |
-| sing-box 对接 | `internal/singbox`（配置生成 / 分享链接 / Reality 密钥）、`sbproc`（写→check→原子替换→reload）、`sbstats`（手写 gRPC-over-h2c 读 v2ray 统计）、`sbctl`（编排）、`sshctl`（多机下发） |
+| sing-box 对接 | `internal/singbox`（配置生成 / 分享链接 / Reality 密钥）、`sbproc`（写→check→原子替换→reload）、`sbstats`（手写 gRPC-over-h2c 读 v2ray 统计）、`sbctl`（编排）、`sshctl`（多机下发）、`acmesh`（ACME 证书签发 / 续期） |
 | 订阅转换 | `internal/subconv`：vless/vmess/ss/trojan/hysteria2/tuic ↔ base64 / Clash / sing-box / Surge，注入优选组 + 防泄漏分流模板 |
 
 ---
@@ -266,7 +278,7 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 
 - **公开**：`GET /api/health`、`GET /api/config`、`POST /api/auth/{login,register,forgot,reset}`、`GET /api/auth/verify`、`GET /sub/{token}`（聚合订阅，UA 自适应或 `?format=clash|singbox|surge`）
 - **用户**：`/api/user/{dashboard,plans,subscription,reset-sub,packages,purchase,orders,points,announcements,sessions,nodes,stats/traffic,password,email}`、`GET /api/auth/me`
-- **管理**：`/api/admin/{users,packages,nodes,node-groups,node-sources,reg-codes,announcements,orders,help,settings,stats/*}`、原生 sing-box 管理 `/api/admin/sb/*`、多落地 `/api/admin/servers`
+- **管理**：`/api/admin/{users,packages,nodes,node-groups,node-sources,reg-codes,announcements,orders,help,settings,stats/*}`、原生 sing-box 管理 `/api/admin/sb/*`（含 TLS、入站、代理出口 `sb/egresses`）、证书中心 `/api/admin/certs/*`、多落地 `/api/admin/servers`
 
 ---
 
@@ -274,7 +286,7 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 
 - **[部署与配置手册](docs/部署与配置手册.md)** —— 从零把面板 + sing-box 跑起来、多落地、协议选型、运维排错。
 - **[订阅使用指南](docs/订阅使用指南.md)** —— 面向普通用户：各客户端导入、智能优选、分流、常见问题。
-- **[计费与退款业务说明](docs/计费与退款业务说明.md)** —— 面向运营者：桶模型、重复/多套餐购买、续费叠加、按剩余比例退款与后台操作。
+- **[计费与退款业务说明](docs/计费与退款业务说明.md)** —— 面向运营者：桶模型、重复购买排队生效、多套餐并存、按剩余比例退款与后台操作。
 
 ---
 
@@ -323,3 +335,9 @@ go run ./tools/sign -genkey     # 在自己机器上生成，私钥不要进 CI
 > 因禁止商业使用，按 OSI 定义本项目属「源码公开（Source-Available）」，商业授权请联系作者。
 
 版权所有 © 2026 萌狼蓝天 (xrilang)
+
+---
+
+## 🔗 友情链接
+
+- [Linux.do](https://linux.do/) —— 新的理想型社区
