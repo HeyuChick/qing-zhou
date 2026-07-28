@@ -154,7 +154,16 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound) ([]si
 		if eg == nil {
 			continue
 		}
-		byEgress[r.EgressID] = &singbox.Relay{Outbound: egressOutbound(eg), InboundTags: []string{r.Tag}}
+		// A TLS egress may pin a managed certificate as its trust anchor. Resolved
+		// here (once per egress — the byEgress check above short-circuits repeats)
+		// rather than inside egressOutbound, which stays a pure renderer.
+		var trustPEM string
+		if eg.TLSEnabled && eg.Type == "http" && eg.TLSCertID != 0 {
+			if c, _ := s.GetCert(eg.TLSCertID); c != nil && !c.DecryptFailed {
+				trustPEM = c.CertPEM
+			}
+		}
+		byEgress[r.EgressID] = &singbox.Relay{Outbound: egressOutbound(eg, trustPEM), InboundTags: []string{r.Tag}}
 		egOrder = append(egOrder, r.EgressID)
 	}
 	for _, id := range egOrder {
@@ -166,7 +175,14 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound) ([]si
 // egressOutbound renders a proxy egress as a sing-box socks/http outbound. On a
 // DecryptFailed egress the password is empty, so traffic fails closed at the
 // proxy instead of silently exiting with the wrong (direct) IP.
-func egressOutbound(e *SbEgress) map[string]interface{} {
+//
+// trustPEM, when non-empty, is the certificate the proxy is verified against
+// instead of the system roots (see SbEgress.TLSCertID). An egress that asked for
+// an anchor but whose cert has gone missing or undecryptable arrives here with
+// trustPEM empty: the tls block is still emitted, so the handshake fails against
+// the system roots rather than the hop silently reverting to plaintext and
+// handing the proxy credentials to the network.
+func egressOutbound(e *SbEgress, trustPEM string) map[string]interface{} {
 	ob := map[string]interface{}{
 		"type":        e.Type,
 		"tag":         fmt.Sprintf("egress-%d", e.ID),
@@ -181,6 +197,22 @@ func egressOutbound(e *SbEgress) map[string]interface{} {
 	}
 	if e.Password != "" || e.DecryptFailed {
 		ob["password"] = e.Password
+	}
+	// Guarded on http: sing-box's socks outbound has no tls option, so emitting
+	// one there would be silently ignored — a config that looks encrypted and
+	// isn't. The admin API rejects the combination; this is the second gate.
+	if e.TLSEnabled && e.Type == "http" {
+		t := map[string]interface{}{"enabled": true}
+		if e.SNI != "" {
+			t["server_name"] = e.SNI
+		}
+		if trustPEM != "" {
+			t["certificate"] = trustPEM
+		}
+		if e.TLSInsecure {
+			t["insecure"] = true
+		}
+		ob["tls"] = t
 	}
 	return ob
 }

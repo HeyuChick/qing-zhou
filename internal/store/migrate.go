@@ -314,16 +314,24 @@ CREATE TABLE IF NOT EXISTS sb_inbounds (
 -- Third-party proxy egresses (e.g. a purchased static-IP SOCKS5/HTTP proxy).
 -- An inbound with egress_id != 0 routes its traffic out through this proxy
 -- instead of exiting directly. password is encrypted at rest.
+-- tls_* describe the hop TO the proxy ("HTTPS proxy"): there we are the TLS
+-- CLIENT, so tls_cert_id names a trust anchor to verify the proxy against —
+-- never a certificate we present. sing-box has no tls option on its socks
+-- outbound, so tls_enabled is only valid with type='http'.
 CREATE TABLE IF NOT EXISTS sb_egresses (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  name       TEXT    NOT NULL,
-  type       TEXT    NOT NULL DEFAULT 'socks',      -- socks | http
-  host       TEXT    NOT NULL,
-  port       INTEGER NOT NULL,
-  username   TEXT    NOT NULL DEFAULT '',
-  password   TEXT    NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    NOT NULL,
+  type        TEXT    NOT NULL DEFAULT 'socks',     -- socks | http
+  host        TEXT    NOT NULL,
+  port        INTEGER NOT NULL,
+  username    TEXT    NOT NULL DEFAULT '',
+  password    TEXT    NOT NULL DEFAULT '',
+  tls_enabled  INTEGER NOT NULL DEFAULT 0,
+  sni          TEXT    NOT NULL DEFAULT '',
+  tls_cert_id  INTEGER NOT NULL DEFAULT 0,          -- -> certificates.id (0 = system roots)
+  tls_insecure INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
 );
 
 -- A "bucket" = an independently-metered unit a user holds: either a purchased
@@ -526,6 +534,16 @@ func (s *Store) Migrate() error {
 		// A proxy_username must be globally unique (it becomes a stats identity);
 		// partial index so the many empty defaults don't collide.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_proxy_username ON user_plans(proxy_username) WHERE proxy_username <> ''`,
+		// TLS to the proxy egress itself ("HTTPS proxy"). We are the client on
+		// that hop, so tls_cert_id is a TRUST ANCHOR (verify the proxy against
+		// this managed cert) — the panel never presents a certificate here, and
+		// the anchor's private key half is unused. 0 = verify against system
+		// roots, which is what a commercial proxy with a public cert needs.
+		// Defaults keep every existing egress plaintext, exactly as before.
+		`ALTER TABLE sb_egresses ADD COLUMN tls_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sb_egresses ADD COLUMN sni TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sb_egresses ADD COLUMN tls_cert_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sb_egresses ADD COLUMN tls_insecure INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			// Benign on an up-to-date DB: the column already exists (ADD COLUMN) or

@@ -798,6 +798,8 @@ func (a *API) handleAdminListSbEgresses(w http.ResponseWriter, r *http.Request) 
 		out = append(out, map[string]interface{}{
 			"id": m.ID, "name": m.Name, "type": m.Type, "host": m.Host, "port": m.Port,
 			"username": m.Username, "password": m.Password,
+			"tls_enabled": m.TLSEnabled, "sni": m.SNI,
+			"tls_cert_id": m.TLSCertID, "tls_insecure": m.TLSInsecure,
 			"inbound_count": refs[m.ID],
 			"created_at":    m.CreatedAt, "updated_at": m.UpdatedAt,
 		})
@@ -833,6 +835,36 @@ func (a *API) handleAdminSaveSbEgress(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "名称、地址必填，端口需在 1-65535")
 		return
 	}
+	// TLS 到代理这一跳（HTTPS 代理）。sing-box 的 socks 出站没有 tls 选项，
+	// 存下来只会被静默忽略——配置看着是加密的，实际是明文，凭据裸奔。宁可在这里拒绝。
+	e.SNI = strings.TrimSpace(e.SNI)
+	if e.TLSEnabled && e.Type != "http" {
+		fail(w, http.StatusBadRequest, "仅 HTTP 类型支持 TLS（sing-box 的 SOCKS5 出站没有 TLS 选项）")
+		return
+	}
+	if !e.TLSEnabled {
+		// 关掉 TLS 时一并清空附属字段，避免库里留下与实际行为不符的残值：
+		// 下次有人打开开关会以为 SNI / 信任证书还生效。
+		e.SNI, e.TLSCertID, e.TLSInsecure = "", 0, false
+	}
+	if e.TLSCertID != 0 {
+		// 这里引用的是「信任锚」：用它校验上游代理的证书，面板不会把它发出去。
+		// 悬空引用会让构建时退回系统根证书、握手失败，报错离原因很远，先拦掉。
+		c, err := a.st.GetCert(e.TLSCertID)
+		if err != nil || c == nil {
+			fail(w, http.StatusBadRequest, "所选信任证书不存在")
+			return
+		}
+		if c.DecryptFailed {
+			fail(w, http.StatusBadRequest, "所选信任证书无法解密（QZ_SECRET_KEY 变更？）")
+			return
+		}
+		// SNI 留空时取证书域名：证书是签给域名的，而代理地址通常是 IP，
+		// 不补这一步握手必然报 "doesn't contain any IP SANs"。
+		if e.SNI == "" {
+			e.SNI = c.Domain
+		}
+	}
 	// "***" 表示客户端未改动密码：保留库中原值。
 	if e.Password == "***" && e.ID != 0 {
 		if stored, _ := a.st.GetSbEgress(e.ID); stored != nil {
@@ -866,18 +898,46 @@ func (a *API) handleAdminDeleteSbEgress(w http.ResponseWriter, r *http.Request) 
 }
 
 // egressProxyURL renders an egress as a curl --proxy URL. socks uses socks5h so
-// DNS resolves at the proxy (matching how sing-box dials it); http stays http.
-// Credentials are percent-encoded via url.URL.
-func egressProxyURL(e *store.SbEgress) string {
+// DNS resolves at the proxy (matching how sing-box dials it); a plaintext http
+// proxy stays http, and a TLS one becomes https so curl wraps the hop the way
+// sing-box will. Credentials are percent-encoded via url.URL.
+//
+// The second return is the extra curl flags the URL needs. The --resolve entry
+// is the load-bearing one: curl validates the proxy's certificate against the
+// host in the proxy URL and offers no flag to set a proxy's SNI, so a TLS
+// egress dialed by IP has to carry its SNI hostname in the URL and be pointed
+// back at the real address here. --resolve pre-populates curl's DNS cache, which
+// the proxy connection shares — verified against curl 8.x, where the entry
+// visibly redirects the proxy dial.
+func egressProxyURL(e *store.SbEgress) (string, []string) {
+	// Same gate as egressOutbound: TLS only ever applies to an http egress, so a
+	// stale flag on a socks row can't reroute the check to the SNI hostname
+	// while the scheme (correctly) stays socks5h.
+	tlsOn := e.TLSEnabled && e.Type == "http"
 	scheme := "http"
-	if e.Type == "socks" {
+	switch {
+	case e.Type == "socks":
 		scheme = "socks5h"
+	case tlsOn:
+		scheme = "https"
 	}
-	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(e.Host, fmt.Sprintf("%d", e.Port))}
+	host, port := e.Host, fmt.Sprintf("%d", e.Port)
+	var extra []string
+	// Swap in the SNI only when we can redirect it back to the dial address,
+	// i.e. the address is a literal IP (--resolve takes an IP target). With a
+	// hostname address the URL keeps it and curl validates against that name.
+	if tlsOn && e.SNI != "" && e.SNI != e.Host && net.ParseIP(e.Host) != nil {
+		extra = append(extra, "--resolve", e.SNI+":"+port+":"+e.Host)
+		host = e.SNI
+	}
+	if tlsOn && e.TLSInsecure {
+		extra = append(extra, "--proxy-insecure")
+	}
+	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(host, port)}
 	if e.Username != "" {
 		u.User = url.UserPassword(e.Username, e.Password)
 	}
-	return u.String()
+	return u.String(), extra
 }
 
 // handleAdminTestSbEgress runs a live connectivity check THROUGH a proxy egress,
@@ -925,10 +985,30 @@ func (a *API) handleAdminTestSbEgress(w http.ResponseWriter, r *http.Request) {
 	// curl through the proxy to an IP-echo service, trying a few in case one is
 	// blocked; -w appends the total time. -f makes an HTTP error (e.g. 407 bad
 	// auth) a non-zero exit so we report failure rather than echoing an error page.
-	proxy := egressProxyURL(eg)
+	proxy, extra := egressProxyURL(eg)
 	script := `P=` + shellQuoteAPI(proxy) + `
-for U in https://api.ip.sb/ip https://ifconfig.me/ip https://ipinfo.io/ip; do
-  OUT=$(curl -fsS -m 10 --proxy "$P" -w '\n%{time_total}' "$U" 2>&1) && { printf '%s' "$OUT"; exit 0; }
+set --`
+	for _, arg := range extra {
+		script += ` ` + shellQuoteAPI(arg)
+	}
+	script += "\n"
+	// A pinned trust anchor has to reach curl as a file. Written to a private
+	// temp file for the life of the check and removed on every exit path. The
+	// heredoc is quoted so the PEM goes in verbatim, and the sentinel contains
+	// underscores, which base64 never produces — no line of the PEM can end it.
+	if eg.TLSEnabled && eg.Type == "http" && eg.TLSCertID != 0 {
+		if c, _ := a.st.GetCert(eg.TLSCertID); c != nil && !c.DecryptFailed && c.CertPEM != "" {
+			script += `CAF=$(mktemp) || exit 1
+trap 'rm -f "$CAF"' EXIT
+cat > "$CAF" <<'QZ_EGRESS_PEM_EOF'
+` + strings.TrimRight(c.CertPEM, "\n") + `
+QZ_EGRESS_PEM_EOF
+set -- "$@" --proxy-cacert "$CAF"
+`
+		}
+	}
+	script += `for U in https://api.ip.sb/ip https://ifconfig.me/ip https://ipinfo.io/ip; do
+  OUT=$(curl -fsS -m 10 --proxy "$P" "$@" -w '\n%{time_total}' "$U" 2>&1) && { printf '%s' "$OUT"; exit 0; }
 done
 printf '%s' "$OUT" >&2; exit 1`
 

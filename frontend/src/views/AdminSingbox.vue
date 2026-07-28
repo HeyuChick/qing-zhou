@@ -128,10 +128,14 @@
               <div class="lc-head">
                 <span class="lc-title">{{ r.name }}</span>
                 <n-tag size="tiny" type="info" bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag>
+                <n-tag v-if="r.tls_enabled" size="tiny" :type="r.tls_insecure ? 'warning' : 'success'" bordered="false">
+                  {{ r.tls_insecure ? 'TLS·不校验' : 'TLS' }}
+                </n-tag>
               </div>
               <div class="lc-meta">
                 <span class="kv">地址 <b>{{ r.host }}:{{ r.port }}</b></span>
                 <span class="kv">用户名 <b>{{ r.username || '—' }}</b></span>
+                <span v-if="r.tls_enabled && r.sni" class="kv">SNI <b>{{ r.sni }}</b></span>
                 <span class="kv">入站数 <b>{{ r.inbound_count ?? 0 }}</b></span>
               </div>
               <div v-if="r._test" class="egress-test" :class="r._test.ok ? 'ok' : 'err'">
@@ -360,15 +364,52 @@
         <n-form label-placement="left" label-width="100">
           <n-form-item label="名称"><n-input v-model:value="ee.name" placeholder="如：静态IP-香港" /></n-form-item>
           <n-form-item label="类型">
-            <n-radio-group v-model:value="ee.type">
-              <n-radio value="socks">SOCKS5</n-radio>
-              <n-radio value="http">HTTP</n-radio>
-            </n-radio-group>
+            <div style="width:100%;">
+              <n-radio-group :value="ee.type" @update:value="onEgressType">
+                <n-radio value="socks">SOCKS5</n-radio>
+                <n-radio value="http">HTTP</n-radio>
+              </n-radio-group>
+              <div class="form-tip">按供应商给的协议选，选错的表现是连上后立刻被 RST（对端读不懂握手包）。高位随机端口通常是 SOCKS5。</div>
+            </div>
           </n-form-item>
           <n-form-item label="服务器地址"><n-input v-model:value="ee.host" placeholder="IP 或域名" /></n-form-item>
           <n-form-item label="端口"><n-input-number v-model:value="ee.port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
           <n-form-item label="用户名"><n-input v-model:value="ee.username" placeholder="无认证则留空" /></n-form-item>
           <n-form-item label="密码"><n-input v-model:value="ee.password" type="password" show-password-on="click" :placeholder="ee.id ? '*** 表示保持原密码不变' : '无认证则留空'" /></n-form-item>
+          <n-form-item label="TLS 加密">
+            <div style="width:100%;">
+              <n-switch v-model:value="ee.tls_enabled" :disabled="ee.type !== 'http'" />
+              <div class="form-tip">
+                <template v-if="ee.type !== 'http'">仅 HTTP 类型可用——sing-box 的 SOCKS5 出站没有 TLS 选项。</template>
+                <template v-else>即「HTTPS 代理」：到代理这一跳走 TLS，认证凭据不再明文过网。<b>端口是 443 不等于要开</b>，很多代理只是借 443 穿墙，实际是明文；开错的表现是握手阶段报证书错误。</template>
+              </div>
+            </div>
+          </n-form-item>
+          <template v-if="ee.tls_enabled && ee.type === 'http'">
+            <n-form-item label="SNI">
+              <div style="width:100%;">
+                <n-input v-model:value="ee.sni" placeholder="证书上的域名，留空则用上面的地址" />
+                <div class="form-tip">地址填的是 IP 时几乎一定要填：证书签给的是域名，不填会报 <code>doesn't contain any IP SANs</code>。</div>
+              </div>
+            </n-form-item>
+            <n-form-item label="信任证书">
+              <div style="width:100%;">
+                <n-select v-model:value="ee.tls_cert_id" :options="egressTrustOpts" />
+                <div class="form-tip">
+                  这一跳面板是<b>客户端</b>，选的证书只用来<b>校验对方</b>，不会发出去。<br>
+                  商用代理保持「系统根证书」；只有代理是你自己搭的、用的正是证书管理里这张证书（含自签）时才需要指定。
+                </div>
+              </div>
+            </n-form-item>
+            <n-form-item label="跳过证书校验">
+              <div style="width:100%;">
+                <n-switch v-model:value="ee.tls_insecure" />
+                <div class="form-tip" :style="ee.tls_insecure ? 'color:var(--warn,#d97706);' : ''">
+                  仅用于临时排障。凭据就在这条 TLS 里，跳过校验等于允许中间人拿走它们并盗用你的出口。
+                </div>
+              </div>
+            </n-form-item>
+          </template>
         </n-form>
         <n-button type="primary" block :loading="saving" @click="saveEgress">保存</n-button>
       </n-drawer-content>
@@ -895,17 +936,39 @@ async function deleteTls(id: number) { try { await apiDelete('/api/admin/sb/tls/
 
 // ========== Egress（第三方代理出口，如购买的静态 IP SOCKS5/HTTP） ==========
 const showEg = ref(false)
-const ee = reactive({ id: 0, name: '', type: 'socks', host: '', port: 1080, username: '', password: '' })
+const egBlank = { id: 0, name: '', type: 'socks', host: '', port: 1080, username: '', password: '', tls_enabled: false, sni: '', tls_cert_id: 0, tls_insecure: false }
+const ee = reactive({ ...egBlank })
 function openEgress(r?: any) {
   Object.assign(ee, r
-    ? { id: r.id, name: r.name, type: r.type, host: r.host, port: r.port, username: r.username || '', password: r.password || '' }
-    : { id: 0, name: '', type: 'socks', host: '', port: 1080, username: '', password: '' })
+    ? {
+        id: r.id, name: r.name, type: r.type, host: r.host, port: r.port,
+        username: r.username || '', password: r.password || '',
+        tls_enabled: !!r.tls_enabled, sni: r.sni || '', tls_cert_id: r.tls_cert_id || 0, tls_insecure: !!r.tls_insecure,
+      }
+    : { ...egBlank })
   showEg.value = true
 }
+// sing-box 的 SOCKS5 出站没有 TLS 选项，切到 SOCKS5 时把开关一并关掉，
+// 否则表单看着是加密的、后端却会拒绝保存。
+function onEgressType(t: string) {
+  ee.type = t
+  if (t !== 'http') ee.tls_enabled = false
+}
+// 出口方向我们是 TLS 客户端：这里选的证书是「信任锚」，用来校验上游代理，
+// 面板不会把它发出去，私钥那一半也用不到（sing-box 出站不支持 mTLS）。
+// 只有代理是你自己搭的、用的正是证书中心这张证书时才需要选。
+const egressTrustOpts = computed(() => [
+  { label: '系统根证书（商用代理选这个）', value: 0 },
+  ...certList.value.map(c => ({ label: `${c.name}（${c.domain || '无域名'}·${c.source === 'acme' ? '真实证书' : c.source === 'paste' ? '导入' : '自签'}）`, value: c.id })),
+])
 async function saveEgress() {
   saving.value = true
   try {
-    const body = { name: ee.name, type: ee.type, host: ee.host, port: ee.port, username: ee.username, password: ee.password }
+    const body = {
+      name: ee.name, type: ee.type, host: ee.host, port: ee.port,
+      username: ee.username, password: ee.password,
+      tls_enabled: ee.tls_enabled, sni: ee.sni, tls_cert_id: ee.tls_cert_id, tls_insecure: ee.tls_insecure,
+    }
     if (ee.id) await apiPut('/api/admin/sb/egresses/' + ee.id, body)
     else await apiPost('/api/admin/sb/egresses', body)
     message.success('保存成功'); showEg.value = false; await load()

@@ -23,46 +23,78 @@ type SbEgress struct {
 	// decrypted (wrong/changed QZ_SECRET_KEY). The outbound is still emitted with
 	// an empty password so traffic fails closed at the proxy instead of silently
 	// falling through to a direct (wrong-IP) exit.
-	DecryptFailed bool  `json:"-"`
-	CreatedAt     int64 `json:"created_at"`
-	UpdatedAt     int64 `json:"updated_at"`
+	DecryptFailed bool `json:"-"`
+	// TLSEnabled wraps the hop to the proxy in TLS — an "HTTPS proxy", where the
+	// CONNECT exchange and the credentials below travel inside a TLS session
+	// instead of in the clear. sing-box offers this on its http outbound only
+	// (its socks outbound has no tls option), so the admin API rejects the
+	// tls+socks combination rather than silently emitting a config that ignores
+	// the flag.
+	TLSEnabled bool `json:"tls_enabled"`
+	// SNI is the name sent in the handshake and checked against the proxy's
+	// certificate. Empty falls back to Host — which fails when Host is a bare IP
+	// and the cert has no IP SAN (the usual shape of a domain-fronted proxy).
+	SNI string `json:"sni"`
+	// TLSCertID pins a managed certificate (certificates.id) as the TRUST ANCHOR
+	// for that handshake, instead of the node's system root store. We are the
+	// client on this hop: the cert is used to verify the proxy, never presented
+	// to it, and its private-key half is unused (sing-box outbounds have no
+	// client-certificate option). Only meaningful when the upstream proxy is
+	// one you run yourself with a cert from the panel's certificate center —
+	// self-signed included. 0 = system roots, which is what a commercial proxy
+	// holding a publicly-trusted cert needs.
+	TLSCertID int64 `json:"tls_cert_id"`
+	// TLSInsecure skips verification entirely. Diagnostics only: the proxy
+	// credentials ride inside this session, so anyone able to intercept it can
+	// take them and reuse the egress.
+	TLSInsecure bool  `json:"tls_insecure"`
+	CreatedAt   int64 `json:"created_at"`
+	UpdatedAt   int64 `json:"updated_at"`
+}
+
+const egressCols = `id, name, type, host, port, username, password, tls_enabled, sni, tls_cert_id, tls_insecure, created_at, updated_at`
+
+func (s *Store) scanEgress(row interface{ Scan(...any) error }) (*SbEgress, error) {
+	var e SbEgress
+	var tlsEnabled, tlsInsecure int
+	if err := row.Scan(&e.ID, &e.Name, &e.Type, &e.Host, &e.Port, &e.Username, &e.Password,
+		&tlsEnabled, &e.SNI, &e.TLSCertID, &tlsInsecure, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		return nil, err
+	}
+	e.TLSEnabled = tlsEnabled != 0
+	e.TLSInsecure = tlsInsecure != 0
+	var ok bool
+	e.Password, ok = s.decryptOK(e.Password)
+	e.DecryptFailed = !ok
+	return &e, nil
 }
 
 func (s *Store) ListSbEgresses() ([]*SbEgress, error) {
-	rows, err := s.db.Query(`SELECT id, name, type, host, port, username, password, created_at, updated_at
-		FROM sb_egresses ORDER BY id`)
+	rows, err := s.db.Query(`SELECT ` + egressCols + ` FROM sb_egresses ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []*SbEgress{}
 	for rows.Next() {
-		var e SbEgress
-		if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.Host, &e.Port, &e.Username, &e.Password, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		e, err := s.scanEgress(rows)
+		if err != nil {
 			return nil, err
 		}
-		var ok bool
-		e.Password, ok = s.decryptOK(e.Password)
-		e.DecryptFailed = !ok
-		out = append(out, &e)
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
 func (s *Store) GetSbEgress(id int64) (*SbEgress, error) {
-	var e SbEgress
-	err := s.db.QueryRow(`SELECT id, name, type, host, port, username, password, created_at, updated_at
-		FROM sb_egresses WHERE id=?`, id).Scan(&e.ID, &e.Name, &e.Type, &e.Host, &e.Port, &e.Username, &e.Password, &e.CreatedAt, &e.UpdatedAt)
+	e, err := s.scanEgress(s.db.QueryRow(`SELECT `+egressCols+` FROM sb_egresses WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var ok bool
-	e.Password, ok = s.decryptOK(e.Password)
-	e.DecryptFailed = !ok
-	return &e, nil
+	return e, nil
 }
 
 // SaveSbEgress inserts (id==0) or updates a proxy egress. Password is encrypted.
@@ -70,15 +102,20 @@ func (s *Store) SaveSbEgress(e *SbEgress) (int64, error) {
 	now := time.Now().Unix()
 	enc := s.encrypt(e.Password)
 	if e.ID == 0 {
-		res, err := s.db.Exec(`INSERT INTO sb_egresses (name, type, host, port, username, password, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?)`, e.Name, e.Type, e.Host, e.Port, e.Username, enc, now, now)
+		res, err := s.db.Exec(`INSERT INTO sb_egresses
+			(name, type, host, port, username, password, tls_enabled, sni, tls_cert_id, tls_insecure, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			e.Name, e.Type, e.Host, e.Port, e.Username, enc,
+			b2i(e.TLSEnabled), e.SNI, e.TLSCertID, b2i(e.TLSInsecure), now, now)
 		if err != nil {
 			return 0, err
 		}
 		return res.LastInsertId()
 	}
-	_, err := s.db.Exec(`UPDATE sb_egresses SET name=?, type=?, host=?, port=?, username=?, password=?, updated_at=? WHERE id=?`,
-		e.Name, e.Type, e.Host, e.Port, e.Username, enc, now, e.ID)
+	_, err := s.db.Exec(`UPDATE sb_egresses SET name=?, type=?, host=?, port=?, username=?, password=?,
+		tls_enabled=?, sni=?, tls_cert_id=?, tls_insecure=?, updated_at=? WHERE id=?`,
+		e.Name, e.Type, e.Host, e.Port, e.Username, enc,
+		b2i(e.TLSEnabled), e.SNI, e.TLSCertID, b2i(e.TLSInsecure), now, e.ID)
 	return e.ID, err
 }
 

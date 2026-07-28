@@ -1,6 +1,11 @@
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"qingzhou/internal/store"
+)
 
 // normalizeSniAddr had no coverage at all, and it sits in front of a dialer, so
 // both directions matter: every legitimate host shape must reach a dialable
@@ -57,6 +62,73 @@ func TestNormalizeSniAddr(t *testing.T) {
 			}
 			if got != c.want {
 				t.Errorf("normalizeSniAddr(%q, %q) = %q, want %q", c.host, c.port, got, c.want)
+			}
+		})
+	}
+}
+
+// egressProxyURL decides how the connectivity check dials the proxy, and a wrong
+// scheme reads as "the proxy is broken" rather than "the panel asked for the
+// wrong protocol" — the exact confusion this test pins down. The --resolve pair
+// matters just as much: without it a TLS egress dialed by IP can never validate,
+// because curl checks the certificate against whatever host is in the proxy URL.
+func TestEgressProxyURL(t *testing.T) {
+	cases := []struct {
+		name      string
+		eg        store.SbEgress
+		want      string
+		wantExtra []string
+	}{
+		{
+			name: "socks resolves at the proxy",
+			eg:   store.SbEgress{Type: "socks", Host: "9.9.9.9", Port: 1080, Username: "u", Password: "p"},
+			want: "socks5h://u:p@9.9.9.9:1080",
+		},
+		{
+			name: "plaintext http stays http",
+			eg:   store.SbEgress{Type: "http", Host: "9.9.9.9", Port: 8080},
+			want: "http://9.9.9.9:8080",
+		},
+		{
+			name: "tls without sni keeps the address",
+			eg:   store.SbEgress{Type: "http", Host: "proxy.example.com", Port: 443, TLSEnabled: true},
+			want: "https://proxy.example.com:443",
+		},
+		{
+			name:      "tls by ip carries the sni and is pointed back",
+			eg:        store.SbEgress{Type: "http", Host: "9.9.9.9", Port: 443, TLSEnabled: true, SNI: "proxy.example.com"},
+			want:      "https://proxy.example.com:443",
+			wantExtra: []string{"--resolve", "proxy.example.com:443:9.9.9.9"},
+		},
+		{
+			// A hostname address gives --resolve no IP to point at, so the URL
+			// keeps it; curl then validates against that name.
+			name: "tls by hostname ignores a differing sni",
+			eg:   store.SbEgress{Type: "http", Host: "dial.example.com", Port: 443, TLSEnabled: true, SNI: "cert.example.com"},
+			want: "https://dial.example.com:443",
+		},
+		{
+			name:      "insecure is passed through",
+			eg:        store.SbEgress{Type: "http", Host: "9.9.9.9", Port: 443, TLSEnabled: true, TLSInsecure: true},
+			want:      "https://9.9.9.9:443",
+			wantExtra: []string{"--proxy-insecure"},
+		},
+		{
+			// The flag is meaningless on socks (sing-box has no tls there) and
+			// must not silently turn the check into an https dial.
+			name: "tls flag on socks is ignored",
+			eg:   store.SbEgress{Type: "socks", Host: "9.9.9.9", Port: 1080, TLSEnabled: true, SNI: "proxy.example.com"},
+			want: "socks5h://9.9.9.9:1080",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, extra := egressProxyURL(&c.eg)
+			if got != c.want {
+				t.Errorf("egressProxyURL() = %q, want %q", got, c.want)
+			}
+			if strings.Join(extra, " ") != strings.Join(c.wantExtra, " ") {
+				t.Errorf("egressProxyURL() extra = %v, want %v", extra, c.wantExtra)
 			}
 		})
 	}
