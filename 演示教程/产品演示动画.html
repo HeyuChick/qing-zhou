@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>轻舟 · 产品演示动画</title>
+<style>
+  :root{
+    --ink:#f5f6f7; --sub:#9aa3ad; --bg0:#0d0f12; --bg1:#15181d;
+    --card:#1b1f26; --line:#2a2f38; --accent:#ffffff; --green:#38b676;
+    --violet:#8a5cf6; --blue:#4f8cff; --gold:#d9a441;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:#000;overflow:hidden;font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  /* 16:9 letterboxed stage, scales to viewport */
+  .stage{
+    position:absolute;inset:0;margin:auto;
+    width:min(100vw, calc(100vh * 16 / 9));
+    height:min(100vh, calc(100vw * 9 / 16));
+    background:radial-gradient(120% 120% at 50% 0%, var(--bg1), var(--bg0) 60%);
+    color:var(--ink);overflow:hidden;
+  }
+  .scene{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    opacity:0;transform:translateY(14px);transition:opacity .6s ease, transform .6s ease;padding:6% 8%}
+  .scene.on{opacity:1;transform:none}
+  .scene.out{opacity:0;transform:translateY(-14px)}
+
+  /* logo */
+  .m{background:#fff;color:#111;border-radius:18%;display:grid;place-items:center;font-weight:800}
+  .brand{display:flex;align-items:center;gap:2.2vh}
+  .brand .m{width:9vh;height:9vh;font-size:5vh}
+  .brand h1{font-size:8vh;font-weight:800;letter-spacing:.02em}
+  .tagline{color:var(--sub);font-size:3vh;margin-top:3vh;letter-spacing:.35em}
+  .kdot{display:inline-block;width:.9vh;height:.9vh;border-radius:50%;background:var(--green);margin:0 .8vh;vertical-align:middle}
+
+  h2.title{font-size:5vh;font-weight:800;margin-bottom:1.2vh}
+  .subt{color:var(--sub);font-size:2.5vh;margin-bottom:4.5vh;letter-spacing:.05em}
+
+  /* user flow */
+  .flow{display:flex;align-items:stretch;gap:2.2vh}
+  .step{background:var(--card);border:1px solid var(--line);border-radius:2.2vh;padding:3.4vh 3vh;width:26vh;
+    text-align:center;opacity:0;transform:translateY(2vh) scale(.96)}
+  .step .ic{font-size:5.4vh;line-height:1}
+  .step .st{margin-top:1.6vh;font-weight:700;font-size:2.7vh}
+  .step .sd{margin-top:.8vh;color:var(--sub);font-size:1.9vh}
+  .arrow{align-self:center;font-size:4vh;color:var(--line);opacity:0}
+  .pop{animation:pop .5s cubic-bezier(.2,.8,.2,1) forwards}
+  .fadein{animation:fadein .5s ease forwards}
+  @keyframes pop{to{opacity:1;transform:none}}
+  @keyframes fadein{to{opacity:1}}
+
+  /* admin diagram */
+  .diagram{display:flex;align-items:center;gap:3vh;flex-wrap:wrap;justify-content:center;max-width:130vh}
+  .grp{background:var(--card);border:1px solid var(--line);border-radius:2vh;padding:2.4vh 2.8vh;min-width:24vh;opacity:0;transform:translateY(2vh)}
+  .grp h4{font-size:2.4vh;margin-bottom:1.4vh;display:flex;align-items:center;gap:1vh}
+  .chip{display:inline-block;background:#22272f;border:1px solid var(--line);border-radius:1vh;padding:.7vh 1.4vh;font-size:1.8vh;margin:.5vh .4vh;color:#cfd6de}
+  .chip.g{border-color:#2c5c46;color:#7ee2b0}.chip.v{border-color:#4a3a7a;color:#c3adff}
+  .lk{color:var(--sub);font-size:3vh;opacity:0}
+  .badge{display:inline-block;font-size:1.7vh;padding:.4vh 1.2vh;border-radius:999px;margin-left:1vh}
+  .badge.n{background:#123;color:#7cc}.badge.p{background:#1e1633;color:#c3adff}
+
+  /* features grid */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:2.2vh;max-width:120vh;width:100%}
+  .feat{background:var(--card);border:1px solid var(--line);border-radius:2vh;padding:3vh 2.6vh;opacity:0;transform:translateY(2vh)}
+  .feat .fi{font-size:4vh}
+  .feat .ft{font-weight:700;font-size:2.5vh;margin-top:1.2vh}
+  .feat .fd{color:var(--sub);font-size:1.9vh;margin-top:.6vh;line-height:1.5}
+
+  /* outro */
+  .cta{color:var(--sub);font-size:2.6vh;margin-top:3.5vh;letter-spacing:.05em}
+  .url{color:#fff;border:1px solid var(--line);border-radius:999px;padding:1.2vh 3vh;font-size:2.4vh;margin-top:3.5vh;background:#1b1f26}
+
+  /* progress + controls */
+  .bar{position:absolute;left:0;bottom:0;height:4px;background:var(--green);width:0;transition:width .25s linear;z-index:5}
+  .ctl{position:absolute;right:2.4vh;bottom:2.4vh;display:flex;gap:1vh;z-index:6;opacity:.25;transition:opacity .2s}
+  .stage:hover .ctl{opacity:1}
+  .ctl button{background:#1b1f26cc;color:#fff;border:1px solid var(--line);border-radius:1vh;padding:1vh 1.8vh;font-size:1.9vh;cursor:pointer}
+  .hint{position:absolute;left:2.4vh;bottom:2.4vh;color:#4b5563;font-size:1.7vh;z-index:6;opacity:.25}
+  .stage:hover .hint{opacity:.7}
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+
+  <!-- 0 · intro -->
+  <section class="scene" data-dur="4200">
+    <div class="brand"><div class="m">舟</div><h1>轻舟</h1></div>
+    <div class="tagline">一站式<span class="kdot"></span>代理订阅面板</div>
+  </section>
+
+  <!-- 1 · user flow -->
+  <section class="scene" data-dur="6200">
+    <h2 class="title">用户：四步就能上网</h2>
+    <div class="subt">自助注册 · 积分购买 · 一键订阅</div>
+    <div class="flow">
+      <div class="step" data-anim><div class="ic">📝</div><div class="st">注册登录</div><div class="sd">用户名 / 邮箱 / 密码</div></div>
+      <div class="arrow" data-anim>→</div>
+      <div class="step" data-anim><div class="ic">🛒</div><div class="st">购买套餐</div><div class="sd">积分商城 · 可排队</div></div>
+      <div class="arrow" data-anim>→</div>
+      <div class="step" data-anim><div class="ic">🔗</div><div class="st">复制订阅</div><div class="sd">链接 / 二维码</div></div>
+      <div class="arrow" data-anim>→</div>
+      <div class="step" data-anim><div class="ic">🚀</div><div class="st">导入连接</div><div class="sd">Clash / v2rayN</div></div>
+    </div>
+  </section>
+
+  <!-- 2 · admin authorization model -->
+  <section class="scene" data-dur="6600">
+    <h2 class="title">管理：分组即授权</h2>
+    <div class="subt">节点分组 决定能用哪些线路 · 用户组 决定谁能购买</div>
+    <div class="diagram">
+      <div class="grp" data-anim>
+        <h4>📦 套餐 <span class="badge p">月享套餐</span></h4>
+        <div><span class="chip">100 GB</span><span class="chip">30 天</span><span class="chip">3 设备</span></div>
+      </div>
+      <div class="lk" data-anim>⇄</div>
+      <div class="grp" data-anim>
+        <h4>🗂️ 节点分组</h4>
+        <div><span class="chip g">🇭🇰 高级线路</span><span class="chip g">🇯🇵 高级线路</span><span class="chip v">🇺🇸 标准线路</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 · relay / egress -->
+  <section class="scene" data-dur="6200">
+    <h2 class="title">多级中转 · 代理出口</h2>
+    <div class="subt">sing-box 原生编排：入站 → 中转 → 落地</div>
+    <div class="flow">
+      <div class="step" data-anim><div class="ic">🌐</div><div class="st">入站</div><div class="sd">用户接入</div></div>
+      <div class="arrow" data-anim>→</div>
+      <div class="step" data-anim><div class="ic">🔀</div><div class="st">多级中转</div><div class="sd">链路拓扑编排</div></div>
+      <div class="arrow" data-anim>→</div>
+      <div class="step" data-anim><div class="ic">📤</div><div class="st">代理出口</div><div class="sd">落地 IP</div></div>
+    </div>
+  </section>
+
+  <!-- 4 · features -->
+  <section class="scene" data-dur="7000">
+    <h2 class="title">一个面板，全部搞定</h2>
+    <div class="subt">开源 · 单文件部署 · 内置 sing-box</div>
+    <div class="grid">
+      <div class="feat" data-anim><div class="fi">🧩</div><div class="ft">多协议支持</div><div class="fd">VLESS / VMess / Trojan / SS / Hysteria2</div></div>
+      <div class="feat" data-anim><div class="fi">🔐</div><div class="ft">证书中心</div><div class="fd">ACME + Cloudflare 一键签发续期</div></div>
+      <div class="feat" data-anim><div class="fi">🖥️</div><div class="ft">多机监控</div><div class="fd">SSH 编排 + 探针热力图告警</div></div>
+      <div class="feat" data-anim><div class="fi">🎟️</div><div class="ft">套餐与积分</div><div class="fd">排队套餐 · 流量加油 · 用户组限购</div></div>
+      <div class="feat" data-anim><div class="fi">📨</div><div class="ft">订阅模板</div><div class="fd">Clash 规则自定义下发</div></div>
+      <div class="feat" data-anim><div class="fi">⬆️</div><div class="ft">在线更新</div><div class="fd">对接 GitHub 一键升级</div></div>
+    </div>
+  </section>
+
+  <!-- 5 · outro -->
+  <section class="scene" data-dur="4600">
+    <div class="brand"><div class="m">舟</div><h1>轻舟</h1></div>
+    <div class="cta">用户自助 · 管理省心 · 开源自建</div>
+    <div class="url">node.xrilang.com</div>
+  </section>
+
+  <div class="bar" id="bar"></div>
+  <div class="hint" id="hint">空格 暂停 / 播放</div>
+  <div class="ctl"><button id="replay">↻ 重播</button><button id="toggle">⏸ 暂停</button></div>
+</div>
+
+<script>
+(function(){
+  var scenes = Array.prototype.slice.call(document.querySelectorAll('.scene'));
+  var bar = document.getElementById('bar');
+  var replay = document.getElementById('replay');
+  var toggle = document.getElementById('toggle');
+  var i = -1, timer = null, rafId = null, paused = false, startT = 0, curDur = 0, elapsedBefore = 0;
+  var loop = new URLSearchParams(location.search).get('loop') !== '0';
+
+  function animateScene(sc){
+    var items = sc.querySelectorAll('[data-anim]');
+    items.forEach(function(el, k){
+      var cls = el.classList.contains('step')||el.classList.contains('grp')||el.classList.contains('feat') ? 'pop':'fadein';
+      // Restart the CSS animation without an inline `animation:none` (that would
+      // override the class-defined animation and leave the element at opacity:0).
+      el.classList.remove('pop','fadein');
+      el.style.animationDelay = '';
+      void el.offsetWidth; // force reflow so re-adding the class replays it
+      el.style.animationDelay = (250 + k*180) + 'ms';
+      el.classList.add(cls);
+    });
+  }
+
+  function progress(){
+    if(paused) return;
+    var now = performance.now();
+    var pct = Math.min(1, (elapsedBefore + (now - startT)) / curDur);
+    bar.style.width = (pct*100) + '%';
+    if(pct < 1) rafId = requestAnimationFrame(progress);
+  }
+
+  function show(n){
+    cancelAnimationFrame(rafId); clearTimeout(timer);
+    if(i >= 0){ scenes[i].classList.remove('on'); scenes[i].classList.add('out'); }
+    i = n;
+    var sc = scenes[i];
+    sc.classList.remove('out'); sc.classList.add('on');
+    curDur = parseInt(sc.getAttribute('data-dur'),10) || 5000;
+    elapsedBefore = 0; startT = performance.now(); paused = false; toggle.textContent = '⏸ 暂停';
+    bar.style.width = '0%';
+    animateScene(sc);
+    rafId = requestAnimationFrame(progress);
+    timer = setTimeout(next, curDur);
+  }
+  function next(){
+    if(i+1 < scenes.length){ show(i+1); }
+    else if(loop){ show(0); }
+    else { bar.style.width='100%'; }
+  }
+  function pause(){
+    if(paused) return;
+    paused = true; clearTimeout(timer); cancelAnimationFrame(rafId);
+    elapsedBefore += performance.now() - startT; toggle.textContent = '▶ 播放';
+  }
+  function resume(){
+    if(!paused) return;
+    paused = false; startT = performance.now(); toggle.textContent = '⏸ 暂停';
+    var remain = Math.max(0, curDur - elapsedBefore);
+    rafId = requestAnimationFrame(progress);
+    timer = setTimeout(next, remain);
+  }
+  toggle.onclick = function(){ paused ? resume() : pause(); };
+  replay.onclick = function(){ show(0); };
+  document.addEventListener('keydown', function(e){ if(e.code==='Space'){ e.preventDefault(); paused?resume():pause(); } });
+
+  show(0);
+})();
+</script>
+</body>
+</html>
