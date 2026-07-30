@@ -58,14 +58,31 @@
 
     <!-- 告警条 -->
     <n-card v-if="unreadAlerts.length" size="small" style="margin-bottom:16px;">
-      <template #header><span class="card-h">未读告警</span></template>
-      <div v-for="a in unreadAlerts" :key="a.id" class="alert-row">
-        <div>
-          <n-tag type="warning" size="small" bordered style="margin-right:8px;">{{ a.type }}</n-tag>
-          <span class="alert-msg">{{ a.message }}</span>
-          <span class="alert-time">{{ fmtDateTime(a.ts) }}</span>
+      <template #header>
+        <span class="card-h">未读告警</span>
+        <span class="alert-cnt">{{ unreadAlerts.length }}</span>
+      </template>
+      <template #header-extra>
+        <n-button size="tiny" @click="dismissAll">全部忽略</n-button>
+      </template>
+      <div v-for="a in shownAlerts" :key="a.id" class="alert-row">
+        <div class="alert-main">
+          <div class="alert-line">
+            <n-tag :type="alertKind(a.type)" size="small" :bordered="false">{{ alertLabel(a.type) }}</n-tag>
+            <span class="alert-msg">{{ a.message }}</span>
+          </div>
+          <div class="alert-meta">
+            首次 {{ fmtDateTime(a.first_ts || a.ts) }}
+            <template v-if="alertDur(a) >= 60"> · 持续 {{ fmtUptime(alertDur(a)) }}</template>
+            <template v-if="a.hits > 1"> · 触发 {{ a.hits }} 次</template>
+          </div>
         </div>
         <n-button size="tiny" @click="dismissAlert(a.id)">忽略</n-button>
+      </div>
+      <div v-if="unreadAlerts.length > ALERT_PREVIEW" class="alert-more">
+        <n-button text size="tiny" @click="alertsExpanded = !alertsExpanded">
+          {{ alertsExpanded ? '收起' : `还有 ${unreadAlerts.length - ALERT_PREVIEW} 条，展开全部` }}
+        </n-button>
       </div>
     </n-card>
 
@@ -179,7 +196,27 @@ const ranges = [
   { label: '24h', value: '24h' }, { label: '7d', value: '7d' }, { label: '30d', value: '30d' },
 ]
 
+// --- 告警 ---
+// 后端已把同一台机器的同一类问题合并成一条「事件」（持续时间 + 触发次数），
+// 这里只负责按严重度排序、折叠长列表，避免一屏刷满重复条目。
 const unreadAlerts = ref<any[]>([])
+const alertsExpanded = ref(false)
+const ALERT_PREVIEW = 5
+const ALERT_META: Record<string, { label: string; kind: 'error' | 'warning'; rank: number }> = {
+  offline: { label: '离线', kind: 'error', rank: 0 },
+  expired: { label: '已过期', kind: 'error', rank: 1 },
+  disk_full: { label: '磁盘将满', kind: 'warning', rank: 2 },
+  high_mem: { label: '内存偏高', kind: 'warning', rank: 3 },
+  high_cpu: { label: 'CPU 偏高', kind: 'warning', rank: 4 },
+  expiring: { label: '即将到期', kind: 'warning', rank: 5 },
+}
+function alertLabel(t: string) { return ALERT_META[t]?.label || t }
+function alertKind(t: string) { return ALERT_META[t]?.kind || 'warning' }
+function alertDur(a: any) { return Math.max(0, (a.ts || 0) - (a.first_ts || a.ts || 0)) }
+const sortedAlerts = computed(() => [...unreadAlerts.value].sort(
+  (a, b) => (ALERT_META[a.type]?.rank ?? 9) - (ALERT_META[b.type]?.rank ?? 9) || b.ts - a.ts
+))
+const shownAlerts = computed(() => alertsExpanded.value ? sortedAlerts.value : sortedAlerts.value.slice(0, ALERT_PREVIEW))
 
 // 移动端抽屉宽度
 const isMobile = ref(false)
@@ -332,7 +369,20 @@ async function handleSaveAsset() {
 }
 
 async function dismissAlert(id: number) {
-  try { await apiPost(`/api/admin/monitor/alerts/${id}/read`); unreadAlerts.value = unreadAlerts.value.filter(a => a.id !== id) } catch {}
+  try {
+    await apiPost(`/api/admin/monitor/alerts/${id}/read`)
+    unreadAlerts.value = unreadAlerts.value.filter(a => a.id !== id)
+    dash.value.alerts_unread = unreadAlerts.value.length
+  } catch {}
+}
+
+async function dismissAll() {
+  try {
+    await apiPost('/api/admin/monitor/alerts/read-all')
+    unreadAlerts.value = []
+    dash.value.alerts_unread = 0
+    alertsExpanded.value = false
+  } catch (e: any) { message.error(e.message) }
 }
 
 function copyInstall(s: any) {
@@ -416,11 +466,12 @@ async function load() {
     const [d, s, a] = await Promise.all([
       apiGet('/api/admin/monitor/dashboard'),
       apiList('/api/admin/monitor/servers'),
-      apiList('/api/admin/monitor/alerts'),
+      // unread=1：只取未读，否则 200 条上限可能被历史已读告警占满。
+      apiList('/api/admin/monitor/alerts?unread=1'),
     ])
     dash.value = d || {}
     servers.value = s || []
-    unreadAlerts.value = (a || []).filter((x: any) => !x.read)
+    unreadAlerts.value = a || []
     for (const sv of servers.value) {
       if (!chartRange.value[sv.id]) chartRange.value[sv.id] = '24h'
     }
@@ -481,10 +532,14 @@ onUnmounted(() => {
 .heat-chart:empty { display: none; }
 
 /* 告警 */
-.alert-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border-soft, #f1efe8); }
+.alert-cnt { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 9px; background: var(--danger-soft, #fef2f2); color: var(--danger, #dc2626); font-size: 11px; font-weight: 650; }
+.alert-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border-soft, #f1efe8); }
 .alert-row:last-child { border-bottom: none; }
-.alert-msg { font-size: 13px; }
-.alert-time { font-size: 11px; color: var(--text-3); margin-left: 8px; }
+.alert-main { min-width: 0; }
+.alert-line { display: flex; align-items: center; gap: 8px; }
+.alert-msg { font-size: 13px; overflow-wrap: anywhere; }
+.alert-meta { font-size: 11px; color: var(--text-3); margin-top: 3px; }
+.alert-more { padding-top: 8px; text-align: center; }
 
 /* 筛选栏 */
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }

@@ -621,6 +621,15 @@ func (a *API) handleMarkAlertRead(w http.ResponseWriter, r *http.Request) {
 	ok(w, nil)
 }
 
+func (a *API) handleMarkAllAlertsRead(w http.ResponseWriter, r *http.Request) {
+	n, err := a.st.MarkAllAlertsRead()
+	if err != nil {
+		fail(w, 500, "标记失败")
+		return
+	}
+	ok(w, J{"count": n})
+}
+
 func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	sv, err := a.st.GetServer(id)

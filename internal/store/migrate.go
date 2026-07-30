@@ -430,15 +430,21 @@ CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON server_metrics(server_id, ts
 CREATE INDEX IF NOT EXISTS idx_metrics_ts ON server_metrics(ts);
 
 -- Server alerts: offline, high_cpu, high_mem, disk_full, expiring, expired.
+-- One row per *episode*, not per observation: a condition that keeps holding
+-- merges into its open row (ts/count refreshed) rather than adding a new one.
 CREATE TABLE IF NOT EXISTS server_alerts (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   server_id INTEGER NOT NULL,
   type      TEXT    NOT NULL,
   message   TEXT    NOT NULL,
   ts        INTEGER NOT NULL,
-  read      INTEGER NOT NULL DEFAULT 0
+  first_ts  INTEGER NOT NULL DEFAULT 0,
+  hits      INTEGER NOT NULL DEFAULT 1,
+  read      INTEGER NOT NULL DEFAULT 0,
+  resolved  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_server ON server_alerts(server_id, ts);
+CREATE INDEX IF NOT EXISTS idx_alerts_open ON server_alerts(server_id, type, read);
 `
 
 func (s *Store) Migrate() error {
@@ -544,6 +550,22 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE sb_egresses ADD COLUMN sni TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_egresses ADD COLUMN tls_cert_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sb_egresses ADD COLUMN tls_insecure INTEGER NOT NULL DEFAULT 0`,
+		// Alerts became episode-based (see server_alerts above). Legacy DBs hold one
+		// row per hourly observation, so a single server that stayed offline for a
+		// week shows ~170 identical unread lines. Fold each unread (server, type)
+		// group into its newest row and mark the rest read. The first statement is
+		// the one-time part (it only matches the legacy first_ts=0 rows); the
+		// collapse is a permanent no-op once InsertAlert keeps the invariant.
+		`ALTER TABLE server_alerts ADD COLUMN first_ts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_alerts ADD COLUMN hits INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE server_alerts ADD COLUMN resolved INTEGER NOT NULL DEFAULT 0`,
+		`CREATE INDEX IF NOT EXISTS idx_alerts_open ON server_alerts(server_id, type, read)`,
+		`UPDATE server_alerts SET
+		   first_ts=(SELECT MIN(b.ts) FROM server_alerts b WHERE b.server_id=server_alerts.server_id AND b.type=server_alerts.type AND b.read=0),
+		   hits=(SELECT COUNT(*) FROM server_alerts b WHERE b.server_id=server_alerts.server_id AND b.type=server_alerts.type AND b.read=0)
+		 WHERE read=0 AND first_ts=0`,
+		`UPDATE server_alerts SET read=1 WHERE read=0 AND id NOT IN (SELECT MAX(id) FROM server_alerts WHERE read=0 GROUP BY server_id, type)`,
+		`UPDATE server_alerts SET first_ts=ts WHERE first_ts=0`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			// Benign on an up-to-date DB: the column already exists (ADD COLUMN) or

@@ -276,6 +276,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/monitor/heatmap", a.handleMonitorHeatmap)
 		ar.Get("/api/admin/monitor/alerts", a.handleMonitorAlerts)
 		ar.Post("/api/admin/monitor/alerts/{id}/read", a.handleMarkAlertRead)
+		ar.Post("/api/admin/monitor/alerts/read-all", a.handleMarkAllAlertsRead)
 
 		// nodes / groups / sources (Phase 4.5)
 		ar.Get("/api/admin/inbounds", a.handleAdminInbounds)
