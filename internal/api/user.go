@@ -226,6 +226,7 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "未登录")
 		return
 	}
+	u = a.ensureSubToken(u)
 	buckets, _ := a.st.ListBuckets(u.ID)
 	pkgNames, _ := a.st.PackageNames()
 	now := time.Now().Unix()
@@ -285,7 +286,14 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/user/reset-sub — rotate the subscription token (old link dies).
+// POST /api/user/reset-sub — revoke the subscription: new token AND new node
+// credentials.
+//
+// The token alone is not the secret worth rotating. Anyone who fetched the old
+// URL already has the node links it served, and those authenticate with the
+// bucket's uuid/password — so a token-only reset left every leaked link working
+// while the UI promised otherwise. ResetSubscription rotates both atomically;
+// the rebuild below is what actually pushes the new credentials to the servers.
 func (a *API) handleResetSub(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
@@ -297,11 +305,12 @@ func (a *API) handleResetSub(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "服务器错误")
 		return
 	}
-	if err := a.st.SetSubToken(u.ID, token); err != nil {
+	if err := a.st.ResetSubscription(u.ID, token); err != nil {
 		fail(w, http.StatusInternalServerError, "重置失败")
 		return
 	}
 	a.invalidateLinks(u.ID)
+	a.sbRebuildLog()
 	u, _ = a.st.UserByID(u.ID)
 	ok(w, J{"url": a.subURL(r, u)})
 }
@@ -312,7 +321,14 @@ func (a *API) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "未登录")
 		return
 	}
-	base := a.subURL(r, u)
+	base := a.subURL(r, a.ensureSubToken(u))
+	if base == "" {
+		// No token and minting failed. Report nothing rather than the bare
+		// "?format=clash" fragments that concatenating onto "" produces — those
+		// look like links and resolve to the SPA.
+		ok(w, J{"url": "", "formats": J{}})
+		return
+	}
 	ok(w, J{
 		"url": base,
 		"formats": J{
@@ -571,6 +587,11 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A revoked link must not outlive its revocation in someone else's cache.
+	// Panels commonly sit behind a CDN (or a "cache everything" rule), and a
+	// cached 200 for a token the panel already deleted looks exactly like
+	// "重置后旧链接还能用". The body is per-user and cheap to regenerate anyway.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Subscription-Userinfo",
 		"upload="+itoa(u.UsedUp)+"; download="+itoa(u.UsedDown)+"; total="+itoa(u.TrafficLimit)+"; expire="+itoa(u.ExpiryAt))
 	w.Header().Set("Profile-Update-Interval", "12")
@@ -762,6 +783,29 @@ func (a *API) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 func (a *API) currentUser(r *http.Request) *store.User {
 	uid, _ := r.Context().Value(ctxUserID).(int64)
 	u, _ := a.st.UserByID(uid)
+	return u
+}
+
+// ensureSubToken backfills a subscription token for an account that has none.
+// The first-boot admin is inserted by Seed without one, so its 订阅 page showed
+// an empty URL forever; registration mints a token, so everyone else already
+// has one and this is a no-op. Returns the user to read the token from.
+func (a *API) ensureSubToken(u *store.User) *store.User {
+	if u == nil || (u.SubToken.Valid && u.SubToken.String != "") {
+		return u
+	}
+	token, err := idgen.RandToken(24)
+	if err != nil {
+		return u
+	}
+	if _, err := a.st.SetSubTokenIfEmpty(u.ID, token); err != nil {
+		return u
+	}
+	// Re-read instead of patching the struct: a concurrent request may have won
+	// and minted a different token, and the loser must serve the winner's.
+	if fresh, err := a.st.UserByID(u.ID); err == nil && fresh != nil {
+		return fresh
+	}
 	return u
 }
 

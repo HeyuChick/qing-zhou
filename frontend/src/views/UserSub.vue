@@ -295,11 +295,12 @@ async function handleToggleAll(enable: boolean) {
   } catch (e: any) { message.error(e.message) }
 }
 function handleResetSub() {
-  // Resetting mints a new token, which INVALIDATES every client already configured
-  // with the old link — the user must re-import everywhere. Confirm before doing it.
+  // Resetting mints a new token AND new node credentials, so it invalidates both
+  // the old URL and every node link ever exported from it — that is the point
+  // (you reset because the link leaked). Every client must re-import.
   dialog.warning({
     title: '确认重置订阅链接',
-    content: '重置后旧链接立即失效，所有已导入的客户端（Clash / sing-box 等）都需要用新链接重新导入。确定重置？',
+    content: '重置后旧链接立即失效，节点凭据也会一并更换——从旧链接导出的节点会立刻断开。所有已导入的客户端（Clash / sing-box 等）都需要用新链接重新导入。确定重置？',
     positiveText: '重置', negativeText: '取消',
     onPositiveClick: async () => {
       try { await apiPost('/api/user/reset-sub'); sub.value = await apiGet('/api/user/subscription') || {}; message.success('订阅链接已重置') }

@@ -113,11 +113,101 @@ func (s *Store) SetUserClient(userID, clientID int64, name, uuid, secret string)
 	return err
 }
 
-// SetSubToken rotates a user's subscription token (revokes the old link).
-func (s *Store) SetSubToken(userID int64, token string) error {
-	_, err := s.db.Exec(`UPDATE users SET sub_token=?, updated_at=? WHERE id=?`,
+// SetSubTokenIfEmpty gives a user their first subscription token — and only
+// that. It never overwrites an existing token, so two concurrent callers can't
+// hand out different links, and it can't be mistaken for a revocation: rotating
+// a live token belongs in ResetSubscription, which also rotates the credentials
+// the old link already handed out. Reports whether it wrote.
+//
+// Needed because not every account is born with a token: the first-boot admin is
+// INSERTed by Seed, which predates the subscription column, so its sub_token is
+// NULL and its subscription URL rendered empty.
+func (s *Store) SetSubTokenIfEmpty(userID int64, token string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE users SET sub_token=?, updated_at=?
+		WHERE id=? AND (sub_token IS NULL OR sub_token='')`,
 		token, time.Now().Unix(), userID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ResetSubscription rotates a user's subscription token AND the sing-box
+// credentials every node link is built from, in one transaction.
+//
+// Rotating the token alone revokes nothing that matters. The reason to reset a
+// subscription is that its URL leaked — and whoever fetched it already holds the
+// vless://…, hysteria2://…, trojan://… links it contained. Those carry the
+// bucket's uuid/password, not the subscription token, so they keep authenticating
+// against sing-box forever while the panel claims "旧链接立即失效". The credentials
+// have to change too, or the reset is cosmetic.
+//
+// Two things are deliberately preserved:
+//   - client_name — the sing-box stats identity usage is metered against
+//     (BucketByClientName). Rotating it would orphan the user's traffic history.
+//   - the mixed (HTTP/SOCKS5) proxy password, which merely *falls back* to
+//     client_secret when the user hasn't set a custom one. That credential is
+//     excluded from the subscription, so it never leaked with the link; pinning
+//     the current effective value before rotating keeps the user's 1Panel/Docker
+//     proxies working instead of silently breaking them.
+//
+// The caller must trigger a sing-box rebuild afterwards — until the new users are
+// pushed to the servers, the old credentials are still what the daemons accept.
+func (s *Store) ResetSubscription(userID int64, subToken string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`UPDATE users SET sub_token=?, updated_at=? WHERE id=?`,
+		subToken, now, userID); err != nil {
+		return err
+	}
+	// Pin the effective proxy credential before client_secret moves out from
+	// under the fallback (see ProxySecret).
+	if _, err := tx.Exec(`UPDATE user_plans SET proxy_password=client_secret, updated_at=?
+		WHERE user_id=? AND proxy_password=''`, now, userID); err != nil {
+		return err
+	}
+
+	rows, err := tx.Query(`SELECT id FROM user_plans WHERE user_id=?`, userID)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// Per-bucket credentials, minted independently: buckets are separately
+	// metered identities and must not collapse onto a shared one.
+	for _, id := range ids {
+		uu, ss := genBucketCreds()
+		if _, err := tx.Exec(`UPDATE user_plans SET client_uuid=?, client_secret=?, updated_at=? WHERE id=?`,
+			uu, ss, now, id); err != nil {
+			return err
+		}
+	}
+	// The users row seeds the pool bucket of accounts provisioned later
+	// (EnsurePoolBucket) and is the legacy identity; leaving the leaked value
+	// there would resurrect it.
+	uu, ss := genBucketCreds()
+	if _, err := tx.Exec(`UPDATE users SET client_uuid=?, client_secret=?, updated_at=? WHERE id=?`,
+		uu, ss, now, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetUserEmail changes a user's email and marks it unverified (pending re-verify).
