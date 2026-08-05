@@ -33,6 +33,9 @@
                     <span class="kv">协议 <b>{{ nodeProtocol(r) }}</b></span>
                   </div>
                   <div v-if="(r.group_ids || []).length > 1" class="lc-meta"><span class="kv">分组 <b>{{ groupNames(r.group_ids) }}</b></span></div>
+                  <div v-if="chainSummary(r)" class="lc-chain" :class="{ warn: chainSummary(r)!.broken }">
+                    链路 {{ chainSummary(r)!.text }}
+                  </div>
                   <div class="lc-foot">
                     <n-button size="tiny" :disabled="idx === 0 || reordering" title="前移（订阅/列表更靠前）" @click="moveNodeInGroup(gv, idx, -1)">←</n-button>
                     <n-button size="tiny" :disabled="idx === gv.nodes.length - 1 || reordering" title="后移" @click="moveNodeInGroup(gv, idx, 1)">→</n-button>
@@ -47,6 +50,75 @@
             </n-card>
           </div>
           <n-empty v-else-if="!loading" description="暂无分组或节点" style="padding:40px 0;" />
+        </n-spin>
+      </n-tab-pane>
+
+      <!-- 链路拓扑：按节点分组展示每个节点的完整出网路径 -->
+      <n-tab-pane name="topology" tab="链路拓扑">
+        <n-spin :show="loading">
+          <div v-if="nodes.length" class="topo">
+            <div class="topo-legend">
+              <span><i class="dot client"></i>客户端</span>
+              <span><i class="dot entry"></i>节点入口</span>
+              <span><i class="dot landing"></i>落地入站</span>
+              <span><i class="dot egress"></i>代理出口</span>
+              <span><i class="dot inet"></i>互联网</span>
+              <span style="flex:1;"></span>
+              <n-button size="tiny" quaternary @click="showTopoIp = !showTopoIp">{{ showTopoIp ? '🙈 隐藏 IP' : '👁 显示 IP' }}</n-button>
+            </div>
+            <div v-for="gv in topoGroups" :key="gv.key" class="topo-machine">
+              <div class="topo-mhead">
+                <span class="machine-name">{{ gv.name }}</span>
+                <n-tag size="tiny" :type="gv.isUngrouped ? 'default' : 'info'" bordered="false">{{ gv.rows.length }} 节点</n-tag>
+              </div>
+              <n-empty v-if="!gv.rows.length" description="该分组暂无节点" size="small" style="padding:10px 0;" />
+              <div v-for="row in gv.rows" :key="row.node.id" class="topo-row" :class="{ off: !row.node.enabled }">
+                <span class="topo-node client">👤 客户端</span>
+                <span class="topo-arrow">→</span>
+                <span class="topo-node entry">
+                  <b>{{ row.node.name || '—' }}</b>
+                  <span class="topo-proto">{{ nodeProtocol(row.node) }}</span>
+                  <template v-if="row.ib">
+                    <span class="topo-port">:{{ row.ib.listen_port }}</span>
+                    <span class="topo-loc">@ {{ serverName(row.ib.server_id) }}</span>
+                  </template>
+                </span>
+                <span v-if="row.kind === 'external'" class="topo-arrow relay">⇢ 外部线路 ⇢</span>
+                <span v-else-if="row.kind === 'broken'" class="topo-arrow relay warn">⇢ 入站已失效 ⇢</span>
+                <template v-else>
+                <template v-for="(seg, si) in row.segs" :key="si">
+                  <template v-if="seg.kind === 'landing'">
+                    <span class="topo-arrow relay">⇢ 中转 ⇢</span>
+                    <span class="topo-node landing">
+                      <b>{{ seg.ib.tag }}</b>
+                      <span class="topo-proto">{{ (seg.ib.type || '').toUpperCase() }}</span>
+                      <span class="topo-loc">@ {{ serverName(seg.ib.server_id) }}</span>
+                    </span>
+                  </template>
+                  <template v-else-if="seg.kind === 'egress'">
+                    <span class="topo-arrow egress">⇢ 代理出口 ⇢</span>
+                    <span class="topo-node egress">
+                      <b>{{ seg.eg.name }}</b>
+                      <span class="topo-proto">{{ (seg.eg.type || '').toUpperCase() }}</span>
+                      <span class="topo-loc">{{ showTopoIp ? seg.eg.host : maskHost(seg.eg.host) }}</span>
+                    </span>
+                  </template>
+                  <span v-else-if="seg.kind === 'broken-landing'" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
+                  <span v-else-if="seg.kind === 'broken-egress'" class="topo-arrow relay warn">⇢ 出口已失效 ⇢</span>
+                </template>
+                </template>
+                <span class="topo-arrow">→</span>
+                <span class="topo-node inet">🌐 互联网</span>
+                <span class="topo-actions">
+                  <n-button size="tiny" quaternary @click="openNode(row.node)">编辑节点</n-button>
+                </span>
+              </div>
+            </div>
+            <p class="topo-tip">
+              节点的中转 / 代理出口在「sing-box 配置」页的入站上配置，这里只做展示；外部节点的后续链路由对方线路决定，面板不可见。
+            </p>
+          </div>
+          <n-empty v-else-if="!loading" description="暂无节点，无法展示链路" style="padding:40px 0;" />
         </n-spin>
       </n-tab-pane>
 
@@ -171,6 +243,8 @@ const nodes = ref<any[]>([])
 const groups = ref<any[]>([])
 const sources = ref<any[]>([])
 const inbounds = ref<any[]>([])
+const servers = ref<any[]>([])
+const egresses = ref<any[]>([])
 
 const groupMap = computed(() => new Map(groups.value.map(g => [g.id, g.name])))
 const inboundMap = computed(() => new Map(inbounds.value.map(i => [i.tag, i])))
@@ -207,6 +281,78 @@ const groupedView = computed(() => {
   }
   return out
 })
+
+// ========== 链路拓扑 ==========
+// 自建节点绑定的是某个入站，出网路径（多级中转 / 代理出口）挂在入站上，
+// 因此这里按节点分组把每个节点对应入站的链路展开，与 sing-box 配置页同一套画法。
+const showTopoIp = ref(false) // 默认对 IP 打码，避免截图/分享泄露真实地址
+const inboundById = computed(() => new Map<number, any>(inbounds.value.map(i => [i.id, i])))
+const egressById = computed(() => new Map<number, any>(egresses.value.map(e => [e.id, e])))
+
+function serverName(id: number) { if (!id) return '本机'; const s = servers.value.find(s => s.id === id); return s ? s.name : '#' + id }
+
+// maskHost 对 IP/域名打码：IPv4 保留首尾段，域名/IPv6 保留首尾各两位。
+function maskHost(h: string): string {
+  if (!h) return h
+  const v4 = h.match(/^(\d{1,3})\.\d{1,3}\.\d{1,3}\.(\d{1,3})$/)
+  if (v4) return `${v4[1]}.***.***.${v4[2]}`
+  if (!/[.:]/.test(h)) return h
+  if (h.length <= 6) return '***'
+  return h.slice(0, 2) + '***' + h.slice(-2)
+}
+
+// 节点绑定的入站（仅自建节点；tag 找不到说明入站已被删除/改名）。
+function inboundOfNode(n: any): any | null {
+  if (!n || n.type === 'external' || !n.inbound_tag) return null
+  return inboundMap.value.get(n.inbound_tag) || null
+}
+
+// 从某入站沿 upstream 链走到头，返回拓扑段列表（多级中转 + 末端出口），防环。
+function chainOf(ib: any) {
+  const segs: any[] = []
+  const seen = new Set<number>([ib.id])
+  let cur = ib
+  while (cur.upstream_inbound_id) {
+    const next = inboundById.value.get(cur.upstream_inbound_id)
+    if (!next || seen.has(next.id)) { segs.push({ kind: 'broken-landing' }); return segs }
+    seen.add(next.id)
+    segs.push({ kind: 'landing', ib: next })
+    cur = next
+  }
+  if (cur.egress_id) {
+    const e = egressById.value.get(cur.egress_id)
+    segs.push(e ? { kind: 'egress', eg: e } : { kind: 'broken-egress' })
+  }
+  return segs
+}
+
+// 每个节点一行：kind 区分「自建且入站存在」「自建但入站失效」「外部节点」。
+function topoRow(n: any) {
+  if (n.type === 'external') return { node: n, ib: null, kind: 'external', segs: [] as any[] }
+  const ib = inboundOfNode(n)
+  if (!ib) return { node: n, ib: null, kind: 'broken', segs: [] as any[] }
+  return { node: n, ib, kind: 'ok', segs: chainOf(ib) }
+}
+const topoGroups = computed(() => groupedView.value.map(gv => ({
+  key: gv.key, name: gv.name, isUngrouped: gv.isUngrouped, rows: gv.nodes.map(topoRow),
+})))
+
+// 节点卡片上的一行链路摘要：只在「有中转/出口」或「入站失效」时出现，
+// 直连节点不加这行噪音。
+function chainSummary(n: any): { text: string; broken: boolean } | null {
+  const row = topoRow(n)
+  if (row.kind === 'external') return null
+  if (row.kind === 'broken') return { text: `入站「${n.inbound_tag || '未绑定'}」不存在`, broken: true }
+  if (!row.segs.length) return null
+  const parts: string[] = []
+  let broken = false
+  for (const seg of row.segs) {
+    if (seg.kind === 'landing') parts.push(`中转 ${seg.ib.tag} @ ${serverName(seg.ib.server_id)}`)
+    else if (seg.kind === 'egress') parts.push(`出口 ${seg.eg.name}`)
+    else { parts.push(seg.kind === 'broken-egress' ? '出口已失效' : '落地已失效'); broken = true }
+  }
+  return { text: parts.join(' ⇢ ') + ' ⇢ 互联网', broken }
+}
 
 // --- Nodes ---
 const showNode = ref(false)
@@ -326,11 +472,15 @@ async function handleDeleteSource(id: number) {
 async function load() {
   loading.value = true
   try {
-    const [n, g, s, i] = await Promise.all([
+    // 服务器/出口只用于链路拓扑的展示，取不到时降级为空数组，不影响节点管理主流程。
+    const [n, g, s, i, sv, eg] = await Promise.all([
       apiList('/api/admin/nodes'), apiList('/api/admin/node-groups'),
       apiList('/api/admin/node-sources'), apiList('/api/admin/inbounds'),
+      apiList('/api/admin/servers').catch(() => []),
+      apiList('/api/admin/sb/egresses').catch(() => []),
     ])
     nodes.value = n; groups.value = g; sources.value = s; inbounds.value = i
+    servers.value = sv; egresses.value = eg
   } catch {} finally { loading.value = false }
 }
 </script>
@@ -341,4 +491,41 @@ async function load() {
 .group-card { margin-bottom: 14px; }
 .group-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .group-desc { color: var(--text-2); font-size: 12px; margin-bottom: 10px; }
+
+/* 节点卡片上的链路摘要 */
+.lc-chain { font-size: 12px; color: var(--text-3, #999); line-height: 1.5; margin-top: 2px; word-break: break-word; }
+.lc-chain.warn { color: #d03050; }
+
+/* 链路拓扑（与 sing-box 配置页同一套画法） */
+.topo { display: flex; flex-direction: column; gap: 18px; padding: 4px 2px; }
+.topo-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--text-3, #888); }
+.topo-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.topo-legend .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.dot.client { background: #909399; }
+.dot.entry { background: #2080f0; }
+.dot.landing { background: #f0a020; }
+.dot.egress { background: #7c3aed; }
+.dot.inet { background: #18a058; }
+.topo-machine { border: 1px solid var(--n-border-color, #e6e6ec); border-radius: 8px; padding: 12px 14px; }
+.topo-mhead { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.topo-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 0; }
+.topo-row + .topo-row { border-top: 1px dashed var(--n-border-color, #ececf2); }
+.topo-row.off { opacity: 0.42; }
+.topo-node { display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 10px; border-radius: 7px; font-size: 13px; border: 1px solid transparent; white-space: nowrap; }
+.topo-node.client { background: rgba(144, 147, 153, 0.14); color: var(--text-2, #666); }
+.topo-node.entry { background: rgba(32, 128, 240, 0.12); border-color: rgba(32, 128, 240, 0.35); }
+.topo-node.landing { background: rgba(240, 160, 32, 0.13); border-color: rgba(240, 160, 32, 0.4); }
+.topo-node.egress { background: rgba(124, 58, 237, 0.11); border-color: rgba(124, 58, 237, 0.38); }
+.topo-node.inet { background: rgba(24, 160, 88, 0.12); color: #18a058; }
+.topo-node b { font-weight: 650; }
+.topo-proto { font-size: 11px; opacity: 0.75; }
+.topo-port, .topo-loc { font-size: 11px; opacity: 0.6; }
+.topo-arrow { color: var(--text-3, #aaa); font-size: 13px; user-select: none; }
+.topo-arrow.relay { color: #f0a020; font-weight: 600; font-size: 12px; }
+.topo-arrow.egress { color: #7c3aed; font-weight: 600; font-size: 12px; }
+.topo-arrow.relay.warn { color: #d03050; }
+.topo-actions { margin-left: auto; display: inline-flex; gap: 6px; }
+.topo-tip { font-size: 12px; color: var(--text-3, #999); line-height: 1.6; margin: 0; }
+.machine-name { font-weight: 650; font-size: 15px; color: var(--text); }
+@media (max-width: 600px) { .topo-actions { margin-left: 0; } }
 </style>
