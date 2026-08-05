@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS users (
   used_up         INTEGER NOT NULL DEFAULT 0,
   used_down       INTEGER NOT NULL DEFAULT 0,
   expiry_at       INTEGER NOT NULL DEFAULT 0,
+  -- When the user last rotated their node credentials. Backs the cooldown on
+  -- that action: unlike swapping the subscription address (panel-only), it has
+  -- to reach every node's config, so it is deliberately rate-limited. 0 = never.
+  creds_reset_at  INTEGER NOT NULL DEFAULT 0,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -476,6 +480,7 @@ func (s *Store) Migrate() error {
 		// renewal touches a single row. 0 = legacy inline PEM (backfilled below).
 		`ALTER TABLE sb_tls ADD COLUMN cert_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN creds_reset_at INTEGER NOT NULL DEFAULT 0`,
 		// Rename legacy columns to neutral names on DBs created before the
 		// rename. Errors ("no such column") are expected on fresh/up-to-date DBs
 		// where CREATE TABLE already used the new names.

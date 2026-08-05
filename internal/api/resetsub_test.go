@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"qingzhou/internal/store"
 )
@@ -25,20 +26,34 @@ func newResetSubAPI(t *testing.T) (*API, *store.Store) {
 	return New(st, []byte("secret"), nil), st
 }
 
-func resetSub(t *testing.T, a *API, uid int64) {
-	t.Helper()
-	req := httptest.NewRequest("POST", "/api/user/reset-sub", nil)
+func post(a *API, uid int64, path string, h http.HandlerFunc) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", path, nil)
 	req = req.WithContext(context.WithValue(req.Context(), ctxUserID, uid))
 	w := httptest.NewRecorder()
-	a.handleResetSub(w, req)
-	if w.Code != http.StatusOK {
+	h(w, req)
+	return w
+}
+
+func resetSub(t *testing.T, a *API, uid int64) {
+	t.Helper()
+	if w := post(a, uid, "/api/user/reset-sub", a.handleResetSub); w.Code != http.StatusOK {
 		t.Fatalf("reset-sub = %d %s", w.Code, w.Body.String())
 	}
 }
 
-// The URL half of the revocation: the old /sub/<token> must stop resolving, and
-// must not be cacheable — a CDN or browser holding a 200 for a deleted token is
-// indistinguishable from no revocation at all.
+// resetCreds runs the credential rotation with the kill switch turned on — the
+// tests below cover the switch itself separately.
+func resetCreds(t *testing.T, a *API, st *store.Store, uid int64) *httptest.ResponseRecorder {
+	t.Helper()
+	if err := st.SetSetting("node_creds_reset_enabled", "true"); err != nil {
+		t.Fatal(err)
+	}
+	return post(a, uid, "/api/user/reset-node-creds", a.handleResetNodeCreds)
+}
+
+// Swapping the address must take effect immediately: the old /sub/<token> stops
+// resolving, and the response must not be cacheable — a CDN or browser holding a
+// 200 for a deleted token is indistinguishable from no swap at all.
 func TestResetSub_OldURLStopsResolving(t *testing.T) {
 	a, st := newResetSubAPI(t)
 	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "OLDTOKEN"})
@@ -71,11 +86,38 @@ func TestResetSub_OldURLStopsResolving(t *testing.T) {
 	}
 }
 
-// The half that actually matters (issue #6). A leaked subscription has already
+// Swapping the address is panel-only by design: it must leave the node
+// credentials strictly alone, so no config changes and no node reloads. The
+// price is that it does not revoke — which is why the copy says so and why the
+// credential rotation exists as its own action.
+func TestResetSub_LeavesNodeCredentialsAlone(t *testing.T) {
+	a, st := newResetSubAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "OLDTOKEN"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsurePoolBucket(uid, "qz_u1", "uuid", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	resetSub(t, a, uid)
+
+	after, _ := st.ListBuckets(uid)
+	if after[0].ClientUUID != "uuid" || after[0].ClientSecret != "secret" {
+		t.Errorf("address swap rotated node credentials (%s/%s) — that would restart every node",
+			after[0].ClientUUID, after[0].ClientSecret)
+	}
+	u, _ := st.UserByID(uid)
+	if u.CredsResetAt != 0 {
+		t.Error("address swap consumed the credential-rotation cooldown")
+	}
+}
+
+// The half that actually revokes (issue #6). A leaked subscription has already
 // handed out its node links, and those authenticate with the bucket credentials
-// — not the token. If reset leaves them in place, every link the old URL served
-// keeps working and the reset is cosmetic.
-func TestResetSub_RotatesNodeCredentials(t *testing.T) {
+// — not the token. If nothing rotates them, every link the old address served
+// keeps working.
+func TestResetNodeCreds_RotatesCredentials(t *testing.T) {
 	a, st := newResetSubAPI(t)
 	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "OLDTOKEN"})
 	if err != nil {
@@ -93,7 +135,9 @@ func TestResetSub_RotatesNodeCredentials(t *testing.T) {
 		t.Fatalf("ListBuckets = %v, %v; want at least one bucket", before, err)
 	}
 
-	resetSub(t, a, uid)
+	if w := resetCreds(t, a, st, uid); w.Code != http.StatusOK {
+		t.Fatalf("reset-node-creds = %d %s", w.Code, w.Body.String())
+	}
 
 	after, err := st.ListBuckets(uid)
 	if err != nil {
@@ -133,6 +177,70 @@ func TestResetSub_RotatesNodeCredentials(t *testing.T) {
 	u, _ := st.UserByID(uid)
 	if u.ClientUUID.String == "leaked-uuid" || u.ClientSecret.String == "leaked-secret" {
 		t.Error("users row still holds the pre-reset credential")
+	}
+}
+
+// The feature ships off. A disabled button is not an access control — the
+// endpoint is reachable by any logged-in user, so the switch has to be enforced
+// server-side, and the message has to be the one the tooltip promises.
+func TestResetNodeCreds_DisabledByDefault(t *testing.T) {
+	a, st := newResetSubAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsurePoolBucket(uid, "qz_u1", "uuid", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := post(a, uid, "/api/user/reset-node-creds", a.handleResetNodeCreds)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("reset-node-creds with the switch off = %d, want 403", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "联系管理员") {
+		t.Errorf("body = %s, want the 「该功能暂时禁用，有需要请联系管理员」 message", w.Body.String())
+	}
+	after, _ := st.ListBuckets(uid)
+	if after[0].ClientUUID != "uuid" {
+		t.Error("credentials rotated even though the feature is disabled")
+	}
+}
+
+// Applying a rotation restarts sing-box on every server carrying the user's
+// nodes, dropping everyone else's connections — so one per 30 days, enforced on
+// the server, not by a greyed-out button.
+func TestResetNodeCreds_CooldownIs30Days(t *testing.T) {
+	a, st := newResetSubAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsurePoolBucket(uid, "qz_u1", "uuid", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	if w := resetCreds(t, a, st, uid); w.Code != http.StatusOK {
+		t.Fatalf("first rotation = %d %s", w.Code, w.Body.String())
+	}
+	afterFirst, _ := st.ListBuckets(uid)
+
+	w := resetCreds(t, a, st, uid)
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("second rotation = %d, want 429", w.Code)
+	}
+	afterSecond, _ := st.ListBuckets(uid)
+	if afterSecond[0].ClientUUID != afterFirst[0].ClientUUID {
+		t.Error("the rejected rotation still changed credentials")
+	}
+
+	// Just past the window, it's allowed again.
+	u, _ := st.UserByID(uid)
+	if _, err := st.DB().Exec(`UPDATE users SET creds_reset_at=? WHERE id=?`,
+		u.CredsResetAt-int64(credsResetCooldown/time.Second)-1, uid); err != nil {
+		t.Fatal(err)
+	}
+	if w := resetCreds(t, a, st, uid); w.Code != http.StatusOK {
+		t.Errorf("rotation after the cooldown expired = %d %s, want 200", w.Code, w.Body.String())
 	}
 }
 
@@ -184,8 +292,8 @@ func TestSubscription_BackfillsMissingToken(t *testing.T) {
 }
 
 // A user who customized their proxy credential keeps exactly that one — the pin
-// must not overwrite a value the user chose.
-func TestResetSub_KeepsCustomProxyCredential(t *testing.T) {
+// that protects the fallback case must not overwrite a value the user chose.
+func TestResetNodeCreds_KeepsCustomProxyCredential(t *testing.T) {
 	a, st := newResetSubAPI(t)
 	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "OLDTOKEN"})
 	if err != nil {
@@ -199,10 +307,52 @@ func TestResetSub_KeepsCustomProxyCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resetSub(t, a, uid)
+	if w := resetCreds(t, a, st, uid); w.Code != http.StatusOK {
+		t.Fatalf("reset-node-creds = %d %s", w.Code, w.Body.String())
+	}
 
 	after, _ := st.ListBuckets(uid)
 	if after[0].ProxyUsername != "myuser" || after[0].ProxyPassword != "mypass" {
 		t.Errorf("custom proxy credential clobbered: %q/%q", after[0].ProxyUsername, after[0].ProxyPassword)
+	}
+	if after[0].ClientUUID == "uuid" {
+		t.Error("node credentials did not rotate — the proxy assertion above proves nothing")
+	}
+}
+
+// One user's actions must not disturb another's link or credentials.
+func TestReset_IsolatedBetweenUsers(t *testing.T) {
+	a, st := newResetSubAPI(t)
+	mk := func(name, tok string) int64 {
+		id, err := st.CreateUser(store.NewUser{Username: name, PasswordHash: "x", SubToken: tok})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.EnsurePoolBucket(id, "qz_"+name, "uuid-"+name, "sec-"+name); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	alice := mk("alice", "ALICE_TOKEN")
+	bob := mk("bob", "BOB_TOKEN")
+
+	bobBefore, _ := st.ListBuckets(bob)
+	resetSub(t, a, alice)
+	if w := resetCreds(t, a, st, alice); w.Code != http.StatusOK {
+		t.Fatalf("reset-node-creds = %d %s", w.Code, w.Body.String())
+	}
+
+	w := httptest.NewRecorder()
+	a.Router().ServeHTTP(w, httptest.NewRequest("GET", "/sub/BOB_TOKEN", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("bob's link broke: GET /sub/BOB_TOKEN = %d", w.Code)
+	}
+	bobAfter, _ := st.ListBuckets(bob)
+	if bobAfter[0].ClientUUID != bobBefore[0].ClientUUID || bobAfter[0].ClientSecret != bobBefore[0].ClientSecret {
+		t.Error("bob's credentials rotated by alice's reset")
+	}
+	bobUser, _ := st.UserByID(bob)
+	if bobUser.CredsResetAt != 0 {
+		t.Error("alice's rotation consumed bob's cooldown")
 	}
 }

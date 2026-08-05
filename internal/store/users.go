@@ -27,8 +27,11 @@ type User struct {
 	UsedUp        int64
 	UsedDown      int64
 	ExpiryAt      int64
-	CreatedAt     int64
-	UpdatedAt     int64
+	// CredsResetAt is when the user last rotated their node credentials, 0 if
+	// never. Backs the cooldown on that action (see RotateNodeCredentials).
+	CredsResetAt int64
+	CreatedAt    int64
+	UpdatedAt    int64
 	// LastOnlineAt is bumped by the stats poll whenever this user shows a
 	// non-zero traffic delta, so it doubles as the proxy-side liveness signal.
 	// Panel logins do not touch it — see sessions for that.
@@ -38,7 +41,7 @@ type User struct {
 const userCols = `id, username, email, password_hash, role, status, email_verified, points,
 	client_id, client_name, client_uuid, client_secret, sub_token, current_plan_id,
 	traffic_limit, device_limit, used_up, used_down, expiry_at, created_at, updated_at,
-	last_online_at`
+	last_online_at, creds_reset_at`
 
 type scanner interface{ Scan(...any) error }
 
@@ -47,7 +50,8 @@ func scanUser(sc scanner) (*User, error) {
 	err := sc.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Status,
 		&u.EmailVerified, &u.Points, &u.ClientID, &u.ClientName, &u.ClientUUID,
 		&u.ClientSecret, &u.SubToken, &u.CurrentPlanID, &u.TrafficLimit, &u.DeviceLimit,
-		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt, &u.LastOnlineAt)
+		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt, &u.LastOnlineAt,
+		&u.CredsResetAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -133,15 +137,25 @@ func (s *Store) SetSubTokenIfEmpty(userID int64, token string) (bool, error) {
 	return n > 0, err
 }
 
-// ResetSubscription rotates a user's subscription token AND the sing-box
-// credentials every node link is built from, in one transaction.
+// RotateSubToken changes the address a user's subscription is served at, and
+// nothing else. Panel-only: the token is not part of any node's config, so no
+// server is touched, nobody's connection drops, and the swap is effective the
+// instant it commits.
 //
-// Rotating the token alone revokes nothing that matters. The reason to reset a
-// subscription is that its URL leaked — and whoever fetched it already holds the
-// vless://…, hysteria2://…, trojan://… links it contained. Those carry the
-// bucket's uuid/password, not the subscription token, so they keep authenticating
-// against sing-box forever while the panel claims "旧链接立即失效". The credentials
-// have to change too, or the reset is cosmetic.
+// What this does NOT do is revoke access. Whoever fetched the old address still
+// holds the node links it served, and those authenticate with the bucket's
+// uuid/password — see RotateNodeCredentials for the half that cuts them off.
+// Callers must not describe this as making the old links stop working.
+func (s *Store) RotateSubToken(userID int64, subToken string) error {
+	_, err := s.db.Exec(`UPDATE users SET sub_token=?, updated_at=? WHERE id=?`,
+		subToken, time.Now().Unix(), userID)
+	return err
+}
+
+// RotateNodeCredentials mints fresh sing-box credentials for every bucket the
+// user holds, which is what actually revokes the node links a leaked
+// subscription already handed out: those carry the bucket's uuid/password, not
+// the subscription token, so swapping the address alone leaves them working.
 //
 // Two things are deliberately preserved:
 //   - client_name — the sing-box stats identity usage is metered against
@@ -152,9 +166,12 @@ func (s *Store) SetSubTokenIfEmpty(userID int64, token string) (bool, error) {
 //     the current effective value before rotating keeps the user's 1Panel/Docker
 //     proxies working instead of silently breaking them.
 //
-// The caller must trigger a sing-box rebuild afterwards — until the new users are
-// pushed to the servers, the old credentials are still what the daemons accept.
-func (s *Store) ResetSubscription(userID int64, subToken string) error {
+// Unlike RotateSubToken this is NOT panel-only: the new credentials only take
+// effect once they reach the nodes, which happens on the controller's periodic
+// rebuild. Stamps creds_reset_at so callers can enforce a cooldown — applying it
+// restarts sing-box on every server carrying the user's nodes, dropping every
+// other user's live connections with it.
+func (s *Store) RotateNodeCredentials(userID int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -162,10 +179,6 @@ func (s *Store) ResetSubscription(userID int64, subToken string) error {
 	defer func() { _ = tx.Rollback() }()
 
 	now := time.Now().Unix()
-	if _, err := tx.Exec(`UPDATE users SET sub_token=?, updated_at=? WHERE id=?`,
-		subToken, now, userID); err != nil {
-		return err
-	}
 	// Pin the effective proxy credential before client_secret moves out from
 	// under the fallback (see ProxySecret).
 	if _, err := tx.Exec(`UPDATE user_plans SET proxy_password=client_secret, updated_at=?
@@ -203,8 +216,8 @@ func (s *Store) ResetSubscription(userID int64, subToken string) error {
 	// (EnsurePoolBucket) and is the legacy identity; leaving the leaked value
 	// there would resurrect it.
 	uu, ss := genBucketCreds()
-	if _, err := tx.Exec(`UPDATE users SET client_uuid=?, client_secret=?, updated_at=? WHERE id=?`,
-		uu, ss, now, userID); err != nil {
+	if _, err := tx.Exec(`UPDATE users SET client_uuid=?, client_secret=?, creds_reset_at=?, updated_at=? WHERE id=?`,
+		uu, ss, now, now, userID); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -59,6 +59,16 @@ func (a *API) sbRebuildLog() {
 	a.sbctl.ScheduleRebuild()
 }
 
+// sbSyncInterval is the worst-case delay before a change that doesn't force its
+// own rebuild reaches the nodes. Falls back to the controller's own default when
+// no controller is attached.
+func (a *API) sbSyncInterval() time.Duration {
+	if a.sbctl == nil {
+		return time.Minute
+	}
+	return a.sbctl.SyncInterval()
+}
+
 // sbScheduleServer queues an async rebuild of specific servers (0 = local panel),
 // deduplicating and skipping zero ids. Used by save/delete paths that previously
 // blocked on a synchronous per-server SSH push and could time out.
@@ -165,6 +175,7 @@ func (a *API) Router() http.Handler {
 		pr.Get("/api/user/proxies", a.handleUserProxies)
 		pr.Put("/api/user/proxies/{bucket}", a.handleUpdateUserProxy)
 		pr.Post("/api/user/reset-sub", a.handleResetSub)
+		pr.Post("/api/user/reset-node-creds", a.handleResetNodeCreds)
 		pr.Get("/api/user/packages", a.handleUserPackages)
 		pr.Post("/api/user/purchase", a.handlePurchase)
 		pr.Get("/api/user/orders", a.handleUserOrders)

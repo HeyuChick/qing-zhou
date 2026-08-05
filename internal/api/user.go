@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -286,14 +287,17 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/user/reset-sub — revoke the subscription: new token AND new node
-// credentials.
+// POST /api/user/reset-sub — serve the subscription at a new address.
 //
-// The token alone is not the secret worth rotating. Anyone who fetched the old
-// URL already has the node links it served, and those authenticate with the
-// bucket's uuid/password — so a token-only reset left every leaked link working
-// while the UI promised otherwise. ResetSubscription rotates both atomically;
-// the rebuild below is what actually pushes the new credentials to the servers.
+// Panel-only and instant: the token is not part of any node's config, so no
+// server is touched and no other user's connection is disturbed. This is the
+// answer to a leaked *address*, and it is deliberately the cheap, unrestricted
+// action.
+//
+// It does not revoke anything. The node links the old address already served
+// authenticate with the bucket's uuid/password and keep working — cutting those
+// off is handleResetNodeCreds, which has to reach every node and is gated
+// accordingly. The UI must not promise more than this does.
 func (a *API) handleResetSub(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
@@ -305,14 +309,64 @@ func (a *API) handleResetSub(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "服务器错误")
 		return
 	}
-	if err := a.st.ResetSubscription(u.ID, token); err != nil {
+	if err := a.st.RotateSubToken(u.ID, token); err != nil {
+		fail(w, http.StatusInternalServerError, "更换失败")
+		return
+	}
+	a.invalidateLinks(u.ID)
+	u, _ = a.st.UserByID(u.ID)
+	ok(w, J{"url": a.subURL(r, u)})
+}
+
+// credsResetCooldown is how long a user must wait between node-credential
+// rotations. Applying one restarts sing-box on every server carrying their
+// nodes, which drops every *other* user's live connections too, so this is a
+// deliberately expensive action to take.
+const credsResetCooldown = 30 * 24 * time.Hour
+
+// credsResetEnabled reports whether users may rotate their own node credentials.
+// Off unless an admin turns it on: the action is disruptive panel-wide, so it
+// ships disabled and the UI points users at the admin instead.
+func (a *API) credsResetEnabled() bool {
+	v, _ := a.st.GetSetting("node_creds_reset_enabled")
+	return v == "true"
+}
+
+// POST /api/user/reset-node-creds — rotate the credentials the user's node links
+// authenticate with, revoking every link a leaked subscription already handed
+// out (issue #6).
+//
+// Three gates, because this is the expensive half:
+//   - a kill switch, default off — the endpoint is not merely hidden in the UI;
+//     a disabled button is not an access control.
+//   - a 30-day cooldown per user.
+//   - no explicit rebuild. The controller's periodic pass (every minute by
+//     default) picks the change up and batches it with whatever else changed,
+//     so a rotation adds no extra sing-box restart of its own. The cost is that
+//     the new credentials take up to one interval to work.
+func (a *API) handleResetNodeCreds(w http.ResponseWriter, r *http.Request) {
+	u := a.currentUser(r)
+	if u == nil {
+		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	if !a.credsResetEnabled() {
+		fail(w, http.StatusForbidden, "该功能暂时禁用，有需要请联系管理员")
+		return
+	}
+	if u.CredsResetAt > 0 {
+		if wait := time.Unix(u.CredsResetAt, 0).Add(credsResetCooldown).Sub(time.Now()); wait > 0 {
+			days := int(wait/(24*time.Hour)) + 1
+			fail(w, http.StatusTooManyRequests, fmt.Sprintf("节点凭据 30 天内只能重置一次，请 %d 天后再试", days))
+			return
+		}
+	}
+	if err := a.st.RotateNodeCredentials(u.ID); err != nil {
 		fail(w, http.StatusInternalServerError, "重置失败")
 		return
 	}
 	a.invalidateLinks(u.ID)
-	a.sbRebuildLog()
-	u, _ = a.st.UserByID(u.ID)
-	ok(w, J{"url": a.subURL(r, u)})
+	ok(w, J{"applies_in_seconds": int64(a.sbSyncInterval().Seconds())})
 }
 
 func (a *API) handleSubscription(w http.ResponseWriter, r *http.Request) {

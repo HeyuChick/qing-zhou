@@ -57,7 +57,19 @@
              v2rayN / NekoBox / Shadowrocket, so it must pin the link list. -->
         <n-button size="small" @click="copy(sub.formats?.base64 || sub.formats?.default)">通用 / v2rayN</n-button>
         <n-button size="small" @click="showQr=!showQr">{{ showQr?'隐藏':'显示' }}二维码</n-button>
-        <n-button size="small" type="error" @click="handleResetSub">重置链接</n-button>
+        <!-- 两个按钮代价完全不同，分开呈现：换地址是纯面板操作、立即生效、不影响
+             任何人；换凭据要同步到每个节点才生效，因此默认禁用 + 30 天冷却。 -->
+        <n-button size="small" type="warning" @click="handleResetSub">更换订阅地址</n-button>
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button size="small" type="error" disabled>重置节点凭据 <span style="margin-left:4px;">?</span></n-button>
+          </template>
+          该功能暂时禁用，有需要请联系管理员
+        </n-tooltip>
+      </div>
+      <div style="margin-top:8px;font-size:11px;color:var(--text-3);line-height:1.6;">
+        订阅地址泄露时用「更换订阅地址」：旧地址立即失效，无需重启节点。
+        注意它不会使已经导出的节点失效——那需要「重置节点凭据」。
       </div>
       <div v-if="showQr && sub.url" style="margin-top:12px;text-align:center;">
         <canvas ref="qrCanvas" />
@@ -136,7 +148,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NInput, NInputGroup, NButton, NDataTable, NProgress, NTag, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, useMessage, useDialog } from 'naive-ui'
+import { NCard, NInput, NInputGroup, NButton, NDataTable, NProgress, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, useMessage, useDialog } from 'naive-ui'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { fmtBytes, fmtTotal, fmtDate, pct } from '@/utils/format'
@@ -295,15 +307,15 @@ async function handleToggleAll(enable: boolean) {
   } catch (e: any) { message.error(e.message) }
 }
 function handleResetSub() {
-  // Resetting mints a new token AND new node credentials, so it invalidates both
-  // the old URL and every node link ever exported from it — that is the point
-  // (you reset because the link leaked). Every client must re-import.
+  // Swapping the address invalidates every client configured with the old one,
+  // so it still needs a confirm — but it does NOT revoke the nodes those clients
+  // already hold, and the copy must not claim otherwise.
   dialog.warning({
-    title: '确认重置订阅链接',
-    content: '重置后旧链接立即失效，节点凭据也会一并更换——从旧链接导出的节点会立刻断开。所有已导入的客户端（Clash / sing-box 等）都需要用新链接重新导入。确定重置？',
-    positiveText: '重置', negativeText: '取消',
+    title: '确认更换订阅地址',
+    content: '更换后旧地址立即失效，所有已导入的客户端（Clash / sing-box 等）都需要用新地址重新导入。注意：已经从旧地址导出的节点仍然可用，如需彻底吊销请联系管理员重置节点凭据。确定更换？',
+    positiveText: '更换', negativeText: '取消',
     onPositiveClick: async () => {
-      try { await apiPost('/api/user/reset-sub'); sub.value = await apiGet('/api/user/subscription') || {}; message.success('订阅链接已重置') }
+      try { await apiPost('/api/user/reset-sub'); sub.value = await apiGet('/api/user/subscription') || {}; message.success('订阅地址已更换') }
       catch (e: any) { message.error(e.message) }
     },
   })
