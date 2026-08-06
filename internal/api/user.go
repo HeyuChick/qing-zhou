@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -304,6 +305,12 @@ func (a *API) handleResetSub(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "未登录")
 		return
 	}
+	// Cheap is not the same as free: every swap revokes the previous address, so
+	// a runaway caller can keep a user permanently unable to finish an import.
+	if a.subRL != nil && !a.subRL.allow(fmt.Sprintf("s%d", u.ID)) {
+		fail(w, http.StatusTooManyRequests, "更换过于频繁，请稍后再试")
+		return
+	}
 	token, err := idgen.RandToken(24)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "服务器错误")
@@ -314,7 +321,9 @@ func (a *API) handleResetSub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.invalidateLinks(u.ID)
-	u, _ = a.st.UserByID(u.ID)
+	if fresh, err := a.st.UserByID(u.ID); err == nil && fresh != nil {
+		u = fresh
+	}
 	ok(w, J{"url": a.subURL(r, u)})
 }
 
@@ -339,11 +348,15 @@ func (a *API) credsResetEnabled() bool {
 // Three gates, because this is the expensive half:
 //   - a kill switch, default off — the endpoint is not merely hidden in the UI;
 //     a disabled button is not an access control.
-//   - a 30-day cooldown per user.
+//   - a 30-day cooldown per user, enforced inside the rotation's transaction so
+//     two concurrent requests cannot both slip through.
 //   - no explicit rebuild. The controller's periodic pass (every minute by
 //     default) picks the change up and batches it with whatever else changed,
 //     so a rotation adds no extra sing-box restart of its own. The cost is that
 //     the new credentials take up to one interval to work.
+//
+// When the switch is off, handleAdminResetNodeCreds is the way through — which
+// is what "请联系管理员" in the error and in the UI refers to.
 func (a *API) handleResetNodeCreds(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
@@ -354,19 +367,67 @@ func (a *API) handleResetNodeCreds(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "该功能暂时禁用，有需要请联系管理员")
 		return
 	}
-	if u.CredsResetAt > 0 {
-		if wait := time.Unix(u.CredsResetAt, 0).Add(credsResetCooldown).Sub(time.Now()); wait > 0 {
-			days := int(wait/(24*time.Hour)) + 1
-			fail(w, http.StatusTooManyRequests, fmt.Sprintf("节点凭据 30 天内只能重置一次，请 %d 天后再试", days))
+	cutoff := time.Now().Add(-credsResetCooldown).Unix()
+	if err := a.st.RotateNodeCredentials(u.ID, cutoff); err != nil {
+		if errors.Is(err, store.ErrCredsResetCooldown) {
+			fail(w, http.StatusTooManyRequests, a.credsCooldownMsg(u.ID))
 			return
 		}
-	}
-	if err := a.st.RotateNodeCredentials(u.ID); err != nil {
 		fail(w, http.StatusInternalServerError, "重置失败")
 		return
 	}
+	// Rotating credentials is a security-relevant act on a live account: without
+	// a record, "when were this user's credentials last changed, and by whom" is
+	// unanswerable after the fact.
+	log.Printf("audit: node credentials rotated by user id=%d (self-service)", u.ID)
 	a.invalidateLinks(u.ID)
 	ok(w, J{"applies_in_seconds": int64(a.sbSyncInterval().Seconds())})
+}
+
+// POST /api/admin/users/{id}/reset-node-creds — the operator half of the node
+// credential rotation, and the thing 「请联系管理员」 actually refers to.
+//
+// The user-facing endpoint ships behind a kill switch precisely so that most
+// panels route this through an operator, so it would be circular for this path
+// to honor that switch. It also skips the 30-day cooldown — an admin doing this
+// is responding to a leak on an account that is, by definition, rate-limited.
+//
+// Unlike the self-service path it pushes immediately rather than riding the
+// periodic pass: someone is standing in front of an active leak, and saving one
+// sing-box restart is not worth up to a minute of the old credentials still
+// working.
+func (a *API) handleAdminResetNodeCreds(w http.ResponseWriter, r *http.Request) {
+	uid := atoi(chi.URLParam(r, "id"))
+	if uid <= 0 {
+		fail(w, http.StatusBadRequest, "无效的用户 id")
+		return
+	}
+	if err := a.st.RotateNodeCredentials(uid, store.NoCredsResetCooldown); err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			fail(w, http.StatusNotFound, "用户不存在")
+			return
+		}
+		fail(w, http.StatusInternalServerError, "重置失败")
+		return
+	}
+	operatorID, _ := r.Context().Value(ctxUserID).(int64)
+	log.Printf("audit: node credentials rotated for user id=%d by admin id=%d", uid, operatorID)
+	a.invalidateLinks(uid)
+	a.sbRebuildLog()
+	ok(w, J{"user_id": uid})
+}
+
+// credsCooldownMsg renders the "come back in N days" refusal, re-reading the
+// stamp so the count is right even when the caller lost a race to another
+// request rather than tripping the cooldown it already knew about.
+func (a *API) credsCooldownMsg(userID int64) string {
+	days := 1
+	if u, err := a.st.UserByID(userID); err == nil && u != nil {
+		if wait := time.Until(time.Unix(u.CredsResetAt, 0).Add(credsResetCooldown)); wait > 0 {
+			days = int(wait/(24*time.Hour)) + 1
+		}
+	}
+	return fmt.Sprintf("节点凭据 30 天内只能重置一次，请 %d 天后再试", days)
 }
 
 func (a *API) handleSubscription(w http.ResponseWriter, r *http.Request) {
@@ -380,11 +441,15 @@ func (a *API) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		// No token and minting failed. Report nothing rather than the bare
 		// "?format=clash" fragments that concatenating onto "" produces — those
 		// look like links and resolve to the SPA.
-		ok(w, J{"url": "", "formats": J{}})
+		ok(w, J{"url": "", "formats": J{}, "creds_reset_enabled": a.credsResetEnabled()})
 		return
 	}
 	ok(w, J{
 		"url": base,
+		// Drives the 「重置节点凭据」 button. Served from the same kill switch the
+		// endpoint enforces, so the button reflects reality instead of being
+		// hardcoded — and the switch has an effect users can see.
+		"creds_reset_enabled": a.credsResetEnabled(),
 		"formats": J{
 			"default": base,
 			"clash":   base + "?format=clash",
@@ -863,8 +928,12 @@ func (a *API) ensureSubToken(u *store.User) *store.User {
 	return u
 }
 
+// subURL renders a user's subscription address, or "" when there is no token to
+// render. Nil-tolerant: callers reach it with the result of a re-read that can
+// legitimately come back empty (a concurrently deleted account), and an empty
+// URL is the right answer there — not a panic in the middle of a request.
 func (a *API) subURL(r *http.Request, u *store.User) string {
-	if !u.SubToken.Valid {
+	if u == nil || !u.SubToken.Valid {
 		return ""
 	}
 	return a.publicBase(r) + "/sub/" + u.SubToken.String

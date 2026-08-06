@@ -30,6 +30,10 @@
             <n-button size="tiny" type="info" @click="openRecharge(u)">充值</n-button>
             <n-button size="tiny" type="warning" @click="openAssign(u)">分配</n-button>
             <n-button size="tiny" @click="openOrders(u)">订单</n-button>
+            <!-- 用户端「重置节点凭据」默认关闭、且有 30 天冷却，文案让用户来找管理员，
+                 这里就是那个入口——订阅泄露后彻底吊销旧链接的唯一办法。 -->
+            <n-button size="tiny" type="warning" :loading="resettingCreds === u.id"
+                      @click="handleResetCreds(u)">重置凭据</n-button>
             <n-button size="tiny" type="error" @click="handleDelete(u)">删除</n-button>
           </div>
         </div>
@@ -313,6 +317,30 @@ async function reloadUserOrders() {
   // list and the user table behind the modal.
   try { userOrders.value = await apiList(`/api/admin/users/${ordersUser.value.id}/orders`) } catch {}
   await load()
+}
+
+// --- Reset node credentials ---
+// The operator half of「订阅泄露怎么办」. Swapping the user's subscription address
+// only moves where the list is served; the node links already exported from the
+// old address authenticate with the account's own credentials and keep working
+// until those are rotated — which is what this does.
+const resettingCreds = ref<number | null>(null)
+function handleResetCreds(u: any) {
+  dialog.error({
+    title: '确认重置节点凭据',
+    content: `为用户「${u.username}」重新生成所有节点凭据？从其旧订阅导出的节点将立即失效，`
+      + '该用户需要重新导入订阅。凭据会马上推送到相关服务器，'
+      + '推送会重启这些服务器上的 sing-box，其他用户的在线连接也会短暂中断。',
+    positiveText: '重置', negativeText: '取消',
+    onPositiveClick: async () => {
+      resettingCreds.value = u.id
+      try {
+        await apiPost(`/api/admin/users/${u.id}/reset-node-creds`)
+        message.success('已重置并推送，该用户需重新导入订阅')
+      } catch (e: any) { message.error(e.message) }
+      finally { resettingCreds.value = null }
+    },
+  })
 }
 
 // --- Delete ---

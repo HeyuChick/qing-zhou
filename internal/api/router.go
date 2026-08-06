@@ -25,6 +25,7 @@ type API struct {
 	authRL   *rateLimiter
 	resendRL *rateLimiter
 	probeRL  *rateLimiter // rate limit for agent report endpoint
+	subRL    *rateLimiter // subscription-address swaps, per user
 
 	sbctl   *sbctl.Controller // native sing-box orchestrator; nil if not enabled
 	updater *updater.Manager  // GitHub-release self-updater
@@ -89,9 +90,14 @@ func (a *API) sbScheduleServer(serverIDs ...int64) {
 func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 	a := &API{
 		st: st, secret: secret, mailer: mail,
-		authRL:    newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
-		resendRL:  newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
-		probeRL:   newRateLimiter(60, time.Minute),   // 60 probe reports / IP / min
+		authRL:   newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
+		resendRL: newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
+		probeRL:  newRateLimiter(60, time.Minute),   // 60 probe reports / IP / min
+		// Each address swap revokes the previous one, so a loop of them — a stuck
+		// retry, a double-click, a misbehaving script — leaves the user with a
+		// subscription that never stays valid long enough to import. Generous
+		// enough that nobody swapping addresses on purpose will notice.
+		subRL:     newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
 		linkCache: make(map[int64]linkCacheEntry),
 	}
 	// Self-updater: repo + optional GitHub token come from env or DB settings,
@@ -216,6 +222,7 @@ func (a *API) Router() http.Handler {
 		ar.Delete("/api/admin/users/{id}", a.handleAdminDeleteUser)
 		ar.Post("/api/admin/users/{id}/points", a.handleAdminRecharge)
 		ar.Post("/api/admin/users/{id}/assign-plan", a.handleAdminAssignPlan)
+		ar.Post("/api/admin/users/{id}/reset-node-creds", a.handleAdminResetNodeCreds)
 		ar.Get("/api/admin/packages", a.handleAdminListPackages)
 		ar.Post("/api/admin/packages", a.handleAdminCreatePackage)
 		ar.Post("/api/admin/packages/reorder", a.handleAdminReorderPackages)
@@ -265,6 +272,7 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/sb/inbounds", a.handleAdminSaveSbInbound)
 		ar.Put("/api/admin/sb/inbounds/{id}", a.handleAdminSaveSbInbound)
 		ar.Delete("/api/admin/sb/inbounds/{id}", a.handleAdminDeleteSbInbound)
+		ar.Post("/api/admin/sb/inbounds/{id}/ack-upstream", a.handleAdminAckUpstreamBroken)
 		ar.Get("/api/admin/sb/preview", a.handleAdminSbPreview)
 		ar.Get("/api/admin/sb/check", a.handleAdminSbCheck)
 		ar.Get("/api/admin/sb/port-check", a.handleAdminPortCheck)

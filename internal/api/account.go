@@ -75,7 +75,7 @@ func (a *API) maintain() {
 	a.st.CleanupEmailTokens()
 	// Sweep every limiter — otherwise resendRL/probeRL entries accumulate for the
 	// process lifetime (unbounded memory; the probe endpoint is IP-keyed).
-	for _, rl := range []*rateLimiter{a.authRL, a.resendRL, a.probeRL} {
+	for _, rl := range []*rateLimiter{a.authRL, a.resendRL, a.probeRL, a.subRL} {
 		if rl != nil {
 			rl.sweep()
 		}

@@ -60,9 +60,12 @@
         <!-- 两个按钮代价完全不同，分开呈现：换地址是纯面板操作、立即生效、不影响
              任何人；换凭据要同步到每个节点才生效，因此默认禁用 + 30 天冷却。 -->
         <n-button size="small" type="warning" @click="handleResetSub">更换订阅地址</n-button>
-        <n-tooltip trigger="hover">
+        <!-- 禁用与否跟随后端开关，不写死：后端本来就要校验 node_creds_reset_enabled，
+             按钮读同一个值才不会出现「管理员开了但按钮还是灰的」。 -->
+        <n-tooltip trigger="hover" :disabled="credsResetEnabled">
           <template #trigger>
-            <n-button size="small" type="error" disabled>重置节点凭据 <span style="margin-left:4px;">?</span></n-button>
+            <n-button size="small" type="error" :disabled="!credsResetEnabled" :loading="resettingCreds"
+                      @click="handleResetNodeCreds">重置节点凭据</n-button>
           </template>
           该功能暂时禁用，有需要请联系管理员
         </n-tooltip>
@@ -163,6 +166,10 @@ const sub = ref<any>({})
 const plans = ref<any[]>([])
 const proxies = ref<any[]>([])
 const nodes = ref<any[]>([])
+// 由后端的 node_creds_reset_enabled 决定，缺省按关闭处理——拿不到就当没开，
+// 不要给用户一个点了必然 403 的按钮。
+const credsResetEnabled = computed(() => sub.value?.creds_reset_enabled === true)
+const resettingCreds = ref(false)
 
 // 代理账号编辑
 const showEditProxy = ref(false)
@@ -317,6 +324,32 @@ function handleResetSub() {
     onPositiveClick: async () => {
       try { await apiPost('/api/user/reset-sub'); sub.value = await apiGet('/api/user/subscription') || {}; message.success('订阅地址已更换') }
       catch (e: any) { message.error(e.message) }
+    },
+  })
+}
+function handleResetNodeCreds() {
+  // The expensive half. Unlike the address swap this one has a real cost to
+  // spell out: it needs a node-side push before it takes effect, it breaks every
+  // client until they re-import, and it can only be done once a month.
+  dialog.error({
+    title: '确认重置节点凭据',
+    content: '这会为你的所有节点重新生成凭据，从旧订阅导出的节点将彻底失效。'
+      + '新凭据需要同步到各节点后才生效（通常 1 分钟内），期间你自己的连接也会中断，需要重新导入订阅。'
+      + '每 30 天只能重置一次。确定重置？',
+    positiveText: '重置', negativeText: '取消',
+    onPositiveClick: async () => {
+      resettingCreds.value = true
+      try {
+        const r: any = await apiPost('/api/user/reset-node-creds')
+        sub.value = await apiGet('/api/user/subscription') || {}
+        // 节点链接与代理账号都嵌了刚刚轮换掉的凭据，必须重新拉一次，
+        // 否则页面上还挂着一份已经失效的旧链接。
+        try { nodes.value = await apiList('/api/user/nodes') } catch {}
+        try { proxies.value = await apiList('/api/user/proxies') } catch {}
+        const secs = Number(r?.applies_in_seconds) || 60
+        message.success(`节点凭据已重置，约 ${secs} 秒后在各节点生效，请重新导入订阅`)
+      } catch (e: any) { message.error(e.message) }
+      finally { resettingCreds.value = false }
     },
   })
 }

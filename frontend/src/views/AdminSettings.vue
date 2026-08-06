@@ -19,6 +19,16 @@
           <n-form-item label="免费节点分组">
             <n-select v-model:value="freeGroupId" :options="groupOptions" placeholder="无计划用户可用的节点分组" clearable style="width:300px;" />
           </n-form-item>
+          <n-form-item label="用户自助重置凭据">
+            <div>
+              <n-switch v-model:value="credsResetEnabled" />
+              <div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:4px;max-width:520px;">
+                允许用户在「我的订阅」页自行重置节点凭据，彻底吊销已泄露订阅导出的节点（每人 30 天一次）。
+                每次重置都需要把新凭据推送到相关服务器并重启 sing-box，<b>期间同机器上其他用户的连接也会中断</b>，
+                因此默认关闭。关闭时管理员仍可在「用户管理」里逐个重置。
+              </div>
+            </div>
+          </n-form-item>
         </n-form>
       </n-card>
 
@@ -191,6 +201,8 @@ const signupBonus = ref(0)
 const defaultTraffic = ref(0)
 const defaultExpiry = ref(0)
 const freeGroupId = ref<number | null>(null)
+// 默认 false，与后端 credsResetEnabled() 的「只有显式 true 才算开」保持一致。
+const credsResetEnabled = ref(false)
 const alertCpu = ref(90)
 const alertMem = ref(90)
 const alertDisk = ref(85)
@@ -237,6 +249,7 @@ async function handleSave() {
       default_traffic: String(Math.round(defaultTraffic.value * 1024 * 1024 * 1024)),
       default_expiry_days: String(defaultExpiry.value),
       free_group_id: freeGroupId.value ? String(freeGroupId.value) : '',
+      node_creds_reset_enabled: credsResetEnabled.value ? 'true' : 'false',
       alert_cpu_threshold: String(alertCpu.value),
       alert_mem_threshold: String(alertMem.value),
       alert_disk_threshold: String(alertDisk.value),
@@ -287,6 +300,7 @@ onMounted(async () => {
       defaultTraffic.value = (parseInt(data.default_traffic) || 0) / (1024 * 1024 * 1024)
       defaultExpiry.value = parseInt(data.default_expiry_days) || 0
       freeGroupId.value = parseInt(data.free_group_id) || null
+      credsResetEnabled.value = data.node_creds_reset_enabled === 'true'
       alertCpu.value = parseInt(data.alert_cpu_threshold) || 90
       alertMem.value = parseInt(data.alert_mem_threshold) || 90
       alertDisk.value = parseInt(data.alert_disk_threshold) || 85

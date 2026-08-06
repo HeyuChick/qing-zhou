@@ -4,8 +4,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
+
+// ErrCredsResetCooldown is returned by RotateNodeCredentials when the user's
+// last rotation is too recent to allow another. See that function for why the
+// action is rate-limited at all.
+var ErrCredsResetCooldown = errors.New("节点凭据重置冷却中")
+
+// NoCredsResetCooldown is the lastResetBefore that waives RotateNodeCredentials'
+// cooldown entirely. Used by the operator path, which exists to serve exactly
+// the user whose own rotation is already spent. A far-future cutoff rather than
+// "now" so the waiver holds regardless of clock skew.
+const NoCredsResetCooldown int64 = math.MaxInt64
 
 type User struct {
 	ID            int64
@@ -168,10 +180,15 @@ func (s *Store) RotateSubToken(userID int64, subToken string) error {
 //
 // Unlike RotateSubToken this is NOT panel-only: the new credentials only take
 // effect once they reach the nodes, which happens on the controller's periodic
-// rebuild. Stamps creds_reset_at so callers can enforce a cooldown — applying it
-// restarts sing-box on every server carrying the user's nodes, dropping every
-// other user's live connections with it.
-func (s *Store) RotateNodeCredentials(userID int64) error {
+// rebuild. Applying it restarts sing-box on every server carrying the user's
+// nodes, dropping every other user's live connections with it — hence the
+// cooldown, which lives here rather than in the caller.
+//
+// lastResetBefore is that cooldown, as the newest creds_reset_at that may still
+// rotate: a user whose stamp is newer is refused with ErrCredsResetCooldown. The
+// check is the WHERE clause of the stamping UPDATE, not a separate read, so two
+// concurrent requests cannot both pass it. Pass NoCredsResetCooldown to waive it.
+func (s *Store) RotateNodeCredentials(userID, lastResetBefore int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -179,6 +196,35 @@ func (s *Store) RotateNodeCredentials(userID int64) error {
 	defer func() { _ = tx.Rollback() }()
 
 	now := time.Now().Unix()
+	// Claim the rotation first: the users row carries creds_reset_at, so its
+	// conditional UPDATE is both the cooldown gate and the stamp. Doing it before
+	// the per-bucket work means a refused caller changes nothing at all.
+	//
+	// The users row is also the seed for the pool bucket of accounts provisioned
+	// later (EnsurePoolBucket) and is the legacy identity, so leaving the leaked
+	// value there would resurrect it.
+	uu, ss := genBucketCreds()
+	res, err := tx.Exec(`UPDATE users SET client_uuid=?, client_secret=?, creds_reset_at=?, updated_at=?
+		WHERE id=? AND creds_reset_at<=?`, uu, ss, now, now, userID, lastResetBefore)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// No row matched: either the user is gone, or the cooldown has not
+		// elapsed. Only the latter is a race, so tell them apart.
+		var exists int
+		if err := tx.QueryRow(`SELECT 1 FROM users WHERE id=?`, userID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+			return ErrUserNotFound
+		} else if err != nil {
+			return err
+		}
+		return ErrCredsResetCooldown
+	}
+
 	// Pin the effective proxy credential before client_secret moves out from
 	// under the fallback (see ProxySecret).
 	if _, err := tx.Exec(`UPDATE user_plans SET proxy_password=client_secret, updated_at=?
@@ -206,19 +252,11 @@ func (s *Store) RotateNodeCredentials(userID int64) error {
 	// Per-bucket credentials, minted independently: buckets are separately
 	// metered identities and must not collapse onto a shared one.
 	for _, id := range ids {
-		uu, ss := genBucketCreds()
+		bu, bs := genBucketCreds()
 		if _, err := tx.Exec(`UPDATE user_plans SET client_uuid=?, client_secret=?, updated_at=? WHERE id=?`,
-			uu, ss, now, id); err != nil {
+			bu, bs, now, id); err != nil {
 			return err
 		}
-	}
-	// The users row seeds the pool bucket of accounts provisioned later
-	// (EnsurePoolBucket) and is the legacy identity; leaving the leaked value
-	// there would resurrect it.
-	uu, ss := genBucketCreds()
-	if _, err := tx.Exec(`UPDATE users SET client_uuid=?, client_secret=?, creds_reset_at=?, updated_at=? WHERE id=?`,
-		uu, ss, now, now, userID); err != nil {
-		return err
 	}
 	return tx.Commit()
 }

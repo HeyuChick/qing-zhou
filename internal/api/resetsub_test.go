@@ -6,9 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/store"
 )
@@ -29,6 +33,20 @@ func newResetSubAPI(t *testing.T) (*API, *store.Store) {
 func post(a *API, uid int64, path string, h http.HandlerFunc) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", path, nil)
 	req = req.WithContext(context.WithValue(req.Context(), ctxUserID, uid))
+	w := httptest.NewRecorder()
+	h(w, req)
+	return w
+}
+
+// adminPost invokes an /api/admin/users/{id}/... handler with the path param and
+// the operator's identity in place, without standing up the whole router (which
+// would need a real admin session).
+func adminPost(a *API, operatorID, targetID int64, h http.HandlerFunc) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/api/admin/users/"+strconv.FormatInt(targetID, 10)+"/reset-node-creds", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", strconv.FormatInt(targetID, 10))
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	req = req.WithContext(context.WithValue(ctx, ctxUserID, operatorID))
 	w := httptest.NewRecorder()
 	h(w, req)
 	return w
@@ -317,6 +335,153 @@ func TestResetNodeCreds_KeepsCustomProxyCredential(t *testing.T) {
 	}
 	if after[0].ClientUUID == "uuid" {
 		t.Error("node credentials did not rotate — the proxy assertion above proves nothing")
+	}
+}
+
+// The user-facing endpoint tells people to 「联系管理员」 when the switch is off, and
+// the 订阅 page repeats it. That is only true if the operator actually has a way
+// to do it — so the admin path must work with the switch off.
+func TestAdminResetNodeCreds_WorksWithSwitchOff(t *testing.T) {
+	a, st := newResetSubAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsurePoolBucket(uid, "qz_u1", "leaked-uuid", "leaked-secret"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := st.CreateUser(store.NewUser{Username: "root", PasswordHash: "x", Role: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The switch is off — the self-service path is refused, which is the exact
+	// situation this endpoint exists for.
+	if w := post(a, uid, "/api/user/reset-node-creds", a.handleResetNodeCreds); w.Code != http.StatusForbidden {
+		t.Fatalf("precondition: self-service = %d, want 403", w.Code)
+	}
+
+	if w := adminPost(a, admin, uid, a.handleAdminResetNodeCreds); w.Code != http.StatusOK {
+		t.Fatalf("admin reset-node-creds = %d %s", w.Code, w.Body.String())
+	}
+	after, _ := st.ListBuckets(uid)
+	if after[0].ClientUUID == "leaked-uuid" || after[0].ClientSecret == "leaked-secret" {
+		t.Error("admin rotation left the leaked credentials in place")
+	}
+}
+
+// The operator path is the escape hatch from the cooldown, not another thing
+// subject to it: an admin reaching for this is handling a leak on an account
+// that has, by definition, already used its own rotation.
+func TestAdminResetNodeCreds_IgnoresCooldown(t *testing.T) {
+	a, st := newResetSubAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsurePoolBucket(uid, "qz_u1", "uuid", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if w := resetCreds(t, a, st, uid); w.Code != http.StatusOK {
+		t.Fatalf("first rotation = %d %s", w.Code, w.Body.String())
+	}
+	first, _ := st.ListBuckets(uid)
+
+	if w := adminPost(a, 1, uid, a.handleAdminResetNodeCreds); w.Code != http.StatusOK {
+		t.Fatalf("admin rotation during the user's cooldown = %d %s", w.Code, w.Body.String())
+	}
+	after, _ := st.ListBuckets(uid)
+	if after[0].ClientUUID == first[0].ClientUUID {
+		t.Error("admin rotation was silently swallowed by the cooldown")
+	}
+}
+
+func TestAdminResetNodeCreds_UnknownUser(t *testing.T) {
+	a, _ := newResetSubAPI(t)
+	if w := adminPost(a, 1, 4242, a.handleAdminResetNodeCreds); w.Code != http.StatusNotFound {
+		t.Errorf("admin reset for a nonexistent user = %d, want 404", w.Code)
+	}
+}
+
+// The cooldown is only a cooldown if it holds under concurrent requests. Checked
+// here because it is enforced as the WHERE clause of the stamping UPDATE — a
+// read-then-write would let several requests through together, each restarting
+// sing-box on every server the user's nodes live on.
+func TestResetNodeCreds_CooldownHoldsUnderConcurrency(t *testing.T) {
+	a, st := newResetSubAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsurePoolBucket(uid, "qz_u1", "uuid", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("node_creds_reset_enabled", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 8
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			codes[i] = post(a, uid, "/api/user/reset-node-creds", a.handleResetNodeCreds).Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	granted := 0
+	for i, c := range codes {
+		switch c {
+		case http.StatusOK:
+			granted++
+		case http.StatusTooManyRequests:
+		default:
+			t.Errorf("request %d = %d, want 200 or 429", i, c)
+		}
+	}
+	if granted != 1 {
+		t.Errorf("%d of %d concurrent rotations were granted, want exactly 1", granted, n)
+	}
+}
+
+// The kill switch has to reach the button, or it is a setting with no observable
+// effect and the button stays dead no matter what the admin does.
+func TestSubscription_ReportsCredsResetSwitch(t *testing.T) {
+	a, st := newResetSubAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x", SubToken: "T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := func() bool {
+		req := httptest.NewRequest("GET", "/api/user/subscription", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ctxUserID, uid))
+		w := httptest.NewRecorder()
+		a.handleSubscription(w, req)
+		var resp struct {
+			Data struct {
+				CredsResetEnabled bool `json:"creds_reset_enabled"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp.Data.CredsResetEnabled
+	}
+
+	if enabled() {
+		t.Error("creds_reset_enabled is true by default; the feature ships off")
+	}
+	if err := st.SetSetting("node_creds_reset_enabled", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if !enabled() {
+		t.Error("flipping node_creds_reset_enabled did not reach the subscription payload")
 	}
 }
 
