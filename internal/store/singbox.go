@@ -277,10 +277,13 @@ func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 	return n.ID, tx.Commit()
 }
 
-func (s *Store) DeleteSbInbound(id int64) error {
+// DeleteSbInbound removes an inbound plus everything that only exists because of
+// it, and returns the ids of the servers hosting relay inbounds that were
+// un-chained by the deletion (see below) so the caller can rebuild them.
+func (s *Store) DeleteSbInbound(id int64) ([]int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	// A self-built node is a 1:1 mirror of an inbound (linked by tag). Without
@@ -291,16 +294,51 @@ func (s *Store) DeleteSbInbound(id int64) error {
 	_ = tx.QueryRow(`SELECT tag FROM sb_inbounds WHERE id=?`, id).Scan(&tag)
 	if tag != "" {
 		if _, err := tx.Exec(`DELETE FROM node_group_members WHERE node_id IN (SELECT id FROM nodes WHERE type='self_built' AND inbound_tag=?)`, tag); err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := tx.Exec(`DELETE FROM nodes WHERE type='self_built' AND inbound_tag=?`, tag); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	if _, err := tx.Exec(`DELETE FROM sb_inbounds WHERE id=?`, id); err != nil {
-		return err
+	// Un-chain the relays that used this inbound as their landing. buildRelayWiring
+	// already skips a dangling upstream (that traffic exits directly from the relay
+	// machine), so leaving the id behind stores a link that no longer exists — and
+	// the 链路拓扑 page keeps drawing the deleted inbound as「落地已失效」forever.
+	// Clearing it makes the stored chain match the config that is actually pushed.
+	relayServers, err := serverIDsRelayingTo(tx, id)
+	if err != nil {
+		return nil, err
 	}
-	return tx.Commit()
+	if _, err := tx.Exec(`UPDATE sb_inbounds SET upstream_inbound_id=0 WHERE upstream_inbound_id=?`, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM sb_inbounds WHERE id=?`, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return relayServers, nil
+}
+
+// serverIDsRelayingTo lists the distinct servers hosting inbounds that relay to
+// the given landing inbound. Those servers must rebuild when the landing goes
+// away, to drop the upstream outbound that dialed it.
+func serverIDsRelayingTo(tx *sql.Tx, landingID int64) ([]int64, error) {
+	rows, err := tx.Query(`SELECT DISTINCT server_id FROM sb_inbounds WHERE upstream_inbound_id=?`, landingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var sid int64
+		if err := rows.Scan(&sid); err != nil {
+			return nil, err
+		}
+		out = append(out, sid)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListSbInboundsByServer(serverID int64) ([]*SbInbound, error) {

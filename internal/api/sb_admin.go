@@ -1259,14 +1259,19 @@ func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request)
 	inboundID := int64(atoi(chi.URLParam(r, "id")))
 	// 先查询归属服务器，删除后只重建该服务器，避免影响其他服务器。
 	ib, _ := a.st.GetSbInbound(inboundID)
-	if err := a.st.DeleteSbInbound(inboundID); err != nil {
+	// relayServers host the inbounds that pointed at this one as their landing;
+	// DeleteSbInbound un-chained them, so they must rebuild to drop the upstream
+	// outbound that dialed the now-deleted inbound.
+	relayServers, err := a.st.DeleteSbInbound(inboundID)
+	if err != nil {
 		fail(w, http.StatusInternalServerError, "删除失败")
 		return
 	}
 	if ib != nil {
 		// If this was a relay inbound, its landing server must also rebuild to drop
 		// the now-unused relay credential. Async — see handleAdminSaveSbInbound.
-		a.sbScheduleServer(append([]int64{ib.ServerID}, a.landingServerIDs(ib.UpstreamInboundID)...)...)
+		ids := append([]int64{ib.ServerID}, a.landingServerIDs(ib.UpstreamInboundID)...)
+		a.sbScheduleServer(append(ids, relayServers...)...)
 	} else {
 		// 查不到归属服务器（异常情况）时全量重建兜底，避免被删的 inbound
 		// 残留在某个运行中的配置里。

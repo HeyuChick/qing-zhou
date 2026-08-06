@@ -113,7 +113,7 @@ func TestCertStoreAndInjection(t *testing.T) {
 	if err := st.DeleteCert(certID); err == nil {
 		t.Error("DeleteCert should refuse while a TLS profile references it")
 	}
-	if err := st.DeleteSbInbound(inbID); err != nil {
+	if _, err := st.DeleteSbInbound(inbID); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteSbTls(tlsID); err != nil {

@@ -186,6 +186,86 @@ func TestRelayMultiHopChain(t *testing.T) {
 	}
 }
 
+// TestDeleteLandingUnchainsRelays covers the 链路拓扑 bug: deleting a landing
+// inbound must clear the upstream link on every inbound that relayed to it,
+// instead of leaving a dangling id that the topology keeps drawing as a
+// 「落地已失效」hop to an inbound that no longer exists.
+func TestDeleteLandingUnchainsRelays(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	relaySrv, _ := st.CreateServer(Server{Name: "relay", Host: "1.2.3.4", Enabled: true})
+	landingSrv, _ := st.CreateServer(Server{Name: "landing", Host: "5.6.7.8", Enabled: true})
+
+	landingID, err := st.SaveSbInbound(&SbInbound{
+		ServerID: landingSrv, Type: "trojan", Tag: "L-trojan", ListenPort: 8443,
+		Options: `{}`, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayID, err := st.SaveSbInbound(&SbInbound{
+		ServerID: relaySrv, Type: "vless", Tag: "R-vless", ListenPort: 443,
+		Options: `{}`, Enabled: true, UpstreamInboundID: landingID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	touched, err := st.DeleteSbInbound(landingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(touched) != 1 || touched[0] != relaySrv {
+		t.Errorf("un-chained servers = %v, want [%d] so the relay machine rebuilds", touched, relaySrv)
+	}
+
+	relay, err := st.GetSbInbound(relayID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relay == nil {
+		t.Fatal("relay inbound was deleted along with its landing")
+	}
+	if relay.UpstreamInboundID != 0 {
+		t.Errorf("relay still points at deleted landing %d — 链路拓扑 will keep showing it", relay.UpstreamInboundID)
+	}
+}
+
+// TestMigrateClearsDanglingUpstream covers DBs that already accumulated dangling
+// relay links from deletions made before DeleteSbInbound un-chained referrers.
+func TestMigrateClearsDanglingUpstream(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	relayID, err := st.SaveSbInbound(&SbInbound{
+		ServerID: 0, Type: "vless", Tag: "R-vless", ListenPort: 443,
+		Options: `{}`, Enabled: true, UpstreamInboundID: 4242, // landing long gone
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	relay, _ := st.GetSbInbound(relayID)
+	if relay == nil || relay.UpstreamInboundID != 0 {
+		t.Errorf("migrate left a dangling upstream: %+v", relay)
+	}
+}
+
 func itoa(n int64) string {
 	return strings.TrimSpace(string(jsonNumber(n)))
 }

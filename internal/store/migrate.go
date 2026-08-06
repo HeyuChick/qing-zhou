@@ -571,6 +571,13 @@ func (s *Store) Migrate() error {
 		 WHERE read=0 AND first_ts=0`,
 		`UPDATE server_alerts SET read=1 WHERE read=0 AND id NOT IN (SELECT MAX(id) FROM server_alerts WHERE read=0 GROUP BY server_id, type)`,
 		`UPDATE server_alerts SET first_ts=ts WHERE first_ts=0`,
+		// Drop relay links left dangling by inbound deletions that predate
+		// DeleteSbInbound un-chaining its referrers. The generated config already
+		// ignores a dangling upstream, but 链路拓扑 kept drawing the deleted inbound
+		// as「落地已失效」. Permanent no-op once the invariant is maintained.
+		`UPDATE sb_inbounds SET upstream_inbound_id=0
+		 WHERE upstream_inbound_id<>0
+		   AND upstream_inbound_id NOT IN (SELECT id FROM sb_inbounds)`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			// Benign on an up-to-date DB: the column already exists (ADD COLUMN) or

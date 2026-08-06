@@ -96,7 +96,7 @@ func TestEgressWiring(t *testing.T) {
 	if err := st.DeleteSbEgress(egID); err == nil {
 		t.Error("DeleteSbEgress should refuse while an inbound references it")
 	}
-	if err := st.DeleteSbInbound(inbID); err != nil {
+	if _, err := st.DeleteSbInbound(inbID); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteSbEgress(egID); err != nil {
