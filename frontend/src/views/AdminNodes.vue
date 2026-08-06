@@ -72,7 +72,7 @@
                 <n-tag size="tiny" :type="gv.isUngrouped ? 'default' : 'info'" bordered="false">{{ gv.rows.length }} 节点</n-tag>
               </div>
               <n-empty v-if="!gv.rows.length" description="该分组暂无节点" size="small" style="padding:10px 0;" />
-              <div v-for="row in gv.rows" :key="row.node.id" class="topo-row" :class="{ off: !row.node.enabled }">
+              <div v-for="row in gv.rows" :key="row.node.id" class="topo-row" :class="{ off: row.off }">
                 <span class="topo-node client">👤 客户端</span>
                 <span class="topo-arrow">→</span>
                 <span class="topo-node entry">
@@ -93,6 +93,7 @@
                       <b>{{ seg.ib.tag }}</b>
                       <span class="topo-proto">{{ (seg.ib.type || '').toUpperCase() }}</span>
                       <span class="topo-loc">@ {{ serverName(seg.ib.server_id) }}</span>
+                      <span v-if="seg.off" class="topo-loc">· 已停用</span>
                     </span>
                   </template>
                   <template v-else-if="seg.kind === 'egress'">
@@ -105,11 +106,21 @@
                   </template>
                   <span v-else-if="seg.kind === 'broken-landing'" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
                   <span v-else-if="seg.kind === 'broken-egress'" class="topo-arrow relay warn">⇢ 出口已失效 ⇢</span>
+                  <span v-else-if="seg.kind === 'loop'" class="topo-arrow relay warn">⇢ 链路成环 ⇢</span>
+                  <!-- 原本该走中转，落地被删后降级成本机直连；出口 IP 已经变了。 -->
+                  <span v-else-if="seg.kind === 'downgraded'" class="topo-arrow relay warn"
+                        title="原落地入站已被删除，此中转已降级为从本机直连出网；编辑并保存该入站可消除此提示">
+                    ⇢ 原落地已删除 · 现本机直连 ⇢
+                  </span>
                 </template>
                 </template>
                 <span class="topo-arrow">→</span>
                 <span class="topo-node inet">🌐 互联网</span>
                 <span class="topo-actions">
+                  <!-- 降级提示要么靠重新指定落地/出口来消除，要么在这里明确「就这样」。
+                       不给出口就成了一条永远消不掉的红字，久了没人再看。 -->
+                  <n-button v-if="row.ib?.upstream_broken" size="tiny" quaternary
+                            :loading="acking === row.ib.id" @click="ackUpstream(row.ib)">已知晓</n-button>
                   <n-button size="tiny" quaternary @click="openNode(row.node)">编辑节点</n-button>
                 </span>
               </div>
@@ -245,6 +256,9 @@ const sources = ref<any[]>([])
 const inbounds = ref<any[]>([])
 const servers = ref<any[]>([])
 const egresses = ref<any[]>([])
+// 出口列表是否真的取到了。取不到时 egressById 是空的，此时不能把「查不到出口」
+// 当成「出口已失效」——那会把一次加载失败画成满屏红字。
+const egressesLoaded = ref(true)
 
 const groupMap = computed(() => new Map(groups.value.map(g => [g.id, g.name])))
 const inboundMap = computed(() => new Map(inbounds.value.map(i => [i.tag, i])))
@@ -314,14 +328,21 @@ function chainOf(ib: any) {
   let cur = ib
   while (cur.upstream_inbound_id) {
     const next = inboundById.value.get(cur.upstream_inbound_id)
-    if (!next || seen.has(next.id)) { segs.push({ kind: 'broken-landing' }); return segs }
+    // 成环和落地被删是两种完全不同的配置错误，分开报，不要都说成「落地已失效」。
+    if (seen.has(next?.id)) { segs.push({ kind: 'loop' }); return segs }
+    if (!next) { segs.push({ kind: 'broken-landing' }); return segs }
     seen.add(next.id)
-    segs.push({ kind: 'landing', ib: next })
+    segs.push({ kind: 'landing', ib: next, off: !next.enabled })
     cur = next
   }
+  // 落地被删时后端会清掉 upstream 并置 upstream_broken：链路看着是直连，
+  // 实际是「本该走中转，现在从本机出网」，这行提示是它唯一的痕迹。
+  if (cur.upstream_broken) segs.push({ kind: 'downgraded' })
   if (cur.egress_id) {
     const e = egressById.value.get(cur.egress_id)
-    segs.push(e ? { kind: 'egress', eg: e } : { kind: 'broken-egress' })
+    // 出口列表没加载出来时不要报「已失效」——那是个假告警。load() 会另外提示。
+    if (e) segs.push({ kind: 'egress', eg: e })
+    else if (egressesLoaded.value) segs.push({ kind: 'broken-egress' })
   }
   return segs
 }
@@ -331,25 +352,52 @@ function topoRow(n: any) {
   if (n.type === 'external') return { node: n, ib: null, kind: 'external', segs: [] as any[] }
   const ib = inboundOfNode(n)
   if (!ib) return { node: n, ib: null, kind: 'broken', segs: [] as any[] }
-  return { node: n, ib, kind: 'ok', segs: chainOf(ib) }
+  // 入站自己被停用时整行置灰：链路画得再完整，这条也是不通的。
+  return { node: n, ib, kind: 'ok', off: !n.enabled || !ib.enabled, segs: chainOf(ib) }
 }
 const topoGroups = computed(() => groupedView.value.map(gv => ({
   key: gv.key, name: gv.name, isUngrouped: gv.isUngrouped, rows: gv.nodes.map(topoRow),
 })))
 
 // 节点卡片上的一行链路摘要：只在「有中转/出口」或「入站失效」时出现，
-// 直连节点不加这行噪音。
-function chainSummary(n: any): { text: string; broken: boolean } | null {
-  const row = topoRow(n)
+// 直连节点不加这行噪音。模板里要用三次（v-if / class / 文本），
+// 所以按 node.id 预先算好，不要每次渲染都重走一遍链路。
+const chainSummaries = computed(() => {
+  const out = new Map<number, { text: string; broken: boolean }>()
+  for (const gv of topoGroups.value) {
+    for (const row of gv.rows) {
+      const s = summarize(row)
+      if (s) out.set(row.node.id, s)
+    }
+  }
+  return out
+})
+function chainSummary(n: any) { return chainSummaries.value.get(n.id) || null }
+
+// 确认「原落地已删除、现本机直连」这件事已知晓。只清提示，不动配置。
+const acking = ref<number | null>(null)
+async function ackUpstream(ib: any) {
+  acking.value = ib.id
+  try { await apiPost(`/api/admin/sb/inbounds/${ib.id}/ack-upstream`); await load() }
+  catch (e: any) { message.error(e.message) }
+  finally { acking.value = null }
+}
+
+function summarize(row: any): { text: string; broken: boolean } | null {
   if (row.kind === 'external') return null
-  if (row.kind === 'broken') return { text: `入站「${n.inbound_tag || '未绑定'}」不存在`, broken: true }
+  if (row.kind === 'broken') return { text: `入站「${row.node.inbound_tag || '未绑定'}」不存在`, broken: true }
   if (!row.segs.length) return null
   const parts: string[] = []
   let broken = false
   for (const seg of row.segs) {
-    if (seg.kind === 'landing') parts.push(`中转 ${seg.ib.tag} @ ${serverName(seg.ib.server_id)}`)
-    else if (seg.kind === 'egress') parts.push(`出口 ${seg.eg.name}`)
-    else { parts.push(seg.kind === 'broken-egress' ? '出口已失效' : '落地已失效'); broken = true }
+    switch (seg.kind) {
+      case 'landing': parts.push(`中转 ${seg.ib.tag} @ ${serverName(seg.ib.server_id)}${seg.off ? '（已停用）' : ''}`); break
+      case 'egress': parts.push(`出口 ${seg.eg.name}`); break
+      case 'downgraded': parts.push('原落地已删除 · 现本机直连'); broken = true; break
+      case 'loop': parts.push('链路成环'); broken = true; break
+      case 'broken-egress': parts.push('出口已失效'); broken = true; break
+      default: parts.push('落地已失效'); broken = true
+    }
   }
   return { text: parts.join(' ⇢ ') + ' ⇢ 互联网', broken }
 }
@@ -471,16 +519,21 @@ async function handleDeleteSource(id: number) {
 
 async function load() {
   loading.value = true
+  // 服务器/出口只用于链路拓扑的展示，取不到时降级为空数组，不影响节点管理主流程。
+  // 但降级要说出来：出口列表为空会让每条带出口的链路都显示成「出口已失效」，
+  // 那是个假告警——拿不到就别画，并明确告诉管理员拓扑是不完整的。
+  let degraded = ''
   try {
-    // 服务器/出口只用于链路拓扑的展示，取不到时降级为空数组，不影响节点管理主流程。
     const [n, g, s, i, sv, eg] = await Promise.all([
       apiList('/api/admin/nodes'), apiList('/api/admin/node-groups'),
       apiList('/api/admin/node-sources'), apiList('/api/admin/inbounds'),
-      apiList('/api/admin/servers').catch(() => []),
-      apiList('/api/admin/sb/egresses').catch(() => []),
+      apiList('/api/admin/servers').catch(() => { degraded = '服务器列表'; return [] }),
+      apiList('/api/admin/sb/egresses').catch(() => { degraded = degraded ? degraded + '、代理出口' : '代理出口'; return [] }),
     ])
     nodes.value = n; groups.value = g; sources.value = s; inbounds.value = i
     servers.value = sv; egresses.value = eg
+    egressesLoaded.value = !degraded.includes('代理出口')
+    if (degraded) message.warning(`${degraded}加载失败，链路拓扑显示不完整`)
   } catch {} finally { loading.value = false }
 }
 </script>

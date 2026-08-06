@@ -57,8 +57,15 @@ type SbInbound struct {
 	// relay first targets it. Both the relay's upstream outbound and the relay
 	// user injected into this inbound derive their credential from it.
 	RelaySecret string `json:"-"`
-	CreatedAt   int64  `json:"created_at"`
-	UpdatedAt   int64  `json:"updated_at"`
+	// UpstreamBroken marks an inbound whose landing was deleted out from under
+	// it. DeleteSbInbound clears upstream_inbound_id so the stored chain matches
+	// the config actually pushed, but that silently turns a relay into a direct
+	// exit — the traffic now leaves from the relay machine's IP instead of the
+	// landing's. This flag keeps that visible in 链路拓扑 until an admin saves the
+	// inbound again (which clears it), rather than letting the downgrade vanish.
+	UpstreamBroken bool  `json:"upstream_broken"`
+	CreatedAt      int64 `json:"created_at"`
+	UpdatedAt      int64 `json:"updated_at"`
 }
 
 // ---- sb_tls ----
@@ -196,7 +203,7 @@ func (s *Store) resolveTlsBlock(tlsID int64, tag string, tlsCache map[int64]*SbT
 // ---- sb_inbounds ----
 
 func (s *Store) ListSbInbounds() ([]*SbInbound, error) {
-	rows, err := s.db.Query(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, egress_id, created_at, updated_at
+	rows, err := s.db.Query(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, egress_id, upstream_broken, created_at, updated_at
 		FROM sb_inbounds ORDER BY sort_order, id`)
 	if err != nil {
 		return nil, err
@@ -205,11 +212,12 @@ func (s *Store) ListSbInbounds() ([]*SbInbound, error) {
 	out := []*SbInbound{}
 	for rows.Next() {
 		var n SbInbound
-		var enabled int
-		if err := rows.Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.UpstreamInboundID, &n.RelaySecret, &n.EgressID, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		var enabled, broken int
+		if err := rows.Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.UpstreamInboundID, &n.RelaySecret, &n.EgressID, &broken, &n.CreatedAt, &n.UpdatedAt); err != nil {
 			return nil, err
 		}
 		n.Enabled = enabled == 1
+		n.UpstreamBroken = broken == 1
 		out = append(out, &n)
 	}
 	return out, rows.Err()
@@ -217,9 +225,9 @@ func (s *Store) ListSbInbounds() ([]*SbInbound, error) {
 
 func (s *Store) GetSbInbound(id int64) (*SbInbound, error) {
 	var n SbInbound
-	var enabled int
-	err := s.db.QueryRow(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, egress_id, created_at, updated_at
-		FROM sb_inbounds WHERE id=?`, id).Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.UpstreamInboundID, &n.RelaySecret, &n.EgressID, &n.CreatedAt, &n.UpdatedAt)
+	var enabled, broken int
+	err := s.db.QueryRow(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, egress_id, upstream_broken, created_at, updated_at
+		FROM sb_inbounds WHERE id=?`, id).Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.UpstreamInboundID, &n.RelaySecret, &n.EgressID, &broken, &n.CreatedAt, &n.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -227,6 +235,7 @@ func (s *Store) GetSbInbound(id int64) (*SbInbound, error) {
 		return nil, err
 	}
 	n.Enabled = enabled == 1
+	n.UpstreamBroken = broken == 1
 	return &n, nil
 }
 
@@ -259,8 +268,18 @@ func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 		return n.ID, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE sb_inbounds SET server_id=?, type=?, tag=?, listen=?, listen_port=?, tls_id=?, options=?, enabled=?, sort_order=?, upstream_inbound_id=?, relay_secret=?, egress_id=?, updated_at=? WHERE id=?`,
-		n.ServerID, n.Type, n.Tag, n.Listen, n.ListenPort, n.TlsID, n.Options, b2i(n.Enabled), n.SortOrder, n.UpstreamInboundID, n.RelaySecret, n.EgressID, now, n.ID); err != nil {
+	// upstream_broken clears only when this save gives the inbound a real exit
+	// again — a new landing, or an egress. Not on every save: enable/disable and
+	// the batch toggle go through here too, and an unrelated toggle must not
+	// dismiss a warning about traffic leaving from the wrong machine. Accepting
+	// the direct exit as-is is the other way out, via AckUpstreamBroken.
+	rechained := 0
+	if n.UpstreamInboundID != 0 || n.EgressID != 0 {
+		rechained = 1
+	}
+	if _, err := tx.Exec(`UPDATE sb_inbounds SET server_id=?, type=?, tag=?, listen=?, listen_port=?, tls_id=?, options=?, enabled=?, sort_order=?, upstream_inbound_id=?, relay_secret=?, egress_id=?,
+		upstream_broken=CASE WHEN ?=1 THEN 0 ELSE upstream_broken END, updated_at=? WHERE id=?`,
+		n.ServerID, n.Type, n.Tag, n.Listen, n.ListenPort, n.TlsID, n.Options, b2i(n.Enabled), n.SortOrder, n.UpstreamInboundID, n.RelaySecret, n.EgressID, rechained, now, n.ID); err != nil {
 		return n.ID, err
 	}
 	if tagChanged {
@@ -275,6 +294,17 @@ func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 		}
 	}
 	return n.ID, tx.Commit()
+}
+
+// AckUpstreamBroken clears the downgrade warning on an inbound whose landing was
+// deleted — the admin looked at it and accepted the direct exit. Re-pointing the
+// inbound at a new landing or an egress clears it too (see SaveSbInbound); this
+// is the other outcome, where nothing about the config changes and only the
+// admin's knowledge of it does.
+func (s *Store) AckUpstreamBroken(id int64) error {
+	_, err := s.db.Exec(`UPDATE sb_inbounds SET upstream_broken=0, updated_at=? WHERE id=?`,
+		time.Now().Unix(), id)
+	return err
 }
 
 // DeleteSbInbound removes an inbound plus everything that only exists because of
@@ -305,11 +335,16 @@ func (s *Store) DeleteSbInbound(id int64) ([]int64, error) {
 	// machine), so leaving the id behind stores a link that no longer exists — and
 	// the 链路拓扑 page keeps drawing the deleted inbound as「落地已失效」forever.
 	// Clearing it makes the stored chain match the config that is actually pushed.
+	//
+	// upstream_broken records that this happened. Un-chaining is not a neutral
+	// edit: those relays now exit from their own machine's IP instead of the
+	// landing's, and without the flag that change would be invisible the moment
+	// the admin closes the confirm dialog.
 	relayServers, err := serverIDsRelayingTo(tx, id)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`UPDATE sb_inbounds SET upstream_inbound_id=0 WHERE upstream_inbound_id=?`, id); err != nil {
+	if _, err := tx.Exec(`UPDATE sb_inbounds SET upstream_inbound_id=0, upstream_broken=1 WHERE upstream_inbound_id=?`, id); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(`DELETE FROM sb_inbounds WHERE id=?`, id); err != nil {

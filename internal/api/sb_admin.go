@@ -1255,6 +1255,23 @@ func (a *API) landingServerIDs(landingIDs ...int64) []int64 {
 	return out
 }
 
+// POST /api/admin/sb/inbounds/{id}/ack-upstream — dismiss the "landing deleted,
+// now exiting from this machine" warning without changing the config. The other
+// resolution is to re-point the inbound, which clears the flag on save; this one
+// is for the admin who looked and decided the direct exit is fine.
+func (a *API) handleAdminAckUpstreamBroken(w http.ResponseWriter, r *http.Request) {
+	id := atoi(chi.URLParam(r, "id"))
+	if id <= 0 {
+		fail(w, http.StatusBadRequest, "无效的入站 id")
+		return
+	}
+	if err := a.st.AckUpstreamBroken(id); err != nil {
+		fail(w, http.StatusInternalServerError, "操作失败")
+		return
+	}
+	ok(w, nil)
+}
+
 func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request) {
 	inboundID := int64(atoi(chi.URLParam(r, "id")))
 	// 先查询归属服务器，删除后只重建该服务器，避免影响其他服务器。

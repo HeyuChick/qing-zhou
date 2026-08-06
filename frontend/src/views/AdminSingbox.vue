@@ -514,11 +514,12 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import {
   NTabs, NTabPane, NDrawer, NDrawerContent, NButton, NForm, NFormItem, NInput, NInputNumber, NInputGroup,
   NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCode, NCheckbox, NCollapse, NCollapseItem,
-  NAlert, NPopselect, useMessage
+  NAlert, NPopselect, useMessage, useDialog
 } from 'naive-ui'
 import { apiList, apiGet, apiGetRaw, apiPost, apiPut, apiDelete } from '@/api'
 
 const message = useMessage()
+const dialog = useDialog()
 const tab = ref('tls')
 const loading = ref(false)
 const saving = ref(false)
@@ -1160,7 +1161,27 @@ async function saveInbound() {
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
 }
 
-async function deleteInbound(id: number) { try { await apiDelete('/api/admin/sb/inbounds/' + id); message.success('已删除，配置推送中…'); await load(); pollSyncStatus() } catch (e: any) { message.error(e.message) } }
+// 删除一个被中转引用的落地入站，不是一次中性的编辑：那些中转会被解链，
+// 流量改从中转机本地出网，出口 IP 静默从落地机变成中转机。所以在删除这一刻
+// 就把受影响的中转摆出来，而不是等事后去拓扑页找。
+async function deleteInbound(id: number) {
+  const referrers = inbounds.value.filter(i => i.upstream_inbound_id === id)
+  if (!referrers.length) { await doDeleteInbound(id); return }
+  const names = referrers.map(i => `「${i.tag}」`).join('、')
+  dialog.error({
+    title: '该入站正被中转引用',
+    content: `${names} 以此入站为落地。删除后这些中转将改为从各自所在机器直连出网，`
+      + '出口 IP 会从当前落地机变成中转机，请确认这是你想要的。'
+      + '删除后可在「节点管理 → 链路拓扑」看到它们被标记为已降级。',
+    positiveText: '仍然删除', negativeText: '取消',
+    onPositiveClick: () => doDeleteInbound(id),
+  })
+}
+
+async function doDeleteInbound(id: number) {
+  try { await apiDelete('/api/admin/sb/inbounds/' + id); message.success('已删除，配置推送中…'); await load(); pollSyncStatus() }
+  catch (e: any) { message.error(e.message) }
+}
 
 async function toggleInbound(n: any) {
   try {
@@ -1203,13 +1224,28 @@ async function batchToggle(enable: boolean) {
 
 async function batchDelete() {
   const ids = [...checkedIds.value]
-  let ok = 0
-  for (const id of ids) {
-    try { await apiDelete('/api/admin/sb/inbounds/' + id); ok++ } catch {}
+  if (!ids.length) return
+  // 同一批里被一起删掉的中转不必提示——它们自己也不存在了。
+  const orphaned = inbounds.value.filter(i => ids.includes(i.upstream_inbound_id) && !ids.includes(i.id))
+  let content = `确定删除选中的 ${ids.length} 个入站？绑定它们的自建节点会一并移除，此操作不可撤销。`
+  if (orphaned.length) {
+    content += `另外 ${orphaned.map(i => `「${i.tag}」`).join('、')} 以其中的入站为落地，`
+      + '删除后将改为从各自所在机器直连出网，出口 IP 会变。'
   }
-  checkedIds.value = new Set()
-  message.success(`${ok} 个入站已删除`)
-  await load()
+  dialog.error({
+    title: '确认批量删除入站',
+    content,
+    positiveText: '删除', negativeText: '取消',
+    onPositiveClick: async () => {
+      let ok = 0
+      for (const id of ids) {
+        try { await apiDelete('/api/admin/sb/inbounds/' + id); ok++ } catch {}
+      }
+      checkedIds.value = new Set()
+      message.success(`${ok} 个入站已删除`)
+      await load()
+    },
+  })
 }
 
 // ========== Preview ==========

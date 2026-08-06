@@ -473,6 +473,10 @@ func (s *Store) Migrate() error {
 		// Third-party proxy egress: an inbound with egress_id != 0 exits through
 		// that sb_egresses row (static-IP SOCKS5/HTTP proxy) instead of directly.
 		`ALTER TABLE sb_inbounds ADD COLUMN egress_id INTEGER NOT NULL DEFAULT 0`,
+		// Set when DeleteSbInbound un-chains this relay because its landing was
+		// deleted, so 链路拓扑 can keep showing that the exit silently moved to this
+		// machine. Cleared by any save of the inbound. See SbInbound.UpstreamBroken.
+		`ALTER TABLE sb_inbounds ADD COLUMN upstream_broken INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE servers ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_tls ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
 		// Certificate center: a mode=tls profile references a managed certificate
@@ -575,7 +579,11 @@ func (s *Store) Migrate() error {
 		// DeleteSbInbound un-chaining its referrers. The generated config already
 		// ignores a dangling upstream, but 链路拓扑 kept drawing the deleted inbound
 		// as「落地已失效」. Permanent no-op once the invariant is maintained.
-		`UPDATE sb_inbounds SET upstream_inbound_id=0
+		//
+		// upstream_broken=1 rather than a silent clear: these relays are exiting
+		// from their own machine instead of the landing the admin configured, and
+		// upgrading must not be what makes that stop being visible.
+		`UPDATE sb_inbounds SET upstream_inbound_id=0, upstream_broken=1
 		 WHERE upstream_inbound_id<>0
 		   AND upstream_inbound_id NOT IN (SELECT id FROM sb_inbounds)`,
 	} {

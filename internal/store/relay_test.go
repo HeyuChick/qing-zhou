@@ -236,6 +236,96 @@ func TestDeleteLandingUnchainsRelays(t *testing.T) {
 	if relay.UpstreamInboundID != 0 {
 		t.Errorf("relay still points at deleted landing %d — 链路拓扑 will keep showing it", relay.UpstreamInboundID)
 	}
+	// Un-chaining is not a neutral edit: this relay now exits from its own
+	// machine's IP instead of the landing's. Clearing the link without recording
+	// that would make the change invisible.
+	if !relay.UpstreamBroken {
+		t.Error("relay was silently downgraded to a direct exit with nothing marking it")
+	}
+}
+
+// The flag has to be dismissible or it stops being read — but only by something
+// that actually resolves it. Enable/disable goes through the same SaveSbInbound,
+// and an unrelated toggle must not clear a warning that traffic is leaving from
+// the wrong machine.
+func TestUpstreamBrokenClearsOnlyOnResolution(t *testing.T) {
+	newBrokenRelay := func(t *testing.T) (*Store, int64) {
+		t.Helper()
+		st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		if err := st.Migrate(); err != nil {
+			t.Fatal(err)
+		}
+		landingID, err := st.SaveSbInbound(&SbInbound{
+			ServerID: 0, Type: "trojan", Tag: "L-trojan", ListenPort: 8443, Options: `{}`, Enabled: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		relayID, err := st.SaveSbInbound(&SbInbound{
+			ServerID: 0, Type: "vless", Tag: "R-vless", ListenPort: 443,
+			Options: `{}`, Enabled: true, UpstreamInboundID: landingID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.DeleteSbInbound(landingID); err != nil {
+			t.Fatal(err)
+		}
+		if ib, _ := st.GetSbInbound(relayID); ib == nil || !ib.UpstreamBroken {
+			t.Fatal("precondition: delete did not set upstream_broken")
+		}
+		return st, relayID
+	}
+
+	t.Run("toggling enabled preserves it", func(t *testing.T) {
+		st, relayID := newBrokenRelay(t)
+		relay, _ := st.GetSbInbound(relayID)
+		relay.Enabled = false
+		if _, err := st.SaveSbInbound(relay); err != nil {
+			t.Fatal(err)
+		}
+		after, _ := st.GetSbInbound(relayID)
+		if !after.UpstreamBroken {
+			t.Error("disabling the inbound dismissed the downgrade warning — an unrelated action must not")
+		}
+	})
+
+	t.Run("re-pointing at a new landing clears it", func(t *testing.T) {
+		st, relayID := newBrokenRelay(t)
+		newLanding, err := st.SaveSbInbound(&SbInbound{
+			ServerID: 0, Type: "trojan", Tag: "L2-trojan", ListenPort: 9443, Options: `{}`, Enabled: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		relay, _ := st.GetSbInbound(relayID)
+		relay.UpstreamInboundID = newLanding
+		if _, err := st.SaveSbInbound(relay); err != nil {
+			t.Fatal(err)
+		}
+		after, _ := st.GetSbInbound(relayID)
+		if after.UpstreamBroken {
+			t.Error("the chain was repaired but the warning stuck around")
+		}
+	})
+
+	t.Run("acknowledging clears it", func(t *testing.T) {
+		st, relayID := newBrokenRelay(t)
+		if err := st.AckUpstreamBroken(relayID); err != nil {
+			t.Fatal(err)
+		}
+		after, _ := st.GetSbInbound(relayID)
+		if after.UpstreamBroken {
+			t.Error("acknowledging left the warning in place — it would never go away")
+		}
+		if after.UpstreamInboundID != 0 {
+			t.Error("acknowledging changed the chain; it must only clear the warning")
+		}
+	})
 }
 
 // TestMigrateClearsDanglingUpstream covers DBs that already accumulated dangling
@@ -263,6 +353,10 @@ func TestMigrateClearsDanglingUpstream(t *testing.T) {
 	relay, _ := st.GetSbInbound(relayID)
 	if relay == nil || relay.UpstreamInboundID != 0 {
 		t.Errorf("migrate left a dangling upstream: %+v", relay)
+	}
+	// Upgrading must not be what makes an already-broken chain invisible.
+	if relay != nil && !relay.UpstreamBroken {
+		t.Error("migrate cleared the dangling link without flagging the downgrade")
 	}
 }
 
