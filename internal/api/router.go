@@ -331,6 +331,9 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/stats/traffic", a.handleAdminTrafficStats)
 		ar.Get("/api/admin/stats/top", a.handleAdminTopStats)
 		ar.Get("/api/admin/stats/distribution", a.handleAdminDistribution)
+		ar.Get("/api/admin/stats/packages", a.handleAdminPackageStats)
+		ar.Get("/api/admin/stats/users", a.handleAdminUserStats)
+		ar.Get("/api/admin/stats/user/{id}/traffic", a.handleAdminUserTraffic)
 
 		ar.Get("/api/admin/reg-codes", a.handleAdminListRegCodes)
 		ar.Post("/api/admin/reg-codes/generate", a.handleAdminGenerateRegCodes)
