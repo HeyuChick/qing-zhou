@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"qingzhou/internal/sbproc"
@@ -63,9 +64,15 @@ type Controller struct {
 
 	mu sync.Mutex // serializes Rebuild
 
-	// syncInterval is the period of the Run loop, published for callers that let
-	// a change ride that pass instead of forcing a rebuild. Zero until Run starts.
-	syncInterval time.Duration
+	// syncInterval is the period of the Run loop in nanoseconds, published for
+	// callers that let a change ride that pass instead of forcing a rebuild. Zero
+	// until Run starts.
+	//
+	// Deliberately NOT guarded by mu: mu is held for a whole rebuild, SSH pushes
+	// to every server included, and a read of one int must not queue behind that
+	// — the HTTP handler that quotes this interval would block for the length of
+	// a rebuild and could outlive its own request timeout.
+	syncInterval atomic.Int64
 
 	// restartFailed tracks servers whose last local systemctl restart errored, so
 	// applyLocal retries instead of short-circuiting on the already-swapped config
@@ -599,12 +606,10 @@ func (c *Controller) remoteStats(ctx context.Context) []remoteResult {
 // nodes, i.e. the worst-case delay for a change that doesn't force its own
 // rebuild. Returns a minute — the Run default — before Run has started.
 func (c *Controller) SyncInterval() time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.syncInterval <= 0 {
-		return time.Minute
+	if d := c.syncInterval.Load(); d > 0 {
+		return time.Duration(d)
 	}
-	return c.syncInterval
+	return time.Minute
 }
 
 // Run drives the periodic loop: every interval it collects stats then rebuilds
@@ -625,9 +630,7 @@ func (c *Controller) Run(ctx context.Context, interval time.Duration, errFn func
 	// Publish the effective interval: it is how long a change that isn't pushed
 	// explicitly (a node-credential rotation, which rides this pass rather than
 	// forcing its own restart) can take to reach the nodes, and the UI quotes it.
-	c.mu.Lock()
-	c.syncInterval = interval
-	c.mu.Unlock()
+	c.syncInterval.Store(int64(interval))
 	report(c.Rebuild()) // apply current state on startup
 	t := time.NewTicker(interval)
 	defer t.Stop()
