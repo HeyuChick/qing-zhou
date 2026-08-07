@@ -253,11 +253,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick, shallowRef } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, shallowRef } from 'vue'
 import { NEmpty } from 'naive-ui'
 import { apiGet } from '@/api'
 import { useConfigStore } from '@/stores/config'
 import { fmtBytes, fmtUptime, timeAgo, pct } from '@/utils/format'
+import { useCountUp } from '@/utils/countup'
 import AppHeader from '@/components/AppHeader.vue'
 import * as echarts from 'echarts'
 
@@ -317,31 +318,15 @@ const totalUp = computed(() => servers.value.reduce((s, x) => s + (x.metrics?.ne
 const totalDown = computed(() => servers.value.reduce((s, x) => s + (x.metrics?.net_down || 0), 0))
 
 // 数字滚动动画
-function useCountUp(src: () => number) {
-  const disp = ref(0)
-  let raf = 0
-  const DUR = 650
-  watch(src, (to) => {
-    cancelAnimationFrame(raf)
-    const from = disp.value
-    const start = performance.now()
-    const tick = (now: number) => {
-      const p = Math.min((now - start) / DUR, 1)
-      const e = 1 - Math.pow(1 - p, 3)
-      disp.value = from + (to - from) * e
-      if (p < 1) raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-  }, { immediate: true })
-  return disp
-}
-const dTotal = useCountUp(() => servers.value.length)
-const dOnline = useCountUp(() => onlineCount.value)
-const dCpu = useCountUp(() => avgCpuN.value)
-const dMem = useCountUp(() => avgMemN.value)
-const dDisk = useCountUp(() => avgDiskN.value)
-const dUp = useCountUp(() => totalUp.value)
-const dDown = useCountUp(() => totalDown.value)
+// round:false —— CPU/内存/流量这些指标本身带小数，取整会把 0.4% 抹成 0%。
+const NOROUND = { round: false }
+const dTotal = useCountUp(() => servers.value.length, NOROUND)
+const dOnline = useCountUp(() => onlineCount.value, NOROUND)
+const dCpu = useCountUp(() => avgCpuN.value, NOROUND)
+const dMem = useCountUp(() => avgMemN.value, NOROUND)
+const dDisk = useCountUp(() => avgDiskN.value, NOROUND)
+const dUp = useCountUp(() => totalUp.value, NOROUND)
+const dDown = useCountUp(() => totalDown.value, NOROUND)
 
 function memPct(s: Server) { return s.metrics ? pct(s.metrics.mem_used, s.metrics.mem_total) : 0 }
 function diskPct(s: Server) { return s.metrics ? pct(s.metrics.disk_used, s.metrics.disk_total) : 0 }

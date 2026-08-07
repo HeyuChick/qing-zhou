@@ -8,7 +8,7 @@
       <div class="kpi-card">
         <div class="kpi-label">当前积分</div>
         <div class="kpi-value accent">{{ dBalance }}</div>
-        <div class="kpi-sub">≈ {{ yuan(dBalance) }}</div>
+        <div class="kpi-sub">{{ yuan(dBalance) }}</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">累计收入</div>
@@ -85,12 +85,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { NCard, NSpin, NEmpty, NRadioGroup, NRadioButton, NSelect, NInput } from 'naive-ui'
 import * as echarts from 'echarts'
 import { useAuthStore } from '@/stores/auth'
 import { apiGet } from '@/api'
 import { fmtDateTime, yuan } from '@/utils/format'
+import { useCountUp } from '@/utils/countup'
 
 const auth = useAuthStore()
 const txs = ref<any[]>([])
@@ -140,26 +141,7 @@ const net7 = ref(0)
 const in7 = ref(0)
 const out7 = ref(0)
 
-// ---- 数字滚动动画（参考 Monitor.vue 的 useCountUp）----
-// watch 源值：数据到达时自动从 0 滚动到目标值，避免和卡片入场动画抢戏
-function useCountUp(src: () => number) {
-  const disp = ref(0)
-  let raf = 0
-  const DUR = 650
-  watch(src, (to) => {
-    cancelAnimationFrame(raf)
-    const from = disp.value
-    const start = performance.now()
-    const tick = (now: number) => {
-      const p = Math.min((now - start) / DUR, 1)
-      const e = 1 - Math.pow(1 - p, 3)
-      disp.value = Math.round(from + (to - from) * e)
-      if (p < 1) raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-  }, { immediate: true })
-  return disp
-}
+// ---- 数字滚动动画（useCountUp 见 utils/countup.ts，全站共用同一条缓动）----
 const dBalance = useCountUp(() => Math.round(balance.value))
 const dIncome = useCountUp(() => Math.round(income.value))
 const dExpense = useCountUp(() => Math.round(expense.value))

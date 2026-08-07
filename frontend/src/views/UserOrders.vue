@@ -17,7 +17,7 @@
       <div class="kpi-card">
         <div class="kpi-label">累计消费</div>
         <div class="kpi-value accent">{{ dTotalSpend }}</div>
-        <div class="kpi-sub">≈ {{ yuan(totalSpend) }} · {{ successCount }} 笔成功</div>
+        <div class="kpi-sub">{{ yuan(totalSpend) }} · {{ successCount }} 笔成功</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">订单总数</div>
@@ -110,13 +110,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { NCard, NSpin, NEmpty, NButton, NRadioGroup, NRadioButton, NSelect, NInput, NIcon } from 'naive-ui'
 import { CartOutline } from '@vicons/ionicons5'
 import * as echarts from 'echarts'
 import { apiList } from '@/api'
 import { fmtDateTime, timeAgo, yuan } from '@/utils/format'
+import { useCountUp } from '@/utils/countup'
 
 const router = useRouter()
 const orders = ref<any[]>([])
@@ -173,25 +174,7 @@ const monthOrders = computed(() => {
   return orders.value.filter(o => (o.created_at || 0) >= cutoff).length
 })
 
-// ---- 数字滚动动画（与积分明细页一致）----
-function useCountUp(src: () => number) {
-  const disp = ref(0)
-  let raf = 0
-  const DUR = 650
-  watch(src, (to) => {
-    cancelAnimationFrame(raf)
-    const from = disp.value
-    const start = performance.now()
-    const tick = (now: number) => {
-      const p = Math.min((now - start) / DUR, 1)
-      const e = 1 - Math.pow(1 - p, 3)
-      disp.value = Math.round(from + (to - from) * e)
-      if (p < 1) raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-  }, { immediate: true })
-  return disp
-}
+// ---- 数字滚动动画（与积分明细页共用 utils/countup.ts）----
 const dTotalSpend = useCountUp(() => Math.round(totalSpend.value))
 const dMonthSpend = useCountUp(() => Math.round(monthSpend.value))
 
