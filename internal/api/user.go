@@ -230,33 +230,20 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	buckets, _ := a.st.ListBuckets(u.ID)
 	pkgNames, _ := a.st.PackageNames()
-
-	// Top-line traffic = currently-owned metered traffic, EXCLUDING queued份 (paid
-	// but not yet active) and the unmetered free bucket. This mirrors the legacy
-	// users.* roll-up minus queued, so the big number isn't inflated by traffic the
-	// user can't use yet. Enforcement (handleSub) still reads the full aggregate /
-	// buckets — this is display-only.
-	var total, used int64
-	for _, b := range buckets {
-		if b.Kind == store.KindFree || (b.Kind == "plan" && b.Status == "queued") {
-			continue
-		}
-		total += b.TrafficLimit
-		used += b.Used()
-	}
-	remaining := int64(0)
-	if total > used {
-		remaining = total - used
-	}
+	tr := dashboardTraffic(buckets)
 	ok(w, J{
 		"username": u.Username,
 		"email":    nsOr(u.Email),
 		"points":   u.Points,
 		"status":   u.Status,
 		"traffic": J{
-			"used":      used,
-			"total":     total, // 0 = unlimited; excludes queued份 (not yet usable)
-			"remaining": remaining,
+			"used":      tr.Used,
+			"total":     tr.Total, // 0 = no metered quota at all; read Unlimited to tell which
+			"remaining": tr.Remaining,
+			// Unlimited says "0 total" means 不限, not 没额度 — the two render
+			// completely differently and the number alone cannot distinguish them.
+			"unlimited":      tr.Unlimited,
+			"unmetered_used": tr.UnmeteredUsed,
 		},
 		// Plans stay per-bucket so the UI can show every active/queued份 with its
 		// own quota and expiry; there is deliberately no single "current plan" —
@@ -586,6 +573,63 @@ func queueActivations(buckets []*store.Bucket, now int64) map[int64]int64 {
 // holds it; the stored name is only a snapshot from purchase time. Buckets with
 // no package row (pool / welcome id -1 / admin grant id 0) keep their own name.
 // Pass nil to fall back to the snapshot everywhere.
+// dashTraffic is the control-panel's top-line traffic roll-up.
+type dashTraffic struct {
+	Total         int64 // metered quota the user owns right now
+	Used          int64 // usage counted against Total
+	Remaining     int64
+	Unlimited     bool  // at least one owned份 has no cap
+	UnmeteredUsed int64 // usage on those uncapped份 — real, but not part of any ratio
+}
+
+// dashboardTraffic rolls the buckets up into one headline figure.
+//
+// Excluded: the internal free bucket (unmetered metering identity), queued份
+// (paid but not yet usable) and expired份 (past their window, so handleSub
+// hands out nothing for them). All three would advertise traffic the user
+// cannot actually spend — an expired 100G plan showing as 剩余 100 GB directly
+// under a 「套餐已全部到期」 banner is the same lie the queued exclusion exists
+// to prevent. Exhausted-but-live份 DO stay in: 100% of a quota the user still
+// holds is a fact worth showing.
+//
+// The subtlety is TrafficLimit == 0, which means "uncapped", not "zero quota".
+// Summing such a bucket the naive way adds its Used() to the numerator and
+// nothing to the denominator, so a user holding one unlimited plan alongside a
+// metered one sees an inflated used-percentage — and once the metered份 ran
+// low, a "流量已用尽" banner while an unlimited plan is still live. Keep the
+// ratio over capped buckets only and report the uncapped usage on the side.
+//
+// Display-only: enforcement (handleSub) still reads the buckets directly.
+func dashboardTraffic(buckets []*store.Bucket) dashTraffic {
+	var d dashTraffic
+	now := time.Now().Unix()
+	for _, b := range buckets {
+		if b.Kind == store.KindFree || (b.Kind == "plan" && b.Status == "queued") {
+			continue
+		}
+		if !b.NotExpired(now) {
+			continue
+		}
+		// An empty pool is inert bookkeeping, not an uncapped份 — buildPlanViews
+		// hides it for the same reason. Every account has one, so reading its 0
+		// limit as "unlimited" would tell literally everyone their traffic is 不限.
+		if b.Kind == "pool" && b.TrafficLimit <= 0 {
+			continue
+		}
+		if b.TrafficLimit <= 0 {
+			d.Unlimited = true
+			d.UnmeteredUsed += b.Used()
+			continue
+		}
+		d.Total += b.TrafficLimit
+		d.Used += b.Used()
+	}
+	if d.Total > d.Used {
+		d.Remaining = d.Total - d.Used
+	}
+	return d
+}
+
 func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planView {
 	now := time.Now().Unix()
 	acts := queueActivations(buckets, now)
