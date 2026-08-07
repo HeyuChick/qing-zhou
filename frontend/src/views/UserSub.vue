@@ -56,6 +56,25 @@
       </div>
     </n-card>
 
+    <!-- 我的套餐：每个套餐独立计量，各自展示剩余流量与到期时间（可能多份并存，不合并） -->
+    <n-card v-if="plans.length" size="small" class="sec" title="我的套餐">
+      <template #header-extra>
+        <span v-if="hasQueued" style="font-size:11.5px;color:var(--text-3);">重复购买自动排队，一次只用一份</span>
+      </template>
+      <div v-for="p in sortedPlans" :key="p.id" class="plan-row" :class="{ queued: p.status === 'queued' }">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <span style="font-weight:600;">{{ p.name || '套餐 #' + p.id }}</span>
+          <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
+        </div>
+        <n-progress v-if="p.status !== 'queued'" type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
+        <div v-else style="height:6px;border-radius:3px;background:repeating-linear-gradient(45deg,var(--border),var(--border) 4px,transparent 4px,transparent 8px);"></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;gap:8px;">
+          <span>{{ p.status === 'queued' ? '待用流量 ' + (p.traffic_limit>0 ? fmtTotal(p.traffic_limit) : '不限') : '剩余 ' + (p.remaining < 0 ? '不限' : fmtBytes(p.remaining)) + '（' + fmtBytes(p.used) + ' / ' + fmtTotal(p.traffic_limit) + '）' }}</span>
+          <span style="white-space:nowrap;">{{ planTime(p) }}</span>
+        </div>
+      </div>
+    </n-card>
+
     <!-- HTTP/SOCKS5 代理（mixed 节点，不在订阅里，单独复制填入 1Panel/Docker 等） -->
     <n-card v-if="proxies.length" size="small" class="sec" title="HTTP / SOCKS5 代理">
       <template #header-extra><span style="font-size:11px;color:var(--text-3);">可填入 1Panel、Docker、git 等只认 HTTP/SOCKS 代理的地方</span></template>
@@ -127,11 +146,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NInput, NInputGroup, NButton, NDataTable, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, NIcon, useMessage, useDialog } from 'naive-ui'
+import { NCard, NInput, NInputGroup, NButton, NDataTable, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, NProgress, NIcon, useMessage, useDialog } from 'naive-ui'
 import { SpeedometerOutline } from '@vicons/ionicons5'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { useAuthStore } from '@/stores/auth'
-import { fmtBytes, fmtDate } from '@/utils/format'
+import { fmtBytes, fmtTotal, fmtDate, pct } from '@/utils/format'
+import { planStatusMeta, planTimeText, planSortKey } from '@/utils/plan'
 import { copyText } from '@/utils/clipboard'
 import QRCode from 'qrcode'
 
@@ -142,6 +162,19 @@ const auth = useAuthStore()
 const sub = ref<any>({})
 const proxies = ref<any[]>([])
 const nodes = ref<any[]>([])
+// 我的套餐：后端按套餐独立计量（可能多份并存、含排队份），全部列出，不合并
+const plans = ref<any[]>([])
+// Read: 使用中 first, then 排队中 (by soonest activation), then finished — so the
+// current份 and what's next are always at the top.
+const sortedPlans = computed<any[]>(() => {
+  const list = [...plans.value]
+  list.sort((a, b) => planSortKey(a) - planSortKey(b) || (a.activate_by || a.expiry_at || 0) - (b.activate_by || b.expiry_at || 0))
+  return list
+})
+const hasQueued = computed(() => plans.value.some(p => p.status === 'queued'))
+function planPct(p: any) { return p.status === 'queued' ? 0 : pct(p.used, p.traffic_limit) }
+const planStatus = planStatusMeta
+const planTime = (p: any) => planTimeText(p, fmtDate)
 // 由后端的 node_creds_reset_enabled 决定，缺省按关闭处理——拿不到就当没开，
 // 不要给用户一个点了必然 403 的按钮。
 const credsResetEnabled = computed(() => sub.value?.creds_reset_enabled === true)
@@ -335,6 +368,7 @@ watch(showQr, async (v) => {
 
 onMounted(async () => {
   try { sub.value = await apiGet('/api/user/subscription') || {} } catch (e: any) { message.error('订阅信息加载失败：' + (e?.message || '请稍后重试')) }
+  try { plans.value = await apiList('/api/user/plans') } catch {}
   try { proxies.value = await apiList('/api/user/proxies') } catch {}
   loadingNodes.value = true
   try { nodes.value = await apiList('/api/user/nodes') } catch {} finally { loadingNodes.value = false }
@@ -347,6 +381,9 @@ onMounted(async () => {
 .sub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
 .sec { margin-bottom: 16px; border-radius: var(--r-sm); }
 .sec-title { font-weight: 650; font-size: 14px; }
+.plan-row { margin-bottom: 12px; padding: 12px; background: var(--bg-soft); border-radius: 10px; }
+.plan-row.queued { opacity: .72; border: 1px dashed var(--border); background: transparent; }
+.plan-row:last-child { margin-bottom: 0; }
 .proxy-row { margin-bottom: 12px; padding: 12px; background: var(--bg-soft); border-radius: 10px; }
 .proxy-row:last-child { margin-bottom: 0; }
 .pxrow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }

@@ -228,10 +228,8 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "未登录")
 		return
 	}
-	u = a.ensureSubToken(u)
 	buckets, _ := a.st.ListBuckets(u.ID)
 	pkgNames, _ := a.st.PackageNames()
-	now := time.Now().Unix()
 
 	// Top-line traffic = currently-owned metered traffic, EXCLUDING queued份 (paid
 	// but not yet active) and the unmetered free bucket. This mirrors the legacy
@@ -250,27 +248,6 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if total > used {
 		remaining = total - used
 	}
-	// Current plan = the plan actually in use, derived from the active bucket rather
-	// than the legacy current_plan_id pointer (which a queued repeat-purchase would
-	// mislabel, and which a ticker promotion never updates).
-	plan := ""
-	for _, b := range buckets {
-		if b.Kind != "plan" || b.Status == "queued" || !b.Active(now) {
-			continue
-		}
-		plan = b.Name
-		if b.PackageID > 0 {
-			if live, ok := pkgNames[b.PackageID]; ok && live != "" {
-				plan = live
-			}
-		}
-		break
-	}
-	if plan == "" && u.CurrentPlanID.Valid {
-		if p, _ := a.st.GetPackage(u.CurrentPlanID.Int64); p != nil {
-			plan = p.Name
-		}
-	}
 	ok(w, J{
 		"username": u.Username,
 		"email":    nsOr(u.Email),
@@ -281,10 +258,12 @@ func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			"total":     total, // 0 = unlimited; excludes queued份 (not yet usable)
 			"remaining": remaining,
 		},
-		"plans":            buildPlanViews(buckets, pkgNames),
-		"expiry_at":        u.ExpiryAt,
-		"current_plan":     plan,
-		"subscription_url": a.subURL(r, u),
+		// Plans stay per-bucket so the UI can show every active/queued份 with its
+		// own quota and expiry; there is deliberately no single "current plan" —
+		// several can be live at once and a queued repeat purchase means one of
+		// them isn't actually in use yet.
+		"plans":     buildPlanViews(buckets, pkgNames),
+		"expiry_at": u.ExpiryAt,
 	})
 }
 
