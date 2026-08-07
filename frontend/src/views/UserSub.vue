@@ -1,53 +1,29 @@
 <template>
   <div>
-    <h2 class="page-title">订阅管理</h2>
-    <p class="page-sub">管理你的订阅链接和节点</p>
-
-    <!-- 资源概览 -->
-    <n-card size="small" style="margin-bottom:16px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
-        <div style="flex:1;min-width:200px;">
-          <div style="font-size:12px;color:var(--text-3);margin-bottom:4px;">总流量使用</div>
-          <n-progress type="line" :percentage="totalPct" :color="totalPct>90?'#c2685c':'#6f8f76'" />
-          <div style="font-size:12px;color:var(--text-2);margin-top:4px;">{{ fmtBytes(totalUsed) }} / {{ fmtTotal(totalCap) }}</div>
-        </div>
-        <n-space>
-          <n-button size="small" @click="router.push('/shop')">去商城</n-button>
-          <n-button size="small" @click="router.push('/orders')">订单记录</n-button>
-        </n-space>
+    <!-- 页面头 -->
+    <div class="sub-head">
+      <div>
+        <h2 class="page-title">订阅管理</h2>
+        <p class="page-sub">订阅链接、导入格式与节点开关，都在这里管理</p>
       </div>
-    </n-card>
-
-    <!-- 分计划资源 -->
-    <n-card v-if="plans.length" title="我的计划" size="small" style="margin-bottom:16px;">
-      <template v-if="expiredCount" #header-extra>
-        <n-button size="tiny" quaternary @click="showExpiredPlans = !showExpiredPlans">
-          {{ showExpiredPlans ? '隐藏已过期' : '显示已过期 (' + expiredCount + ')' }}
+      <n-space size="small">
+        <n-button size="small" secondary @click="router.push('/dashboard')">
+          <template #icon><n-icon><SpeedometerOutline /></n-icon></template>
+          控制台
         </n-button>
-      </template>
-      <div v-for="p in visiblePlans" :key="p.id" style="margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <span style="font-weight:600;">{{ p.name || '计划 #' + p.id }}</span>
-          <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
-        </div>
-        <n-progress type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;">
-          <span>{{ fmtBytes(p.used) }} / {{ fmtTotal(p.traffic_limit) }}</span>
-          <span>{{ fmtDate(p.expiry_at) }}</span>
-        </div>
-      </div>
-      <div v-if="!visiblePlans.length" style="font-size:12px;color:var(--text-3);text-align:center;padding:6px 0;">
-        {{ expiredCount }} 个已过期套餐已隐藏，点右上角「显示已过期」查看
-      </div>
-    </n-card>
+        <n-button size="small" secondary @click="router.push('/orders')">订单记录</n-button>
+        <n-button size="small" type="primary" @click="router.push('/shop')">去商城</n-button>
+      </n-space>
+    </div>
 
     <!-- 订阅链接 -->
-    <n-card title="订阅链接" size="small" style="margin-bottom:16px;">
+    <n-card size="small" class="sec">
+      <template #header><span class="sec-title">订阅链接</span></template>
       <n-input-group>
         <n-input :value="sub.url" readonly placeholder="暂无订阅" />
         <n-button type="primary" @click="copy(sub.url)">复制</n-button>
       </n-input-group>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
         <n-button size="small" @click="copy(sub.formats?.clash)">Clash</n-button>
         <n-button size="small" @click="copy(sub.formats?.singbox)">sing-box</n-button>
         <n-button size="small" @click="copy(sub.formats?.surge)">Surge</n-button>
@@ -81,9 +57,9 @@
     </n-card>
 
     <!-- HTTP/SOCKS5 代理（mixed 节点，不在订阅里，单独复制填入 1Panel/Docker 等） -->
-    <n-card v-if="proxies.length" title="HTTP / SOCKS5 代理" size="small" style="margin-bottom:16px;">
+    <n-card v-if="proxies.length" size="small" class="sec" title="HTTP / SOCKS5 代理">
       <template #header-extra><span style="font-size:11px;color:var(--text-3);">可填入 1Panel、Docker、git 等只认 HTTP/SOCKS 代理的地方</span></template>
-      <div v-for="p in proxies" :key="p.tag" style="margin-bottom:12px;padding:10px;background:var(--bg-soft);border-radius:10px;">
+      <div v-for="p in proxies" :key="p.tag" class="proxy-row">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;">
           <span style="font-weight:600;">{{ p.tag }}</span>
           <div style="display:flex;align-items:center;gap:6px;">
@@ -127,7 +103,7 @@
     </n-modal>
 
     <!-- 节点列表 -->
-    <n-card title="节点列表" size="small">
+    <n-card size="small" class="sec" title="节点列表">
       <template #header-extra>
         <n-space size="small">
           <n-input v-model:value="search" placeholder="搜索节点" size="small" style="width:160px;" clearable />
@@ -151,10 +127,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NInput, NInputGroup, NButton, NDataTable, NProgress, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, useMessage, useDialog } from 'naive-ui'
+import { NCard, NInput, NInputGroup, NButton, NDataTable, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, NIcon, useMessage, useDialog } from 'naive-ui'
+import { SpeedometerOutline } from '@vicons/ionicons5'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { useAuthStore } from '@/stores/auth'
-import { fmtBytes, fmtTotal, fmtDate, pct } from '@/utils/format'
+import { fmtBytes, fmtDate } from '@/utils/format'
 import { copyText } from '@/utils/clipboard'
 import QRCode from 'qrcode'
 
@@ -163,7 +140,6 @@ const message = useMessage()
 const dialog = useDialog()
 const auth = useAuthStore()
 const sub = ref<any>({})
-const plans = ref<any[]>([])
 const proxies = ref<any[]>([])
 const nodes = ref<any[]>([])
 // 由后端的 node_creds_reset_enabled 决定，缺省按关闭处理——拿不到就当没开，
@@ -221,10 +197,6 @@ const selectedKeys = ref<string[]>([])
 const loadingNodes = ref(false)
 const pinging = ref(false)
 
-const totalUsed = computed(() => plans.value.reduce((s, p) => s + (p.used || 0), 0))
-const totalCap = computed(() => plans.value.reduce((s, p) => s + (p.traffic_limit || 0), 0))
-const totalPct = computed(() => pct(totalUsed.value, totalCap.value))
-
 const protoOptions = computed(() => {
   const set = new Set(nodes.value.map((n: any) => n.protocol).filter(Boolean))
   return Array.from(set).map(p => ({ label: p.toUpperCase(), value: p }))
@@ -240,17 +212,6 @@ const filteredNodes = computed(() => {
   return list
 })
 
-function planPct(p: any) { return pct(p.used, p.traffic_limit) }
-function planStatus(p: any) {
-  if (p.expiry_at && p.expiry_at * 1000 < Date.now()) return { type: 'error' as const, label: '已过期' }
-  if (p.traffic_limit > 0 && p.used >= p.traffic_limit) return { type: 'warning' as const, label: '已用尽' }
-  return { type: 'success' as const, label: '正常' }
-}
-// 过期套餐默认隐藏（减少堆积的历史套餐干扰），可一键展开。
-const showExpiredPlans = ref(false)
-function isExpiredPlan(p: any) { return !!(p.expiry_at && p.expiry_at * 1000 < Date.now()) }
-const expiredCount = computed(() => plans.value.filter(isExpiredPlan).length)
-const visiblePlans = computed(() => showExpiredPlans.value ? plans.value : plans.value.filter(p => !isExpiredPlan(p)))
 function latencyColor(ms: number) {
   if (ms < 0) return 'var(--text-3)'
   if (ms < 150) return '#10b981'
@@ -374,7 +335,6 @@ watch(showQr, async (v) => {
 
 onMounted(async () => {
   try { sub.value = await apiGet('/api/user/subscription') || {} } catch (e: any) { message.error('订阅信息加载失败：' + (e?.message || '请稍后重试')) }
-  try { plans.value = await apiList('/api/user/plans') } catch {}
   try { proxies.value = await apiList('/api/user/proxies') } catch {}
   loadingNodes.value = true
   try { nodes.value = await apiList('/api/user/nodes') } catch {} finally { loadingNodes.value = false }
@@ -383,7 +343,12 @@ onMounted(async () => {
 
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 4px; }
-.page-sub { color: var(--text-2); margin-bottom: 22px; }
+.page-sub { color: var(--text-2); margin-bottom: 0; }
+.sub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+.sec { margin-bottom: 16px; border-radius: var(--r-sm); }
+.sec-title { font-weight: 650; font-size: 14px; }
+.proxy-row { margin-bottom: 12px; padding: 12px; background: var(--bg-soft); border-radius: 10px; }
+.proxy-row:last-child { margin-bottom: 0; }
 .pxrow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .pxk { width: 52px; flex-shrink: 0; font-size: 12px; color: var(--text-3); }
 .pxv { flex: 1; min-width: 0; }
