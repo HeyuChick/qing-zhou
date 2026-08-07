@@ -27,9 +27,7 @@
       <StatCard label="剩余流量" :value="remainingText" :badge="usedPctLabel" :badge-color="ringColor">
         <div class="mini-progress"><div class="mini-fill" :style="{ width: usedPct + '%', background: ringColor }" /></div>
       </StatCard>
-      <StatCard label="到期时间" :value="expiryText" :badge="dlLabel" :badge-color="dlBadgeColor" :value-color="dlColor" />
       <StatCard label="积分" :value="String(dash.points || 0)" :sub="yuan(dash.points || 0)" />
-      <StatCard v-if="dash.current_plan" label="当前套餐" :value="dash.current_plan" sub="当前正在使用的套餐" />
     </div>
 
     <n-card v-if="notices.length" size="small" class="sec" style="margin-bottom:16px;">
@@ -47,7 +45,7 @@
       </n-list>
     </n-card>
 
-    <!-- 主区域：左侧用量环，右侧套餐 -->
+    <!-- 主区域：左侧用量环，右侧流量趋势 -->
     <div class="dash-grid">
       <n-card size="small" class="sec" style="margin-bottom:0;">
         <template #header><span class="sec-title">流量用量</span></template>
@@ -78,25 +76,6 @@
       </n-card>
 
       <div class="dash-main">
-        <n-card v-if="plans.length" size="small" class="sec">
-          <template #header>
-            <span class="sec-title">我的套餐</span>
-            <span v-if="hasQueued" class="sec-hint">重复购买自动排队，一次只用一份</span>
-          </template>
-          <div v-for="p in plans" :key="p.id" class="plan-row" :class="{ queued: p.status === 'queued' }">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-              <span style="font-weight:600;">{{ p.name || '套餐 #' + p.id }}</span>
-              <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
-            </div>
-            <n-progress v-if="p.status !== 'queued'" type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
-            <div v-else style="height:6px;border-radius:3px;background:repeating-linear-gradient(45deg,var(--border),var(--border) 4px,transparent 4px,transparent 8px);"></div>
-            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;">
-              <span>{{ p.status === 'queued' ? '待用流量 ' + (p.traffic_limit>0 ? fmtTotal(p.traffic_limit) : '不限') : '剩余 ' + (p.remaining < 0 ? '不限' : fmtBytes(p.remaining)) + '（' + fmtBytes(p.used) + ' / ' + fmtTotal(p.traffic_limit) + '）' }}</span>
-              <span>{{ planTime(p) }}</span>
-            </div>
-          </div>
-        </n-card>
-
         <n-card size="small" class="sec">
           <template #header>
             <span class="sec-title">流量趋势</span>
@@ -111,13 +90,6 @@
       </div>
     </div>
 
-    <n-card title="订阅链接" size="small" class="sec" style="margin-top:16px;">
-      <n-input-group>
-        <n-input :value="dash.subscription_url" readonly placeholder="暂无订阅" />
-        <n-button type="primary" @click="copySub">复制</n-button>
-      </n-input-group>
-    </n-card>
-
     <n-modal v-model:show="showNotice" preset="card" style="max-width:640px;" :title="activeNotice?.title">
       <template #header-extra v-if="activeNotice">
         <span style="font-size:12px;color:var(--text-3);">{{ fmtDate(activeNotice.created_at) }}</span>
@@ -130,33 +102,19 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NAlert, NInputGroup, NInput, NButton, NList, NListItem, NThing, NTag, NRadioGroup, NRadioButton, NProgress, NModal, NSpace, NIcon, useMessage } from 'naive-ui'
+import { NCard, NAlert, NButton, NList, NListItem, NThing, NTag, NRadioGroup, NRadioButton, NModal, NSpace, NIcon } from 'naive-ui'
 import { LinkOutline, CartOutline, ReceiptOutline } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
 import { apiGet, apiList } from '@/api'
-import { fmtBytes, fmtTotal, fmtDate, daysLeft, yuan, pct } from '@/utils/format'
+import { fmtBytes, fmtTotal, fmtDate, yuan, pct } from '@/utils/format'
 import { mdToHtml } from '@/utils/markdown'
-import { planStatusMeta, planTimeText, planSortKey } from '@/utils/plan'
 import StatCard from '@/components/StatCard.vue'
 import TrafficTrendChart from '@/components/TrafficTrendChart.vue'
 
-const router = useRouter(); const auth = useAuthStore(); const message = useMessage()
+const router = useRouter(); const auth = useAuthStore()
 const dash = ref<any>({}); const notices = ref<any[]>([]); const trendRange = ref('7d'); const trendData = ref<any[]>([])
 const showNotice = ref(false); const activeNotice = ref<any>(null)
 function openNotice(n: any) { activeNotice.value = n; showNotice.value = true }
-
-const dl = computed(() => daysLeft(dash.value.expiry_at))
-// Read: 使用中 first, then 排队中 (by soonest activation), then finished — so the
-// current份 and what's next are always at the top.
-const plans = computed<any[]>(() => {
-  const list = [...(dash.value.plans || [])]
-  list.sort((a, b) => planSortKey(a) - planSortKey(b) || (a.activate_by || a.expiry_at || 0) - (b.activate_by || b.expiry_at || 0))
-  return list
-})
-const hasQueued = computed(() => plans.value.some(p => p.status === 'queued'))
-function planPct(p: any) { return p.status === 'queued' ? 0 : pct(p.used, p.traffic_limit) }
-const planStatus = planStatusMeta
-const planTime = (p: any) => planTimeText(p, fmtDate)
 
 const usedPct = computed(() => pct(dash.value.traffic?.used, dash.value.traffic?.total))
 const usedPctLabel = computed(() => usedPct.value > 0 ? usedPct.value + '%' : '')
@@ -169,15 +127,6 @@ const remainingText = computed(() => {
   if (!t) return '—'
   return t.total > 0 ? fmtBytes(t.remaining) : '不限'
 })
-const expiryText = computed(() => {
-  if (!dash.value.expiry_at) return '永久'
-  return fmtDate(dash.value.expiry_at) + (dl.value !== null ? `（剩 ${dl.value} 天）` : '')
-})
-const dlLabel = computed(() => dl.value === null ? '' : `剩 ${dl.value} 天`)
-const dlColor = computed(() => (dl.value !== null && dl.value <= 7) ? 'var(--danger)' : '')
-const dlBadgeColor = computed(() => (dl.value !== null && dl.value <= 7) ? '#c2685c' : '#6f8f76')
-
-function copySub() { if (!dash.value.subscription_url) { message.warning('暂无订阅'); return }; navigator.clipboard.writeText(dash.value.subscription_url); message.success('已复制') }
 
 async function loadTrend() { try { trendData.value = await apiList(`/api/user/stats/traffic?range=${trendRange.value}`) } catch {} }
 watch(trendRange, loadTrend)
