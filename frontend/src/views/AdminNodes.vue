@@ -31,6 +31,9 @@
                   <div class="lc-meta">
                     <span class="kv"><n-tag :type="r.type === 'self_built' ? 'info' : 'warning'" size="tiny" bordered="false">{{ r.type === 'self_built' ? '自建' : '外部' }}</n-tag></span>
                     <span class="kv">协议 <b>{{ nodeProtocol(r) }}</b></span>
+                    <!-- 节点跑在哪台机器上。外部节点不在我们的机器上，自建但入站失踪时
+                         也没有答案——那两种情况下面的链路行会说明，这里就不占位了。 -->
+                    <span v-if="nodeServer(r)" class="kv">机器 <b>{{ nodeServer(r) }}</b></span>
                   </div>
                   <div v-if="(r.group_ids || []).length > 1" class="lc-meta"><span class="kv">分组 <b>{{ groupNames(r.group_ids) }}</b></span></div>
                   <div v-if="chainSummary(r)" class="lc-chain" :class="{ warn: chainSummary(r)!.broken }">
@@ -373,6 +376,21 @@ const chainSummaries = computed(() => {
   return out
 })
 function chainSummary(n: any) { return chainSummaries.value.get(n.id) || null }
+
+// 节点落在哪台机器上——卡片上原先完全看不到这件事。链路摘要只在有中转/出口时才
+// 出现，而直连节点（最常见的那种）因此一个字都不显示，要知道它在哪台机跑得先去
+// sing-box 页翻入站。自建节点由入站的 server_id 决定；外部节点不在我们的机器上，
+// 入站找不到时更无从谈起，两种情况都返回 null 由模板决定怎么说。
+// 与 chainSummaries 同样预先算好：模板里要读多次，不该每次渲染都重查一遍入站。
+const nodeServers = computed(() => {
+  const out = new Map<number, string>()
+  for (const n of nodes.value) {
+    const ib = inboundOfNode(n)
+    if (ib) out.set(n.id, serverName(ib.server_id))
+  }
+  return out
+})
+function nodeServer(n: any) { return nodeServers.value.get(n.id) || null }
 
 // 确认「原落地已删除、现本机直连」这件事已知晓。只清提示，不动配置。
 const acking = ref<number | null>(null)
