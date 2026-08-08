@@ -159,7 +159,7 @@
     <n-card size="small" class="sec" title="节点列表">
       <template #header-extra>
         <n-space size="small">
-          <n-input v-model:value="search" placeholder="搜索线路 / 地区" size="small" style="width:160px;" clearable />
+          <n-input v-model:value="search" placeholder="搜索节点 / 线路" size="small" style="width:160px;" clearable />
           <n-select v-model:value="protoFilter" :options="protoOptions" placeholder="协议" size="small" style="width:100px;" clearable />
           <n-button size="small" @click="handlePing" :loading="pinging">测速</n-button>
           <n-button size="small" @click="handleToggleAll(true)">全启用</n-button>
@@ -310,8 +310,7 @@ const filteredNodes = computed(() => {
   let list: any[] = nodes.value
   if (search.value) {
     const q = search.value.toLowerCase()
-    // 也匹配链路上的机器名和地区：列表里已经不显示节点名了，只按名字搜等于让人
-    // 照着看不见的字段猜。名字仍然保留在匹配范围内（外部节点只有名字可认）。
+    // 节点名和链路上的机器名/地区都匹配：两列都在眼前，搜哪个都该命中。
     list = list.filter((n: any) => [
       n.name, n.server,
       ...(n.topo?.hops || []).flatMap((h: any) => [h.name, h.location]),
@@ -364,15 +363,15 @@ function hopChip(kind: string, name: string, proto?: string, loc?: string) {
   ])
 }
 
-// 「哪台机器 → 哪台机器」，不写节点名：名字是管理员起的标签，看不出流量实际怎么
-// 走；机器 + 协议才看得出来。节点名退到 title 里，仍然能对上号。
+// 「哪台机器 → 哪台机器」。这一栏只画路径，不重复节点名——名字在左边独立一列，
+// 因为它是唯一能和客户端里那条订阅对上号的标识，路径本身回答的是另一个问题
+// （流量实际怎么走），两件事各占一列比挤在一起清楚。
 function renderTopo(r: any) {
   const kids: any[] = []
   const hops = r.topo?.hops || []
   if (!hops.length) {
-    // 外部导入的分享链接：这条链路不在我们手里，除了它自己什么都不知道，
-    // 此时节点名是唯一能区分两个外部节点的东西，只好用它。
-    kids.push(hopChip('ext', r.name || '外部节点', r.protocol))
+    // 外部导入的分享链接：这条链路不在我们手里，除了它自己什么都不知道。
+    kids.push(hopChip('ext', '外部节点', r.protocol))
   } else {
     hops.forEach((hp: any, i: number) => {
       if (i) kids.push(h('span', { class: 'qz-arrow' }, hp.kind === 'egress' ? '⇢ 出口 ⇢' : '⇢ 中转 ⇢'))
@@ -393,6 +392,10 @@ function renderTopo(r: any) {
 
 const nodeCols = [
   { type: 'selection' as const },
+  // 节点名单独一列而不是塞进线路里：客户端（Clash / v2rayN）节点选择器上显示的就是
+  // 这个名字，没有它就对不上「我现在连的是哪条」。宽度写死 + 省略号，免得长名字
+  // 把右边的线路挤没。
+  { title: '节点', key: 'name', width: 132, ellipsis: { tooltip: true } },
   { title: '线路', key: 'topo', render: renderTopo },
   {
     title: '延迟', key: 'latency', width: 70,
