@@ -534,6 +534,99 @@ func (s *Store) ListBuckets(userID int64) ([]*Bucket, error) {
 	return out, rows.Err()
 }
 
+// ListBucketsBulk returns the buckets of several users in one query, keyed by
+// user id. The admin user list needs every user's buckets to roll up traffic
+// correctly (the users.* columns are a naive sum — see AdminUserTraffic), and
+// one ListBuckets per row would be a query per user.
+func (s *Store) ListBucketsBulk(userIDs []int64) (map[int64][]*Bucket, error) {
+	out := map[int64][]*Bucket{}
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	q := `SELECT ` + bucketCols + ` FROM user_plans WHERE user_id IN (?` +
+		strings.Repeat(`,?`, len(userIDs)-1) + `) ORDER BY user_id, id`
+	args := make([]any, len(userIDs))
+	for i, id := range userIDs {
+		args[i] = id
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		b, err := scanBucket(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[b.UserID] = append(out[b.UserID], b)
+	}
+	return out, rows.Err()
+}
+
+var (
+	// ErrBucketNotFound — no such bucket for that user (wrong id, or already gone).
+	ErrBucketNotFound = errors.New("该套餐不存在")
+	// ErrBucketProtected — the free bucket is the account's unmetered metering
+	// identity, not something the user was granted; removing it would silently
+	// re-route free-group traffic onto the paid pool (the very coupling it exists
+	// to break), so it is not removable.
+	ErrBucketProtected = errors.New("该额度是系统内部计量身份，不能移除")
+)
+
+// DeleteBucket removes one of a user's buckets — an admin pulling back a plan份
+// or the traffic pool. Returns the removed bucket so the caller can report what
+// went.
+//
+// This is a revocation, not a refund: no points are returned and the order row
+// (if any) stays as it was. Refunding is ListOrders → RefundOrder, which reverses
+// exactly one order's entitlement and gives the points back.
+//
+// Removing the active head of a package queue frees the slot, so advanceUserQueues
+// promotes the next queued份 in the same transaction — otherwise a user whose
+// current份 was pulled would sit with a paid-but-invisible份 until the periodic
+// ticker noticed.
+func (s *Store) DeleteBucket(userID, bucketID int64) (*Bucket, error) {
+	now := time.Now().Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	b, err := scanBucket(tx.QueryRow(`SELECT `+bucketCols+` FROM user_plans WHERE id=? AND user_id=?`, bucketID, userID))
+	if err != nil {
+		return nil, err
+	}
+	if b == nil {
+		return nil, ErrBucketNotFound
+	}
+	if b.Kind == KindFree {
+		return nil, ErrBucketProtected
+	}
+	if _, err := tx.Exec(`DELETE FROM user_plans WHERE id=? AND user_id=?`, bucketID, userID); err != nil {
+		return nil, err
+	}
+	if _, err := advanceUserQueues(tx, userID, now); err != nil {
+		return nil, err
+	}
+	// advanceUserQueues only recomputes when it promoted something; the deletion
+	// itself always changes the aggregate, so recompute unconditionally.
+	if _, _, _, _, err := recomputeUserAggregate(tx, userID, now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
+	return b, nil
+}
+
 // BucketByClientName resolves a sing-box stats identity to its bucket.
 func (s *Store) BucketByClientName(name string) (*Bucket, error) {
 	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+` FROM user_plans WHERE client_name=?`, name))

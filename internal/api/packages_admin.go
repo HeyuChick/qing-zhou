@@ -307,6 +307,43 @@ func (a *API) handleAdminUserPlans(w http.ResponseWriter, r *http.Request) {
 	ok(w, buildPlanViews(buckets, pkgNames))
 }
 
+// DELETE /api/admin/users/{id}/plans/{planID} — revoke one of a user's份.
+//
+// Deliberately NOT a refund: the points stay spent and the order row keeps its
+// 'success' status, because this is the "take this back" action (mis-assignment,
+// abuse, a comp that shouldn't have gone out), not the "undo this purchase" one.
+// Refunding is POST /api/admin/orders/{id}/refund, which returns points and
+// reverses exactly that order. The UI says which is which at the confirm step.
+func (a *API) handleAdminDeleteUserPlan(w http.ResponseWriter, r *http.Request) {
+	uid := atoi(chi.URLParam(r, "id"))
+	pid := atoi(chi.URLParam(r, "planID"))
+	if uid <= 0 || pid <= 0 {
+		fail(w, http.StatusBadRequest, "无效的参数")
+		return
+	}
+	if !a.st.UserExists(uid) {
+		fail(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	b, err := a.st.DeleteBucket(uid, pid)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrBucketNotFound):
+			fail(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, store.ErrBucketProtected):
+			fail(w, http.StatusBadRequest, err.Error())
+		default:
+			fail(w, http.StatusInternalServerError, "移除失败")
+		}
+		return
+	}
+	// The removed bucket carried its own node credentials, so any cached link list
+	// still advertises an identity the config is about to drop.
+	a.invalidateLinks(uid)
+	a.sbRebuildLog()
+	ok(w, J{"deleted": pid, "name": b.Name, "kind": b.Kind})
+}
+
 // DELETE /api/admin/orders/{id} — purge an order record. Only allowed for
 // orphaned orders (the user has been deleted); active users' orders should be
 // refunded, not silently dropped.

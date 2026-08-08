@@ -508,6 +508,12 @@ type planView struct {
 	// activate sooner if the head's traffic runs out first. 0 = unknown (the head
 	// has no expiry, so only exhaustion triggers the next). Only set for queued.
 	ActivateBy int64 `json:"activate_by,omitempty"`
+	// CreatedAt is when this份 was granted, and OrderID the purchase it came from
+	// (0 = no order: signup grant, admin grant, admin assignment). The admin panel
+	// orders份 of the same package by these and uses OrderID to point at the
+	// refund action, which is a different thing from removing the份.
+	CreatedAt int64 `json:"created_at"`
+	OrderID   int64 `json:"order_id"`
 }
 
 // queueActivations estimates, for each queued plan bucket, the LATEST time it
@@ -648,7 +654,7 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 			}
 		}
 		pv := planView{ID: b.ID, Kind: b.Kind, PackageID: b.PackageID, Name: name, TrafficLimit: b.TrafficLimit,
-			Used: b.Used(), ExpiryAt: b.ExpiryAt, Remaining: -1}
+			Used: b.Used(), ExpiryAt: b.ExpiryAt, Remaining: -1, CreatedAt: b.CreatedAt, OrderID: b.OrderID}
 		if b.TrafficLimit > 0 {
 			if rem := b.TrafficLimit - b.Used(); rem > 0 {
 				pv.Remaining = rem

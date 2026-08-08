@@ -40,17 +40,70 @@ func (a *API) handleAdminRebuild(w http.ResponseWriter, r *http.Request) {
 	ok(w, J{"total": len(users), "synced": len(users), "disabled_no_access": disabled})
 }
 
-// adminUserViewWithGroups renders a user for the admin UI. group_ids is always
-// present (never null) so the frontend can bind it to a multi-select without a
-// null guard. There is deliberately no group-less variant: one that passed nil
-// would report "this user is in no groups", which is a claim, not a default.
-func adminUserViewWithGroups(u *store.User, groupIDs []int64) J {
+// adminPlanRollup is the per-user plan/traffic summary the user list shows, so an
+// admin can read a row's real entitlement without opening the detail panel.
+type adminPlanRollup struct {
+	Active      int      `json:"active"`
+	Queued      int      `json:"queued"`
+	Finished    int      `json:"finished"` // expired or exhausted — held, but not usable
+	ActiveNames []string `json:"active_names"`
+	// NextExpiryAt is the soonest expiry among the usable份 (0 = none of them
+	// expires). users.expiry_at is a MAX over every plan bucket, so it points at
+	// the份 that lasts longest — the opposite of what "when does this user need to
+	// renew" means once several份 coexist.
+	NextExpiryAt int64 `json:"next_expiry_at"`
+	// The traffic pool ("流量包") is reported on its own: it is a top-up balance
+	// scoped across the user's groups, not a package with a name and a window,
+	// and folding it into the plan counts makes both numbers unreadable.
+	PoolLimit int64 `json:"pool_limit"`
+	PoolUsed  int64 `json:"pool_used"`
+}
+
+// adminPlanRollupOf summarises a user's buckets. The free bucket is skipped for
+// the same reason buildPlanViews skips it — it is an internal metering identity,
+// not a份 anyone was granted.
+func adminPlanRollupOf(buckets []*store.Bucket) adminPlanRollup {
+	var s adminPlanRollup
+	s.ActiveNames = []string{}
+	now := time.Now().Unix()
+	for _, b := range buckets {
+		switch {
+		case b.Kind == store.KindFree:
+			continue
+		case b.Kind == "pool":
+			s.PoolLimit += b.TrafficLimit
+			s.PoolUsed += b.Used()
+			continue
+		case b.Status == "queued":
+			s.Queued++
+		case !b.NotExpired(now) || !b.HasQuota():
+			s.Finished++
+		default:
+			s.Active++
+			s.ActiveNames = append(s.ActiveNames, b.Name)
+			if b.ExpiryAt > 0 && (s.NextExpiryAt == 0 || b.ExpiryAt < s.NextExpiryAt) {
+				s.NextExpiryAt = b.ExpiryAt
+			}
+		}
+	}
+	return s
+}
+
+// adminUserView renders a user for the admin UI. group_ids is always present
+// (never null) so the frontend can bind it to a multi-select without a null
+// guard. There is deliberately no group-less variant: one that passed nil would
+// report "this user is in no groups", which is a claim, not a default.
+//
+// buckets are the user's metering buckets, used for the traffic roll-up. Pass
+// nil only when they genuinely could not be read — the view then omits `traffic`
+// rather than reporting a zero the caller would render as "0 B / 0 B".
+func adminUserView(u *store.User, groupIDs []int64, buckets []*store.Bucket) J {
 	if groupIDs == nil {
 		groupIDs = []int64{}
 	}
 	// online is computed here rather than in the frontend so the whole panel
 	// shares one definition of the window (see onlineWindow in stats.go).
-	return J{
+	v := J{
 		"id":             u.ID,
 		"username":       u.Username,
 		"email":          nsOr(u.Email),
@@ -58,6 +111,10 @@ func adminUserViewWithGroups(u *store.User, groupIDs []int64) J {
 		"status":         u.Status,
 		"email_verified": u.EmailVerified,
 		"points":         u.Points,
+		// used / traffic_limit are the legacy users.* mirror: a flat sum over every
+		// bucket, including queued份 the user cannot spend yet and expired份 that
+		// hand out nothing — which is why they must not be rendered as a ratio.
+		// Kept for older clients; new UI reads `traffic` below.
 		"used":           u.UsedUp + u.UsedDown,
 		"traffic_limit":  u.TrafficLimit,
 		"expiry_at":      u.ExpiryAt,
@@ -67,13 +124,40 @@ func adminUserViewWithGroups(u *store.User, groupIDs []int64) J {
 		"online":         u.LastOnlineAt > 0 && time.Now().Unix()-u.LastOnlineAt <= onlineWindow,
 		"group_ids":      groupIDs,
 	}
+	if buckets != nil {
+		// Same roll-up the user's own dashboard shows, so the admin and the user
+		// are looking at one number and not two definitions of "流量".
+		tr := dashboardTraffic(buckets)
+		var freeUsed int64
+		for _, b := range buckets {
+			if b.Kind == store.KindFree {
+				freeUsed += b.Used()
+			}
+		}
+		v["traffic"] = J{
+			"used":      tr.Used,
+			"total":     tr.Total, // 0 = no metered quota; read `unlimited` to tell which
+			"remaining": tr.Remaining,
+			"unlimited": tr.Unlimited,
+			// Usage on uncapped份 and on the free group is real, it just cannot be
+			// part of any percentage. Reported beside the ratio, never inside it.
+			"unmetered_used": tr.UnmeteredUsed,
+			"free_used":      freeUsed,
+		}
+		v["plan_summary"] = adminPlanRollupOf(buckets)
+	}
+	return v
 }
 
 // adminUserViewLoadGroups builds the view for a single user, fetching their
-// groups. Use the bulk path for lists.
+// groups and buckets. Use the bulk path for lists.
 func (a *API) adminUserViewLoadGroups(u *store.User) J {
 	gids, _ := a.st.UserGroupIDs(u.ID)
-	return adminUserViewWithGroups(u, gids)
+	buckets, err := a.st.ListBuckets(u.ID)
+	if err != nil {
+		buckets = nil
+	}
+	return adminUserView(u, gids, buckets)
 }
 
 // POST /api/admin/users — admin creates a user directly (no registration gate,
@@ -337,9 +421,20 @@ func (a *API) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "读取用户组失败")
 		return
 	}
+	buckets, err := a.st.ListBucketsBulk(ids) // likewise: one query for the whole page
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "读取套餐失败")
+		return
+	}
 	out := make([]J, 0, len(users))
 	for _, u := range users {
-		out = append(out, adminUserViewWithGroups(u, groups[u.ID]))
+		// A user with no buckets still gets a (zero) roll-up: "holds nothing" is a
+		// fact here, unlike the read-failure case adminUserView guards with nil.
+		bs := buckets[u.ID]
+		if bs == nil {
+			bs = []*store.Bucket{}
+		}
+		out = append(out, adminUserView(u, groups[u.ID], bs))
 	}
 	ok(w, out)
 }
