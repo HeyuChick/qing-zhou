@@ -1098,14 +1098,15 @@ func pickOwner(ord []ownedBucket, ibGroups []int64, groupCount int) *Bucket {
 	return nil
 }
 
-// UserOwnedInbounds maps each enabled self-built inbound tag to the bucket that
-// currently owns it for this user (its credentials + remaining quota drive the
-// subscription link), or omits it when the user has no active bucket covering
-// it. Mirrors BuildUsersByTag's assignment for one user.
-func (s *Store) UserOwnedInbounds(userID, now int64) (map[string]*Bucket, error) {
+// userBucketOrder builds this user's priority-ordered active buckets along with
+// the configured node-group count, the two inputs pickOwner needs. Split out so
+// the tag-keyed and group-keyed owner lookups below can't drift apart — they
+// must agree on who owns what, or a node would be listed under one plan and
+// billed to another.
+func (s *Store) userBucketOrder(userID, now int64) ([]ownedBucket, int, error) {
 	buckets, err := s.ListBuckets(userID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	freeGroup, _ := s.GetSettingInt64("free_group_id", 0)
 	groupCount, _ := s.GroupCount()
@@ -1118,6 +1119,47 @@ func (s *Store) UserOwnedInbounds(userID, now int64) (map[string]*Bucket, error)
 		planGroupsCache[pkgID] = g
 		return g
 	})
+	return ord, groupCount, nil
+}
+
+// UserGroupOwners maps each node group to the bucket that grants this user
+// access to it. Same assignment as UserOwnedInbounds, keyed by group instead of
+// inbound tag — external nodes carry a group id but no inbound tag, so they have
+// nothing to join on there. Key 0 additionally holds the zero-config owner (no
+// groups configured at all, so every node falls to the first bucket).
+func (s *Store) UserGroupOwners(userID, now int64) (map[int64]*Bucket, error) {
+	ord, groupCount, err := s.userBucketOrder(userID, now)
+	if err != nil {
+		return nil, err
+	}
+	out := map[int64]*Bucket{}
+	if groupCount == 0 {
+		if b := pickOwner(ord, nil, 0); b != nil {
+			out[0] = b
+		}
+		return out, nil
+	}
+	groups, err := s.ListGroups()
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range groups {
+		if b := pickOwner(ord, []int64{g.ID}, groupCount); b != nil {
+			out[g.ID] = b
+		}
+	}
+	return out, nil
+}
+
+// UserOwnedInbounds maps each enabled self-built inbound tag to the bucket that
+// currently owns it for this user (its credentials + remaining quota drive the
+// subscription link), or omits it when the user has no active bucket covering
+// it. Mirrors BuildUsersByTag's assignment for one user.
+func (s *Store) UserOwnedInbounds(userID, now int64) (map[string]*Bucket, error) {
+	ord, groupCount, err := s.userBucketOrder(userID, now)
+	if err != nil {
+		return nil, err
+	}
 	inbounds, err := s.ListSbInbounds()
 	if err != nil {
 		return nil, err

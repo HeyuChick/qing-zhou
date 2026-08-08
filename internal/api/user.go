@@ -814,6 +814,10 @@ type nodeEntry struct {
 	Link      string
 	GroupID   int64
 	GroupName string
+	// Tag is the sing-box inbound tag for a self-built node, "" for an external
+	// (imported share-link) one. It is the join key to the inbound row, and so to
+	// the relay/egress chain behind the node.
+	Tag string
 }
 
 // computeNodeEntries builds the user's nodes with group attribution: external
@@ -823,10 +827,10 @@ type nodeEntry struct {
 func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	var out []nodeEntry
 	seen := map[string]bool{}
-	add := func(l string, gid int64, gname string) {
+	add := func(l string, gid int64, gname, tag string) {
 		if l != "" && !seen[l] {
 			seen[l] = true
-			out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname})
+			out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname, Tag: tag})
 		}
 	}
 
@@ -838,7 +842,7 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 		// convenience). Once any group exists, "unassigned" means "no nodes".
 		if n, _ := a.st.GroupCount(); n == 0 {
 			for _, l := range a.selfBuiltLinks(u) {
-				add(l.Link, 0, "")
+				add(l.Link, 0, "", l.Tag)
 			}
 		}
 		return out
@@ -856,7 +860,7 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	for _, n := range nodes {
 		switch n.Type {
 		case "external":
-			add(n.ShareLink, n.GroupID, gname[n.GroupID])
+			add(n.ShareLink, n.GroupID, gname[n.GroupID], "")
 		case "self_built":
 			if n.InboundTag != "" {
 				tagGroup[n.InboundTag] = n.GroupID
@@ -866,7 +870,7 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	if len(tagGroup) > 0 {
 		for _, l := range a.selfBuiltLinks(u) {
 			if gid, ok := tagGroup[l.Tag]; ok {
-				add(l.Link, gid, gname[gid])
+				add(l.Link, gid, gname[gid], l.Tag)
 			}
 		}
 	}

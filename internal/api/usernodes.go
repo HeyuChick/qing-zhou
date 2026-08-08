@@ -57,6 +57,8 @@ func (a *API) handleUserNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	entries := a.computeNodeEntries(u)
 	disabled, _ := a.st.DisabledNodeKeys(u.ID)
+	ix := a.newTopoIndex()
+	plansOf := a.planGrants(u)
 	out := make([]J, 0, len(entries))
 	for _, e := range entries {
 		p, err := subconv.ParseLink(e.Link)
@@ -65,8 +67,13 @@ func (a *API) handleUserNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		// The key handed to the client is always the current one, so a toggle
 		// round-trip rewrites a legacy row under the new key.
-		out = append(out, J{"name": p.Name, "protocol": p.Protocol, "server": p.Server, "port": p.Port,
-			"key": subconv.NodeKey(e.Link), "disabled": subconv.NodeDisabled(disabled, e.Link), "group": e.GroupName})
+		row := J{"name": p.Name, "protocol": p.Protocol, "server": p.Server, "port": p.Port,
+			"key": subconv.NodeKey(e.Link), "disabled": subconv.NodeDisabled(disabled, e.Link), "group": e.GroupName,
+			"plans": plansOf(e)}
+		if t := ix.topoFor(e.Tag); t != nil {
+			row["topo"] = t
+		}
+		out = append(out, row)
 	}
 	ok(w, out)
 }

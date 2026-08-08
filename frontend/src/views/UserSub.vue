@@ -61,16 +61,21 @@
       <template #header-extra>
         <span v-if="hasQueued" style="font-size:11.5px;color:var(--text-3);">重复购买自动排队，一次只用一份</span>
       </template>
-      <div v-for="p in sortedPlans" :key="p.id" class="plan-row" :class="{ queued: p.status === 'queued' }">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <span style="font-weight:600;">{{ p.name || '套餐 #' + p.id }}</span>
-          <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
-        </div>
-        <n-progress v-if="p.status !== 'queued'" type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
-        <div v-else style="height:6px;border-radius:3px;background:repeating-linear-gradient(45deg,var(--border),var(--border) 4px,transparent 4px,transparent 8px);"></div>
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;gap:8px;">
-          <span>{{ p.status === 'queued' ? '待用流量 ' + (p.traffic_limit>0 ? fmtTotal(p.traffic_limit) : '不限') : '剩余 ' + (p.remaining < 0 ? '不限' : fmtBytes(p.remaining)) + '（' + fmtBytes(p.used) + ' / ' + fmtTotal(p.traffic_limit) + '）' }}</span>
-          <span style="white-space:nowrap;">{{ planTime(p) }}</span>
+      <!-- 网格而非纵向平铺：每份套餐的信息量固定（一条进度 + 两行小字），窄卡片
+           完全放得下，多份并存时横向排开比一路往下堆省掉大半屏高度。
+           auto-fill + minmax 让它在窄屏自动退回单列，不用另写断点。 -->
+      <div class="plan-grid">
+        <div v-for="p in sortedPlans" :key="p.id" class="plan-row" :class="{ queued: p.status === 'queued' }">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px;">
+            <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ p.name || '套餐 #' + p.id }}</span>
+            <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
+          </div>
+          <n-progress v-if="p.status !== 'queued'" type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
+          <div v-else style="height:6px;border-radius:3px;background:repeating-linear-gradient(45deg,var(--border),var(--border) 4px,transparent 4px,transparent 8px);"></div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;gap:8px;">
+            <span>{{ p.status === 'queued' ? '待用流量 ' + (p.traffic_limit>0 ? fmtTotal(p.traffic_limit) : '不限') : '剩余 ' + (p.remaining < 0 ? '不限' : fmtBytes(p.remaining)) + '（' + fmtBytes(p.used) + ' / ' + fmtTotal(p.traffic_limit) + '）' }}</span>
+            <span style="white-space:nowrap;">{{ planTime(p) }}</span>
+          </div>
         </div>
       </div>
     </n-card>
@@ -78,23 +83,52 @@
     <!-- HTTP/SOCKS5 代理（mixed 节点，不在订阅里，单独复制填入 1Panel/Docker 等） -->
     <n-card v-if="proxies.length" size="small" class="sec" title="HTTP / SOCKS5 代理">
       <template #header-extra><span style="font-size:11px;color:var(--text-3);">可填入 1Panel、Docker、git 等只认 HTTP/SOCKS 代理的地方</span></template>
+      <!-- 默认只留一行：节点 + 地址:端口 + 复制链接。原先六行「标签 + 只读输入框 +
+           复制」每个代理就吃掉大半屏，而有了整串 URL，逐字段复制只在 1Panel 这类
+           分字段表单里才需要——那是少数情况，收进「详情」里按需展开。 -->
       <div v-for="p in proxies" :key="p.tag" class="proxy-row">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;">
-          <span style="font-weight:600;">{{ p.tag }}</span>
-          <div style="display:flex;align-items:center;gap:6px;">
-            <n-tag v-if="p.expired" type="error" size="small" bordered>已过期</n-tag>
-            <n-tag :type="p.tls?'success':'warning'" size="small" bordered>{{ p.tls ? 'HTTPS 代理' : 'HTTP / SOCKS5' }}</n-tag>
+        <div class="px-head">
+          <span class="px-name">{{ p.tag }}</span>
+          <n-tag v-if="p.expired" type="error" size="small" bordered>已过期</n-tag>
+          <n-tag :type="p.tls?'success':'warning'" size="small" bordered>{{ p.tls ? 'HTTPS' : 'HTTP / SOCKS5' }}</n-tag>
+          <code class="px-addr">{{ p.host }}:{{ p.port }}</code>
+          <!-- 一键复制成 scheme://user:pass@host:port —— 大多数工具（git、docker、
+               curl、各类 SDK 的 HTTPS_PROXY）只认这一种整串形式。
+               只给按钮不显示明文：URL 里带着密码，直接铺在页面上就把详情里那个
+               掩码输入框的意义抵消了。
+               按钮自成一组：直接摊在 px-head 里的话，窄屏换行会把它们拆散到两行的
+               两端（第一行末尾一个、第二行开头一个），整组一起换行才读得出是一组。 -->
+          <div class="px-actions">
+            <!-- 标签不带「链接」二字：窄屏上这一行本来就要换行，少几个字就少一行，
+                 而卡片标题 + 下方说明已经交代了复制到手的是整串 URL。 -->
+            <template v-if="p.tls">
+              <n-button size="tiny" type="primary" secondary @click="copy(proxyUrl(p, 'https'))">复制 HTTPS</n-button>
+            </template>
+            <template v-else>
+              <n-button size="tiny" type="primary" secondary @click="copy(proxyUrl(p, 'http'))">复制 HTTP</n-button>
+              <n-button size="tiny" type="primary" secondary @click="copy(proxyUrl(p, 'socks5'))">复制 SOCKS5</n-button>
+            </template>
+            <n-button size="tiny" quaternary @click="toggleProxyDetail(p.tag)">
+              {{ expandedProxies.includes(p.tag) ? '收起' : '详情' }}
+            </n-button>
+          </div>
+        </div>
+        <!-- 默认账号是个待办事项，不该只在展开后才看得见 -->
+        <div v-if="!p.custom" class="px-hint">系统默认账号，建议点「详情 → 编辑账号」自设</div>
+        <div v-if="expandedProxies.includes(p.tag)" class="px-detail">
+          <div class="pxrow"><span class="pxk">类型</span><span style="font-size:13px;">{{ p.tls ? 'HTTPS' : 'HTTP / SOCKS5' }}</span></div>
+          <div class="pxrow"><span class="pxk">地址</span><div class="pxv"><n-input-group><n-input :value="p.host" readonly size="small" /><n-button size="small" @click="copy(p.host)">复制</n-button></n-input-group></div></div>
+          <div class="pxrow"><span class="pxk">端口</span><div class="pxv"><n-input-group><n-input :value="String(p.port)" readonly size="small" /><n-button size="small" @click="copy(String(p.port))">复制</n-button></n-input-group></div></div>
+          <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="p.username" readonly size="small" /><n-button size="small" @click="copy(p.username)">复制</n-button></n-input-group></div></div>
+          <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="p.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(p.password)">复制</n-button></n-input-group></div></div>
+          <div class="pxrow">
+            <span class="pxk">有效期</span>
+            <span style="font-size:12px;color:var(--text-2);flex:1;">{{ p.expires_at ? fmtDate(p.expires_at) : '永久' }}</span>
             <n-button size="tiny" @click="openEditProxy(p)">编辑账号</n-button>
           </div>
         </div>
-        <div class="pxrow"><span class="pxk">类型</span><span style="font-size:13px;">{{ p.tls ? 'HTTPS' : 'HTTP / SOCKS5' }}</span></div>
-        <div class="pxrow"><span class="pxk">地址</span><div class="pxv"><n-input-group><n-input :value="p.host" readonly size="small" /><n-button size="small" @click="copy(p.host)">复制</n-button></n-input-group></div></div>
-        <div class="pxrow"><span class="pxk">端口</span><div class="pxv"><n-input-group><n-input :value="String(p.port)" readonly size="small" /><n-button size="small" @click="copy(String(p.port))">复制</n-button></n-input-group></div></div>
-        <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="p.username" readonly size="small" /><n-button size="small" @click="copy(p.username)">复制</n-button></n-input-group></div></div>
-        <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="p.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(p.password)">复制</n-button></n-input-group></div></div>
-        <div class="pxrow"><span class="pxk">有效期</span><span style="font-size:12px;color:var(--text-2);">{{ p.expires_at ? fmtDate(p.expires_at) : '永久' }}<span v-if="!p.custom" style="color:var(--text-3);"> · 系统默认账号，建议点「编辑账号」自设</span></span></div>
       </div>
-      <div style="font-size:11px;color:var(--text-3);">在 1Panel「代理服务器」里：代理类型选 <b>HTTP</b> 或 <b>SOCKS5</b>（显示「HTTPS 代理」则选 <b>HTTPS</b>），地址 / 端口 / 用户名 / 密码 按上面填。</div>
+      <div style="font-size:11px;color:var(--text-3);margin-top:10px;">命令行 / Docker / git 等直接点「复制 HTTP」「复制 SOCKS5」，拿到的是 <code>scheme://用户名:密码@地址:端口</code> 整串。1Panel 这类分字段的表单展开「详情」逐项复制：代理类型选 <b>HTTP</b> 或 <b>SOCKS5</b>（标着 <b>HTTPS</b> 的节点则选 HTTPS）。</div>
     </n-card>
 
     <!-- 编辑代理账号 -->
@@ -125,20 +159,35 @@
     <n-card size="small" class="sec" title="节点列表">
       <template #header-extra>
         <n-space size="small">
-          <n-input v-model:value="search" placeholder="搜索节点" size="small" style="width:160px;" clearable />
+          <n-input v-model:value="search" placeholder="搜索线路 / 地区" size="small" style="width:160px;" clearable />
           <n-select v-model:value="protoFilter" :options="protoOptions" placeholder="协议" size="small" style="width:100px;" clearable />
           <n-button size="small" @click="handlePing" :loading="pinging">测速</n-button>
           <n-button size="small" @click="handleToggleAll(true)">全启用</n-button>
           <n-button size="small" @click="handleToggleAll(false)">全禁用</n-button>
         </n-space>
       </template>
-      <n-data-table :columns="nodeCols" :data="filteredNodes" :bordered="false" size="small" :loading="loadingNodes" :pagination="{pageSize:20}" :row-key="(r:any)=>r.key" v-model:checked-row-keys="selectedKeys" />
+      <!-- 按套餐分节：一个节点归哪份套餐，决定的是它走谁的流量和有效期，所以这条
+           归属线才是节点列表真正的分组依据（后端 plan_id 就是计费用的那个桶）。 -->
+      <div v-for="g in nodeGroups" :key="g.planId" class="ngrp">
+        <div class="ngrp-head">
+          <span class="ngrp-name">{{ g.planName }}</span>
+          <span class="ngrp-meta">{{ g.nodes.length }} 个节点<template v-if="g.offCount"> · {{ g.offCount }} 个禁用</template></span>
+          <span style="flex:1;"></span>
+          <n-button size="tiny" quaternary @click="handlePlanToggle(g, true)">全启用</n-button>
+          <n-button size="tiny" quaternary @click="handlePlanToggle(g, false)">全禁用</n-button>
+        </div>
+        <n-data-table :columns="nodeCols" :data="g.nodes" :bordered="false" size="small"
+                      :pagination="g.nodes.length > 20 ? { pageSize: 20 } : false" :row-key="(r:any)=>r.key"
+                      :checked-row-keys="selectedByPlan[g.planId] || []"
+                      @update:checked-row-keys="(k:any) => selectedByPlan[g.planId] = k" />
+      </div>
+      <n-empty v-if="!loadingNodes && !nodeGroups.length" :description="nodes.length ? '没有匹配的节点' : '暂无节点'" style="padding:28px 0;" />
       <div v-if="selectedKeys.length" style="margin-top:10px;display:flex;gap:8px;align-items:center;">
         <span style="font-size:12px;color:var(--text-3);">已选 {{ selectedKeys.length }} 个</span>
         <n-button size="small" type="primary" @click="handleBulk(true)">批量启用</n-button>
         <n-button size="small" type="error" @click="handleBulk(false)">批量禁用</n-button>
       </div>
-      <div style="margin-top:8px;font-size:11px;color:var(--text-3);">共 {{ nodes.length }} 个节点，{{ filteredNodes.length }} 个匹配，{{ nodes.filter((n:any)=>n.disabled).length }} 个禁用</div>
+      <div style="margin-top:8px;font-size:11px;color:var(--text-3);">共 {{ nodes.length }} 个节点，{{ filteredNodes.length }} 个匹配，{{ nodes.filter((n:any)=>n.disabled).length }} 个禁用。线路一栏从左到右是客户端实际走的路径：入口机 → 中转机 → 出网。</div>
     </n-card>
   </div>
 </template>
@@ -185,6 +234,24 @@ const showEditProxy = ref(false)
 const savingProxy = ref(false)
 const editForm = ref<any>({ bucket_id: 0, tag: '', username: '', password: '', permanent: true, expireTs: null as number | null })
 
+// 展开的代理（按 tag 记）。默认全收起——常用路径是复制整串 URL，逐字段只是备用。
+const expandedProxies = ref<string[]>([])
+function toggleProxyDetail(tag: string) {
+  const i = expandedProxies.value.indexOf(tag)
+  if (i >= 0) expandedProxies.value.splice(i, 1)
+  else expandedProxies.value.push(tag)
+}
+
+// proxyUrl 拼出 scheme://user:pass@host:port。
+// - 用户名/密码走 encodeURIComponent：密码是用户自设的任意 6-128 位，里面出现
+//   @ : / # ? 都会把 URL 解析歪，必须转义。
+// - host 若是裸 IPv6（含 :）要加方括号，否则冒号会被当成端口分隔符。
+function proxyUrl(p: any, scheme: string) {
+  const host = p.host?.includes(':') && !p.host.startsWith('[') ? `[${p.host}]` : p.host
+  const cred = p.username ? `${encodeURIComponent(p.username)}:${encodeURIComponent(p.password || '')}@` : ''
+  return `${scheme}://${cred}${host}:${p.port}`
+}
+
 function openEditProxy(p: any) {
   editForm.value = {
     bucket_id: p.bucket_id,
@@ -226,7 +293,11 @@ const showQr = ref(false)
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 const search = ref('')
 const protoFilter = ref<string | null>(null)
-const selectedKeys = ref<string[]>([])
+// 每个套餐一张表，勾选状态也得一张表一份：几张表共用一个 ref 时，任何一张表的
+// update 事件都会把自己那份完整勾选列表写回去，等于清空其他表的选择。
+const selectedByPlan = ref<Record<string, string[]>>({})
+// 去重：一条线路可以同时属于两份套餐，两个分组里都勾上就会出现两次同一个 key。
+const selectedKeys = computed<string[]>(() => [...new Set(Object.values(selectedByPlan.value).flat())])
 const loadingNodes = ref(false)
 const pinging = ref(false)
 
@@ -239,10 +310,42 @@ const filteredNodes = computed(() => {
   let list: any[] = nodes.value
   if (search.value) {
     const q = search.value.toLowerCase()
-    list = list.filter((n: any) => n.name?.toLowerCase().includes(q) || n.server?.toLowerCase().includes(q))
+    // 也匹配链路上的机器名和地区：列表里已经不显示节点名了，只按名字搜等于让人
+    // 照着看不见的字段猜。名字仍然保留在匹配范围内（外部节点只有名字可认）。
+    list = list.filter((n: any) => [
+      n.name, n.server,
+      ...(n.topo?.hops || []).flatMap((h: any) => [h.name, h.location]),
+    ].some((s: any) => s?.toLowerCase().includes(q)))
   }
   if (protoFilter.value) list = list.filter((n: any) => n.protocol === protoFilter.value)
   return list
+})
+
+// 分组顺序跟着「我的套餐」卡片走（使用中在前、排队在后），两处对同一份套餐的排序
+// 一致，滚上去核对时不用重新找。套餐列表里没有的归属（免费线路）排在最后。
+//
+// 后端给的是「哪几份套餐能用这条线路」，一条线路可能被两份套餐同时覆盖，那它就在
+// 两个分组里各出现一次——这是事实，不是重复。节点对象是同一个引用，所以在任一处
+// 开关，另一处的状态跟着变。
+const nodeGroups = computed(() => {
+  const order = new Map<string, number>()
+  sortedPlans.value.forEach((p, i) => order.set(String(p.id), i))
+  const byPlan = new Map<string, any>()
+  for (const n of filteredNodes.value) {
+    const refs = n.plans?.length ? n.plans : [{ id: 0, name: '未归属套餐' }]
+    for (const ref of refs) {
+      const id = String(ref.id)
+      let g = byPlan.get(id)
+      if (!g) {
+        g = { planId: id, planName: ref.name, nodes: [] as any[], offCount: 0 }
+        byPlan.set(id, g)
+      }
+      g.nodes.push(n)
+      if (n.disabled) g.offCount++
+    }
+  }
+  return [...byPlan.values()].sort((a, b) =>
+    (order.get(a.planId) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.planId) ?? Number.MAX_SAFE_INTEGER))
 })
 
 function latencyColor(ms: number) {
@@ -252,10 +355,45 @@ function latencyColor(ms: number) {
   return '#ef4444'
 }
 
+// 一段链路的胶囊。这些 vnode 由 n-data-table 渲染，拿不到本组件 scoped 样式的
+// 属性标记，所以类名走文件末尾那个非 scoped 的 style 块。
+function hopChip(kind: string, name: string, proto?: string, loc?: string) {
+  return h('span', { class: 'qz-hop qz-hop-' + kind, title: loc || undefined }, [
+    h('b', null, name),
+    proto ? h('span', { class: 'qz-hop-proto' }, proto.toUpperCase()) : null,
+  ])
+}
+
+// 「哪台机器 → 哪台机器」，不写节点名：名字是管理员起的标签，看不出流量实际怎么
+// 走；机器 + 协议才看得出来。节点名退到 title 里，仍然能对上号。
+function renderTopo(r: any) {
+  const kids: any[] = []
+  const hops = r.topo?.hops || []
+  if (!hops.length) {
+    // 外部导入的分享链接：这条链路不在我们手里，除了它自己什么都不知道，
+    // 此时节点名是唯一能区分两个外部节点的东西，只好用它。
+    kids.push(hopChip('ext', r.name || '外部节点', r.protocol))
+  } else {
+    hops.forEach((hp: any, i: number) => {
+      if (i) kids.push(h('span', { class: 'qz-arrow' }, hp.kind === 'egress' ? '⇢ 出口 ⇢' : '⇢ 中转 ⇢'))
+      kids.push(hopChip(hp.kind, hp.name, hp.protocol, hp.location))
+    })
+  }
+  // 降级不是细节：落地/出口断了，流量改从上一跳的 IP 出网，出口地址静默变了。
+  // 这段本身就带箭头，末尾不再补一个，免得出现「⇢ … ⇢ →」。
+  if (r.topo?.warn) {
+    kids.push(h('span', { class: 'qz-arrow qz-arrow-warn' },
+      r.topo.warn === 'egress' ? '⇢ 出口已失效 ⇢' : '⇢ 落地已失效 ⇢'))
+  } else {
+    kids.push(h('span', { class: 'qz-arrow' }, '→'))
+  }
+  kids.push(h('span', { class: 'qz-hop qz-hop-inet' }, '🌐 互联网'))
+  return h('div', { class: 'qz-topo', title: r.name || '' }, kids)
+}
+
 const nodeCols = [
   { type: 'selection' as const },
-  { title: '节点', key: 'name', ellipsis: { tooltip: true } },
-  { title: '协议', key: 'protocol', width: 70, render: (r: any) => r.protocol?.toUpperCase() || '—' },
+  { title: '线路', key: 'topo', render: renderTopo },
   {
     title: '延迟', key: 'latency', width: 70,
     render: (r: any) => {
@@ -290,14 +428,28 @@ async function handlePing() {
     message.success('测速完成')
   } catch (e: any) { message.error(e.message) } finally { pinging.value = false }
 }
+// applyBulk 是「一批节点一起开/关」的唯一路径：批量按钮和每个套餐的全启用/全禁用
+// 都走它，避免两处各写一遍本地状态回写。
+async function applyBulk(keys: string[], enable: boolean) {
+  if (!keys.length) return
+  const body = enable ? { enable: keys, disable: [] } : { enable: [], disable: keys }
+  await apiPost('/api/user/nodes/bulk', body)
+  const set = new Set(keys)
+  nodes.value = nodes.value.map((n: any) => set.has(n.key) ? { ...n, disabled: !enable } : n)
+}
 async function handleBulk(enable: boolean) {
   try {
-    const keys = selectedKeys.value
-    const body = enable ? { enable: keys, disable: [] } : { enable: [], disable: keys }
-    await apiPost('/api/user/nodes/bulk', body)
-    nodes.value = nodes.value.map((n: any) => keys.includes(n.key) ? { ...n, disabled: !enable } : n)
-    selectedKeys.value = []
+    await applyBulk(selectedKeys.value, enable)
+    selectedByPlan.value = {}
     message.success(enable ? '已批量启用' : '已批量禁用')
+  } catch (e: any) { message.error(e.message) }
+}
+// 只动这份套餐下的节点——分组之后「全启用」按钮就在分组标题里，它要是仍然扫全部
+// 节点，点下去会连别的套餐一起改，和它所在的位置说的不是一回事。
+async function handlePlanToggle(g: any, enable: boolean) {
+  try {
+    await applyBulk(g.nodes.map((n: any) => n.key), enable)
+    message.success(`「${g.planName}」已全部${enable ? '启用' : '禁用'}`)
   } catch (e: any) { message.error(e.message) }
 }
 async function handleToggleAll(enable: boolean) {
@@ -381,12 +533,46 @@ onMounted(async () => {
 .sub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
 .sec { margin-bottom: 16px; border-radius: var(--r-sm); }
 .sec-title { font-weight: 650; font-size: 14px; }
-.plan-row { margin-bottom: 12px; padding: 12px; background: var(--bg-soft); border-radius: 10px; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.plan-row { padding: 12px; background: var(--bg-soft); border-radius: 10px; min-width: 0; }
 .plan-row.queued { opacity: .72; border: 1px dashed var(--border); background: transparent; }
-.plan-row:last-child { margin-bottom: 0; }
-.proxy-row { margin-bottom: 12px; padding: 12px; background: var(--bg-soft); border-radius: 10px; }
+.proxy-row { margin-bottom: 8px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; }
 .proxy-row:last-child { margin-bottom: 0; }
+/* 一行放不下时按钮整体换行，地址不被挤成省略号 */
+.px-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.px-name { font-weight: 600; }
+.px-addr { font-size: 12px; color: var(--text-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* margin-left:auto 把整组按钮推到右端；宽度不够时它整块换到下一行 */
+.px-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.px-hint { font-size: 11px; color: var(--text-3); margin-top: 6px; }
+.px-detail { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 .pxrow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.pxrow:last-child { margin-bottom: 0; }
 .pxk { width: 52px; flex-shrink: 0; font-size: 12px; color: var(--text-3); }
 .pxv { flex: 1; min-width: 0; }
+
+.ngrp { margin-bottom: 14px; }
+.ngrp:last-of-type { margin-bottom: 0; }
+.ngrp-head { display: flex; align-items: center; gap: 8px; padding: 0 2px 6px; }
+.ngrp-name { font-weight: 650; font-size: 13px; }
+.ngrp-meta { font-size: 11px; color: var(--text-3); }
+</style>
+
+<!--
+  非 scoped：链路胶囊是 nodeCols 的 render 用 h() 造的 vnode，由 n-data-table
+  渲染，拿不到本组件 scoped 样式的属性标记。类名统一加 qz- 前缀圈住作用域。
+-->
+<style>
+.qz-topo { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; line-height: 1.9; }
+.qz-hop { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 6px; font-size: 12px; white-space: nowrap; }
+.qz-hop b { font-weight: 600; }
+.qz-hop-proto { font-size: 10px; opacity: .75; letter-spacing: .3px; }
+/* 入口=蓝、中转=紫、出口=橙、互联网=灰，与管理端链路拓扑的配色一致 */
+.qz-hop-entry { background: rgba(32, 128, 240, .12); color: #2080f0; }
+.qz-hop-relay { background: rgba(139, 92, 246, .14); color: #7c53d8; }
+.qz-hop-egress { background: rgba(217, 119, 6, .14); color: #c2751a; }
+.qz-hop-ext { background: rgba(120, 120, 120, .14); color: var(--text-2, #666); }
+.qz-hop-inet { background: transparent; color: var(--text-3, #999); padding-left: 0; }
+.qz-arrow { font-size: 11px; color: var(--text-3, #999); white-space: nowrap; }
+.qz-arrow-warn { color: #d03050; font-weight: 600; }
 </style>
