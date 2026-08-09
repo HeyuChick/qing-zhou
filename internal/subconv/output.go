@@ -35,10 +35,28 @@ func NormalizeFormat(f string) string {
 	}
 }
 
+// singboxAppUAs are the official sing-box GUI clients, which do NOT put
+// "sing-box" in their User-Agent — SFA (Android), SFI (iOS), SFM (macOS) and
+// SFT (tvOS) all identify by initials, e.g. "SFI/1.11.0 (io.nekohasekai.sfa)".
+//
+// Matching only the string "sing-box" therefore missed the entire first-party
+// client family: they were served the base64 link list, so they got working
+// nodes but none of the config that makes the sing-box format worth choosing —
+// no fake-ip DNS, no CN/ads rule-sets, no url-test groups. Since the panel
+// advertises UA-based format selection, that read as the feature not working.
+//
+// Matched as a prefix, not a substring: "SFI" is three letters and would
+// otherwise collide with unrelated agents.
+var singboxAppUAs = []string{"sfa/", "sfi/", "sfm/", "sft/"}
+
 // FormatForUA picks a sensible subscription format from a client's User-Agent,
 // so users importing into Clash/sing-box/Surge get a native config without
 // having to append ?format=. Anything unrecognised (v2rayN, Shadowrocket,
-// NekoBox, Quantumult, …) falls back to the universal base64 link list.
+// Quantumult, …) falls back to the universal base64 link list.
+//
+// Clash is tested first on purpose: NekoBox states its preference in its own
+// UA ("NekoBox/Android/1.3.6 (Prefer ClashMeta Format)"), and that preference
+// has to win over the fact that NekoBox is itself sing-box based.
 func FormatForUA(ua string) string {
 	s := strings.ToLower(ua)
 	switch {
@@ -48,9 +66,13 @@ func FormatForUA(ua string) string {
 		return FormatSingbox
 	case strings.Contains(s, "surge"):
 		return FormatSurge
-	default:
-		return FormatBase64
 	}
+	for _, p := range singboxAppUAs {
+		if strings.HasPrefix(s, p) {
+			return FormatSingbox
+		}
+	}
+	return FormatBase64
 }
 
 // Base64 joins raw share links and base64-encodes them (the universal format).
