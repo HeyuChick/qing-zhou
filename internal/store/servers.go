@@ -132,8 +132,12 @@ func (s *Store) DeleteServer(id int64) error {
 	if n > 0 {
 		return fmt.Errorf("%w：仍有 %d 个入站/TLS 绑定到此服务器，请先改绑或删除", ErrInUse, n)
 	}
-	_, err := s.db.Exec(`DELETE FROM servers WHERE id=?`, id)
-	return err
+	if _, err := s.db.Exec(`DELETE FROM servers WHERE id=?`, id); err != nil {
+		return err
+	}
+	// Drop the observed sing-box state with it; a row describing a server that
+	// no longer exists would keep showing up in the node version list.
+	return s.DeleteNodeSingbox(id)
 }
 
 func (s *Store) UpdateServerStatus(id int64, status string) error {

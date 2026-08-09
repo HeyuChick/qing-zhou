@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"qingzhou/internal/sbver"
 	"qingzhou/internal/sshctl"
 	"qingzhou/internal/store"
 )
@@ -152,6 +153,17 @@ func (a *API) newRemoteManager(timeout time.Duration) *sshctl.RemoteManager {
 	return rm
 }
 
+// sshConfigFor builds the SSH dial config for a server row. Shared so every
+// remote flow authenticates and pins host keys identically — a second, subtly
+// different copy is how one path ends up skipping host-key verification.
+func sshConfigFor(sv *store.Server) *sshctl.ServerConfig {
+	return &sshctl.ServerConfig{
+		ID: sv.ID, Host: sv.Host, Port: sv.Port, SSHUser: sv.SSHUser,
+		SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
+		SingBoxBin: sv.SingBoxBin, HostKey: sv.HostKey,
+	}
+}
+
 // POST /api/admin/servers/{id}/test — attempt an SSH connection and report
 // success or failure. The SSH key/pass from DB is used (not from request body).
 func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
@@ -176,11 +188,7 @@ func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
 	// deployment, so a passing test guarantees deployment can connect too.
 	// This is also the natural place to pin the host key (trust-on-first-use).
 	rm := a.newRemoteManager(10 * time.Second)
-	cfg := &sshctl.ServerConfig{
-		ID: sv.ID, Host: sv.Host, Port: sv.Port, SSHUser: sv.SSHUser,
-		SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
-		SingBoxBin: sv.SingBoxBin, HostKey: sv.HostKey,
-	}
+	cfg := sshConfigFor(sv)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	version, err := rm.TestConnection(ctx, cfg)
@@ -190,6 +198,9 @@ func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.st.UpdateServerStatus(id, "online")
+	// TestConnection runs `sing-box version`; record it rather than showing it
+	// once and forgetting, so the node version list is fresh after a test too.
+	_ = a.st.SetNodeSingbox(sv.ID, sbver.Parse(version))
 	ok(w, J{"status": "online", "message": "SSH 连接成功", "version": version})
 }
 

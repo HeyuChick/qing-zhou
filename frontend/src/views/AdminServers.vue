@@ -5,6 +5,48 @@
       <span class="spacer" />
       <n-button type="primary" @click="openForm()">添加服务器</n-button>
     </div>
+    <!-- 各节点实际在跑的 sing-box。数据来自面板本来就在做的能力探测，
+         以前只取了「有没有 v2ray_api」，版本号被丢掉了。 -->
+    <n-card title="节点 sing-box 版本" size="small" style="margin-bottom:16px;">
+      <template #header-extra>
+        <n-space size="small">
+          <n-button size="tiny" :loading="verLoading" @click="refreshVersions">重新检测</n-button>
+        </n-space>
+      </template>
+      <p class="nv-note">
+        一键脚本装完之后，版本号只印在当时的终端里。这里长期显示每台机器实际在跑的版本 ——
+        数据来自面板每轮下发配置时本来就会做的探测，不额外连一次机器。
+        面板生成的配置要求 <b>sing-box ≥ {{ minSupported }}</b>；低于这个版本，节点的
+        <code>sing-box check</code> 会失败，面板会<b>停止向它下发任何配置</b>（旧配置继续跑，所以表面看不出来）。
+        「重装」装的是<b>面板自己发布的构建</b>（随面板版本走，含流量统计所需的 <code>v2ray_api</code>），
+        不是 sing-box 官方发布版 —— 官方版不带这个插件，装上去流量就统计不到了。
+      </p>
+      <div v-if="versions.length" class="nv-list">
+        <div v-for="n in versions" :key="n.server_id" class="nv-row">
+          <div class="nv-main">
+            <span class="nv-name">{{ n.name }}<span v-if="n.host" class="nv-host">{{ n.host }}</span></span>
+            <span class="nv-ver">{{ n.version || '—' }}</span>
+            <n-tag v-if="n.too_old" type="error" size="tiny" bordered="false">版本过低</n-tag>
+            <n-tag v-else-if="!n.version" type="default" size="tiny" bordered="false">未知</n-tag>
+            <n-tag v-if="n.version && !n.has_v2ray_api" type="warning" size="tiny" bordered="false">无流量统计</n-tag>
+          </div>
+          <div class="nv-side">
+            <span v-if="n.checked_at" class="nv-time">{{ fmtDateTime(n.checked_at) }}</span>
+            <n-button size="tiny" :disabled="!n.upgradable" :loading="upgradingId === n.server_id"
+                      @click="confirmUpgrade(n)">
+              {{ n.version ? '重装' : '安装' }}
+            </n-button>
+          </div>
+          <div v-if="n.error" class="nv-err">探测失败：{{ n.error }}</div>
+          <div v-else-if="n.version && !n.has_v2ray_api" class="nv-err">
+            该版本不含 <code>v2ray_api</code> 插件 —— 这台机器的流量<b>统计不到</b>，配额也不会生效（界面上一直显示 0）。
+            点「重装」换成面板发布的版本即可；官方发布版不带这个插件。
+          </div>
+        </div>
+      </div>
+      <n-empty v-else-if="!verLoading" description="暂无数据，点「重新检测」" style="padding:20px 0;" />
+    </n-card>
+
     <n-spin :show="loading">
       <div v-if="servers.length" class="card-grid">
         <div v-for="s in servers" :key="s.id" class="list-card">
@@ -51,9 +93,11 @@
 </template>
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, useMessage } from 'naive-ui'
-import { apiList, apiPost, apiPut, apiDelete } from '@/api'
+import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, NCard, useMessage, useDialog } from 'naive-ui'
+import { apiList, apiPost, apiPut, apiDelete, apiGet } from '@/api'
+import { fmtDateTime } from '@/utils/format'
 const message = useMessage()
+const dialog = useDialog()
 const servers = ref<any[]>([])
 const loading = ref(false); const saving = ref(false); const testing = ref(false)
 const showForm = ref(false); const editing = ref<any>(null)
@@ -81,5 +125,69 @@ async function handleTest(){ testing.value=true; try{ const id=editing.value?.id
 async function handleRebuild(id:number){ try{await apiPost(`/api/admin/servers/${id}/rebuild`);message.success('重建成功')}catch(e:any){message.error(e.message)} }
 async function handleDelete(id:number){ try{await apiDelete(`/api/admin/servers/${id}`);message.success('已删除');await load()}catch(e:any){message.error(e.message)} }
 async function load(){loading.value=true;try{servers.value=await apiList('/api/admin/servers')}catch{}finally{loading.value=false}}
-onMounted(load)
+
+// ---- 节点 sing-box 版本 ----
+const versions = ref<any[]>([])
+const minSupported = ref('1.12.0')
+const verLoading = ref(false)
+const upgradingId = ref<number | null>(null)
+
+async function loadVersions(){
+  try{
+    const d = await apiGet<any>('/api/admin/nodes/singbox')
+    versions.value = d?.nodes || []
+    if (d?.min_supported) minSupported.value = d.min_supported
+  }catch(e:any){ message.error(e?.message || '读取节点版本失败') }
+}
+
+async function refreshVersions(){
+  verLoading.value = true
+  try{
+    await apiPost('/api/admin/nodes/singbox/refresh')
+    // 探测是后台跑的（不可达的机器要等 SSH 超时），稍等再读一次结果。
+    await new Promise(r => setTimeout(r, 2500))
+    await loadVersions()
+  }catch(e:any){ message.error(e?.message || '检测失败') }
+  finally{ verLoading.value = false }
+}
+
+function confirmUpgrade(n:any){
+  dialog.warning({
+    title: '确认重装 sing-box',
+    content: `将在「${n.name}」上安装面板发布的 sing-box（随面板版本走）并重启服务。`
+      + '安装期间这台机器上的用户会断线，客户端会自动重连。继续？',
+    positiveText: '开始安装',
+    negativeText: '取消',
+    onPositiveClick: () => { doUpgrade(n) },
+  })
+}
+
+async function doUpgrade(n:any){
+  upgradingId.value = n.server_id
+  try{
+    await apiPost(`/api/admin/nodes/${n.server_id}/singbox/upgrade`)
+    message.success('安装完成')
+    await loadVersions()
+  }catch(e:any){ message.error(e?.message || '安装失败', { duration: 10000 }) }
+  finally{ upgradingId.value = null }
+}
+
+onMounted(() => { load(); loadVersions() })
 </script>
+
+<style scoped>
+.nv-note { font-size:12px; color:var(--text-3); line-height:1.75; margin:0 0 12px; }
+.nv-list { display:flex; flex-direction:column; gap:2px; }
+.nv-row {
+  display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+  padding:8px 0; border-bottom:1px solid var(--border);
+}
+.nv-row:last-child { border-bottom:0; }
+.nv-main { display:flex; align-items:center; gap:8px; flex:1; min-width:0; flex-wrap:wrap; }
+.nv-name { font-weight:600; font-size:13px; }
+.nv-host { color:var(--text-3); font-weight:400; font-size:12px; margin-left:6px; }
+.nv-ver { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+.nv-side { display:flex; align-items:center; gap:10px; }
+.nv-time { font-size:11px; color:var(--text-3); }
+.nv-err { flex-basis:100%; font-size:11px; line-height:1.7; color:var(--warning,#d97706); }
+</style>

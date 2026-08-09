@@ -213,6 +213,10 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
 		ar.Get("/api/admin/backup", a.handleAdminBackup)
+		// Which sing-box each node runs, plus a per-node reinstall.
+		ar.Get("/api/admin/nodes/singbox", a.handleAdminNodeVersions)
+		ar.Post("/api/admin/nodes/singbox/refresh", a.handleAdminNodeVersionRefresh)
+		ar.Post("/api/admin/nodes/{id}/singbox/upgrade", a.handleAdminNodeSingboxUpgrade)
 		ar.Get("/api/admin/update/check", a.handleUpdateCheck)
 		ar.Get("/api/admin/update/status", a.handleUpdateStatus)
 		ar.Get("/api/admin/update/releases", a.handleUpdateReleases)
