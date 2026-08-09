@@ -18,6 +18,8 @@
         数据来自面板每轮下发配置时本来就会做的探测，不额外连一次机器。
         面板生成的配置要求 <b>sing-box ≥ {{ minSupported }}</b>；低于这个版本，节点的
         <code>sing-box check</code> 会失败，面板会<b>停止向它下发任何配置</b>（旧配置继续跑，所以表面看不出来）。
+        「重装」装的是<b>面板自己发布的构建</b>（随面板版本走，含流量统计所需的 <code>v2ray_api</code>），
+        不是 sing-box 官方发布版 —— 官方版不带这个插件，装上去流量就统计不到了。
       </p>
       <div v-if="versions.length" class="nv-list">
         <div v-for="n in versions" :key="n.server_id" class="nv-row">
@@ -32,13 +34,13 @@
             <span v-if="n.checked_at" class="nv-time">{{ fmtDateTime(n.checked_at) }}</span>
             <n-button size="tiny" :disabled="!n.upgradable" :loading="upgradingId === n.server_id"
                       @click="confirmUpgrade(n)">
-              {{ n.version ? '重装为最新' : '安装' }}
+              {{ n.version ? '重装' : '安装' }}
             </n-button>
           </div>
           <div v-if="n.error" class="nv-err">探测失败：{{ n.error }}</div>
           <div v-else-if="n.version && !n.has_v2ray_api" class="nv-err">
             该版本不含 <code>v2ray_api</code> 插件 —— 这台机器的流量<b>统计不到</b>，配额也不会生效（界面上一直显示 0）。
-            点「重装为最新」换成面板发布的版本即可；官方发布版不带这个插件。
+            点「重装」换成面板发布的版本即可；官方发布版不带这个插件。
           </div>
         </div>
       </div>
@@ -152,7 +154,7 @@ async function refreshVersions(){
 function confirmUpgrade(n:any){
   dialog.warning({
     title: '确认重装 sing-box',
-    content: `将在「${n.name}」上重新安装面板发布的 sing-box 并重启服务。`
+    content: `将在「${n.name}」上安装面板发布的 sing-box（随面板版本走）并重启服务。`
       + '安装期间这台机器上的用户会断线，客户端会自动重连。继续？',
     positiveText: '开始安装',
     negativeText: '取消',
