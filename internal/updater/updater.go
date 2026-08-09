@@ -76,6 +76,22 @@ type CheckResult struct {
 	Dev             bool   `json:"dev"`
 }
 
+// ReleaseInfo is one selectable release in the version picker.
+type ReleaseInfo struct {
+	Tag         string `json:"tag"`
+	Name        string `json:"name"`
+	PublishedAt string `json:"published_at"`
+	Prerelease  bool   `json:"prerelease"`
+	Notes       string `json:"notes"`
+	// Downloadable is false when the release predates this architecture's asset
+	// (or the upload failed). Such a release is listed but cannot be installed —
+	// hiding it would leave an unexplained gap in the version history.
+	Downloadable bool  `json:"downloadable"`
+	AssetSize    int64 `json:"asset_size"`
+	// Relation to the running build: "current", "newer" or "older".
+	Relation string `json:"relation"`
+}
+
 // Manager coordinates update checks and the (single-flight) apply operation.
 type Manager struct {
 	repoFn  func() string // resolves the configured "owner/name" (env/setting/default)
@@ -146,9 +162,24 @@ func (m *Manager) newRequest(ctx context.Context, url string) (*http.Request, er
 	return req, nil
 }
 
-// latestRelease fetches the newest non-draft release for the configured repo.
-func (m *Manager) latestRelease(ctx context.Context) (*ghRelease, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", m.repo())
+// releaseHTTPError turns a non-200 releases response into the message the admin
+// sees. Shared by every releases call so they fail in the same words.
+func releaseHTTPError(resp *http.Response) error {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return errors.New("未找到该发布版本（仓库无 release、版本号有误，或名称配置有误）")
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		return errors.New("GitHub API 速率受限，请稍后再试（或配置 update_github_token）")
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("GitHub 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+}
+
+// getRelease fetches and decodes a single release document.
+func (m *Manager) getRelease(ctx context.Context, url string) (*ghRelease, error) {
 	req, err := m.newRequest(ctx, url)
 	if err != nil {
 		return nil, err
@@ -158,21 +189,115 @@ func (m *Manager) latestRelease(ctx context.Context) (*ghRelease, error) {
 		return nil, fmt.Errorf("请求 GitHub 失败: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, errors.New("未找到任何发布版本（仓库无 release 或名称配置有误）")
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return nil, errors.New("GitHub API 速率受限，请稍后再试（或配置 update_github_token）")
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("GitHub 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	if err := releaseHTTPError(resp); err != nil {
+		return nil, err
 	}
 	var rel ghRelease
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
 		return nil, fmt.Errorf("解析 GitHub 响应失败: %w", err)
 	}
 	return &rel, nil
+}
+
+// latestRelease fetches the newest non-draft release for the configured repo.
+func (m *Manager) latestRelease(ctx context.Context) (*ghRelease, error) {
+	return m.getRelease(ctx, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", m.repo()))
+}
+
+// releaseByTag fetches one specific release. Used when the admin pinned a
+// version rather than taking whatever /releases/latest currently points at.
+func (m *Manager) releaseByTag(ctx context.Context, tag string) (*ghRelease, error) {
+	// The tag goes into a URL path. Anything that could escape the path segment
+	// is refused up front rather than URL-escaped, because a tag containing a
+	// slash or a traversal sequence is not a tag we published.
+	if !validTag(tag) {
+		return nil, fmt.Errorf("版本号格式非法: %q", tag)
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", m.repo(), tag)
+	rel, err := m.getRelease(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	// GitHub resolved the tag, but bind the answer to what was asked for: the
+	// whole point of pinning is that the installed bytes belong to the version
+	// the admin chose.
+	if rel.TagName != tag {
+		return nil, fmt.Errorf("GitHub 返回的版本 %q 与请求的 %q 不一致，已取消", rel.TagName, tag)
+	}
+	return rel, nil
+}
+
+// validTag accepts the character set real release tags use. Deliberately
+// restrictive: this value is interpolated into a URL path.
+func validTag(tag string) bool {
+	if tag == "" || len(tag) > 64 {
+		return false
+	}
+	for _, r := range tag {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_' || r == '+':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ListReleases returns the most recent releases, newest first, for the version
+// picker. Drafts are omitted (they have no public assets); pre-releases are
+// kept but flagged, so an operator can deliberately install one.
+func (m *Manager) ListReleases(ctx context.Context, limit int) ([]ReleaseInfo, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=%d", m.repo(), limit)
+	req, err := m.newRequest(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求 GitHub 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := releaseHTTPError(resp); err != nil {
+		return nil, err
+	}
+	var rels []ghRelease
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&rels); err != nil {
+		return nil, fmt.Errorf("解析 GitHub 响应失败: %w", err)
+	}
+
+	cur, dev := version.Current(), version.IsDev()
+	out := make([]ReleaseInfo, 0, len(rels))
+	for i := range rels {
+		rel := &rels[i]
+		if rel.Draft {
+			continue
+		}
+		info := ReleaseInfo{
+			Tag: rel.TagName, Name: rel.Name, PublishedAt: rel.PublishedAt,
+			Prerelease: rel.Prerelease, Notes: rel.Body,
+		}
+		if a := findAsset(rel, assetName()); a != nil {
+			info.Downloadable = true
+			info.AssetSize = a.Size
+		}
+		switch {
+		case dev:
+			// A dev build has no comparable version, so no ordering claim is made.
+			info.Relation = "unknown"
+		case rel.TagName == cur:
+			info.Relation = "current"
+		case version.Compare(rel.TagName, cur) > 0:
+			info.Relation = "newer"
+		default:
+			info.Relation = "older"
+		}
+		out = append(out, info)
+	}
+	return out, nil
 }
 
 func findAsset(rel *ghRelease, name string) *ghAsset {
@@ -238,10 +363,29 @@ func (m *Manager) setState(s Status, msg string, pct int, target string) {
 	m.mu.Unlock()
 }
 
-// Apply kicks off a self-update in the background. It returns immediately; the
-// caller polls State() for progress. Returns an error if the platform is
-// unsupported or an update is already running.
-func (m *Manager) Apply(nowUnix int64) error {
+// Apply kicks off a self-update to the latest release in the background.
+func (m *Manager) Apply(nowUnix int64) error { return m.ApplyVersion(nowUnix, "") }
+
+// ApplyVersion installs a specific release tag, which may be OLDER than the
+// running build — that is the point: it is how an operator gets off a release
+// that turned out to be broken when the one-step rollback is not enough (the
+// bad version has already been superseded, or the panel was reinstalled and no
+// local backup exists).
+//
+// An empty tag means "latest", and keeps the original not-newer refusal. A
+// pinned tag deliberately drops that check but replaces it with a stricter one:
+// the release fetched must carry exactly the requested tag. The refusal existed
+// because run() re-resolves "latest" and could therefore silently serve an
+// older, known-vulnerable build; naming the version removes the "silently".
+// Digest and signature verification are never skipped either way.
+func (m *Manager) ApplyVersion(nowUnix int64, tag string) error {
+	// Tag validation first: a malformed tag is a bad request whatever the
+	// platform, and checking it here rather than behind the Linux gate keeps the
+	// rejection identical (and testable) everywhere.
+	tag = strings.TrimSpace(tag)
+	if tag != "" && !validTag(tag) {
+		return fmt.Errorf("版本号格式非法: %q", tag)
+	}
 	if runtime.GOOS != "linux" {
 		return errors.New("自更新仅支持 Linux 部署；请在服务器上手动替换二进制")
 	}
@@ -251,10 +395,14 @@ func (m *Manager) Apply(nowUnix int64) error {
 		return errors.New("已有更新任务在进行中")
 	}
 	m.running = true
-	m.state = State{Status: StatusDownloading, Message: "准备下载…", Percent: 0, StartedAt: nowUnix}
+	msg := "准备下载…"
+	if tag != "" {
+		msg = "准备下载 " + tag + "…"
+	}
+	m.state = State{Status: StatusDownloading, Message: msg, Percent: 0, StartedAt: nowUnix, TargetVersion: tag}
 	m.mu.Unlock()
 
-	go m.run()
+	go m.run(tag)
 	return nil
 }
 
@@ -268,22 +416,31 @@ func (m *Manager) fail(msg string) {
 // run performs the full download → verify → swap → re-exec sequence. On success
 // it never returns (the process image is replaced); any failure lands in
 // StatusFailed with a message the UI shows.
-func (m *Manager) run() {
+// pinned is a release tag the admin explicitly chose, or "" for "latest".
+func (m *Manager) run(pinned string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	rel, err := m.latestRelease(ctx)
+	var rel *ghRelease
+	var err error
+	if pinned != "" {
+		rel, err = m.releaseByTag(ctx, pinned)
+	} else {
+		rel, err = m.latestRelease(ctx)
+	}
 	if err != nil {
 		m.fail("获取版本信息失败: " + err.Error())
 		return
 	}
 	target := rel.TagName
 
-	// Refuse anything that isn't newer. run() re-fetches the release rather than
-	// carrying the one Check() showed, so without this an admin could be shown
-	// vX and served whatever /releases/latest returns at apply time — including
-	// an older, known-vulnerable build, which installed silently.
-	if !isNewer(target, version.Current(), version.IsDev()) {
+	// Only the unpinned path refuses a non-newer version. run() re-fetches the
+	// release rather than carrying the one Check() showed, so without this an
+	// admin could be shown vX and served whatever /releases/latest returns at
+	// apply time — including an older, known-vulnerable build, which installed
+	// silently. A pinned tag is not silent, and releaseByTag has already bound
+	// the answer to the exact version asked for.
+	if pinned == "" && !isNewer(target, version.Current(), version.IsDev()) {
 		m.fail(fmt.Sprintf("最新版本 %s 不比当前版本 %s 新，已取消更新", target, version.Current()))
 		return
 	}
@@ -376,6 +533,11 @@ func (m *Manager) run() {
 			return
 		}
 	}
+	// Record what the backup actually is. A binary on disk cannot be asked its
+	// version (there is no such subcommand), so without this note the rollback
+	// button could only offer "回滚到上一个版本" — and an operator staring at a
+	// broken panel needs to know *which* version that is before pressing it.
+	writeBackupVersion(exePath, version.Current())
 	// rename() over the running binary is safe on Linux (no ETXTBSY; only
 	// *writing* a busy text file fails — the probe installer relies on the same).
 	if err := os.Rename(tmpPath, exePath); err != nil {

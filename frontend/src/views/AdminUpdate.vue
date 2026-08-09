@@ -43,6 +43,64 @@
         最新发布未提供适配当前服务器架构的二进制（{{ info.asset_name }}），无法一键更新。请手动升级或补充对应架构的构建产物。
       </n-alert>
 
+      <!-- 回滚：不联网，发布翻车时唯一还能走的路径 -->
+      <div class="rb-box">
+        <div class="rb-head">
+          <span class="rb-title">回滚到上一个版本</span>
+          <n-tag v-if="rollback?.available" type="success" size="tiny" bordered="false">可用</n-tag>
+          <n-tag v-else type="default" size="tiny" bordered="false">不可用</n-tag>
+        </div>
+        <p class="rb-desc">
+          <template v-if="rollback?.available">
+            升级前的二进制还留在本机（<b>{{ rollback.version || '版本未知' }}</b>{{ rollback.saved_at ? '，保存于 ' + fmtDate(rollback.saved_at) : '' }}）。
+            回滚<b>不需要联网</b>，也不重新下载 —— 新版本起不来、GitHub 连不上时，这是唯一还能走的路径。
+            回滚后当前版本会成为新的回滚目标，所以点错了还能再点回来。
+          </template>
+          <template v-else>{{ rollback?.reason || '本机没有保留上一个版本。' }}</template>
+        </p>
+        <n-button size="small" :disabled="!rollback?.available || updating" @click="confirmRollback">
+          {{ rollback?.version ? '回滚到 ' + rollback.version : '回滚到上一个版本' }}
+        </n-button>
+      </div>
+
+      <!-- 指定版本安装（含降级） -->
+      <div class="rel-box">
+        <div class="rb-head">
+          <span class="rb-title">安装指定版本</span>
+          <n-button text size="tiny" :loading="relLoading" @click="loadReleases">
+            {{ releases.length ? '刷新列表' : '加载版本列表' }}
+          </n-button>
+        </div>
+        <p class="rb-desc">
+          用于回到更早的版本 —— 出问题的版本已经不是最新、或本机没留上一个二进制时走这里。
+          <b>降级不会回滚数据库</b>：库结构变更都是只增不减的，旧版本会忽略多出来的列，但跨大版本降级前
+          请先到「系统设置 → 数据备份」下载一份快照。
+        </p>
+        <div v-if="releases.length" class="rel-pick">
+          <n-select
+            v-model:value="selectedTag"
+            :options="releaseOptions"
+            placeholder="选择版本"
+            style="max-width:360px;"
+          />
+          <n-button
+            type="primary"
+            ghost
+            :disabled="!selectedTag || updating || !selectedRelease?.downloadable"
+            @click="confirmInstall"
+          >安装此版本</n-button>
+        </div>
+        <n-alert v-if="selectedRelease && !selectedRelease.downloadable" type="warning" style="margin-top:8px;">
+          该版本未提供适配当前架构的二进制（{{ info?.asset_name }}），无法一键安装。
+        </n-alert>
+        <n-alert v-else-if="selectedRelease?.relation === 'older'" type="warning" style="margin-top:8px;">
+          这是一次<b>降级</b>：{{ info?.current }} → {{ selectedRelease.tag }}。请确认已了解上面关于数据库的说明。
+        </n-alert>
+        <n-alert v-else-if="selectedRelease?.prerelease" type="warning" style="margin-top:8px;">
+          {{ selectedRelease.tag }} 是预发布版本，不建议用于生产。
+        </n-alert>
+      </div>
+
       <!-- 更新进度 -->
       <div v-if="updating || progress.status === 'failed'" class="progress-box">
         <div class="progress-head">
@@ -77,11 +135,30 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { NSpin, NButton, NIcon, NTag, NAlert, NProgress, useMessage, useDialog } from 'naive-ui'
+import { NSpin, NButton, NIcon, NTag, NAlert, NProgress, NSelect, useMessage, useDialog } from 'naive-ui'
 import { RefreshOutline } from '@vicons/ionicons5'
 import { apiGet, apiPost } from '@/api'
 import { mdToHtml } from '@/utils/markdown'
 import { fmtDate } from '@/utils/format'
+
+interface ReleaseInfo {
+  tag: string
+  name: string
+  published_at: string
+  prerelease: boolean
+  notes: string
+  downloadable: boolean
+  asset_size: number
+  relation: 'current' | 'newer' | 'older' | 'unknown'
+}
+
+interface RollbackState {
+  available: boolean
+  version: string
+  reason?: string
+  size?: number
+  saved_at?: number
+}
 
 interface UpdateInfo {
   current: string
@@ -133,6 +210,30 @@ const phaseLabels: Record<string, string> = {
 }
 const phaseLabel = computed(() => phaseLabels[progress.status] || progress.status)
 
+const rollback = ref<RollbackState | null>(null)
+const releases = ref<ReleaseInfo[]>([])
+const relLoading = ref(false)
+const selectedTag = ref<string | null>(null)
+
+const selectedRelease = computed(() =>
+  releases.value.find(r => r.tag === selectedTag.value) || null)
+
+const relationLabel: Record<string, string> = {
+  current: '当前', newer: '更新', older: '更旧', unknown: '',
+}
+const releaseOptions = computed(() => releases.value.map(r => {
+  const bits = [r.tag]
+  if (relationLabel[r.relation]) bits.push(relationLabel[r.relation])
+  if (r.prerelease) bits.push('预发布')
+  if (!r.downloadable) bits.push('无本架构产物')
+  return {
+    label: bits.join(' · '),
+    value: r.tag,
+    // 当前版本没有「安装」的意义，禁掉避免误触发一次无谓的重启。
+    disabled: r.relation === 'current',
+  }
+}))
+
 async function check() {
   loading.value = true
   try {
@@ -142,6 +243,63 @@ async function check() {
   } finally {
     loading.value = false
   }
+}
+
+// 回滚状态是纯本地判断（看 .prev 在不在），GitHub 挂了也要能拿到——所以独立
+// 于 check() 请求，不能因为检查更新失败就连回滚按钮都点不了。
+async function loadRollback() {
+  try {
+    rollback.value = await apiGet<RollbackState>('/api/admin/update/rollback')
+  } catch { /* 非致命：按钮保持不可用 */ }
+}
+
+async function loadReleases() {
+  relLoading.value = true
+  try {
+    const data = await apiGet<{ current: string; releases: ReleaseInfo[] }>('/api/admin/update/releases')
+    releases.value = data?.releases || []
+    if (!releases.value.length) message.warning('该仓库没有可用的发布版本')
+  } catch (e: any) {
+    message.error(e?.message || '获取版本列表失败')
+  } finally {
+    relLoading.value = false
+  }
+}
+
+function confirmRollback() {
+  const v = rollback.value?.version || '上一个版本'
+  dialog.warning({
+    title: '确认回滚',
+    content: `将把面板换回 ${v} 并重启服务。不会下载任何东西，也不会改动数据库。继续？`,
+    positiveText: '回滚',
+    negativeText: '取消',
+    onPositiveClick: () => { startRollback() },
+  })
+}
+
+async function startRollback() {
+  try {
+    await apiPost('/api/admin/update/rollback')
+  } catch (e: any) {
+    message.error(e?.message || '无法启动回滚')
+    return
+  }
+  beginProgress('正在回滚…', rollback.value?.version || '')
+}
+
+function confirmInstall() {
+  const r = selectedRelease.value
+  if (!r) return
+  const downgrade = r.relation === 'older'
+  dialog.warning({
+    title: downgrade ? '确认降级' : '确认安装',
+    content: downgrade
+      ? `将从 ${info.value?.current} 降级到 ${r.tag}。数据库不会回滚，建议先下载一份备份。继续？`
+      : `将安装 ${r.tag} 并重启服务，确定继续？`,
+    positiveText: downgrade ? '仍然降级' : '开始安装',
+    negativeText: '取消',
+    onPositiveClick: () => { startUpdate(r.tag) },
+  })
 }
 
 function confirmUpdate() {
@@ -155,17 +313,23 @@ function confirmUpdate() {
   })
 }
 
-async function startUpdate() {
+// tag 为空 = 装最新版（保持原行为）；给了 tag 就装指定版本，可以比当前旧。
+async function startUpdate(tag?: string) {
   try {
-    await apiPost('/api/admin/update/apply')
+    await apiPost('/api/admin/update/apply', tag ? { version: tag } : undefined)
   } catch (e: any) {
     message.error(e?.message || '无法启动更新')
     return
   }
+  beginProgress('准备下载…', tag || '')
+}
+
+function beginProgress(msg: string, target: string) {
   updating.value = true
   progress.status = 'downloading'
   progress.percent = 0
-  progress.message = '准备下载…'
+  progress.message = msg
+  progress.target_version = target
   pollStart = Date.now()
   poll()
 }
@@ -210,7 +374,7 @@ function onSuccess(newVer: string) {
   window.setTimeout(() => window.location.reload(), 1500)
 }
 
-onMounted(check)
+onMounted(() => { check(); loadRollback() })
 onUnmounted(() => { if (pollTimer) window.clearTimeout(pollTimer) })
 </script>
 
@@ -244,6 +408,15 @@ onUnmounted(() => { if (pollTimer) window.clearTimeout(pollTimer) })
 .progress-head .target { font-size: 12px; color: var(--text-3); }
 .progress-msg { margin-top: 8px; font-size: 12px; color: var(--text-2); }
 .progress-msg.err { color: #d03050; }
+
+.rb-box, .rel-box {
+  margin-top: 16px; padding: 14px 16px;
+  background: #fff; border: 1px solid var(--border); border-radius: 12px;
+}
+.rb-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rb-title { font-weight: 650; }
+.rb-desc { margin: 0 0 10px; font-size: 12px; line-height: 1.75; color: var(--text-3); }
+.rel-pick { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
 .changelog {
   margin-top: 20px; background: #fff; border: 1px solid var(--border); border-radius: 12px;
