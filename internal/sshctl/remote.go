@@ -650,3 +650,46 @@ func configHash(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+
+// UpgradeSingBox reinstalls sing-box on the remote node by running the panel's
+// own install script there with --force.
+//
+// The script is pushed over the existing SSH session rather than fetched by the
+// node from a URL. Two reasons: the node does not have to be able to reach the
+// panel (a landing box may well have no route back), and the bytes that run are
+// the ones embedded in this binary rather than whatever an intercepted URL
+// would have served.
+//
+// Reusing the script instead of reimplementing the download is deliberate — it
+// already knows to prefer the panel's own sing-box build (the official one is
+// built without with_v2ray_api, so installing it silently ends traffic
+// accounting on that node), and to re-apply the tuning and unit file.
+//
+// Returns the script's combined output, which is what the operator needs to see
+// when it does not work.
+func (m *RemoteManager) UpgradeSingBox(ctx context.Context, cfg *ServerConfig, script string) (string, error) {
+	client, err := m.dial(ctx, cfg)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+
+	// A path under /tmp, named per-run so two upgrades cannot collide.
+	remote := fmt.Sprintf("/tmp/.qz-install-singbox-%d.sh", time.Now().UnixNano())
+	if err := m.writeFile(ctx, client, remote, []byte(script)); err != nil {
+		return "", fmt.Errorf("上传安装脚本失败: %w", err)
+	}
+	// Removed whatever happens: it is a script the panel put on someone else's
+	// machine, and leaving copies of it lying around in /tmp is impolite at best.
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_, _ = m.run(cleanup, client, "rm -f "+shellQuote(remote))
+	}()
+
+	out, err := m.run(ctx, client, "bash "+shellQuote(remote)+" --force")
+	if err != nil {
+		return out, fmt.Errorf("安装脚本执行失败: %w", err)
+	}
+	return out, nil
+}

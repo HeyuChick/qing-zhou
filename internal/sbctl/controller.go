@@ -28,6 +28,7 @@ import (
 
 	"qingzhou/internal/sbproc"
 	"qingzhou/internal/sbstats"
+	"qingzhou/internal/sbver"
 	"qingzhou/internal/singbox"
 	"qingzhou/internal/sshctl"
 	"qingzhou/internal/store"
@@ -41,6 +42,10 @@ type ConfigStore interface {
 	AddUsageBatch(deltas map[string]store.UsageDelta) (int, error)
 	ListServers() ([]*store.Server, error)
 	GetServer(id int64) (*store.Server, error)
+	// The capability probe already runs `sing-box version` on every node; these
+	// let it keep what it learned instead of throwing the version away.
+	SetNodeSingbox(serverID int64, info sbver.Info) error
+	SetNodeSingboxError(serverID int64, msg string) error
 }
 
 // Applier validates and reloads a sing-box config (satisfied by *sbproc.Manager).
@@ -55,8 +60,12 @@ type StatsFetcher interface {
 
 // Controller orchestrates config regeneration and stats collection.
 type Controller struct {
-	st          ConfigStore
-	mgr         Applier
+	st  ConfigStore
+	mgr Applier
+
+	// Cached timestamp of the local sing-box version probe; see version.go.
+	localVerMu  sync.Mutex
+	localVerAt  time.Time
 	stats       StatsFetcher
 	baseConfig  string
 	v2rayListen string
@@ -303,6 +312,14 @@ func (c *Controller) statsSupported(sv *store.Server) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	ok, version, err := c.remoteMgr.SupportsStatsAPI(ctx, serverConfigFor(sv))
+	// Record what the probe saw either way. This is the panel's only window onto
+	// which sing-box a node actually ended up with after the one-line installer,
+	// and an operator otherwise has to SSH in to find out.
+	if err != nil {
+		_ = c.st.SetNodeSingboxError(sv.ID, err.Error())
+	} else {
+		_ = c.st.SetNodeSingbox(sv.ID, sbver.Parse(version))
+	}
 	if err != nil {
 		log.Printf("sbctl: server %d (%s) stats capability probe failed: %v", sv.ID, sv.Name, err)
 		ok = false
@@ -632,6 +649,9 @@ func (c *Controller) Run(ctx context.Context, interval time.Duration, errFn func
 	// forcing its own restart) can take to reach the nodes, and the UI quotes it.
 	c.syncInterval.Store(int64(interval))
 	report(c.Rebuild()) // apply current state on startup
+	// The remote nodes get their version recorded by the capability probe inside
+	// Rebuild; the local machine has no such path, so it is probed here.
+	c.refreshLocalVersion(false)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -643,6 +663,7 @@ func (c *Controller) Run(ctx context.Context, interval time.Duration, errFn func
 				report(err)
 			}
 			report(c.Rebuild())
+			c.refreshLocalVersion(false)
 		}
 	}
 }

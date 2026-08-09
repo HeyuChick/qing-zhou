@@ -433,6 +433,20 @@ CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON server_metrics(server_id, ts
 -- full-scan this, the fastest-growing table.
 CREATE INDEX IF NOT EXISTS idx_metrics_ts ON server_metrics(ts);
 
+-- What sing-box each node is actually running. A separate table rather than
+-- extra columns on the servers table, for two reasons: the panel's own machine
+-- runs sing-box too but has no servers row (it is server_id 0 everywhere else
+-- in the code), and this is observed state that a failed probe must be able to
+-- leave stale without touching the server's configuration.
+CREATE TABLE IF NOT EXISTS node_singbox (
+  server_id  INTEGER PRIMARY KEY,          -- 0 = 面板本机
+  version    TEXT    NOT NULL DEFAULT '',  -- 解析出的版本号，如 1.13.18；空=测不出
+  v2ray_api  INTEGER NOT NULL DEFAULT 0,   -- 是否带 with_v2ray_api（没有则流量统计失效）
+  raw        TEXT    NOT NULL DEFAULT '',  -- sing-box version 的首行原文，解析失败时给人看
+  checked_at INTEGER NOT NULL DEFAULT 0,
+  error      TEXT    NOT NULL DEFAULT ''   -- 探测失败的原因；成功时清空
+);
+
 -- Server alerts: offline, high_cpu, high_mem, disk_full, expiring, expired.
 -- One row per *episode*, not per observation: a condition that keeps holding
 -- merges into its open row (ts/count refreshed) rather than adding a new one.

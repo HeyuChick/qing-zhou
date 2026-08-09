@@ -8,10 +8,12 @@ package sbproc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -168,4 +170,25 @@ func SystemdReload(unit string) func() error {
 		}
 		return nil
 	}
+}
+
+// Version runs `sing-box version` on the local binary.
+//
+// The panel manages a sing-box on its own machine as well as on the remote
+// nodes, but only the remote ones get probed over SSH — so without this the one
+// node an operator is most likely to have installed by hand is the one the
+// panel can say the least about.
+//
+// Returns the raw output; interpreting it is sbver's job.
+func (m *Manager) Version(ctx context.Context) (string, error) {
+	if m.bin == "" {
+		return "", errors.New("未配置 sing-box 可执行文件路径")
+	}
+	out, err := exec.CommandContext(ctx, m.bin, "version").CombinedOutput()
+	if err != nil {
+		// The output carries the real reason (missing file, permission denied),
+		// which is far more useful than "exit status 1".
+		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
 }
