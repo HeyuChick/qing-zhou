@@ -30,6 +30,73 @@ const reAlertWindow = 24 * time.Hour
 // alertTypes are the conditions CheckProbeAlerts evaluates and auto-resolves.
 var alertTypes = []string{"offline", "expiring", "expired", "high_cpu", "high_mem", "disk_full"}
 
+// flappyAlertTypes are sampled conditions: each check reads one instant, and one
+// instant is not a problem. A build, a backup or a log rotation drives CPU over
+// any threshold for a few seconds, and alerting on that first sample trains the
+// admin to ignore the panel — which is worse than not alerting at all.
+//
+// Expiry-based conditions are absent on purpose: a date does not flap, and
+// delaying "this server expires in 3 days" to make it look steadier would only
+// shorten the warning.
+var flappyAlertTypes = map[string]bool{
+	"offline": true, "high_cpu": true, "high_mem": true, "disk_full": true,
+}
+
+// SettingAlertStreak is how many consecutive checks a flappy condition must hold
+// before it is raised. 1 restores the old alert-on-first-sample behaviour.
+const SettingAlertStreak = "alert_consecutive"
+
+const defaultAlertStreak = 2
+
+// alertStreaks counts consecutive observations per (server, type) between
+// checks. Memory, not a table: the count is only meaningful within one run of
+// the panel, and after a restart re-arming from zero merely delays the first
+// alert of a still-broken condition by one check interval — the alternative,
+// a write per server per type per check, buys nothing.
+type alertStreakKey struct {
+	server int64
+	typ    string
+}
+
+// observeStreak records one observation and reports whether the condition has
+// now held for `need` consecutive checks. Once the threshold is reached the
+// counter is held there rather than growing, so a long outage keeps reporting
+// true without overflowing or needing a reset.
+func (s *Store) observeStreak(key alertStreakKey, need int) bool {
+	s.streakMu.Lock()
+	defer s.streakMu.Unlock()
+	if s.streaks == nil {
+		s.streaks = map[alertStreakKey]int{}
+	}
+	if s.streaks[key] < need {
+		s.streaks[key]++
+	}
+	return s.streaks[key] >= need
+}
+
+// clearStreak forgets a condition that no longer holds, so the next occurrence
+// has to earn its alert from scratch instead of inheriting a stale count.
+func (s *Store) clearStreak(key alertStreakKey) {
+	s.streakMu.Lock()
+	defer s.streakMu.Unlock()
+	delete(s.streaks, key)
+}
+
+// alertStreakRequired reads the configured threshold, clamped to something sane:
+// below 1 it would alert on nothing observed, and a very large value would mean
+// a genuinely dead server never surfaces.
+func (s *Store) alertStreakRequired() int {
+	n, _ := s.GetSettingInt64(SettingAlertStreak, defaultAlertStreak)
+	switch {
+	case n < 1:
+		return 1
+	case n > 10:
+		return 10
+	default:
+		return int(n)
+	}
+}
+
 const alertCols = `id, server_id, type, message, ts, first_ts, hits, read, resolved`
 
 func scanAlert(sc scanner) (*ServerAlert, error) {
@@ -160,18 +227,29 @@ func (s *Store) CheckProbeAlerts() error {
 		diskThreshold = 85
 	}
 
+	streakNeeded := s.alertStreakRequired()
+
 	for _, sv := range servers {
 		if !sv.ProbeEnabled {
 			// Probe turned off: nothing is being watched, so close whatever is
 			// still open instead of leaving stale alerts in the panel.
 			for _, typ := range alertTypes {
 				_ = s.ResolveAlert(sv.ID, typ)
+				s.clearStreak(alertStreakKey{sv.ID, typ})
 			}
 			continue
 		}
 		active := map[string]bool{}
+		// raise marks the condition as holding right now. For a sampled condition
+		// that is not yet the same as alerting: it has to hold for streakNeeded
+		// consecutive checks first. `active` is set either way, so a condition
+		// still building its streak is not treated as resolved below — otherwise
+		// an alternating pattern would resolve and re-arm forever.
 		raise := func(typ, msg string) {
 			active[typ] = true
+			if flappyAlertTypes[typ] && !s.observeStreak(alertStreakKey{sv.ID, typ}, streakNeeded) {
+				return
+			}
 			_ = s.InsertAlert(ServerAlert{ServerID: sv.ID, Type: typ, Message: msg})
 		}
 
@@ -215,6 +293,10 @@ func (s *Store) CheckProbeAlerts() error {
 			if !fresh && (typ == "high_cpu" || typ == "high_mem" || typ == "disk_full") {
 				continue
 			}
+			// The condition genuinely does not hold: close the episode and drop
+			// the streak, so a later recurrence has to hold for the full run
+			// again rather than being alerted on its first sample.
+			s.clearStreak(alertStreakKey{sv.ID, typ})
 			_ = s.ResolveAlert(sv.ID, typ)
 		}
 	}

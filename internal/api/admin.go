@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"qingzhou/internal/store"
 	"qingzhou/internal/subconv"
 )
 
@@ -103,6 +104,12 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		if err := a.st.SetSetting(k, v); err != nil {
 			fail(w, http.StatusInternalServerError, "保存配置失败")
 			return
+		}
+		// This one is baked into every node's generated route table, so saving it
+		// has to reach the nodes — otherwise the switch reads as broken until the
+		// next unrelated edit happens to trigger a rebuild.
+		if k == store.SettingBlockPrivateEgress {
+			a.sbctl.ScheduleRebuild()
 		}
 	}
 	a.handleGetSettings(w, r)

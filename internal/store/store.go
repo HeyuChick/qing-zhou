@@ -17,6 +17,10 @@ type Store struct {
 	// memory (raw stored values) and invalidate on any write.
 	setMu    sync.RWMutex
 	setCache map[string]string // raw values, nil until first load
+
+	// Consecutive-observation counters for flappy probe alerts; see alerts.go.
+	streakMu sync.Mutex
+	streaks  map[alertStreakKey]int
 }
 
 // Open opens (creating if needed) the SQLite database at path and applies the

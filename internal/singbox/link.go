@@ -37,6 +37,19 @@ type LinkParams struct {
 	Insecure    bool
 	Flow        bool // vless reality vision
 
+	// PinSHA256 is the leaf certificate's SHA-256 fingerprint (uppercase hex),
+	// set only for self-signed certificates. It rides along on the hysteria-family
+	// links as the standard `pinSHA256` parameter, which lets a client verify the
+	// exact certificate instead of trusting whatever is presented.
+	//
+	// It is additive, never a replacement for Insecure: clients that do not know
+	// the parameter ignore it and behave exactly as before, so advertising it
+	// cannot take a working node offline. It is deliberately absent from the
+	// Clash and sing-box renderers — pinning there needs sing-box ≥1.13's
+	// certificate_public_key_sha256 (a *different* hash, and an unknown field on
+	// the 1.12 clients the subscription still targets).
+	PinSHA256 string
+
 	// transport (vless/vmess/trojan): Network is ws|grpc|httpupgrade ("" or tcp = none)
 	Network     string
 	Path        string // ws/httpupgrade path
@@ -76,6 +89,10 @@ type LinkParams struct {
 	BrutalUp   int
 	BrutalDown int
 }
+
+// tuicUDPRelayModeNative is the UDP relay mode every mainstream TUIC
+// implementation already defaults to. It is emitted explicitly, never inferred.
+const tuicUDPRelayModeNative = "native"
 
 // tuningQuery renders the TCP/multiplex tuning params shared by the URL-style
 // TCP protocols (vless/trojan). These are custom query keys understood by
@@ -226,6 +243,13 @@ func BuildShareLink(p LinkParams) string {
 		if p.ZeroRTT {
 			q = append(q, "zero_rtt=1")
 		}
+		// TUIC has two UDP relay modes and the two ends must agree. sing-box,
+		// mihomo and the reference client all default to "native", but not every
+		// client does — and when they disagree, TCP works while UDP silently
+		// fails, which reads as a broken node rather than a mismatched option.
+		// Stating the value that is already everyone's default costs nothing and
+		// removes the ambiguity.
+		q = append(q, "udp_relay_mode="+tuicUDPRelayModeNative)
 		return "tuic://" + esc(p.UUID) + ":" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "hysteria2":
 		q := []string{"security=tls"}
@@ -233,6 +257,9 @@ func BuildShareLink(p LinkParams) string {
 			q = append(q, "insecure=1")
 		}
 		q = append(q, "fp="+esc(fp), "sni="+esc(p.SNI), "fastopen=0")
+		if p.PinSHA256 != "" {
+			q = append(q, "pinSHA256="+esc(p.PinSHA256))
+		}
 		// obfs must be advertised to clients, otherwise the handshake fails
 		// when the inbound has salamander obfs enabled.
 		if p.Obfs != "" {
@@ -324,6 +351,9 @@ func BuildShareLink(p LinkParams) string {
 		}
 		if p.ALPN != "" {
 			q = append(q, "alpn="+esc(p.ALPN))
+		}
+		if p.PinSHA256 != "" {
+			q = append(q, "pinSHA256="+esc(p.PinSHA256))
 		}
 		return "hysteria://" + hp + "?" + strings.Join(q, "&") + frag
 	}

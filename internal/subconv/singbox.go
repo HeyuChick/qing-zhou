@@ -16,6 +16,10 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 	}
 	doc := map[string]any{}
 	_ = json.Unmarshal([]byte(template), &doc)
+	// The DNS block may be an admin-stored template written against the legacy
+	// address-string format, which sing-box 1.14 removes outright. Rewrite it
+	// before anything else touches dns.rules.
+	modernizeSingboxDNS(doc)
 
 	// Convert first, then dedupe so url-test/selector tags are unique and real.
 	type conv struct {
@@ -286,6 +290,13 @@ func singboxOutbound(p *Proxy) map[string]any {
 		}
 		if p.param("zero_rtt", "reduce_rtt") == "1" {
 			o["zero_rtt_handshake"] = true
+		}
+		// Carried across so both ends agree on how UDP is relayed; a mismatch
+		// breaks UDP only, leaving TCP healthy and the cause invisible. Absent
+		// from the link (an imported external node), sing-box's own default
+		// applies — we do not invent a value the source did not state.
+		if v := p.param("udp_relay_mode", "udp-relay-mode"); v != "" {
+			o["udp_relay_mode"] = v
 		}
 		o["tls"] = sbTLS(p, "tls")
 	default:

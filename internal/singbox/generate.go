@@ -142,6 +142,23 @@ func GenerateConfig(base json.RawMessage, inbounds []Inbound, v2rayListen string
 // to that outbound is added, so a relay inbound's traffic exits via the landing
 // instead of the default "direct" final.
 func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayListen string, relays []Relay) ([]byte, error) {
+	return GenerateConfigWithOptions(base, inbounds, Options{V2RayListen: v2rayListen, Relays: relays})
+}
+
+// Options carries the assembly knobs that are not per-inbound.
+type Options struct {
+	// V2RayListen is the v2ray_api gRPC listen address; "" skips the block
+	// entirely (a node whose sing-box lacks the plugin).
+	V2RayListen string
+	Relays      []Relay
+	// BlockPrivate rejects user traffic destined for non-public addresses.
+	// See injectPrivateBlock for why this is not merely hardening.
+	BlockPrivate bool
+}
+
+// GenerateConfigWithOptions is the full assembly entry point.
+func GenerateConfigWithOptions(base json.RawMessage, inbounds []Inbound, opt Options) ([]byte, error) {
+	v2rayListen, relays := opt.V2RayListen, opt.Relays
 	cfg := map[string]interface{}{}
 	if len(base) > 0 {
 		if err := json.Unmarshal(base, &cfg); err != nil {
@@ -193,6 +210,12 @@ func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayLis
 	cfg["inbounds"] = ibList
 	sort.Strings(names)
 
+	// Must run before the relay rules are appended so the reject sits ahead of
+	// every steering rule, including a relay's.
+	if opt.BlockPrivate {
+		injectPrivateBlock(cfg)
+	}
+
 	// Relay wiring: append each landing outbound and a route rule steering the
 	// relay inbounds' traffic into it (evaluated before route.final="direct").
 	if len(relays) > 0 {
@@ -240,6 +263,51 @@ func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayLis
 
 	stripLegacyDomainStrategy(cfg)
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// privateBlockRule is the route rule that keeps proxied traffic on the public
+// internet. Tagged so it can be recognised on a re-generate and never stacked.
+func privateBlockRule() map[string]interface{} {
+	return map[string]interface{}{
+		"ip_is_private": true,
+		"action":        "reject",
+	}
+}
+
+// injectPrivateBlock prepends a reject rule for non-public destinations.
+//
+// Without it, `route.final: "direct"` means a subscriber can dial anything the
+// landing machine can reach: its own loopback (where the panel, the v2ray_api
+// gRPC port and any other local-only service listen), the provider's private
+// network, and — the sharp edge — 169.254.169.254, the cloud metadata endpoint
+// that hands out instance credentials to whoever asks. A proxy is supposed to
+// forward users to the internet, not to lend them the host's LAN identity.
+//
+// `ip_is_private` covers loopback, RFC1918, link-local and unique-local in one
+// predicate, so the metadata address is caught by the same rule as the LAN.
+//
+// It is prepended rather than appended because route rules are first-match:
+// behind any existing steering rule it would never be consulted. Relay wiring is
+// unaffected — a relay outbound's own dial to its landing is not re-matched
+// against route rules, only the user's destination is.
+func injectPrivateBlock(cfg map[string]interface{}) {
+	route, _ := cfg["route"].(map[string]interface{})
+	if route == nil {
+		route = map[string]interface{}{}
+		cfg["route"] = route
+	}
+	rules, _ := route["rules"].([]interface{})
+	// An admin who wrote their own private-space rule into sb_base_config keeps
+	// it; duplicating would be harmless at runtime but makes the generated config
+	// grow by one rule on every save.
+	for _, it := range rules {
+		if m, ok := it.(map[string]interface{}); ok {
+			if m["ip_is_private"] == true && m["action"] == "reject" {
+				return
+			}
+		}
+	}
+	route["rules"] = append([]interface{}{privateBlockRule()}, rules...)
 }
 
 // stripLegacyDomainStrategy removes the pre-1.12 "domain strategy" knobs that

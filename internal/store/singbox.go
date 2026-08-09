@@ -504,6 +504,18 @@ func (s *Store) AddUsageByClientName(name string, up, down int64) error {
 
 // ---- config assembly ----
 
+// SettingBlockPrivateEgress is the admin toggle for the private-destination
+// reject rule. Absent means enabled: it is a security default, and an upgrade
+// that silently left existing installs reachable-into-LAN would defeat the
+// point. Only an explicit "0" turns it off — for the rare operator who really
+// does want subscribers to reach the landing machine's own network.
+const SettingBlockPrivateEgress = "sb_block_private"
+
+func (s *Store) blockPrivateEgress() bool {
+	v, _ := s.GetSetting(SettingBlockPrivateEgress)
+	return v != "0"
+}
+
 // BuildSingboxConfig assembles a full sing-box config from the enabled inbounds
 // (each merged with its TLS/Reality block and extra options) plus the users
 // entitled to each inbound tag (usersByTag, computed by the caller's
@@ -551,7 +563,11 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 		}
 		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: mergeRelayUser(usersByTag[ib.Tag], landingUsers, ib.Tag)})
 	}
-	return singbox.GenerateConfigWithRelays([]byte(base), ibs, v2rayListen, relays)
+	return singbox.GenerateConfigWithOptions([]byte(base), ibs, singbox.Options{
+		V2RayListen:  v2rayListen,
+		Relays:       relays,
+		BlockPrivate: s.blockPrivateEgress(),
+	})
 }
 
 // BuildSingboxConfigForServer is like BuildSingboxConfig but filters inbounds
@@ -612,7 +628,11 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 	// API, and so no remote traffic was ever metered. The caller now decides:
 	// it probes each node's build tags (sshctl.SupportsStatsAPI) and passes that
 	// node's own listen address only when the plugin is actually present.
-	return singbox.GenerateConfigWithRelays([]byte(base), ibs, v2rayListen, relays)
+	return singbox.GenerateConfigWithOptions([]byte(base), ibs, singbox.Options{
+		V2RayListen:  v2rayListen,
+		Relays:       relays,
+		BlockPrivate: s.blockPrivateEgress(),
+	})
 }
 
 // SelfBuiltLink is one generated share-link plus the inbound tag it came from.
@@ -653,6 +673,35 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		tlsCache[id] = t // cache nil too (negative cache)
 		return t
 	}
+	// Fingerprint of the certificate an inbound presents, but only when it is
+	// self-signed — that is the case where the client has nothing to verify
+	// against and would otherwise have to accept any certificate at all. A
+	// publicly-issued cert is deliberately left unpinned: it rotates on every
+	// ACME renewal, and a subscription cached by the client across a renewal
+	// would then pin a certificate the server no longer presents.
+	pinCache := map[int64]string{}
+	certPin := func(t *SbTls, server map[string]interface{}) string {
+		if t == nil || t.DecryptFailed {
+			return ""
+		}
+		if pin, ok := pinCache[t.ID]; ok {
+			return pin
+		}
+		pem := mapStr(server, "certificate") // legacy inline-PEM profile
+		if t.CertID != 0 {
+			if c, _ := s.GetCert(t.CertID); c != nil && !c.DecryptFailed {
+				pem = c.CertPEM
+			} else {
+				pem = ""
+			}
+		}
+		pin := ""
+		if pem != "" && singbox.IsSelfSignedCert(pem) {
+			pin = singbox.CertFingerprintSHA256(pem)
+		}
+		pinCache[t.ID] = pin
+		return pin
+	}
 	// Each self-built node is owned by one of the user's buckets; the link uses
 	// that bucket's credentials and shows its own remaining quota/expiry. A node
 	// with no active owning bucket is omitted (no access).
@@ -686,10 +735,12 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			}
 		}
 		var server, client, opts map[string]interface{}
+		pin := ""
 		if ib.TlsID != 0 {
 			if t := getTls(ib.TlsID); t != nil {
 				_ = json.Unmarshal([]byte(t.ServerJSON), &server)
 				_ = json.Unmarshal([]byte(t.ClientJSON), &client)
+				pin = certPin(t, server)
 			}
 		}
 		_ = json.Unmarshal([]byte(ib.Options), &opts)
@@ -710,6 +761,7 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
 			Insecure:    mapBool(client, "insecure"),
+			PinSHA256:   pin,
 			Congestion:  mapStr(opts, "congestion_control"),
 			ZeroRTT:     mapBool(opts, "zero_rtt_handshake"), // tuic 0-RTT
 			Method:      mapStr(opts, "method"),              // shadowsocks

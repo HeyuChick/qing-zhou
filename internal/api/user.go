@@ -722,13 +722,33 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 
 	clashTpl, _ := a.st.GetSetting("sub_clash_template")
 	singboxTpl, _ := a.st.GetSetting("sub_singbox_template")
+	siteName, _ := a.st.GetSetting("site_name")
+	if strings.TrimSpace(siteName) == "" {
+		siteName = "轻舟"
+	}
 	// Explicit ?format= wins; otherwise auto-detect from the client User-Agent
 	// so Clash/sing-box/Surge each get a native config out of the box.
-	format := r.URL.Query().Get("format")
+	reqFormat := r.URL.Query().Get("format")
+	subURL := a.publicBase(r) + r.URL.Path
+
+	// A person who pasted the link into a browser gets a readable page instead
+	// of a wall of base64. `?format=info` asks for it explicitly.
+	if strings.EqualFold(reqFormat, "info") || wantsSubInfoPage(r, reqFormat) {
+		a.writeSubInfoHTML(w, subInfo{
+			SiteName: siteName, SubURL: subURL,
+			Used: u.UsedUp + u.UsedDown, Total: u.TrafficLimit, ExpiryAt: u.ExpiryAt,
+			NodeCount: len(links),
+			Banned:    u.Status == "banned",
+			Expired:   u.ExpiryAt != 0 && u.ExpiryAt <= now,
+			OverQuota: u.TrafficLimit != 0 && u.UsedUp+u.UsedDown >= u.TrafficLimit,
+		})
+		return
+	}
+
+	format := reqFormat
 	if format == "" {
 		format = subconv.FormatForUA(r.Header.Get("User-Agent"))
 	}
-	subURL := a.publicBase(r) + r.URL.Path
 	body, ctype, err := subconv.Render(format, links, groups, clashTpl, singboxTpl, subURL)
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)
@@ -743,6 +763,10 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Subscription-Userinfo",
 		"upload="+itoa(u.UsedUp)+"; download="+itoa(u.UsedDown)+"; total="+itoa(u.TrafficLimit)+"; expire="+itoa(u.ExpiryAt))
 	w.Header().Set("Profile-Update-Interval", "12")
+	// Clash-family clients name the imported profile after this; without it they
+	// fall back to the URL's last path segment, which is the subscription token —
+	// pinning a secret into the client's visible profile list.
+	w.Header().Set("Content-Disposition", contentDisposition(siteName, subconv.NormalizeFormat(format)))
 	w.Header().Set("Content-Type", ctype)
 	_, _ = w.Write([]byte(body))
 }

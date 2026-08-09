@@ -345,19 +345,31 @@ rules:
 // DefaultSingboxTemplate carries the sing-box anti-leak dns+route with built-in
 // routing: CN domains resolve via local DNS and go direct, ads are rejected,
 // everything else is fake-ip'd through the proxy. Rule-sets are fetched once and
-// cached. Targets sing-box ≥1.11.
+// cached.
+//
+// Targets sing-box ≥1.12. The DNS block uses the typed server format that 1.12
+// introduced and that 1.14 makes mandatory — the legacy `address` strings this
+// replaced are not deprecated-but-working in 1.14, they are gone, and a profile
+// still carrying them fails to load. There is no formulation that satisfies both
+// 1.11 and 1.14, so the floor moved. Admin-stored templates are rewritten to
+// this shape at render time by modernizeSingboxDNS, so an install that pasted
+// the old default is carried across too.
+//
+// `independent_cache` and `experimental.cache_file.store_rdrc` below are
+// deprecated as of 1.14 (removal in 1.16) but still honored, and dropping them
+// today would change caching behavior on the 1.12/1.13 clients most users are
+// actually running. They stay until the floor moves again.
 const DefaultSingboxTemplate = `{
   "dns": {
     "servers": [
-      {"tag": "remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy"},
-      {"tag": "local", "address": "https://223.5.5.5/dns-query", "detour": "direct"},
-      {"tag": "fake", "address": "fakeip"}
+      {"tag": "remote", "type": "https", "server": "1.1.1.1", "detour": "proxy"},
+      {"tag": "local", "type": "https", "server": "223.5.5.5", "detour": "direct"},
+      {"tag": "fake", "type": "fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18"}
     ],
     "rules": [
       {"rule_set": "geosite-cn", "server": "local"},
       {"query_type": ["A", "AAAA"], "server": "fake"}
     ],
-    "fakeip": {"enabled": true, "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18"},
     "independent_cache": true,
     "final": "remote"
   },

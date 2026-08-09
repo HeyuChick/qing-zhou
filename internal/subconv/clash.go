@@ -42,7 +42,7 @@ func Clash(proxies []*Proxy, template string) (string, error) {
 		list[i] = c.m
 	}
 	doc["proxies"] = list
-	doc["proxy-groups"] = clashGroups(buildAutoGroups(kept))
+	doc["proxy-groups"] = mergeClashGroups(doc["proxy-groups"], clashGroups(buildAutoGroups(kept)), kept)
 	// Always append the final catch-all referencing the ACTUAL primary group, so
 	// the rule can never drift from the group name (templates must NOT hardcode
 	// it — a stale "MATCH,<old name>" yields "proxy not found" in the client).
@@ -62,6 +62,81 @@ func Clash(proxies []*Proxy, template string) (string, error) {
 
 	b, err := yaml.Marshal(doc)
 	return string(b), err
+}
+
+// allPlaceholder is the token an admin writes inside a hand-written group's
+// `proxies:` list to mean "every node in the subscription". A template cannot
+// enumerate node names — they are generated per user, per render — so without
+// it a custom group can only ever reference the built-in groups.
+const allPlaceholder = "all"
+
+// mergeClashGroups combines the admin's own proxy-groups (if the template
+// declares any) with the generated ones.
+//
+// The generated groups used to be assigned straight over the top, so a template
+// carrying `proxy-groups:` silently lost every group in it — the admin saw their
+// config accepted, saved, and then simply not applied. Templates are the
+// documented way to customise the output, so overwriting the one key that
+// expresses that customisation is a bug rather than a policy.
+//
+// The admin's groups come first (a client selects the first group by default,
+// and someone who wrote their own wants it in front), generated groups follow.
+// A generated group whose name the admin already used is dropped: theirs wins,
+// and duplicate names would give the client two different groups under one name.
+//
+// The `all` placeholder inside an admin group's `proxies` list expands to every
+// node name. It expands in place so the surrounding entries keep their order.
+func mergeClashGroups(tpl any, generated []map[string]any, nodes []*Proxy) []map[string]any {
+	custom := mapSlice(tpl)
+	if len(custom) == 0 {
+		return generated
+	}
+	names := make([]string, 0, len(nodes))
+	for _, p := range nodes {
+		names = append(names, p.Name)
+	}
+	taken := map[string]bool{}
+	out := make([]map[string]any, 0, len(custom)+len(generated))
+	for _, g := range custom {
+		if n, _ := g["name"].(string); n != "" {
+			taken[n] = true
+		}
+		expandAllPlaceholder(g, names)
+		out = append(out, g)
+	}
+	for _, g := range generated {
+		if n, _ := g["name"].(string); n != "" && taken[n] {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// expandAllPlaceholder replaces the "all" entry of a group's proxies list with
+// every node name. A group left with no proxies at all is given the full set:
+// mihomo rejects an empty proxy-group, which would take down the whole config.
+func expandAllPlaceholder(g map[string]any, names []string) {
+	raw, ok := g["proxies"].([]any)
+	if !ok {
+		return
+	}
+	out := make([]any, 0, len(raw)+len(names))
+	for _, e := range raw {
+		if s, ok := e.(string); ok && s == allPlaceholder {
+			for _, n := range names {
+				out = append(out, n)
+			}
+			continue
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		for _, n := range names {
+			out = append(out, n)
+		}
+	}
+	g["proxies"] = out
 }
 
 // clashGroups builds the proxy-groups: a primary selector to pick manually, a
@@ -268,6 +343,12 @@ func clashProxy(p *Proxy) map[string]any {
 		}
 		if p.param("zero_rtt", "reduce_rtt") == "1" {
 			m["reduce-rtt"] = true
+		}
+		// See the sing-box renderer: a UDP-relay-mode mismatch breaks UDP while
+		// TCP keeps working, so the value travels with the node rather than being
+		// left to each end's default.
+		if v := p.param("udp_relay_mode", "udp-relay-mode"); v != "" {
+			m["udp-relay-mode"] = v
 		}
 		if p.tlsInsecure() {
 			m["skip-cert-verify"] = true

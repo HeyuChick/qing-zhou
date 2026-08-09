@@ -38,6 +38,16 @@
             </span>
             <span v-if="c.last_renew_at" class="kv" style="color:var(--text-3);">上次续期 {{ fmtDateTime(c.last_renew_at) }}</span>
           </div>
+          <div v-if="c.self_signed && c.sha256" class="lc-meta" style="flex-direction:column;align-items:flex-start;gap:2px;">
+            <span class="kv" style="color:var(--text-3);">
+              证书指纹 SHA-256
+              <n-button text size="tiny" style="margin-left:6px;" @click="copyPin(c.sha256)">复制</n-button>
+            </span>
+            <code style="font-size:10px;word-break:break-all;line-height:1.4;color:var(--text-3);">{{ c.sha256 }}</code>
+            <span style="font-size:11px;color:var(--text-3);">
+              自签证书没有 CA 背书。hysteria / hysteria2 订阅链接已自动带上 <code>pinSHA256</code>；手工配置其他客户端时可粘贴此值，比「跳过证书校验」安全。
+            </span>
+          </div>
           <div v-if="c.last_error" class="lc-meta" style="color:var(--error-color, #d03050);font-size:11px;word-break:break-all;">
             续期错误：{{ c.last_error }}
           </div>
@@ -200,6 +210,13 @@ async function submitSelf() {
     showSelf.value = false
     await load()
   } catch (e: any) { message.error(e.message) } finally { submitting.value = false }
+}
+
+async function copyPin(v: string) {
+  try {
+    await navigator.clipboard.writeText(v)
+    message.success('已复制证书指纹')
+  } catch { message.error('复制失败，请手动选中复制') }
 }
 
 // 导出

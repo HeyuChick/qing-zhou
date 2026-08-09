@@ -212,6 +212,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/settings/default-templates", a.handleGetDefaultTemplates)
 		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
+		ar.Get("/api/admin/backup", a.handleAdminBackup)
 		ar.Get("/api/admin/update/check", a.handleUpdateCheck)
 		ar.Get("/api/admin/update/status", a.handleUpdateStatus)
 		ar.Post("/api/admin/update/apply", a.handleUpdateApply)
