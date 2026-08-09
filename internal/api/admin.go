@@ -108,8 +108,13 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		// This one is baked into every node's generated route table, so saving it
 		// has to reach the nodes — otherwise the switch reads as broken until the
 		// next unrelated edit happens to trigger a rebuild.
+		//
+		// Through sbRebuildLog, not a.sbctl directly: the controller is documented
+		// as optional ("Safe to leave unset" on SetSbController) and is nil between
+		// api.New and SetSbController, so reaching for it raw is a nil dereference
+		// waiting for the one caller that never wires it.
 		if k == store.SettingBlockPrivateEgress {
-			a.sbctl.ScheduleRebuild()
+			a.sbRebuildLog()
 		}
 	}
 	a.handleGetSettings(w, r)
