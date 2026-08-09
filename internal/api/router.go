@@ -32,6 +32,10 @@ type API struct {
 
 	linkMu    sync.Mutex
 	linkCache map[int64]linkCacheEntry
+
+	// In-flight per-node sing-box reinstalls; see nodever_admin.go.
+	upgradeMu   sync.Mutex
+	upgradeJobs map[int64]*nodeUpgradeJob
 }
 
 // SetSbController attaches the native sing-box controller so admin changes to
