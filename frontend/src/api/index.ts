@@ -83,3 +83,41 @@ export function apiPut<T = any>(path: string, body?: any): Promise<T> {
 export function apiDelete<T = any>(path: string): Promise<T> {
   return request<T>(path, { method: 'DELETE' })
 }
+
+/**
+ * GET 一个二进制附件并触发浏览器下载。
+ *
+ * 不能用 <a href> 直接下载：认证走的是 Authorization 头，普通导航带不上，
+ * 服务端只会回 401。所以先 fetch 成 blob，再用临时 object URL 触发保存。
+ */
+export async function apiDownload(path: string, fallbackName: string): Promise<void> {
+  const auth = useAuthStore()
+  const res = await fetch(path, {
+    headers: auth.token ? { Authorization: 'Bearer ' + auth.token } : {},
+    credentials: 'include',
+  })
+  if (!res.ok) {
+    // 失败时后端回的是 JSON 信封，读出来当错误信息用。
+    let msg = `请求失败 ${res.status}`
+    try { const b = await res.json(); if (b?.msg) msg = b.msg } catch {}
+    const err = new Error(msg) as ApiError
+    err.status = res.status
+    throw err
+  }
+  // 优先用服务端给的文件名（Content-Disposition），它带了生成时间。
+  let name = fallbackName
+  const cd = res.headers.get('Content-Disposition') || ''
+  const m = /filename="?([^"';]+)"?/.exec(cd)
+  if (m) name = m[1]
+
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // 立刻撤销会让部分浏览器取消尚未开始的下载，推迟一拍。
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}

@@ -142,6 +142,23 @@ func GenerateConfig(base json.RawMessage, inbounds []Inbound, v2rayListen string
 // to that outbound is added, so a relay inbound's traffic exits via the landing
 // instead of the default "direct" final.
 func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayListen string, relays []Relay) ([]byte, error) {
+	return GenerateConfigWithOptions(base, inbounds, Options{V2RayListen: v2rayListen, Relays: relays})
+}
+
+// Options carries the assembly knobs that are not per-inbound.
+type Options struct {
+	// V2RayListen is the v2ray_api gRPC listen address; "" skips the block
+	// entirely (a node whose sing-box lacks the plugin).
+	V2RayListen string
+	Relays      []Relay
+	// BlockPrivate rejects user traffic destined for non-public addresses.
+	// See injectPrivateBlock for why this is not merely hardening.
+	BlockPrivate bool
+}
+
+// GenerateConfigWithOptions is the full assembly entry point.
+func GenerateConfigWithOptions(base json.RawMessage, inbounds []Inbound, opt Options) ([]byte, error) {
+	v2rayListen, relays := opt.V2RayListen, opt.Relays
 	cfg := map[string]interface{}{}
 	if len(base) > 0 {
 		if err := json.Unmarshal(base, &cfg); err != nil {
@@ -152,6 +169,10 @@ func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayLis
 	names := []string{}
 	seen := map[string]bool{}
 	ibList := []interface{}{}
+	// Tags of the inbounds that actually make it into the config. Not the same
+	// as the input list: a userless mixed inbound is dropped above, and a route
+	// rule naming an inbound the config does not define is at best dead weight.
+	emittedTags := []string{}
 	for _, ib := range inbounds {
 		m := map[string]interface{}{}
 		for k, v := range ib.Base {
@@ -189,9 +210,18 @@ func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayLis
 		// flow 是 per-user 字段，从 inbound 级别移除，否则 sing-box check 会报错
 		delete(m, "flow")
 		ibList = append(ibList, m)
+		if tag, _ := m["tag"].(string); tag != "" {
+			emittedTags = append(emittedTags, tag)
+		}
 	}
 	cfg["inbounds"] = ibList
 	sort.Strings(names)
+
+	// Must run before the relay rules are appended so the reject sits ahead of
+	// every steering rule, including a relay's.
+	if opt.BlockPrivate {
+		injectPrivateBlock(cfg, directExitTags(emittedTags, relays))
+	}
 
 	// Relay wiring: append each landing outbound and a route rule steering the
 	// relay inbounds' traffic into it (evaluated before route.final="direct").
@@ -240,6 +270,132 @@ func GenerateConfigWithRelays(base json.RawMessage, inbounds []Inbound, v2rayLis
 
 	stripLegacyDomainStrategy(cfg)
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// privateBlockRule is the route rule that keeps proxied traffic on the public
+// internet. Tagged so it can be recognised on a re-generate and never stacked.
+func privateBlockRule() map[string]interface{} {
+	return map[string]interface{}{
+		"ip_is_private": true,
+		"action":        "reject",
+	}
+}
+
+// directExitTags returns the inbounds whose traffic leaves the internet from
+// THIS machine, i.e. everything not steered into a relay or a third-party
+// egress. Only those can reach this machine's own private network, and only
+// those may have their destinations resolved here — see injectPrivateBlock.
+// emittedTags must be the tags actually present in the generated config, not
+// the ones asked for: an inbound dropped during assembly (a userless mixed one)
+// would otherwise be named by a rule that has nothing to match.
+func directExitTags(emittedTags []string, relays []Relay) []string {
+	steered := map[string]bool{}
+	for _, r := range relays {
+		for _, t := range r.InboundTags {
+			steered[t] = true
+		}
+	}
+	var out []string
+	for _, tag := range emittedTags {
+		if !steered[tag] {
+			out = append(out, tag)
+		}
+	}
+	sort.Strings(out) // deterministic config → no spurious reloads
+	return out
+}
+
+// injectPrivateBlock prepends the rules that keep proxied traffic on the public
+// internet.
+//
+// Without them, `route.final: "direct"` means a subscriber can dial anything the
+// landing machine can reach: its own loopback (where the panel, the v2ray_api
+// gRPC port and any other local-only service listen), the provider's private
+// network, and — the sharp edge — 169.254.169.254, the cloud metadata endpoint
+// that hands out instance credentials to whoever asks. A proxy is supposed to
+// forward users to the internet, not to lend them the host's LAN identity.
+//
+// TWO rules are needed, not one. `ip_is_private` only ever sees an address, and
+// a proxy protocol delivers whatever the client asked for — usually a hostname.
+// Verified against sing-box 1.13: with the reject rule alone, dialling
+// 127.0.0.1 is refused but dialling "localhost" sails straight through, and
+// neither `default_domain_resolver` nor anything else changes that. So an
+// attacker only has to point a DNS record at 169.254.169.254 to walk around it.
+// The `resolve` action turns the hostname into addresses first, which is what
+// gives the reject something to match.
+//
+// The resolve is scoped to direct-exit inbounds on purpose. Applying it to a
+// relay inbound would rewrite the destination to an IP chosen by *this* machine
+// and hand that to the landing — so a user relaying through Hong Kong to a US
+// landing would be pinned to whichever CDN node is closest to Hong Kong. Nothing
+// is lost by the exclusion: the landing machine receives that traffic on one of
+// its own direct-exit inbounds and applies these same rules there, which is also
+// where the private network actually being protected lives.
+//
+// Rules are prepended because route rules are first-match: behind any existing
+// steering rule they would never be consulted.
+func injectPrivateBlock(cfg map[string]interface{}, directTags []string) {
+	route, _ := cfg["route"].(map[string]interface{})
+	if route == nil {
+		route = map[string]interface{}{}
+		cfg["route"] = route
+	}
+	rules, _ := route["rules"].([]interface{})
+	// An admin who wrote their own private-space rule into sb_base_config keeps
+	// it; duplicating would be harmless at runtime but makes the generated config
+	// grow by one rule on every save.
+	for _, it := range rules {
+		if m, ok := it.(map[string]interface{}); ok {
+			if m["ip_is_private"] == true && m["action"] == "reject" {
+				return
+			}
+		}
+	}
+
+	head := []interface{}{privateBlockRule()}
+	// The resolve needs a DNS server to resolve *with*. When the base config has
+	// no referenceable one, emit the reject alone rather than a config sing-box
+	// would refuse: partial protection beats a node that cannot start.
+	if resolver := dnsResolverTag(cfg); resolver != "" && len(directTags) > 0 {
+		if _, set := route["default_domain_resolver"]; !set {
+			route["default_domain_resolver"] = resolver
+		}
+		head = []interface{}{
+			map[string]interface{}{"inbound": directTags, "action": "resolve"},
+			privateBlockRule(),
+		}
+	}
+	route["rules"] = append(head, rules...)
+}
+
+// dnsResolverTag picks a DNS server tag usable for resolving destinations, or ""
+// when the config has none to point at.
+func dnsResolverTag(cfg map[string]interface{}) string {
+	dns, _ := cfg["dns"].(map[string]interface{})
+	if dns == nil {
+		return ""
+	}
+	servers, _ := dns["servers"].([]interface{})
+	var first string
+	for _, it := range servers {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		tag, _ := m["tag"].(string)
+		// A fake-ip server would hand every destination a 198.18.x address,
+		// turning the reject into a block on everything.
+		if tag == "" || m["type"] == "fakeip" {
+			continue
+		}
+		if tag == "local" {
+			return tag
+		}
+		if first == "" {
+			first = tag
+		}
+	}
+	return first
 }
 
 // stripLegacyDomainStrategy removes the pre-1.12 "domain strategy" knobs that

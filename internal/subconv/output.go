@@ -35,10 +35,28 @@ func NormalizeFormat(f string) string {
 	}
 }
 
+// singboxAppUAs are the official sing-box GUI clients, which do NOT put
+// "sing-box" in their User-Agent — SFA (Android), SFI (iOS), SFM (macOS) and
+// SFT (tvOS) all identify by initials, e.g. "SFI/1.11.0 (io.nekohasekai.sfa)".
+//
+// Matching only the string "sing-box" therefore missed the entire first-party
+// client family: they were served the base64 link list, so they got working
+// nodes but none of the config that makes the sing-box format worth choosing —
+// no fake-ip DNS, no CN/ads rule-sets, no url-test groups. Since the panel
+// advertises UA-based format selection, that read as the feature not working.
+//
+// Matched as a prefix, not a substring: "SFI" is three letters and would
+// otherwise collide with unrelated agents.
+var singboxAppUAs = []string{"sfa/", "sfi/", "sfm/", "sft/"}
+
 // FormatForUA picks a sensible subscription format from a client's User-Agent,
 // so users importing into Clash/sing-box/Surge get a native config without
 // having to append ?format=. Anything unrecognised (v2rayN, Shadowrocket,
-// NekoBox, Quantumult, …) falls back to the universal base64 link list.
+// Quantumult, …) falls back to the universal base64 link list.
+//
+// Clash is tested first on purpose: NekoBox states its preference in its own
+// UA ("NekoBox/Android/1.3.6 (Prefer ClashMeta Format)"), and that preference
+// has to win over the fact that NekoBox is itself sing-box based.
 func FormatForUA(ua string) string {
 	s := strings.ToLower(ua)
 	switch {
@@ -48,9 +66,13 @@ func FormatForUA(ua string) string {
 		return FormatSingbox
 	case strings.Contains(s, "surge"):
 		return FormatSurge
-	default:
-		return FormatBase64
 	}
+	for _, p := range singboxAppUAs {
+		if strings.HasPrefix(s, p) {
+			return FormatSingbox
+		}
+	}
+	return FormatBase64
 }
 
 // Base64 joins raw share links and base64-encodes them (the universal format).
@@ -345,25 +367,38 @@ rules:
 // DefaultSingboxTemplate carries the sing-box anti-leak dns+route with built-in
 // routing: CN domains resolve via local DNS and go direct, ads are rejected,
 // everything else is fake-ip'd through the proxy. Rule-sets are fetched once and
-// cached. Targets sing-box ≥1.11.
+// cached.
+//
+// Targets sing-box ≥1.12. The DNS block uses the typed server format that 1.12
+// introduced and that 1.14 makes mandatory — the legacy `address` strings this
+// replaced are not deprecated-but-working in 1.14, they are gone, and a profile
+// still carrying them fails to load. There is no formulation that satisfies both
+// 1.11 and 1.14, so the floor moved. Admin-stored templates are rewritten to
+// this shape at render time by modernizeSingboxDNS, so an install that pasted
+// the old default is carried across too.
+//
+// `independent_cache` and `experimental.cache_file.store_rdrc` below are
+// deprecated as of 1.14 (removal in 1.16) but still honored, and dropping them
+// today would change caching behavior on the 1.12/1.13 clients most users are
+// actually running. They stay until the floor moves again.
 const DefaultSingboxTemplate = `{
   "dns": {
     "servers": [
-      {"tag": "remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy"},
-      {"tag": "local", "address": "https://223.5.5.5/dns-query", "detour": "direct"},
-      {"tag": "fake", "address": "fakeip"}
+      {"tag": "remote", "type": "https", "server": "1.1.1.1", "detour": "proxy"},
+      {"tag": "local", "type": "https", "server": "223.5.5.5", "detour": "direct"},
+      {"tag": "fake", "type": "fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18"}
     ],
     "rules": [
       {"rule_set": "geosite-cn", "server": "local"},
       {"query_type": ["A", "AAAA"], "server": "fake"}
     ],
-    "fakeip": {"enabled": true, "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18"},
     "independent_cache": true,
     "final": "remote"
   },
   "route": {
     "auto_detect_interface": true,
     "final": "proxy",
+    "default_domain_resolver": "local",
     "rules": [
       {"action": "sniff"},
       {"protocol": "dns", "action": "hijack-dns"},

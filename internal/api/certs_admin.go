@@ -37,7 +37,19 @@ func certPublic(c *store.Cert) map[string]interface{} {
 	if c.DecryptFailed {
 		status = "decrypt_failed"
 	}
+	// Only meaningful for a self-signed cert: it is what a client has to pin,
+	// since no CA vouches for it. Surfaced so an admin configuring a client by
+	// hand can copy it instead of falling back to "skip verification". Never
+	// computed for a CA-issued cert — it rotates on renewal and a pinned copy
+	// would silently start rejecting the server.
+	selfSigned := !c.DecryptFailed && singbox.IsSelfSignedCert(c.CertPEM)
+	fingerprint := ""
+	if selfSigned {
+		fingerprint = singbox.CertFingerprintSHA256(c.CertPEM)
+	}
 	return J{
+		"self_signed":    selfSigned,
+		"sha256":         fingerprint,
 		"id":             c.ID,
 		"name":           c.Name,
 		"domain":         c.Domain,

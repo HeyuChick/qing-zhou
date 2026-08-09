@@ -4,8 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -13,6 +15,63 @@ import (
 	"strings"
 	"time"
 )
+
+// leafCert parses the first CERTIFICATE block of a PEM bundle. In a fullchain
+// that is the leaf — the certificate the server actually presents, and the only
+// one a fingerprint may be taken from.
+func leafCert(certPEM string) *x509.Certificate {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil
+	}
+	c, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil
+	}
+	return c
+}
+
+// CertFingerprintSHA256 returns the leaf certificate's SHA-256 fingerprint as
+// uppercase hex — the value clients call `pinSHA256`. Empty when the PEM does
+// not parse.
+//
+// This is the hash of the whole DER certificate, not of its public key. The two
+// are routinely confused and are not interchangeable: sing-box's
+// `certificate_public_key_sha256` wants a base64 SPKI hash instead, and feeding
+// it this value would reject every connection.
+func CertFingerprintSHA256(certPEM string) string {
+	c := leafCert(certPEM)
+	if c == nil {
+		return ""
+	}
+	sum := sha256.Sum256(c.Raw)
+	return strings.ToUpper(hex.EncodeToString(sum[:]))
+}
+
+// IsSelfSignedCert reports whether the leaf is its own issuer, i.e. no public CA
+// vouches for it and a client can only trust it by pinning (or by disabling
+// verification altogether).
+//
+// Asking the certificate rather than the `source` column is deliberate: it also
+// classifies the legacy inline-PEM profiles that predate the certificate centre,
+// and it cannot drift from reality the way a stored label can.
+func IsSelfSignedCert(certPEM string) bool {
+	c := leafCert(certPEM)
+	if c == nil {
+		return false
+	}
+	if c.Issuer.String() != c.Subject.String() {
+		return false
+	}
+	// A matching subject/issuer is not proof on its own — verify the signature is
+	// actually the leaf's own, so a cert merely *claiming* to be self-issued is
+	// not mistaken for one.
+	//
+	// CheckSignature, not CheckSignatureFrom: the latter additionally insists the
+	// signer be a CA, and a self-signed *server* certificate is by construction
+	// not one — it would reject every certificate this function exists to detect.
+	return c.CheckSignature(c.SignatureAlgorithm, c.RawTBSCertificate, c.Signature) == nil
+}
 
 // GenerateSelfSignedCert issues a self-signed ECDSA (P-256) certificate for the
 // given server name and returns the certificate and private key as PEM strings.

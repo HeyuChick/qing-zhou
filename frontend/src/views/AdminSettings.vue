@@ -142,6 +142,23 @@
         </n-form>
       </n-card>
 
+      <n-card title="节点出口安全" size="small" style="margin-bottom:16px;">
+        <n-form label-placement="left" label-width="160">
+          <n-form-item label="阻断内网 / 元数据">
+            <div style="width:100%;">
+              <n-switch v-model:value="blockPrivate" />
+              <p style="font-size:12px;color:var(--text-3);margin:6px 0 0;">
+                开启后，用户经节点访问 <code>127.0.0.1</code>、内网段（10./172.16./192.168.）、链路本地段（含云厂商元数据地址 <code>169.254.169.254</code>）会被拒绝，只放行公网目标。
+                <b>用 IP 或用域名访问都拦得住</b>——节点会先把域名解析成地址再判断，否则随便注册一个指向内网的域名就能绕过去。
+                中转入站不在本机做这步解析（那会让链路被就近解析到错误的 CDN 节点），改由落地机按同样规则拦截，防护不打折。
+                <b>建议保持开启</b>：关闭意味着任何订阅用户都能借落地机的身份访问它所在的内网，并可能读到该机的云凭据。
+                仅当你确实要让用户经节点访问自己的内网时才关闭。保存后会自动下发到所有节点。
+              </p>
+            </div>
+          </n-form-item>
+        </n-form>
+      </n-card>
+
       <n-card title="订阅模板" size="small" style="margin-bottom:16px;">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">自定义 Clash/sing-box 订阅输出模板。留空使用内置默认模板；改过之后会一直沿用你的版本（升级带来的新版内置模板不会自动生效），点「恢复内置默认」即可清空覆盖、跟随内置。</p>
         <n-form label-placement="left" label-width="120">
@@ -173,7 +190,27 @@
           <n-form-item label="CPU 告警 (%)"><n-input-number v-model:value="alertCpu" :min="1" :max="100" style="width:200px;" /></n-form-item>
           <n-form-item label="内存告警 (%)"><n-input-number v-model:value="alertMem" :min="1" :max="100" style="width:200px;" /></n-form-item>
           <n-form-item label="磁盘告警 (%)"><n-input-number v-model:value="alertDisk" :min="1" :max="100" style="width:200px;" /></n-form-item>
+          <n-form-item label="连续命中次数">
+            <div style="width:100%;">
+              <n-input-number v-model:value="alertStreak" :min="1" :max="10" style="width:200px;" />
+              <p style="font-size:12px;color:var(--text-3);margin:6px 0 0;">
+                CPU / 内存 / 磁盘 / 离线这四项，需要<b>连续命中这么多次检查</b>才真正告警。
+                一次编译、一次备份就能让 CPU 瞬间冲顶，只看单次采样会把告警刷成噪音。
+                填 <code>1</code> 恢复「采到一次就报」。到期类告警不受影响（日期不会抖动）。
+              </p>
+            </div>
+          </n-form-item>
         </n-form>
+      </n-card>
+
+      <n-card title="数据备份" size="small" style="margin-bottom:16px;">
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
+          在线导出整库快照（单个 <code>.db</code> 文件，含用户 / 订单 / 节点 / 证书）。数据库跑在 WAL 模式下，
+          <b>直接 <code>scp</code> 拷贝 <code>qingzhou.db</code> 拿到的是残缺副本</b>——已提交的数据可能还在 <code>-wal</code> 里。
+          此处导出由 SQLite 自己在一致性快照上生成，导出期间面板照常读写。
+          文件里的敏感字段仍是加密的，恢复到别处需要同一个 <code>QZ_SECRET_KEY</code>。
+        </p>
+        <n-button :loading="backingUp" @click="handleBackup">下载数据库备份</n-button>
       </n-card>
 
       <n-space>
@@ -187,7 +224,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
-import { apiGet, apiPost, apiPut, apiList } from '@/api'
+import { apiGet, apiPost, apiPut, apiList, apiDownload } from '@/api'
 
 const message = useMessage()
 const loading = ref(false)
@@ -203,9 +240,12 @@ const defaultExpiry = ref(0)
 const freeGroupId = ref<number | null>(null)
 // 默认 false，与后端 credsResetEnabled() 的「只有显式 true 才算开」保持一致。
 const credsResetEnabled = ref(false)
+// 默认 true，与后端「缺省即开启，只有显式 '0' 才关」保持一致。
+const blockPrivate = ref(true)
 const alertCpu = ref(90)
 const alertMem = ref(90)
 const alertDisk = ref(85)
+const alertStreak = ref(2)
 const refundMode = ref('prorated')
 const refundBasis = ref('min')
 const refundFee = ref(0)
@@ -250,9 +290,11 @@ async function handleSave() {
       default_expiry_days: String(defaultExpiry.value),
       free_group_id: freeGroupId.value ? String(freeGroupId.value) : '',
       node_creds_reset_enabled: credsResetEnabled.value ? 'true' : 'false',
+      sb_block_private: blockPrivate.value ? '1' : '0',
       alert_cpu_threshold: String(alertCpu.value),
       alert_mem_threshold: String(alertMem.value),
       alert_disk_threshold: String(alertDisk.value),
+      alert_consecutive: String(alertStreak.value),
       refund_mode: refundMode.value,
       refund_basis: refundBasis.value,
       refund_fee_percent: String(refundFee.value),
@@ -280,6 +322,15 @@ async function handleTestSMTP() {
   try { await apiPost('/api/admin/settings/test-smtp', { to: testEmail.value }); message.success('测试邮件已发送') } catch (e: any) { message.error(e.message) } finally { testingSmtp.value = false }
 }
 
+const backingUp = ref(false)
+async function handleBackup() {
+  backingUp.value = true
+  try {
+    await apiDownload('/api/admin/backup', 'qingzhou-backup.db')
+    message.success('备份已开始下载')
+  } catch (e: any) { message.error(e.message || '备份失败') } finally { backingUp.value = false }
+}
+
 async function handleRebuild() {
   rebuilding.value = true
   try { await apiPost('/api/admin/rebuild'); message.success('重建成功') } catch (e: any) { message.error(e.message) } finally { rebuilding.value = false }
@@ -301,9 +352,11 @@ onMounted(async () => {
       defaultExpiry.value = parseInt(data.default_expiry_days) || 0
       freeGroupId.value = parseInt(data.free_group_id) || null
       credsResetEnabled.value = data.node_creds_reset_enabled === 'true'
+      blockPrivate.value = data.sb_block_private !== '0'
       alertCpu.value = parseInt(data.alert_cpu_threshold) || 90
       alertMem.value = parseInt(data.alert_mem_threshold) || 90
       alertDisk.value = parseInt(data.alert_disk_threshold) || 85
+      alertStreak.value = parseInt(data.alert_consecutive) || 2
       refundMode.value = data.refund_mode === 'full' ? 'full' : 'prorated'
       refundBasis.value = ['traffic', 'time', 'min'].includes(data.refund_basis) ? data.refund_basis : 'min'
       refundFee.value = parseFloat(data.refund_fee_percent) || 0
