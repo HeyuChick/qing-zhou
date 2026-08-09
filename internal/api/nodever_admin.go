@@ -36,6 +36,12 @@ type nodeVersionView struct {
 	HasV2RayAPI bool   `json:"has_v2ray_api"`
 	CheckedAt   int64  `json:"checked_at"`
 	Error       string `json:"error"`
+	// Reinstall job state, so the list the UI already polls is also what tells it
+	// how the reinstall went. See nodeUpgradeJob.
+	Upgrading     bool   `json:"upgrading"`
+	UpgradeOutput string `json:"upgrade_output,omitempty"`
+	UpgradeError  string `json:"upgrade_error,omitempty"`
+	UpgradedAt    int64  `json:"upgraded_at,omitempty"`
 	// TooOld means the generated config would be rejected by this binary — which
 	// on a node means the panel has silently stopped being able to deploy to it.
 	TooOld bool `json:"too_old"`
@@ -62,9 +68,10 @@ func (a *API) handleAdminNodeVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows := []nodeVersionView{viewFor(store.LocalNodeID, "面板本机", "", true, true, observed)}
+	jobs := a.upgradeSnapshot()
+	rows := []nodeVersionView{viewFor(store.LocalNodeID, "面板本机", "", true, true, observed, jobs)}
 	for _, sv := range servers {
-		v := viewFor(sv.ID, sv.Name, sv.Host, false, sv.Enabled, observed)
+		v := viewFor(sv.ID, sv.Name, sv.Host, false, sv.Enabled, observed, jobs)
 		// Without credentials there is no way in, so the button must not pretend.
 		v.Upgradable = sv.SSHKey != "" || sv.SSHPassword != ""
 		rows = append(rows, v)
@@ -76,7 +83,7 @@ func (a *API) handleAdminNodeVersions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func viewFor(id int64, name, host string, local, enabled bool, observed map[int64]*store.NodeSingbox) nodeVersionView {
+func viewFor(id int64, name, host string, local, enabled bool, observed map[int64]*store.NodeSingbox, jobs map[int64]nodeUpgradeJob) nodeVersionView {
 	v := nodeVersionView{ServerID: id, Name: name, Host: host, Local: local, Enabled: enabled}
 	if local {
 		// The local upgrade shells out to bash; the install script is Linux-only.
@@ -86,6 +93,10 @@ func viewFor(id int64, name, host string, local, enabled bool, observed map[int6
 		v.Version, v.Raw, v.HasV2RayAPI = n.Version, n.Raw, n.HasV2RayAPI
 		v.CheckedAt, v.Error = n.CheckedAt, n.Error
 		v.TooOld = sbver.Info{Version: n.Version}.TooOld()
+	}
+	if j, ok := jobs[id]; ok {
+		v.Upgrading, v.UpgradeOutput, v.UpgradeError = j.Running, j.Output, j.Error
+		v.UpgradedAt = j.FinishedAt
 	}
 	return v
 }
@@ -102,33 +113,122 @@ func (a *API) handleAdminNodeVersionRefresh(w http.ResponseWriter, r *http.Reque
 	ok(w, J{"started": true})
 }
 
-// POST /api/admin/nodes/{id}/singbox/upgrade — reinstall sing-box on one node.
-//
-// Synchronous on purpose: the download is tens of megabytes and the operator
-// needs the script's output when it fails. The handler's own timeout bounds it.
-func (a *API) handleAdminNodeSingboxUpgrade(w http.ResponseWriter, r *http.Request) {
-	id := atoi(chi.URLParam(r, "id"))
-	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Minute)
-	defer cancel()
+// nodeUpgradeJob is the state of one node's reinstall, kept in memory so the
+// node list can report it. Memory rather than a table: a job cannot outlive the
+// process that runs it, and a panel restart mid-install leaves the node's
+// actual version to be settled by the next probe anyway.
+type nodeUpgradeJob struct {
+	Running    bool
+	FinishedAt int64
+	Output     string
+	Error      string
+}
 
-	var out string
-	var err error
-	if id == store.LocalNodeID {
-		out, err = upgradeLocalSingBox(ctx)
-	} else {
-		out, err = a.upgradeRemoteSingBox(ctx, id)
+// upgradeSnapshot copies the job table for reading.
+func (a *API) upgradeSnapshot() map[int64]nodeUpgradeJob {
+	a.upgradeMu.Lock()
+	defer a.upgradeMu.Unlock()
+	out := make(map[int64]nodeUpgradeJob, len(a.upgradeJobs))
+	for id, j := range a.upgradeJobs {
+		out[id] = *j
 	}
+	return out
+}
+
+// claimUpgrade reserves the job slot for one node, reporting false when a
+// reinstall is already running there. Two concurrent runs of the install script
+// on one machine would race over the same binary and unit file.
+func (a *API) claimUpgrade(id int64) bool {
+	a.upgradeMu.Lock()
+	defer a.upgradeMu.Unlock()
+	if a.upgradeJobs == nil {
+		a.upgradeJobs = map[int64]*nodeUpgradeJob{}
+	}
+	if j := a.upgradeJobs[id]; j != nil && j.Running {
+		return false
+	}
+	a.upgradeJobs[id] = &nodeUpgradeJob{Running: true}
+	return true
+}
+
+func (a *API) finishUpgrade(id int64, out string, err error) {
+	a.upgradeMu.Lock()
+	defer a.upgradeMu.Unlock()
+	j := a.upgradeJobs[id]
+	if j == nil {
+		return
+	}
+	j.Running, j.FinishedAt, j.Output = false, time.Now().Unix(), trimOutput(out)
 	if err != nil {
 		// The script's output is the diagnosis; without it the operator gets
 		// "exit status 1" and nothing to act on.
-		fail(w, http.StatusBadGateway, trimOutput(err.Error()+"\n"+out))
+		j.Error = trimOutput(err.Error() + "\n" + out)
+	}
+}
+
+// POST /api/admin/nodes/{id}/singbox/upgrade — reinstall sing-box on one node.
+//
+// Starts the job and returns immediately; the client polls the node list, which
+// carries the result. It cannot be synchronous: the script downloads a sing-box
+// of ~60MB onto the node, which routinely takes longer than the server's
+// WriteTimeout (main.go), so the response was torn off mid-flight and the panel
+// reported a failure for an install that had in fact succeeded. Same reason
+// sbRebuildLog exists — see the note on it in router.go.
+//
+// What the node did is not lost by going async: the script's output is kept on
+// the job and shown when the poll picks it up.
+func (a *API) handleAdminNodeSingboxUpgrade(w http.ResponseWriter, r *http.Request) {
+	id := atoi(chi.URLParam(r, "id"))
+	// Everything that can be judged without touching the node is judged now, so
+	// a misconfigured server still answers with a real error instead of a job
+	// that fails a minute later somewhere the operator has to go looking.
+	if id == store.LocalNodeID {
+		if !runtimeIsLinux() {
+			fail(w, http.StatusBadRequest, errLinuxOnly.Error())
+			return
+		}
+	} else if err := a.checkRemoteUpgradable(id); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Re-probe so the panel shows the new number rather than the old one.
-	if a.sbctl != nil {
-		a.sbctl.RefreshVersions()
+	if !a.claimUpgrade(id) {
+		fail(w, http.StatusConflict, "该节点正在安装中，请等待本次完成")
+		return
 	}
-	ok(w, J{"output": trimOutput(out)})
+
+	go func() {
+		// context.Background, not r.Context: the request is already answered, and
+		// inheriting its context would cancel the install the moment it is.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		var out string
+		var err error
+		if id == store.LocalNodeID {
+			out, err = upgradeLocalSingBox(ctx)
+		} else {
+			out, err = a.upgradeRemoteSingBox(ctx, id)
+		}
+		a.finishUpgrade(id, out, err)
+		// Re-probe so the panel shows the new number rather than the old one.
+		// After the job is marked done, so a poll that sees "finished" sees the
+		// refreshed version too.
+		if err == nil && a.sbctl != nil {
+			a.sbctl.RefreshVersions()
+		}
+	}()
+	ok(w, J{"started": true})
+}
+
+// checkRemoteUpgradable reports why a node cannot be reinstalled, or nil.
+func (a *API) checkRemoteUpgradable(id int64) error {
+	sv, err := a.st.GetServer(id)
+	if err != nil || sv == nil {
+		return errNotFound
+	}
+	if sv.SSHKey == "" && sv.SSHPassword == "" {
+		return errNoCreds
+	}
+	return nil
 }
 
 func (a *API) upgradeRemoteSingBox(ctx context.Context, id int64) (string, error) {

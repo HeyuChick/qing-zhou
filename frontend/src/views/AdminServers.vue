@@ -32,10 +32,17 @@
           </div>
           <div class="nv-side">
             <span v-if="n.checked_at" class="nv-time">{{ fmtDateTime(n.checked_at) }}</span>
-            <n-button size="tiny" :disabled="!n.upgradable" :loading="upgradingId === n.server_id"
+            <n-button size="tiny" :disabled="!n.upgradable || n.upgrading" :loading="n.upgrading"
                       @click="confirmUpgrade(n)">
-              {{ n.version ? '重装' : '安装' }}
+              {{ n.upgrading ? '安装中' : (n.version ? '重装' : '安装') }}
             </n-button>
+          </div>
+          <!-- 安装是后台跑的（要往节点上拉 ~60MB 的二进制），这里显示脚本的输出。 -->
+          <div v-if="n.upgrading" class="nv-err" style="color:var(--text-3);">
+            正在安装…（往节点下载 sing-box 约 60MB，通常 1–3 分钟；离开本页不影响安装）
+          </div>
+          <div v-else-if="n.upgrade_error" class="nv-err">
+            安装失败：<pre class="nv-out">{{ n.upgrade_error }}</pre>
           </div>
           <div v-if="n.error" class="nv-err">探测失败：{{ n.error }}</div>
           <div v-else-if="n.version && !n.has_v2ray_api" class="nv-err">
@@ -130,7 +137,6 @@ async function load(){loading.value=true;try{servers.value=await apiList('/api/a
 const versions = ref<any[]>([])
 const minSupported = ref('1.12.0')
 const verLoading = ref(false)
-const upgradingId = ref<number | null>(null)
 
 async function loadVersions(){
   try{
@@ -162,14 +168,28 @@ function confirmUpgrade(n:any){
   })
 }
 
+// 安装在后端后台跑：往节点拉 ~60MB 的二进制，同步等会被服务端 WriteTimeout 掐断，
+// 于是装成功了前端却报错。这里只负责发起 + 轮询节点列表里的任务状态。
 async function doUpgrade(n:any){
-  upgradingId.value = n.server_id
   try{
     await apiPost(`/api/admin/nodes/${n.server_id}/singbox/upgrade`)
-    message.success('安装完成')
+  }catch(e:any){ message.error(e?.message || '安装启动失败', { duration: 10000 }); return }
+  message.info('已开始安装，完成后本页会自动刷新')
+  await loadVersions()
+  pollUpgrade(n.server_id)
+}
+
+// 轮询到该节点的任务结束为止。设上限，免得后端异常时无限轮询。
+async function pollUpgrade(id:number){
+  for (let i = 0; i < 120; i++){
+    await new Promise(r => setTimeout(r, 5000))
     await loadVersions()
-  }catch(e:any){ message.error(e?.message || '安装失败', { duration: 10000 }) }
-  finally{ upgradingId.value = null }
+    const row = versions.value.find(v => v.server_id === id)
+    if (!row || row.upgrading) continue
+    if (row.upgrade_error) message.error('安装失败，详情见下方输出', { duration: 10000 })
+    else message.success(`安装完成${row.version ? '：' + row.version : ''}`)
+    return
+  }
 }
 
 onMounted(() => { load(); loadVersions() })
@@ -190,4 +210,11 @@ onMounted(() => { load(); loadVersions() })
 .nv-side { display:flex; align-items:center; gap:10px; }
 .nv-time { font-size:11px; color:var(--text-3); }
 .nv-err { flex-basis:100%; font-size:11px; line-height:1.7; color:var(--warning,#d97706); }
+/* 脚本输出可能很长，限高 + 可滚动，免得一次失败把整页撑开。 */
+.nv-out {
+  margin:4px 0 0; padding:8px 10px; max-height:220px; overflow:auto;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.6;
+  white-space:pre-wrap; word-break:break-all;
+  background:var(--code-bg,rgba(128,128,128,.1)); border-radius:6px; color:var(--text-2);
+}
 </style>
