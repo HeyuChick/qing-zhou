@@ -1,0 +1,179 @@
+package updater
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// minBackupBytes is a floor below which a "binary" is certainly damaged. The
+// real one is tens of megabytes; this only has to be far enough above zero to
+// catch an empty or barely-started copy on installs whose backup predates the
+// metadata sidecar and therefore has no hash to check.
+const minBackupBytes = 1 << 20 // 1 MiB
+
+// elfMagic is the first four bytes of every ELF executable. Cheap way to notice
+// that the backup is not a Linux binary at all.
+var elfMagic = []byte{0x7f, 'E', 'L', 'F'}
+
+// backupMeta describes the kept binary. Written next to it at backup time.
+type backupMeta struct {
+	Version string `json:"version"`
+	SHA256  string `json:"sha256"`
+	Size    int64  `json:"size"`
+}
+
+func backupMetaPath(exePath string) string { return backupPath(exePath) + ".meta" }
+
+// fileSHA256 hashes a file without reading it all into memory.
+func fileSHA256(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// writeBackupMeta records the version and digest of the binary now at the
+// backup path. Best-effort: a missing sidecar degrades the rollback to the
+// weaker size/ELF checks, which must never be a reason to fail an update.
+func writeBackupMeta(exePath, ver string) {
+	ver = strings.TrimSpace(ver)
+	if ver == "" {
+		ver = "unknown"
+	}
+	sum, size, err := fileSHA256(backupPath(exePath))
+	if err != nil {
+		_ = os.Remove(backupMetaPath(exePath))
+		return
+	}
+	b, err := json.Marshal(backupMeta{Version: ver, SHA256: sum, Size: size})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(backupMetaPath(exePath), b, 0o600)
+}
+
+// readBackupMeta returns the sidecar, or nil when there is none (an install
+// whose backup was taken before this metadata existed).
+func readBackupMeta(exePath string) *backupMeta {
+	b, err := os.ReadFile(backupMetaPath(exePath))
+	if err != nil || len(b) > 4<<10 {
+		return nil
+	}
+	var m backupMeta
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	if len(m.Version) > 64 {
+		m.Version = ""
+	}
+	return &m
+}
+
+// clearBackupMeta drops the sidecar, e.g. when the backup it describes is gone.
+func clearBackupMeta(exePath string) { _ = os.Remove(backupMetaPath(exePath)) }
+
+// checkBackupShallow is the cheap sanity check: run on every status poll, so it
+// must not hash tens of megabytes. Catches the cases that matter for deciding
+// whether to *offer* the button — missing, empty, truncated early, or not a
+// Linux binary at all.
+func checkBackupShallow(exePath string) error {
+	prev := backupPath(exePath)
+	st, err := os.Stat(prev)
+	if err != nil {
+		return errors.New("本机没有保留上一个版本（面板尚未通过「在线更新」升级过）")
+	}
+	if !st.Mode().IsRegular() {
+		return errors.New("保留的上一个版本不是普通文件，已忽略")
+	}
+	if st.Size() < minBackupBytes {
+		return fmt.Errorf("保留的上一个版本只有 %d 字节，明显不完整，拒绝用于回滚", st.Size())
+	}
+	if meta := readBackupMeta(exePath); meta != nil && meta.Size > 0 && meta.Size != st.Size() {
+		return errors.New("保留的上一个版本大小与备份记录不符，可能已损坏，拒绝用于回滚")
+	}
+	if err := checkELF(prev); err != nil {
+		return err
+	}
+	return nil
+}
+
+func checkELF(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return errors.New("无法读取保留的上一个版本: " + err.Error())
+	}
+	defer f.Close()
+	head := make([]byte, len(elfMagic))
+	if _, err := io.ReadFull(f, head); err != nil {
+		return errors.New("保留的上一个版本无法读取，拒绝用于回滚")
+	}
+	for i := range elfMagic {
+		if head[i] != elfMagic[i] {
+			return errors.New("保留的上一个版本不是可执行文件，拒绝用于回滚")
+		}
+	}
+	return nil
+}
+
+// verifyBackupContent is the thorough check, run once immediately before the
+// swap rather than on every poll. With a recorded digest it proves the bytes
+// are exactly what was backed up; without one — a backup kept by a build that
+// predates this sidecar — it falls back to the shallow checks and says so.
+func verifyBackupContent(exePath string) error {
+	if err := checkBackupShallow(exePath); err != nil {
+		return err
+	}
+	meta := readBackupMeta(exePath)
+	if meta == nil || meta.SHA256 == "" {
+		// Transitional: nothing to compare against. The shallow checks already
+		// ruled out the damage modes that are actually plausible here.
+		return nil
+	}
+	sum, _, err := fileSHA256(backupPath(exePath))
+	if err != nil {
+		return errors.New("校验保留版本失败: " + err.Error())
+	}
+	if !strings.EqualFold(sum, meta.SHA256) {
+		return errors.New("保留的上一个版本校验不通过（内容与备份时不一致），拒绝用于回滚")
+	}
+	return nil
+}
+
+// copyFileAtomic copies src to dst via a sibling temp file and a rename, so dst
+// either does not change or appears complete. Plain copyFile writes into dst
+// incrementally and can leave it truncated.
+func copyFileAtomic(src, dst string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".qz-bak-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	if err := copyFile(src, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}

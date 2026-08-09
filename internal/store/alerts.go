@@ -82,6 +82,20 @@ func (s *Store) clearStreak(key alertStreakKey) {
 	delete(s.streaks, key)
 }
 
+// pruneStreaks drops counters for servers that no longer exist. Deleting a
+// server is the one path that removes it from every check without ever taking
+// its conditions through "resolved", so without this its counters would sit in
+// the map for the lifetime of the process.
+func (s *Store) pruneStreaks(live map[int64]bool) {
+	s.streakMu.Lock()
+	defer s.streakMu.Unlock()
+	for k := range s.streaks {
+		if !live[k.server] {
+			delete(s.streaks, k)
+		}
+	}
+}
+
 // alertStreakRequired reads the configured threshold, clamped to something sane:
 // below 1 it would alert on nothing observed, and a very large value would mean
 // a genuinely dead server never surfaces.
@@ -228,6 +242,11 @@ func (s *Store) CheckProbeAlerts() error {
 	}
 
 	streakNeeded := s.alertStreakRequired()
+	live := make(map[int64]bool, len(servers))
+	for _, sv := range servers {
+		live[sv.ID] = true
+	}
+	s.pruneStreaks(live)
 
 	for _, sv := range servers {
 		if !sv.ProbeEnabled {

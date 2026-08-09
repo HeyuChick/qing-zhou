@@ -56,10 +56,10 @@ func read(t *testing.T, p string) string {
 // new backup, or a mistaken rollback is a one-way trip with no network.
 func TestRollbackRotatesRatherThanConsumes(t *testing.T) {
 	exePath := setup(t, "v2-binary", "v1-binary")
-	writeBackupVersion(exePath, "v1.0.0")
+	writeBackupMeta(exePath, "v1.0.0")
 
 	rotate(t, exePath)
-	writeBackupVersion(exePath, "v2.0.0")
+	writeBackupMeta(exePath, "v2.0.0")
 
 	if got := read(t, exePath); got != "v1-binary" {
 		t.Errorf("live binary = %q, want the rolled-back one", got)
@@ -67,7 +67,7 @@ func TestRollbackRotatesRatherThanConsumes(t *testing.T) {
 	if got := read(t, backupPath(exePath)); got != "v2-binary" {
 		t.Errorf("backup = %q, want the version we just left", got)
 	}
-	if got := readBackupVersion(exePath); got != "v2.0.0" {
+	if got := backupVersion(exePath); got != "v2.0.0" {
 		t.Errorf("recorded backup version = %q, want v2.0.0", got)
 	}
 
@@ -118,32 +118,6 @@ func TestRollbackStateRejectsUnusableBackup(t *testing.T) {
 	rs := m.RollbackState()
 	if !rs.Available && rs.Reason == "" {
 		t.Error("unavailable rollback must explain itself")
-	}
-}
-
-func TestBackupVersionRoundTrip(t *testing.T) {
-	exePath := setup(t, "cur", "prev")
-	if got := readBackupVersion(exePath); got != "" {
-		t.Errorf("no note yet, got %q", got)
-	}
-	writeBackupVersion(exePath, "v1.2.3")
-	if got := readBackupVersion(exePath); got != "v1.2.3" {
-		t.Errorf("got %q", got)
-	}
-	// A blank version still records something, so the UI can say "unknown"
-	// instead of silently rendering an empty button label.
-	writeBackupVersion(exePath, "   ")
-	if got := readBackupVersion(exePath); got != "unknown" {
-		t.Errorf("blank version = %q, want unknown", got)
-	}
-	// Garbage that would blow up the UI is refused on read.
-	long := make([]byte, 200)
-	for i := range long {
-		long[i] = 'x'
-	}
-	_ = os.WriteFile(backupVersionPath(exePath), long, 0o600)
-	if got := readBackupVersion(exePath); got != "" {
-		t.Errorf("oversized note should be ignored, got %q", got)
 	}
 }
 

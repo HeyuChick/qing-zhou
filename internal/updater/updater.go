@@ -82,7 +82,6 @@ type ReleaseInfo struct {
 	Name        string `json:"name"`
 	PublishedAt string `json:"published_at"`
 	Prerelease  bool   `json:"prerelease"`
-	Notes       string `json:"notes"`
 	// Downloadable is false when the release predates this architecture's asset
 	// (or the upload failed). Such a release is listed but cannot be installed —
 	// hiding it would leave an unexplained gap in the version history.
@@ -276,9 +275,12 @@ func (m *Manager) ListReleases(ctx context.Context, limit int) ([]ReleaseInfo, e
 		if rel.Draft {
 			continue
 		}
+		// Deliberately without the release body: the picker shows a one-line
+		// label, and 30 changelogs — several KB each here — would be shipped to
+		// the browser on every list load for nothing. The GitHub link covers it.
 		info := ReleaseInfo{
 			Tag: rel.TagName, Name: rel.Name, PublishedAt: rel.PublishedAt,
-			Prerelease: rel.Prerelease, Notes: rel.Body,
+			Prerelease: rel.Prerelease,
 		}
 		if a := findAsset(rel, assetName()); a != nil {
 			info.Downloadable = true
@@ -526,18 +528,25 @@ func (m *Manager) run(pinned string) {
 	prev := backupPath(exePath)
 	_ = os.Remove(prev)
 	if err := os.Link(exePath, prev); err != nil {
-		// Hard links can fail (e.g. /proc-backed or cross-device layouts); copy.
-		if cerr := copyFile(exePath, prev); cerr != nil {
+		// Hard links can fail (e.g. cross-device or overlayfs layouts); copy.
+		//
+		// Via a temp file and a rename, never straight into prev: copyFile writes
+		// incrementally, so a process killed mid-copy — or a full disk — would
+		// leave a truncated binary sitting at the backup path with nothing to say
+		// it is broken. The rollback button would then cheerfully install it, and
+		// on a deployment whose whole premise is "panel only, no SSH" that is
+		// unrecoverable.
+		if cerr := copyFileAtomic(exePath, prev); cerr != nil {
 			_ = os.Remove(tmpPath)
 			m.fail("备份当前版本失败，已取消更新: " + cerr.Error())
 			return
 		}
 	}
-	// Record what the backup actually is. A binary on disk cannot be asked its
-	// version (there is no such subcommand), so without this note the rollback
-	// button could only offer "回滚到上一个版本" — and an operator staring at a
-	// broken panel needs to know *which* version that is before pressing it.
-	writeBackupVersion(exePath, version.Current())
+	// Record what the backup is and what it should hash to. A binary on disk can
+	// be asked neither its version (there is no such subcommand) nor whether it
+	// is intact, so without this note the rollback button could only offer
+	// "回滚到上一个版本" and would have no way to detect a damaged backup.
+	writeBackupMeta(exePath, version.Current())
 	// rename() over the running binary is safe on Linux (no ETXTBSY; only
 	// *writing* a busy text file fails — the probe installer relies on the same).
 	if err := os.Rename(tmpPath, exePath); err != nil {

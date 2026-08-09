@@ -6,37 +6,18 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 
 	"qingzhou/internal/version"
 )
 
-// backupVersionPath is where the backup's version string is noted, alongside
-// the backup binary itself.
-func backupVersionPath(exePath string) string { return backupPath(exePath) + ".version" }
-
-// writeBackupVersion records which version backupPath() currently holds.
-// Best-effort: a missing note only costs the UI a version label, so it must
-// never be able to fail an update.
-func writeBackupVersion(exePath, v string) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		v = "unknown"
+// backupVersion is the recorded version of the kept binary, or "" when the
+// backup predates the metadata sidecar.
+func backupVersion(exePath string) string {
+	if m := readBackupMeta(exePath); m != nil {
+		return m.Version
 	}
-	_ = os.WriteFile(backupVersionPath(exePath), []byte(v+"\n"), 0o600)
-}
-
-func readBackupVersion(exePath string) string {
-	b, err := os.ReadFile(backupVersionPath(exePath))
-	if err != nil {
-		return ""
-	}
-	v := strings.TrimSpace(string(b))
-	if len(v) > 64 {
-		return ""
-	}
-	return v
+	return ""
 }
 
 // RollbackState describes whether the one-step local rollback is usable, and to
@@ -72,13 +53,19 @@ func (m *Manager) RollbackState() RollbackState {
 	if err != nil {
 		return RollbackState{Reason: "无法定位当前程序路径: " + err.Error()}
 	}
+	// Shallow, not the full digest: this runs on every status poll, and hashing
+	// tens of megabytes to render a button would be absurd. The digest is
+	// verified once, immediately before the swap.
+	if err := checkBackupShallow(exePath); err != nil {
+		return RollbackState{Reason: err.Error()}
+	}
 	st, err := os.Stat(backupPath(exePath))
-	if err != nil || !st.Mode().IsRegular() || st.Size() == 0 {
-		return RollbackState{Reason: "本机没有保留上一个版本（面板尚未通过「在线更新」升级过）"}
+	if err != nil {
+		return RollbackState{Reason: "读取保留版本失败: " + err.Error()}
 	}
 	return RollbackState{
 		Available: true,
-		Version:   readBackupVersion(exePath),
+		Version:   backupVersion(exePath),
 		Size:      st.Size(),
 		SavedAt:   st.ModTime().Unix(),
 	}
@@ -126,11 +113,20 @@ func (m *Manager) runRollback() {
 		return
 	}
 	prev := backupPath(exePath)
-	prevVer := readBackupVersion(exePath)
+	prevVer := backupVersion(exePath)
 	curVer := version.Current()
 	label := prevVer
 	if label == "" {
 		label = "上一个版本"
+	}
+	m.setState(StatusVerifying, "校验保留的版本…", 100, prevVer)
+
+	// The full digest check, once, right before anything irreversible. The
+	// button was offered on the cheap checks alone; installing a binary is not
+	// something to do on "probably fine".
+	if err := verifyBackupContent(exePath); err != nil {
+		m.fail(err.Error())
+		return
 	}
 	m.setState(StatusInstalling, "正在回滚到 "+label+"…", 100, prevVer)
 
@@ -175,10 +171,15 @@ func (m *Manager) runRollback() {
 	//    the rolled-back binary, so a failure here costs the *next* rollback,
 	//    not this one. Do not abort.
 	if err := os.Rename(keep, prev); err == nil {
-		writeBackupVersion(exePath, curVer)
+		writeBackupMeta(exePath, curVer)
 	} else {
+		// prev still holds the bytes now running as exePath. Leaving it would
+		// advertise a rollback that swaps the live binary for an identical copy
+		// — a pointless service restart dressed up as a recovery action. Remove
+		// it so the button honestly reports that there is nothing to go back to.
 		_ = os.Remove(keep)
-		_ = os.Remove(backupVersionPath(exePath))
+		_ = os.Remove(prev)
+		clearBackupMeta(exePath)
 	}
 
 	m.setState(StatusRestarting, "回滚完成，正在重启服务…", 100, prevVer)

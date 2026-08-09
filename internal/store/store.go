@@ -10,6 +10,7 @@ import (
 // Store is the SQLite-backed data layer.
 type Store struct {
 	db        *sql.DB
+	path      string // the database file, so callers can place siblings beside it
 	secretKey []byte // for encrypting secret settings (see crypto.go)
 
 	// settings cache: the settings table is tiny and read on every
@@ -53,10 +54,17 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// Path is the database file this store was opened from. Callers that need to
+// write a file as large as the database itself (a snapshot) should put it in
+// this directory rather than the system temp dir: on the small machines this
+// targets, /tmp is routinely a tmpfs — and under systemd's PrivateTmp always
+// is — so a few hundred MB of snapshot would land in RAM.
+func (s *Store) Path() string { return s.path }
 
 // DB exposes the underlying handle for packages that need raw access.
 func (s *Store) DB() *sql.DB { return s.db }

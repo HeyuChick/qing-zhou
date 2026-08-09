@@ -148,3 +148,34 @@ func TestExpiryAlertsAreImmediate(t *testing.T) {
 		t.Error("expiry warning was delayed by the streak gate")
 	}
 }
+
+// Deleting a server is the only path that removes it from every check without
+// its conditions ever going through "resolved", so its counters would otherwise
+// live in the map until the process restarts.
+func TestStreaksArePrunedForDeletedServers(t *testing.T) {
+	st := newRefundStore(t)
+	id := probeServer(t, st, 99)
+	if err := st.CheckProbeAlerts(); err != nil {
+		t.Fatal(err)
+	}
+	st.streakMu.Lock()
+	n := len(st.streaks)
+	st.streakMu.Unlock()
+	if n == 0 {
+		t.Fatal("no streak was recorded to begin with")
+	}
+
+	if err := st.DeleteServer(id); err != nil {
+		t.Fatalf("delete server: %v", err)
+	}
+	if err := st.CheckProbeAlerts(); err != nil {
+		t.Fatal(err)
+	}
+	st.streakMu.Lock()
+	defer st.streakMu.Unlock()
+	for k := range st.streaks {
+		if k.server == id {
+			t.Errorf("counter for deleted server %d survived", id)
+		}
+	}
+}

@@ -146,7 +146,6 @@ interface ReleaseInfo {
   name: string
   published_at: string
   prerelease: boolean
-  notes: string
   downloadable: boolean
   asset_size: number
   relation: 'current' | 'newer' | 'older' | 'unknown'
@@ -284,7 +283,7 @@ async function startRollback() {
     message.error(e?.message || '无法启动回滚')
     return
   }
-  beginProgress('正在回滚…', rollback.value?.version || '')
+  beginProgress('正在回滚…', rollback.value?.version || '', 'verifying')
 }
 
 function confirmInstall() {
@@ -324,9 +323,10 @@ async function startUpdate(tag?: string) {
   beginProgress('准备下载…', tag || '')
 }
 
-function beginProgress(msg: string, target: string) {
+// phase 是初始阶段：升级从「下载中」起步，回滚不下载任何东西，直接是「安装中」。
+function beginProgress(msg: string, target: string, phase = 'downloading') {
   updating.value = true
-  progress.status = 'downloading'
+  progress.status = phase
   progress.percent = 0
   progress.message = msg
   progress.target_version = target

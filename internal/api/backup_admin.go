@@ -23,7 +23,17 @@ import (
 func (a *API) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
 	// A private temp dir per request: two admins clicking at the same moment
 	// must not race on one path, and VACUUM INTO refuses an existing file.
-	dir, err := os.MkdirTemp("", "qingzhou-backup-")
+	//
+	// Beside the database, not in the system temp dir. The snapshot is as large
+	// as the database, and on the 1H1G machines this targets /tmp is routinely a
+	// tmpfs — always so under systemd's PrivateTmp — which would put the whole
+	// copy in RAM and risk taking the panel down with an OOM. The database's own
+	// directory demonstrably has room for a file that size.
+	base := filepath.Dir(a.st.Path())
+	if base == "" || base == "." {
+		base = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(base, ".qingzhou-backup-")
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "创建临时目录失败")
 		return
