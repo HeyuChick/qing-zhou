@@ -58,7 +58,6 @@ type subInfo struct {
 	Total     int64 // 0 = unlimited
 	ExpiryAt  int64 // 0 = never
 	NodeCount int
-	Banned    bool
 	Expired   bool
 	OverQuota bool
 }
@@ -131,10 +130,11 @@ func (s subInfo) DaysLeft() int64 {
 }
 
 // Notice is the one line explaining why a subscription would come back empty.
+// A banned account has no case here on purpose: handleSub answers it with 403
+// long before this page is reached, so a branch for it would be dead code
+// claiming to handle something it never sees.
 func (s subInfo) Notice() string {
 	switch {
-	case s.Banned:
-		return "此账号已被封禁，订阅不会返回任何节点。"
 	case s.Expired:
 		return "套餐已到期，订阅当前不返回节点。续期后立即恢复。"
 	case s.OverQuota:
@@ -281,5 +281,28 @@ func contentDisposition(siteName, format string) string {
 	if name == "" {
 		return `attachment; filename="` + ascii + `"`
 	}
-	return `attachment; filename="` + ascii + `"; filename*=UTF-8''` + url.PathEscape(name+"."+ext)
+	return `attachment; filename="` + ascii + `"; filename*=UTF-8''` + rfc5987Escape(name+"."+ext)
+}
+
+// rfc5987Escape percent-encodes for an ext-value, per RFC 5987/8187.
+//
+// url.PathEscape is not a substitute: it leaves through characters that are
+// legal in a URL path but not in a header parameter — ':', '=', '&', '@', ','
+// among them. A site name containing one would produce a Content-Disposition
+// that a strict parser reads as truncated or malformed, so the client would
+// name the profile after the URL's last segment (the subscription token) after
+// all — the exact outcome this header exists to prevent.
+func rfc5987Escape(s string) string {
+	const attrChar = "!#$&+-.^_`|~"
+	var b strings.Builder
+	for _, c := range []byte(s) {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			strings.IndexByte(attrChar, c) >= 0:
+			b.WriteByte(c)
+		default:
+			b.WriteString(fmt.Sprintf("%%%02X", c))
+		}
+	}
+	return b.String()
 }

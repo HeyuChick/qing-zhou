@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func req(ua, accept, format string) *http.Request {
+func req(ua, accept string) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "/sub/tok", nil)
 	r.Header.Set("User-Agent", ua)
 	if accept != "" {
@@ -27,7 +27,7 @@ func TestBrowsersGetTheInfoPage(t *testing.T) {
 		"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
 	}
 	for _, ua := range uas {
-		if !wantsSubInfoPage(req(ua, browserAccept, ""), "") {
+		if !wantsSubInfoPage(req(ua, browserAccept), "") {
 			t.Errorf("browser not detected: %s", ua)
 		}
 	}
@@ -54,7 +54,7 @@ func TestProxyClientsNeverGetTheInfoPage(t *testing.T) {
 		{"Mozilla/5.0 (compatible; Clash/1.0)", "*/*"},
 	}
 	for _, c := range clients {
-		if wantsSubInfoPage(req(c.ua, c.accept, ""), "") {
+		if wantsSubInfoPage(req(c.ua, c.accept), "") {
 			t.Errorf("proxy client misdetected as a browser: %q accept=%q", c.ua, c.accept)
 		}
 	}
@@ -65,7 +65,7 @@ func TestProxyClientsNeverGetTheInfoPage(t *testing.T) {
 func TestExplicitFormatSuppressesInfoPage(t *testing.T) {
 	ua := "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 	for _, f := range []string{"clash", "singbox", "base64", "surge"} {
-		if wantsSubInfoPage(req(ua, browserAccept, f), f) {
+		if wantsSubInfoPage(req(ua, browserAccept), f) {
 			t.Errorf("format=%s from a browser was hijacked by the info page", f)
 		}
 	}
@@ -96,6 +96,30 @@ func TestContentDispositionCarriesBothForms(t *testing.T) {
 	}
 	if got := contentDisposition("", "base64"); !strings.Contains(got, ".txt") {
 		t.Errorf("base64 extension = %q", got)
+	}
+	// Characters that are legal in a URL path but would truncate or corrupt a
+	// header parameter must still be escaped.
+	got = contentDisposition(`a,b;c="d" e:f`, "clash")
+	for _, bad := range []string{",", ";c", `"`, " ", ":"} {
+		if strings.Contains(got[strings.Index(got, "UTF-8''"):], bad) {
+			t.Errorf("unescaped %q in ext-value: %s", bad, got)
+		}
+	}
+}
+
+func TestRFC5987Escape(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain.yaml": "plain.yaml",
+		"a b":        "a%20b",
+		"a,b":        "a%2Cb",
+		"a=b":        "a%3Db",
+		"a:b":        "a%3Ab",
+		"a\"b":       "a%22b",
+		"轻舟":         "%E8%BD%BB%E8%88%9F",
+	} {
+		if got := rfc5987Escape(in); got != want {
+			t.Errorf("rfc5987Escape(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

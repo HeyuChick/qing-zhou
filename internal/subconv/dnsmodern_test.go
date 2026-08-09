@@ -235,3 +235,91 @@ func TestSingboxRenderModernizesStoredTemplate(t *testing.T) {
 		t.Error("node domain rule missing from rendered config")
 	}
 }
+
+// sing-box 1.13 refuses a config with no default_domain_resolver outright
+// ("missing `route.default_domain_resolver` … will be removed in sing-box
+// 1.14.0"), so migrating the DNS servers without this would have traded one
+// fatal for another and left the subscription just as unloadable.
+func TestModernizeAddsDomainResolver(t *testing.T) {
+	doc := map[string]any{}
+	if err := json.Unmarshal([]byte(DefaultSingboxTemplate), &doc); err != nil {
+		t.Fatalf("bad default template: %v", err)
+	}
+	modernizeSingboxDNS(doc)
+	route, _ := doc["route"].(map[string]any)
+	if route["default_domain_resolver"] != "local" {
+		t.Errorf("default_domain_resolver = %v, want \"local\"", route["default_domain_resolver"])
+	}
+}
+
+func TestModernizeBackfillsDomainResolverOnLegacyTemplate(t *testing.T) {
+	doc := map[string]any{}
+	_ = json.Unmarshal([]byte(`{
+		"dns": {"servers": [
+			{"tag":"remote","address":"https://1.1.1.1/dns-query","detour":"proxy"},
+			{"tag":"local","address":"https://223.5.5.5/dns-query","detour":"direct"},
+			{"tag":"fake","address":"fakeip"}
+		]},
+		"route": {"final": "proxy"}
+	}`), &doc)
+	modernizeSingboxDNS(doc)
+	route, _ := doc["route"].(map[string]any)
+	if route["default_domain_resolver"] != "local" {
+		t.Errorf("got %v, want \"local\"", route["default_domain_resolver"])
+	}
+}
+
+// An admin who set one keeps it.
+func TestModernizeDoesNotOverrideDomainResolver(t *testing.T) {
+	doc := map[string]any{}
+	_ = json.Unmarshal([]byte(`{
+		"dns": {"servers": [{"tag":"local","address":"local"}]},
+		"route": {"default_domain_resolver": "mine"}
+	}`), &doc)
+	modernizeSingboxDNS(doc)
+	route, _ := doc["route"].(map[string]any)
+	if route["default_domain_resolver"] != "mine" {
+		t.Errorf("admin's resolver was overwritten: %v", route["default_domain_resolver"])
+	}
+}
+
+func TestPickDomainResolver(t *testing.T) {
+	cases := []struct {
+		name    string
+		servers []map[string]any
+		want    string
+	}{
+		{"prefers the conventional local tag", []map[string]any{
+			{"tag": "remote", "type": "https", "detour": "proxy"},
+			{"tag": "local", "type": "https", "detour": "direct"},
+		}, "local"},
+		// Resolving the proxy's own hostname through the proxy is circular, so a
+		// directly-dialled server wins over a detoured one.
+		{"prefers a direct server over a detoured one", []map[string]any{
+			{"tag": "viaproxy", "type": "https", "detour": "proxy"},
+			{"tag": "plain", "type": "https"},
+		}, "plain"},
+		// Every dial would otherwise be handed a 198.18.x fake address.
+		{"never picks fakeip", []map[string]any{
+			{"tag": "fake", "type": "fakeip"},
+			{"tag": "remote", "type": "https", "detour": "proxy"},
+		}, "remote"},
+		{"falls back to a detoured server when that is all there is", []map[string]any{
+			{"tag": "only", "type": "https", "detour": "proxy"},
+		}, "only"},
+		// A dangling tag is a hard error, while the missing field is only
+		// deprecated — so emit nothing rather than invent a reference.
+		{"nothing usable yields nothing", []map[string]any{
+			{"tag": "fake", "type": "fakeip"},
+			{"type": "https"},
+		}, ""},
+		{"no servers at all", nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := pickDomainResolver(c.servers); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}

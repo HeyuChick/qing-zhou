@@ -398,6 +398,7 @@ const DefaultSingboxTemplate = `{
   "route": {
     "auto_detect_interface": true,
     "final": "proxy",
+    "default_domain_resolver": "local",
     "rules": [
       {"action": "sniff"},
       {"protocol": "dns", "action": "hijack-dns"},

@@ -81,6 +81,69 @@ func modernizeSingboxDNS(doc map[string]any) {
 	if fakeipClaimed {
 		delete(dns, "fakeip")
 	}
+
+	ensureDomainResolver(doc, servers)
+}
+
+// ensureDomainResolver sets route.default_domain_resolver when the config has
+// none.
+//
+// This is the *second* thing sing-box 1.14 removes, and it lands on the very
+// same config as the DNS server rewrite: any dial that has to turn a domain
+// into an address — the remote rule-set downloads, a node addressed by
+// hostname — needs to be told which DNS server to use. Without it, 1.13 already
+// refuses the config outright:
+//
+//	missing `route.default_domain_resolver` or `domain_resolver` in dial fields
+//	is deprecated in sing-box 1.12.0 and will be removed in sing-box 1.14.0
+//
+// so migrating the servers alone would have swapped one fatal for another and
+// left the subscription just as unloadable.
+//
+// The resolver must never be the fake-ip server — every dial would then get a
+// 198.18.x address instead of a real one — and should not be a server detoured
+// through the proxy, since resolving the proxy's own hostname through the proxy
+// is circular. A directly-dialled server is therefore preferred, with the
+// conventional "local" tag first.
+func ensureDomainResolver(doc map[string]any, servers []map[string]any) {
+	route, ok := doc["route"].(map[string]any)
+	if !ok {
+		return
+	}
+	if v, exists := route["default_domain_resolver"]; exists && v != nil && v != "" {
+		return
+	}
+	if tag := pickDomainResolver(servers); tag != "" {
+		route["default_domain_resolver"] = tag
+	}
+}
+
+// pickDomainResolver chooses the DNS server tag best suited to resolving dial
+// addresses, or "" when the config has nothing usable (in which case we leave
+// the field out rather than invent a tag that does not exist — a dangling
+// reference is a hard error, whereas the missing field is merely deprecated).
+func pickDomainResolver(servers []map[string]any) string {
+	var firstDirect, firstAny string
+	for _, s := range servers {
+		tag, _ := s["tag"].(string)
+		if tag == "" || s["type"] == "fakeip" {
+			continue
+		}
+		if tag == "local" {
+			return tag
+		}
+		detour, _ := s["detour"].(string)
+		if firstDirect == "" && (detour == "" || detour == "direct") {
+			firstDirect = tag
+		}
+		if firstAny == "" {
+			firstAny = tag
+		}
+	}
+	if firstDirect != "" {
+		return firstDirect
+	}
+	return firstAny
 }
 
 // convertLegacyDNSServer turns one legacy `address` value into typed fields on

@@ -738,7 +738,6 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 			SiteName: siteName, SubURL: subURL,
 			Used: u.UsedUp + u.UsedDown, Total: u.TrafficLimit, ExpiryAt: u.ExpiryAt,
 			NodeCount: len(links),
-			Banned:    u.Status == "banned",
 			Expired:   u.ExpiryAt != 0 && u.ExpiryAt <= now,
 			OverQuota: u.TrafficLimit != 0 && u.UsedUp+u.UsedDown >= u.TrafficLimit,
 		})
