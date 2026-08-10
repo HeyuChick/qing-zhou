@@ -16,6 +16,8 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -785,26 +787,44 @@ func (a *API) handleAdminListSbEgresses(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// 附带每个出口被多少个入站引用，前端用来提示删除限制。
-	inbounds, _ := a.st.ListSbInbounds()
+	refs := a.countEgressRefs()
+	out := make([]map[string]interface{}, 0, len(list))
+	for _, e := range list {
+		out = append(out, egressJSON(e, refs[e.ID]))
+	}
+	ok(w, out)
+}
+
+// egressJSON renders one egress for the admin UI: password masked, and the
+// "decide for me" fields resolved to what the generated config will actually
+// carry. Returning the raw "" / 0 sentinels would make the UI show a blank
+// where a real, load-bearing default is in force.
+func egressJSON(e *store.SbEgress, inboundCount int) map[string]interface{} {
+	m := maskEgress(e)
+	return map[string]interface{}{
+		"id": m.ID, "name": m.Name, "type": m.Type, "host": m.Host, "port": m.Port,
+		"username": m.Username, "password": m.Password,
+		"tls_enabled": m.TLSEnabled, "sni": m.SNI,
+		"tls_cert_id": m.TLSCertID, "tls_insecure": m.TLSInsecure,
+		"udp_mode":                     m.UDPMode,
+		"udp_mode_effective":           m.EffectiveUDPMode(),
+		"connect_timeout_ms":           m.ConnectTimeoutMS,
+		"connect_timeout_effective_ms": m.EffectiveConnectTimeoutMS(),
+		"inbound_count":                inboundCount,
+		"created_at":                   m.CreatedAt, "updated_at": m.UpdatedAt,
+	}
+}
+
+// countEgressRefs returns how many inbounds point at each egress.
+func (a *API) countEgressRefs() map[int64]int {
 	refs := map[int64]int{}
+	inbounds, _ := a.st.ListSbInbounds()
 	for _, ib := range inbounds {
 		if ib.EgressID != 0 {
 			refs[ib.EgressID]++
 		}
 	}
-	out := make([]map[string]interface{}, 0, len(list))
-	for _, e := range list {
-		m := maskEgress(e)
-		out = append(out, map[string]interface{}{
-			"id": m.ID, "name": m.Name, "type": m.Type, "host": m.Host, "port": m.Port,
-			"username": m.Username, "password": m.Password,
-			"tls_enabled": m.TLSEnabled, "sni": m.SNI,
-			"tls_cert_id": m.TLSCertID, "tls_insecure": m.TLSInsecure,
-			"inbound_count": refs[m.ID],
-			"created_at":    m.CreatedAt, "updated_at": m.UpdatedAt,
-		})
-	}
-	ok(w, out)
+	return refs
 }
 
 func (a *API) handleAdminSaveSbEgress(w http.ResponseWriter, r *http.Request) {
@@ -833,6 +853,24 @@ func (a *API) handleAdminSaveSbEgress(w http.ResponseWriter, r *http.Request) {
 	}
 	if e.Name == "" || e.Host == "" || e.Port <= 0 || e.Port > 65535 {
 		fail(w, http.StatusBadRequest, "名称、地址必填，端口需在 1-65535")
+		return
+	}
+	// UDP 策略：空串＝按类型自动决定（见 SbEgress.EffectiveUDPMode），显式值只认这两个。
+	// 拒绝未知值而不是静默回落，否则前端拼错一个字符就会得到一份与界面不符的配置。
+	switch e.UDPMode {
+	case "", store.UDPModePassthrough, store.UDPModeBlock:
+	default:
+		fail(w, http.StatusBadRequest, "UDP 策略仅支持 passthrough / block")
+		return
+	}
+	// HTTP 出站在 sing-box 里根本没有 UDP 通路，passthrough 只会让 UDP 沉默地失败一遍再失败。
+	// 与其存一个界面显示「透传」、实际等于阻断的值，不如直接拦下来。
+	if e.UDPMode == store.UDPModePassthrough && e.Type == "http" {
+		fail(w, http.StatusBadRequest, "HTTP 出口不支持 UDP 透传（sing-box 的 http 出站没有 UDP 通路），请选择「阻断」")
+		return
+	}
+	if e.ConnectTimeoutMS < 0 || e.ConnectTimeoutMS > 60000 {
+		fail(w, http.StatusBadRequest, "连接超时需在 0-60000 毫秒（0＝使用默认值）")
 		return
 	}
 	// TLS 到代理这一跳（HTTPS 代理）。sing-box 的 socks 出站没有 tls 选项，
@@ -879,10 +917,91 @@ func (a *API) handleAdminSaveSbEgress(w http.ResponseWriter, r *http.Request) {
 	// 凭据/地址变更影响所有引用此出口的服务器配置，全量重建兜底。
 	a.sbRebuildLog()
 	if saved, _ := a.st.GetSbEgress(newID); saved != nil {
-		ok(w, maskEgress(saved))
+		ok(w, egressJSON(saved, a.countEgressRefs()[saved.ID]))
 		return
 	}
 	ok(w, nil)
+}
+
+// handleAdminCloneSbEgress duplicates an egress server-side. See
+// store.CloneSbEgress for why this cannot be a client-side copy-and-POST.
+//
+// No sbRebuildLog: a fresh egress has no inbound pointing at it, so no
+// generated config changes until the admin binds it — and that binding already
+// triggers a rebuild.
+func (a *API) handleAdminCloneSbEgress(w http.ResponseWriter, r *http.Request) {
+	cloned, err := a.st.CloneSbEgress(atoi(chi.URLParam(r, "id")))
+	if errors.Is(err, store.ErrEgressUndecryptable) {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "克隆失败")
+		return
+	}
+	if cloned == nil {
+		fail(w, http.StatusNotFound, "代理出口不存在")
+		return
+	}
+	ok(w, egressJSON(cloned, 0))
+}
+
+// handleAdminParseEgressLink turns pasted vendor credentials into candidate
+// egress rows. Read-only: nothing is stored, the client saves what it wants
+// through the normal create endpoint so validation stays in one place.
+//
+// Multi-line input is parsed line by line and failures are reported per line
+// rather than failing the batch: a vendor's mail with a stray header line
+// should still yield the twenty proxies under it.
+func (a *API) handleAdminParseEgressLink(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	lines := strings.Split(strings.ReplaceAll(body.Text, "\r\n", "\n"), "\n")
+	// A paste is a human action; this only exists so a runaway paste can't turn
+	// into an unbounded response. Reported back rather than trimmed quietly: a
+	// silent cap is indistinguishable from "all of it was imported".
+	const maxLines = 500
+	truncated := 0
+	if len(lines) > maxLines {
+		truncated = len(lines) - maxLines
+		lines = lines[:maxLines]
+	}
+	items := []map[string]interface{}{}
+	errs := []map[string]interface{}{}
+	for i, line := range lines {
+		p, err := parseEgressLink(line)
+		if errors.Is(err, errEgressLinkEmpty) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, J{"line": i + 1, "text": strings.TrimSpace(line), "error": err.Error()})
+			continue
+		}
+		e := p.Egress
+		if e.Name == "" {
+			e.Name = egressLinkFallbackName(e)
+		}
+		// The password goes back in the clear, unlike every other egress
+		// response. It is not a disclosure: it arrived in this request body
+		// seconds ago, typed by the same admin, and the client needs it to POST
+		// the row it is about to create. Nothing is read out of the database here.
+		items = append(items, J{
+			"name": e.Name, "type": e.Type, "host": e.Host, "port": e.Port,
+			"username": e.Username, "password": e.Password,
+			"tls_enabled": e.TLSEnabled, "sni": e.SNI,
+			"type_guessed": p.TypeGuessed,
+		})
+	}
+	if len(items) == 0 && len(errs) == 0 {
+		fail(w, http.StatusBadRequest, "没有可解析的内容")
+		return
+	}
+	ok(w, J{"items": items, "errors": errs, "truncated": truncated})
 }
 
 func (a *API) handleAdminDeleteSbEgress(w http.ResponseWriter, r *http.Request) {
@@ -945,6 +1064,10 @@ func egressProxyURL(e *store.SbEgress) (string, []string) {
 // many static-IP proxies allow only whitelisted client IPs — a test from the
 // panel host would give a misleading result. Absent server_id, it auto-picks the
 // first inbound bound to this egress; falling back to the panel host (0).
+//
+// ?n=N (2..32) switches to a concurrency probe: N connections at once instead of
+// one, reporting how many survive. See egressProbeScript for why one-at-a-time
+// cannot see the failure that matters here.
 func (a *API) handleAdminTestSbEgress(w http.ResponseWriter, r *http.Request) {
 	id := int64(atoi(chi.URLParam(r, "id")))
 	eg, err := a.st.GetSbEgress(id)
@@ -982,37 +1105,39 @@ func (a *API) handleAdminTestSbEgress(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// curl through the proxy to an IP-echo service, trying a few in case one is
-	// blocked; -w appends the total time. -f makes an HTTP error (e.g. 407 bad
-	// auth) a non-zero exit so we report failure rather than echoing an error page.
-	proxy, extra := egressProxyURL(eg)
-	script := `P=` + shellQuoteAPI(proxy) + `
-set --`
-	for _, arg := range extra {
-		script += ` ` + shellQuoteAPI(arg)
+	// n>1 switches from "is it up" to "how many connections will it take at
+	// once" — see handleAdminTestSbEgress's doc comment.
+	concurrency := int(atoi(r.URL.Query().Get("n")))
+	if concurrency > maxEgressProbeConns {
+		concurrency = maxEgressProbeConns
 	}
-	script += "\n"
-	// A pinned trust anchor has to reach curl as a file. Written to a private
-	// temp file for the life of the check and removed on every exit path. The
-	// heredoc is quoted so the PEM goes in verbatim, and the sentinel contains
-	// underscores, which base64 never produces — no line of the PEM can end it.
+
+	proxy, extra := egressProxyURL(eg)
+	var trustPEM string
 	if eg.TLSEnabled && eg.Type == "http" && eg.TLSCertID != 0 {
-		if c, _ := a.st.GetCert(eg.TLSCertID); c != nil && !c.DecryptFailed && c.CertPEM != "" {
-			script += `CAF=$(mktemp) || exit 1
-trap 'rm -f "$CAF"' EXIT
-cat > "$CAF" <<'QZ_EGRESS_PEM_EOF'
-` + strings.TrimRight(c.CertPEM, "\n") + `
-QZ_EGRESS_PEM_EOF
-set -- "$@" --proxy-cacert "$CAF"
-`
+		if c, _ := a.st.GetCert(eg.TLSCertID); c != nil && !c.DecryptFailed {
+			trustPEM = c.CertPEM
 		}
 	}
-	script += `for U in https://api.ip.sb/ip https://ifconfig.me/ip https://ipinfo.io/ip; do
-  OUT=$(curl -fsS -m 10 --proxy "$P" "$@" -w '\n%{time_total}' "$U" 2>&1) && { printf '%s' "$OUT"; exit 0; }
-done
-printf '%s' "$OUT" >&2; exit 1`
+	script := egressCheckPrelude(proxy, extra, trustPEM, concurrency > 1)
+	if concurrency > 1 {
+		script += egressProbeScript(concurrency)
+	} else {
+		script += egressSingleCheckScript()
+	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+	// The whole budget, sized against the server's 30s WriteTimeout (main.go).
+	// Past that the response is torn off the wire and the panel shows a transport
+	// error for a check that had already reached a verdict — the same trap that
+	// made 一键重装 report a false failure.
+	//
+	// Two things have to fit inside it, not one: this deadline plus
+	// RunOnServer's WaitDelay, which it spends prying the pipes away from any
+	// child that outlived the kill. 20+2 leaves 8s of headroom. The curl budgets
+	// in the scripts above are chosen to land first, so this is the backstop
+	// rather than the normal exit.
+	const checkBudget = 20 * time.Second
+	ctx, cancel := context.WithTimeout(r.Context(), checkBudget)
 	defer cancel()
 	out, runErr := a.sbctl.RunOnServer(ctx, serverID, script)
 	out = strings.TrimSpace(out)
@@ -1020,13 +1145,27 @@ printf '%s' "$OUT" >&2; exit 1`
 	resp := J{"via_server_id": serverID, "via_server": viaName, "auto_picked": !picked}
 	if runErr != nil {
 		resp["ok"] = false
-		if out == "" {
+		// "exit status 1" tells the admin nothing, and it is what a killed shell
+		// reports. Name the actual cause when the budget is what ran out.
+		if ctx.Err() != nil {
+			out = fmt.Sprintf("检测超时（超过 %ds 未完成）——出口很可能完全无响应；%s",
+				int(checkBudget.Seconds()), strings.TrimSpace(out))
+		} else if out == "" {
 			out = runErr.Error()
 		}
 		if len(out) > 500 {
 			out = out[:500]
 		}
-		resp["output"] = out
+		resp["output"] = strings.TrimSpace(out)
+		ok(w, resp)
+		return
+	}
+	if concurrency > 1 {
+		resp["mode"] = "probe"
+		resp["requested"] = concurrency
+		for k, v := range parseEgressProbeOutput(out) {
+			resp[k] = v
+		}
 		ok(w, resp)
 		return
 	}
@@ -1042,6 +1181,178 @@ printf '%s' "$OUT" >&2; exit 1`
 	resp["ip"] = ip
 	resp["latency_ms"] = latencyMs
 	ok(w, resp)
+}
+
+// maxEgressProbeConns caps the concurrency probe. Well above any plausible
+// vendor limit, and low enough that N parallel curls on the node stay a
+// diagnostic rather than a load test against someone else's service.
+const maxEgressProbeConns = 32
+
+// egressCheckPrelude emits the shell shared by both check modes: the proxy URL,
+// the extra curl flags as "$@", and — only when something needs one — a private
+// scratch dir removed on every exit path, holding the pinned trust anchor
+// and/or the probe's per-connection results.
+//
+// The dir is conditional so a plain connectivity check keeps working on a node
+// whose shell environment has no usable mktemp; that check needed no temp file
+// before this change and must not start needing one.
+//
+// One trap, one directory: an earlier version set a second `trap ... EXIT` for
+// the CA file, and in sh the later trap silently replaces the earlier one.
+func egressCheckPrelude(proxy string, extra []string, trustPEM string, needScratch bool) string {
+	s := `P=` + shellQuoteAPI(proxy) + `
+set --`
+	for _, arg := range extra {
+		s += ` ` + shellQuoteAPI(arg)
+	}
+	s += "\n"
+	hasPEM := strings.TrimSpace(trustPEM) != ""
+	if !needScratch && !hasPEM {
+		return s
+	}
+	s += `D=$(mktemp -d) || exit 1
+trap 'rm -rf "$D"' EXIT
+`
+	// The heredoc is quoted so the PEM goes in verbatim, and the sentinel
+	// contains underscores, which base64 never produces — no line of the PEM
+	// can end it early.
+	if hasPEM {
+		s += `cat > "$D/ca.pem" <<'QZ_EGRESS_PEM_EOF'
+` + strings.TrimRight(trustPEM, "\n") + `
+QZ_EGRESS_PEM_EOF
+set -- "$@" --proxy-cacert "$D/ca.pem"
+`
+	}
+	return s
+}
+
+// egressSingleCheckScript curls an IP-echo service through the proxy, trying a
+// few in case one is blocked; -w appends the total time. -f makes an HTTP error
+// (e.g. 407 bad auth) a non-zero exit so we report failure rather than echoing
+// an error page.
+//
+// -m 6 × 3 URLs = 18s worst case, inside the handler's 20s budget so the script
+// reaches its own verdict instead of being killed mid-way. This is the endpoint
+// that pronounces an egress up or down, so the per-URL budget is set as high as
+// the deadline allows rather than as low as it can go: a measured fetch through
+// a healthy proxy takes 1–3s, and calling a 5s one "不通" would be a false
+// verdict on a working egress. (It was 10s before, which is what pushed the
+// handler past WriteTimeout.)
+func egressSingleCheckScript() string {
+	return `for U in ` + egressEchoURLs + `; do
+  OUT=$(curl -fsS -m 6 --proxy "$P" "$@" -w '\n%{time_total}' "$U" 2>&1) && { printf '%s' "$OUT"; exit 0; }
+done
+printf '%s' "$OUT" >&2; exit 1`
+}
+
+const egressEchoURLs = `https://api.ip.sb/ip https://ifconfig.me/ip https://ipinfo.io/ip`
+
+// egressProbeScript opens n connections through the proxy at once and reports
+// each outcome on its own line ("ok <seconds>" / "err <message>").
+//
+// A single sequential check cannot see the failure this is for. Static-IP
+// vendors meter concurrent connections, and every inbound bound to an egress
+// shares one account, so the limit is reached by ordinary browsing — one page
+// opens dozens of sockets across a dozen domains — and the connections past the
+// cap are dropped by the provider. What the user sees is a page that loads
+// half-way while a long-lived app socket on the same tunnel is untroubled, and
+// what the panel sees, checking one connection at a time, is a healthy egress.
+//
+// A warm-up picks the echo URL first so a blocked service isn't mistaken for a
+// concurrency ceiling, and so all n connections are measuring the same thing.
+//
+// Budget: warm-up 3 × 4s, then one parallel round of 6s — 18s worst case,
+// inside the handler's 20s. The results are written to files and collected
+// after `wait`, not streamed, so interleaved writes can't split a line.
+//
+// The warm-up is stricter than the single check's 6s on purpose. Failing it is
+// not a verdict on the egress — the message sends the admin to 测试连通, which
+// is the endpoint that decides up-or-down and gets the looser budget.
+func egressProbeScript(n int) string {
+	return `U=''
+for C in ` + egressEchoURLs + `; do
+  curl -fsS -m 4 --proxy "$P" "$@" -o /dev/null "$C" && { U=$C; break; }
+done
+[ -n "$U" ] || { echo "预检失败：单条连接就不通，先用「测试连通」定位" >&2; exit 1; }
+mkdir -p "$D/r"
+i=1
+while [ $i -le ` + strconv.Itoa(n) + ` ]; do
+  (
+    if OUT=$(curl -fsS -m 6 --proxy "$P" "$@" -o /dev/null -w '%{time_total}' "$U" 2>&1); then
+      printf 'ok %s\n' "$OUT" > "$D/r/$i"
+    else
+      printf 'err %s\n' "$(printf '%s' "$OUT" | tr '\n' ' ' | cut -c1-120)" > "$D/r/$i"
+    fi
+  ) &
+  i=$((i+1))
+done
+wait
+cat "$D"/r/* 2>/dev/null`
+}
+
+// egressProbeError is one distinct failure message from a concurrency probe,
+// with how many of the connections hit it.
+type egressProbeError struct {
+	Msg   string `json:"msg"`
+	Count int    `json:"count"`
+}
+
+// parseEgressProbeOutput turns the probe's per-connection lines into the
+// summary the UI renders. Reported fields are deliberately raw counts and
+// latency spread rather than a verdict: a partial failure is the signal, and
+// whether 3 failures out of 16 means "capped at 13" or "flaky" is a judgement
+// for whoever is holding the vendor's contract.
+func parseEgressProbeOutput(out string) map[string]interface{} {
+	var lat []int
+	okCount, failCount := 0, 0
+	errCounts := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "ok "):
+			okCount++
+			if f := parseFloat(strings.TrimSpace(line[3:])); f > 0 {
+				lat = append(lat, int(f*1000))
+			}
+		case strings.HasPrefix(line, "err "):
+			failCount++
+			msg := strings.TrimSpace(line[4:])
+			if msg == "" {
+				msg = "未知错误"
+			}
+			errCounts[msg]++
+		}
+	}
+	res := map[string]interface{}{
+		"ok":         failCount == 0 && okCount > 0,
+		"ok_count":   okCount,
+		"fail_count": failCount,
+	}
+	if okCount+failCount == 0 {
+		// The script exited 0 but said nothing — nothing to summarise, so hand
+		// the raw output over rather than rendering a confident "0 / 0".
+		res["output"] = strings.TrimSpace(out)
+	}
+	if len(lat) > 0 {
+		sort.Ints(lat)
+		res["latency_min_ms"] = lat[0]
+		res["latency_p50_ms"] = lat[len(lat)/2]
+		res["latency_max_ms"] = lat[len(lat)-1]
+	}
+	// Distinct messages, most frequent first — 16 copies of the same timeout is
+	// one fact, not sixteen.
+	errList := []egressProbeError{}
+	for m, c := range errCounts {
+		errList = append(errList, egressProbeError{Msg: m, Count: c})
+	}
+	sort.Slice(errList, func(i, j int) bool {
+		if errList[i].Count != errList[j].Count {
+			return errList[i].Count > errList[j].Count
+		}
+		return errList[i].Msg < errList[j].Msg
+	})
+	res["errors"] = errList
+	return res
 }
 
 // handleAdminSbSyncStatus returns the last config-apply outcome per server, so

@@ -277,6 +277,9 @@ func (a *API) Router() http.Handler {
 		ar.Delete("/api/admin/certs/{id}", a.handleAdminDeleteCert)
 		ar.Get("/api/admin/sb/egresses", a.handleAdminListSbEgresses)
 		ar.Post("/api/admin/sb/egresses", a.handleAdminSaveSbEgress)
+		// Before the /{id} routes: chi would otherwise read "parse" as an id.
+		ar.Post("/api/admin/sb/egresses/parse", a.handleAdminParseEgressLink)
+		ar.Post("/api/admin/sb/egresses/{id}/clone", a.handleAdminCloneSbEgress)
 		ar.Put("/api/admin/sb/egresses/{id}", a.handleAdminSaveSbEgress)
 		ar.Delete("/api/admin/sb/egresses/{id}", a.handleAdminDeleteSbEgress)
 		ar.Post("/api/admin/sb/egresses/{id}/test", a.handleAdminTestSbEgress)

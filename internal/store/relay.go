@@ -163,7 +163,11 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound) ([]si
 				trustPEM = c.CertPEM
 			}
 		}
-		byEgress[r.EgressID] = &singbox.Relay{Outbound: egressOutbound(eg, trustPEM), InboundTags: []string{r.Tag}}
+		byEgress[r.EgressID] = &singbox.Relay{
+			Outbound:    egressOutbound(eg, trustPEM),
+			InboundTags: []string{r.Tag},
+			RejectUDP:   eg.EffectiveUDPMode() == UDPModeBlock,
+		}
 		egOrder = append(egOrder, r.EgressID)
 	}
 	for _, id := range egOrder {
@@ -188,6 +192,18 @@ func egressOutbound(e *SbEgress, trustPEM string) map[string]interface{} {
 		"tag":         fmt.Sprintf("egress-%d", e.ID),
 		"server":      e.Host,
 		"server_port": e.Port,
+		// Bound the TCP connect to the proxy. When a provider drops an account
+		// (quota spent, IP no longer whitelisted) the port usually goes silent
+		// rather than refusing, and with no timeout every connection then sits on
+		// the OS retry schedule — minutes, during which the user's tab neither
+		// loads nor errors. Seconds instead at least lets the client retry and
+		// makes the outage legible.
+		//
+		// Scope, precisely: this is a DialerOptions field, so it covers reaching
+		// the proxy's port. A proxy that completes the TCP handshake and then
+		// stalls mid-SOCKS5/CONNECT is not covered by it — nothing in a sing-box
+		// outbound bounds that, and the concurrency probe is what surfaces it.
+		"connect_timeout": fmt.Sprintf("%dms", e.EffectiveConnectTimeoutMS()),
 	}
 	if e.Type == "socks" {
 		ob["version"] = "5"
@@ -269,6 +285,28 @@ func (s *Store) relayOutbound(landing *SbInbound, serverCache map[int64]*Server,
 		ServerKey:   mapStr(opts, "password"),
 		TCPFastOpen: mapBool(opts, "tcp_fast_open"),
 		MPTCP:       mapBool(opts, "tcp_multi_path"),
+	}
+	// Multiplex on the relay→landing hop, mirroring the landing inbound's own
+	// setting exactly as BuildSelfBuiltLinks does for client links.
+	//
+	// This hop is the one place where the omission really hurts. A client makes a
+	// handful of connections; a relay carries every connection of every user
+	// behind it, and without multiplexing each one pays a full protocol handshake
+	// to the landing on top of the client's own. Loading one web page opens
+	// dozens of short connections across a dozen domains, so the round trips
+	// stack up into "images load half-way" while a long-lived app socket over the
+	// same relay feels perfectly fine.
+	//
+	// BuildShareLink drops mux by itself when vless xtls-rprx-vision is active
+	// (sing-box rejects the pair), so no gate is needed here.
+	//
+	// Brutal is deliberately NOT mirrored. Its up/down are per-endpoint physical
+	// bandwidths; the values configured for client links describe a subscriber's
+	// line, and a relay machine's is nothing like it. Brutal ignores congestion
+	// signals and paces to the number it is given, so a wrong one doesn't degrade
+	// gracefully — it floods the landing or throttles the relay to a crawl.
+	if mx, ok := opts["multiplex"].(map[string]interface{}); ok && mapBool(mx, "enabled") {
+		lp.Mux = true
 	}
 	if obfs, ok := opts["obfs"].(map[string]interface{}); ok {
 		lp.Obfs = mapStr(obfs, "type")

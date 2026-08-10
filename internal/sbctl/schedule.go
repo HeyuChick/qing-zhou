@@ -143,6 +143,18 @@ func (c *Controller) RunOnServer(ctx context.Context, serverID int64, cmd string
 			return c.remoteMgr.RunCommand(ctx, serverConfigFor(sv), cmd)
 		}
 	}
-	out, err := exec.CommandContext(ctx, "sh", "-c", cmd).CombinedOutput()
+	ec := exec.CommandContext(ctx, "sh", "-c", cmd)
+	// Without this, ctx does not actually bound the call. CommandContext kills
+	// the shell on expiry, but CombinedOutput goes on waiting until every holder
+	// of the output pipe closes it — and the shell's own children (curl here, and
+	// anything a diagnostic script backgrounds) inherit that pipe and are not
+	// killed with it. So a deadline of 25s could still return at 40s, past the
+	// server's 30s WriteTimeout, and the panel would show a torn connection
+	// instead of the "不通" the script had already determined.
+	//
+	// WaitDelay closes the pipes and gives up shortly after the kill, so the
+	// caller gets whatever output was produced plus the context error.
+	ec.WaitDelay = 2 * time.Second
+	out, err := ec.CombinedOutput()
 	return string(out), err
 }
