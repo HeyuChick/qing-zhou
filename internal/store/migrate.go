@@ -334,6 +334,8 @@ CREATE TABLE IF NOT EXISTS sb_egresses (
   sni          TEXT    NOT NULL DEFAULT '',
   tls_cert_id  INTEGER NOT NULL DEFAULT 0,          -- -> certificates.id (0 = system roots)
   tls_insecure INTEGER NOT NULL DEFAULT 0,
+  udp_mode     TEXT    NOT NULL DEFAULT '',         -- '' = by type | passthrough | block
+  connect_timeout_ms INTEGER NOT NULL DEFAULT 0,    -- 0 = built-in default
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL
 );
@@ -573,6 +575,15 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE sb_egresses ADD COLUMN sni TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_egresses ADD COLUMN tls_cert_id INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sb_egresses ADD COLUMN tls_insecure INTEGER NOT NULL DEFAULT 0`,
+		// How UDP behaves on the hop through this proxy, and how long to wait for
+		// the TCP connect to it. Both default to '' / 0, which mean "decide by
+		// type" and "use the built-in default" respectively — see
+		// SbEgress.EffectiveUDPMode / EffectiveConnectTimeoutMS. Storing the
+		// sentinel instead of backfilling a concrete value keeps an existing row
+		// tracking the panel's default as it improves, rather than freezing
+		// whatever the default happened to be on the upgrade day.
+		`ALTER TABLE sb_egresses ADD COLUMN udp_mode TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sb_egresses ADD COLUMN connect_timeout_ms INTEGER NOT NULL DEFAULT 0`,
 		// Alerts became episode-based (see server_alerts above). Legacy DBs hold one
 		// row per hourly observation, so a single server that stayed offline for a
 		// week shows ~170 identical unread lines. Fold each unread (server, type)

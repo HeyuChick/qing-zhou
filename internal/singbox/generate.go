@@ -127,6 +127,11 @@ func DeriveSSKey(secret, method string) string {
 type Relay struct {
 	Outbound    map[string]interface{} // sing-box outbound object; must carry "tag"
 	InboundTags []string               // local relay inbound tags routed to Outbound
+	// RejectUDP drops UDP from InboundTags instead of handing it to Outbound,
+	// for a third-party proxy egress that cannot carry UDP reliably. Note this
+	// is a drop from the client's point of view, not a refusal it can react to —
+	// see SbEgress.UDPMode, which documents what it does and does not buy.
+	RejectUDP bool
 }
 
 // GenerateConfig assembles the full sing-box config: it starts from base (the
@@ -245,6 +250,16 @@ func GenerateConfigWithOptions(base json.RawMessage, inbounds []Inbound, opt Opt
 			if !seenOut[tag] {
 				seenOut[tag] = true
 				obs = append(obs, r.Outbound)
+			}
+			// Ahead of the steering rule, never after it: route rules are
+			// first-match, so behind the steering rule this would never be
+			// consulted and the UDP would reach the outbound anyway.
+			if r.RejectUDP {
+				rules = append(rules, map[string]interface{}{
+					"inbound": r.InboundTags,
+					"network": "udp",
+					"action":  "reject",
+				})
 			}
 			rules = append(rules, map[string]interface{}{
 				"inbound":  r.InboundTags,

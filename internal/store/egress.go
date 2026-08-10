@@ -47,18 +47,96 @@ type SbEgress struct {
 	// TLSInsecure skips verification entirely. Diagnostics only: the proxy
 	// credentials ride inside this session, so anyone able to intercept it can
 	// take them and reuse the egress.
-	TLSInsecure bool  `json:"tls_insecure"`
-	CreatedAt   int64 `json:"created_at"`
-	UpdatedAt   int64 `json:"updated_at"`
+	TLSInsecure bool `json:"tls_insecure"`
+	// UDPMode decides what happens to UDP steered into this proxy:
+	//
+	//   passthrough — hand it to the proxy (SOCKS5 UDP ASSOCIATE) and hope it
+	//                 relays. What every egress did before this field existed.
+	//   block       — drop it at the route, before the outbound is reached.
+	//
+	// What "block" buys, stated precisely, because the obvious guess is wrong.
+	// It does NOT make the client fail fast. Measured against sing-box 1.13.18: a
+	// route rule {"network":"udp","action":"reject"} on a SOCKS5 inbound still
+	// answers UDP ASSOCIATE with success (the reply is sent before any packet has
+	// a destination to route on), and the packets that follow are then dropped
+	// with nothing sent back — the client waits out its own timeout exactly as it
+	// would against a black hole. There is no way to express a refusal to a
+	// SOCKS5 UDP client, so the fast-fallback story does not hold.
+	//
+	// What it does buy is determinism. A vendor proxy that accepts UDP ASSOCIATE
+	// and then relays it badly is worse than one that carries none: QUIC gets far
+	// enough to be chosen and then stalls mid-stream, so the browser never falls
+	// back at all. Blocking turns "sometimes" into "never", which every client
+	// already knows how to handle. It also stops sing-box attempting — and
+	// logging — a packet path that was never going to work.
+	//
+	// The lever for genuinely fast fallback is on the client side (rejecting
+	// UDP/443 in the subscription config), not here.
+	//
+	// "" means unset — resolved by EffectiveUDPMode from the type, because a
+	// sensible default differs: sing-box's http outbound cannot carry UDP at all,
+	// so blocking merely states what already happens; a socks proxy may genuinely
+	// relay it, so passthrough stays the default there.
+	UDPMode string `json:"udp_mode"`
+	// ConnectTimeoutMS bounds the TCP connect to the proxy. 0 = the built-in
+	// default (see EffectiveConnectTimeoutMS). Without it, a proxy that accepts
+	// packets but never completes the handshake — the usual shape of "the
+	// provider cut us off" — hangs every connection for the OS TCP timeout
+	// (~2 min on Linux) instead of failing while a retry could still help.
+	ConnectTimeoutMS int   `json:"connect_timeout_ms"`
+	CreatedAt        int64 `json:"created_at"`
+	UpdatedAt        int64 `json:"updated_at"`
 }
 
-const egressCols = `id, name, type, host, port, username, password, tls_enabled, sni, tls_cert_id, tls_insecure, created_at, updated_at`
+// UDP mode values. Keep in sync with the admin API validation and the UI.
+const (
+	UDPModePassthrough = "passthrough"
+	UDPModeBlock       = "block"
+)
+
+// ErrEgressUndecryptable is returned when an operation needs the egress's real
+// password and the stored ciphertext can't be opened (QZ_SECRET_KEY changed).
+// Handlers surface it as a 400 rather than a 500: it is a configuration state
+// the admin can fix by re-entering the password, not a server fault.
+var ErrEgressUndecryptable = errors.New("该出口的密码无法解密（QZ_SECRET_KEY 变更？），请重新编辑保存后再试")
+
+// defaultEgressConnectTimeoutMS bounds the dial to the proxy. 5s is far past a
+// healthy TCP handshake to anywhere on earth, so anything slower is a proxy
+// that is down rather than one that is far away.
+const defaultEgressConnectTimeoutMS = 5000
+
+// EffectiveUDPMode resolves the stored UDPMode, including the "" = by-type case.
+// Anything unrecognised falls back the same way, so a value written by a newer
+// panel version can't turn into silently-wrong routing after a downgrade.
+func (e *SbEgress) EffectiveUDPMode() string {
+	switch e.UDPMode {
+	case UDPModePassthrough, UDPModeBlock:
+		return e.UDPMode
+	}
+	if e.Type == "http" {
+		// sing-box's http outbound has no packet path at all; passthrough here
+		// would just be a slower way of writing block.
+		return UDPModeBlock
+	}
+	return UDPModePassthrough
+}
+
+// EffectiveConnectTimeoutMS resolves the stored value, 0 meaning "the default".
+func (e *SbEgress) EffectiveConnectTimeoutMS() int {
+	if e.ConnectTimeoutMS > 0 {
+		return e.ConnectTimeoutMS
+	}
+	return defaultEgressConnectTimeoutMS
+}
+
+const egressCols = `id, name, type, host, port, username, password, tls_enabled, sni, tls_cert_id, tls_insecure, udp_mode, connect_timeout_ms, created_at, updated_at`
 
 func (s *Store) scanEgress(row interface{ Scan(...any) error }) (*SbEgress, error) {
 	var e SbEgress
 	var tlsEnabled, tlsInsecure int
 	if err := row.Scan(&e.ID, &e.Name, &e.Type, &e.Host, &e.Port, &e.Username, &e.Password,
-		&tlsEnabled, &e.SNI, &e.TLSCertID, &tlsInsecure, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		&tlsEnabled, &e.SNI, &e.TLSCertID, &tlsInsecure, &e.UDPMode, &e.ConnectTimeoutMS,
+		&e.CreatedAt, &e.UpdatedAt); err != nil {
 		return nil, err
 	}
 	e.TLSEnabled = tlsEnabled != 0
@@ -103,20 +181,86 @@ func (s *Store) SaveSbEgress(e *SbEgress) (int64, error) {
 	enc := s.encrypt(e.Password)
 	if e.ID == 0 {
 		res, err := s.db.Exec(`INSERT INTO sb_egresses
-			(name, type, host, port, username, password, tls_enabled, sni, tls_cert_id, tls_insecure, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			(name, type, host, port, username, password, tls_enabled, sni, tls_cert_id, tls_insecure,
+			 udp_mode, connect_timeout_ms, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			e.Name, e.Type, e.Host, e.Port, e.Username, enc,
-			b2i(e.TLSEnabled), e.SNI, e.TLSCertID, b2i(e.TLSInsecure), now, now)
+			b2i(e.TLSEnabled), e.SNI, e.TLSCertID, b2i(e.TLSInsecure),
+			e.UDPMode, e.ConnectTimeoutMS, now, now)
 		if err != nil {
 			return 0, err
 		}
 		return res.LastInsertId()
 	}
 	_, err := s.db.Exec(`UPDATE sb_egresses SET name=?, type=?, host=?, port=?, username=?, password=?,
-		tls_enabled=?, sni=?, tls_cert_id=?, tls_insecure=?, updated_at=? WHERE id=?`,
+		tls_enabled=?, sni=?, tls_cert_id=?, tls_insecure=?, udp_mode=?, connect_timeout_ms=?, updated_at=? WHERE id=?`,
 		e.Name, e.Type, e.Host, e.Port, e.Username, enc,
-		b2i(e.TLSEnabled), e.SNI, e.TLSCertID, b2i(e.TLSInsecure), now, e.ID)
+		b2i(e.TLSEnabled), e.SNI, e.TLSCertID, b2i(e.TLSInsecure),
+		e.UDPMode, e.ConnectTimeoutMS, now, e.ID)
 	return e.ID, err
+}
+
+// CloneSbEgress duplicates an egress under a fresh name and returns the new row.
+//
+// Deliberately a store method rather than a "read it, POST it back" round trip
+// through the admin API: the list/get responses mask the password as "***", and
+// SaveSbEgress only interprets that sentinel as "keep the stored value" when an
+// ID is present. A clone has no ID, so a client-side copy would store the three
+// literal asterisks as the password — an egress that looks right in the panel
+// and answers 407 on the wire. Copying here keeps the plaintext server-side.
+func (s *Store) CloneSbEgress(id int64) (*SbEgress, error) {
+	src, err := s.GetSbEgress(id)
+	if err != nil {
+		return nil, err
+	}
+	if src == nil {
+		return nil, nil
+	}
+	// Refuse rather than clone an unreadable password into a second row that
+	// will fail the same way: the copy would look healthy in the panel (a
+	// non-empty masked password) while failing closed at the proxy.
+	if src.DecryptFailed {
+		return nil, ErrEgressUndecryptable
+	}
+	cp := *src
+	cp.ID = 0
+	cp.Name = s.uniqueEgressName(src.Name)
+	newID, err := s.SaveSbEgress(&cp)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetSbEgress(newID)
+}
+
+// uniqueEgressName returns base + a 副本 suffix that no egress currently uses.
+// Names aren't a key, so this is only about not handing the admin three rows
+// called "静态IP-香港（副本）" that they then have to tell apart by id.
+func (s *Store) uniqueEgressName(base string) string {
+	taken := map[string]bool{}
+	rows, err := s.db.Query(`SELECT name FROM sb_egresses`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var n string
+			if rows.Scan(&n) == nil {
+				taken[n] = true
+			}
+		}
+	}
+	for i := 1; ; i++ {
+		cand := base + "（副本）"
+		if i > 1 {
+			cand = fmt.Sprintf("%s（副本 %d）", base, i)
+		}
+		if !taken[cand] {
+			// The column is TEXT so SQLite won't truncate, but a runaway name is
+			// still worth capping before it reaches every dropdown in the UI.
+			if len(cand) > 200 {
+				cand = cand[:200]
+			}
+			return cand
+		}
+	}
 }
 
 func (s *Store) DeleteSbEgress(id int64) error {

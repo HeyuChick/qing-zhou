@@ -120,6 +120,7 @@
       <n-tab-pane name="egress" tab="代理出口">
         <div class="page-toolbar">
           <span class="spacer" />
+          <n-button size="small" @click="openEgressImport()">粘贴导入</n-button>
           <n-button size="small" type="primary" @click="openEgress()">添加出口</n-button>
         </div>
         <n-spin :show="loading">
@@ -136,14 +137,36 @@
                 <span class="kv">地址 <b>{{ r.host }}:{{ r.port }}</b></span>
                 <span class="kv">用户名 <b>{{ r.username || '—' }}</b></span>
                 <span v-if="r.tls_enabled && r.sni" class="kv">SNI <b>{{ r.sni }}</b></span>
+                <span class="kv">UDP <b>{{ r.udp_mode_effective === 'block' ? '阻断' : '透传' }}</b></span>
+                <span class="kv">超时 <b>{{ r.connect_timeout_effective_ms }}ms</b></span>
                 <span class="kv">入站数 <b>{{ r.inbound_count ?? 0 }}</b></span>
               </div>
               <div v-if="r._test" class="egress-test" :class="r._test.ok ? 'ok' : 'err'">
-                <template v-if="r._test.ok">✅ 出口 IP <b>{{ r._test.ip }}</b> · {{ r._test.latency_ms }}ms · 经 {{ r._test.via_server }}</template>
+                <template v-if="r._test.mode === 'probe'">
+                  <template v-if="r._test.ok_count + r._test.fail_count === 0">
+                    ❓ 并发探测没有拿到结果（经 {{ r._test.via_server }}）：{{ r._test.output || '节点无输出' }}
+                  </template>
+                  <template v-else>
+                    <template v-if="r._test.ok">✅ 并发 {{ r._test.requested }} 条全部成功</template>
+                    <template v-else>⚠️ 并发 {{ r._test.requested }} 条：成功 <b>{{ r._test.ok_count }}</b> / 失败 <b>{{ r._test.fail_count }}</b></template>
+                    <template v-if="r._test.latency_max_ms">
+                      · 延迟 {{ r._test.latency_min_ms }}/{{ r._test.latency_p50_ms }}/{{ r._test.latency_max_ms }}ms（最小/中位/最大）
+                    </template>
+                    · 经 {{ r._test.via_server }}
+                    <div v-for="(e, i) in (r._test.errors || [])" :key="i">× {{ e.count }} 次：{{ e.msg }}</div>
+                    <div v-if="r._test.fail_count > 0" class="probe-hint">
+                      部分失败通常是供应商的并发连接数上限——所有绑定此出口的入站共用一个账号，浏览网页一次就会开几十条连接。
+                      但先看上面的错误信息：出现 <b>429</b> 或 rate limit 字样的是 IP 回显服务在限流，不是你的出口到顶了。
+                    </div>
+                  </template>
+                </template>
+                <template v-else-if="r._test.ok">✅ 出口 IP <b>{{ r._test.ip }}</b> · {{ r._test.latency_ms }}ms · 经 {{ r._test.via_server }}</template>
                 <template v-else>❌ 不通（经 {{ r._test.via_server }}）：{{ r._test.output }}</template>
               </div>
               <div class="lc-foot">
                 <n-button size="tiny" :loading="r._testing" @click="testEgress(r)">测试连通</n-button>
+                <n-button size="tiny" :loading="r._probing" @click="probeEgress(r)">并发探测</n-button>
+                <n-button size="tiny" :loading="r._cloning" @click="cloneEgress(r)">克隆</n-button>
                 <n-button size="tiny" @click="openEgress(r)">编辑</n-button>
                 <n-button size="tiny" type="error" @click="deleteEgress(r.id)">删除</n-button>
               </div>
@@ -362,6 +385,15 @@
     <n-drawer v-model:show="showEg" :width="drawerW" placement="right">
       <n-drawer-content :title="ee.id ? '编辑代理出口' : '添加代理出口'" closable>
         <n-form label-placement="left" label-width="100">
+          <n-form-item label="粘贴链接">
+            <div style="width:100%;">
+              <n-input-group>
+                <n-input v-model:value="egParseText" placeholder="socks5://user:pass@1.2.3.4:1080 或 1.2.3.4:1080:user:pass" @keyup.enter="parseIntoForm" />
+                <n-button :loading="egParsing" @click="parseIntoForm">解析填充</n-button>
+              </n-input-group>
+              <div class="form-tip">把供应商给的那串直接贴进来，自动拆到下面各字段。支持 <code>socks5://</code>／<code>http(s)://</code>／<code>user:pass@host:port</code>／<code>host:port:user:pass</code>／<code>host:port</code>。多条批量导入请用列表页的「粘贴导入」。</div>
+            </div>
+          </n-form-item>
           <n-form-item label="名称"><n-input v-model:value="ee.name" placeholder="如：静态IP-香港" /></n-form-item>
           <n-form-item label="类型">
             <div style="width:100%;">
@@ -376,6 +408,34 @@
           <n-form-item label="端口"><n-input-number v-model:value="ee.port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
           <n-form-item label="用户名"><n-input v-model:value="ee.username" placeholder="无认证则留空" /></n-form-item>
           <n-form-item label="密码"><n-input v-model:value="ee.password" type="password" show-password-on="click" :placeholder="ee.id ? '*** 表示保持原密码不变' : '无认证则留空'" /></n-form-item>
+          <n-form-item label="UDP 策略">
+            <div style="width:100%;">
+              <n-radio-group :value="ee.udp_mode" @update:value="(v: string) => ee.udp_mode = v">
+                <n-radio value="">自动（按类型）</n-radio>
+                <n-radio value="passthrough" :disabled="ee.type === 'http'">透传给代理</n-radio>
+                <n-radio value="block">阻断 UDP</n-radio>
+              </n-radio-group>
+              <div class="form-tip">
+                当前生效：<b>{{ effectiveUdpMode === 'block' ? '阻断' : '透传' }}</b>。
+                <template v-if="ee.type === 'http'">HTTP 出口不能透传 UDP——sing-box 的 http 出站没有 UDP 通路。</template>
+                <template v-else>多数商用静态 IP 并不真的中转 UDP。</template><br>
+                <b>「阻断」买到的是确定性，不是提速</b>：实测（sing-box 1.13.18）阻断是在服务端把 UDP 丢掉，客户端只会超时，
+                不会收到明确拒绝、也不会因此更快回落 TCP。它的价值在于——代理「半通」的 UDP 比完全没有更糟：
+                QUIC 能握上手却中途卡死，浏览器反而不回落。阻断把「时好时坏」变成「一直没有」，客户端就知道该走 TCP。
+                代价是经此出口的入站不能玩 UDP 游戏／音视频。真要让浏览器秒回落，得在客户端订阅配置里禁 UDP/443。
+              </div>
+            </div>
+          </n-form-item>
+          <n-form-item label="连接超时">
+            <div style="width:100%;">
+              <n-input-number v-model:value="ee.connect_timeout_ms" :min="0" :max="60000" :step="500" style="width:100%;" />
+              <div class="form-tip">
+                当前生效：<b>{{ ee.connect_timeout_ms > 0 ? ee.connect_timeout_ms : 5000 }}ms</b>（填 0 表示用默认值 5000，不是「不限时」）。<br>
+                这是连到代理的 <b>TCP 握手</b>上限。代理被停用时往往是不回包而不是拒绝，不设上限每条连接都要卡满系统级 TCP 超时（Linux 约 2 分钟），页面既不加载也不报错。
+                握手完成后卡在 SOCKS5／CONNECT 阶段的情况它管不了——那种要用「并发探测」看。
+              </div>
+            </div>
+          </n-form-item>
           <n-form-item label="TLS 加密">
             <div style="width:100%;">
               <n-switch v-model:value="ee.tls_enabled" :disabled="ee.type !== 'http'" />
@@ -415,6 +475,45 @@
       </n-drawer-content>
     </n-drawer>
 
+    <!-- 代理出口批量粘贴导入 -->
+    <n-drawer v-model:show="showEgImport" :width="drawerW" placement="right">
+      <n-drawer-content title="粘贴导入代理出口" closable>
+        <n-input
+          v-model:value="egImportText" type="textarea" :rows="10"
+          placeholder="一行一条，支持：&#10;socks5://user:pass@1.2.3.4:1080&#10;http://user:pass@1.2.3.4:8080&#10;1.2.3.4:1080:user:pass&#10;user:pass@1.2.3.4:1080&#10;1.2.3.4:1080&#10;以 # 开头的行会被忽略"
+        />
+        <div class="form-tip" style="margin:8px 0;">解析只在本地预览，确认无误再导入。没写协议的行会按端口猜类型，猜错的表现是连上后立刻被 RST——导入后请核对。</div>
+        <n-button block :loading="egImportParsing" @click="parseEgressImport">解析</n-button>
+
+        <template v-if="egImportErrors.length">
+          <n-alert type="warning" :show-icon="false" style="margin-top:12px;">
+            <div v-for="(e, i) in egImportErrors" :key="i" style="font-size:12px; word-break:break-all;">
+              第 {{ e.line }} 行无法解析：{{ e.error }}<template v-if="e.text"> —— <code>{{ e.text }}</code></template>
+            </div>
+          </n-alert>
+        </template>
+
+        <template v-if="egImportItems.length">
+          <div class="import-head">解析出 {{ egImportItems.length }} 条：</div>
+          <div v-for="(it, i) in egImportItems" :key="i" class="import-row">
+            <n-input v-model:value="it.name" size="small" placeholder="名称" style="max-width:190px;" />
+            <n-tag size="tiny" :type="it.type_guessed ? 'warning' : 'info'" bordered="false">
+              {{ (it.type || '').toUpperCase() }}<template v-if="it.type_guessed">?</template>
+            </n-tag>
+            <n-tag v-if="it.tls_enabled" size="tiny" type="success" bordered="false">TLS</n-tag>
+            <span class="import-addr">{{ it.host }}:{{ it.port }}</span>
+            <span class="import-user">{{ it.username || '无认证' }}</span>
+          </div>
+          <div v-if="egImportItems.some((x: any) => x.type_guessed)" class="form-tip" style="margin:6px 0;">
+            带 <b>?</b> 的类型是按端口猜的，请对照供应商说明确认。
+          </div>
+          <n-button type="primary" block :loading="egImporting" style="margin-top:10px;" @click="doEgressImport">
+            导入这 {{ egImportItems.length }} 条
+          </n-button>
+        </template>
+      </n-drawer-content>
+    </n-drawer>
+
     <!-- 入站编辑抽屉 -->
     <n-drawer v-model:show="showInb" :width="drawerW" placement="right">
       <n-drawer-content :title="ie.id ? '编辑入站' : '添加入站'" closable>
@@ -441,8 +540,10 @@
             <div style="width:100%;">
               <n-select v-model:value="ie.egress_id" :options="egressOpts" @update:value="(v: number) => { if (v) ie.upstream_inbound_id = 0 }" />
               <div class="form-tip">选择后本入站的流量经该 SOCKS5/HTTP 代理（如购买的静态 IP）出网，出口 IP 即代理的 IP；与「落地 / 中转」二选一。出口在「代理出口」页管理。</div>
-              <n-alert v-if="selectedEgressType === 'http'" type="warning" :show-icon="false" style="margin-top:8px;">
-                所选是 <b>HTTP 代理出口</b>，只转发 TCP。<b>UDP 会静默失败</b>：TUIC / Hysteria / QUIC、以及依赖 UDP 的游戏和音视频将连不上。若本入站需要 UDP，请改选 <b>SOCKS5</b> 出口。
+              <n-alert v-if="selectedEgressUdp === 'block'" type="warning" :show-icon="false" style="margin-top:8px;">
+                所选出口的 <b>UDP 策略为「阻断」</b>：本入站的 UDP 会在服务端被丢弃（客户端表现为超时），TUIC / Hysteria / QUIC、以及依赖 UDP 的游戏和音视频将连不上。
+                <template v-if="selectedEgressType === 'http'">HTTP 出口只能这样——sing-box 的 http 出站没有 UDP 通路。若本入站需要 UDP，请改选 <b>SOCKS5</b> 出口。</template>
+                <template v-else>要放开可在「代理出口」页把该出口改成「透传」——前提是供应商真的中转 UDP，半通比不通更糟。</template>
               </n-alert>
             </div>
           </n-form-item>
@@ -937,7 +1038,11 @@ async function deleteTls(id: number) { try { await apiDelete('/api/admin/sb/tls/
 
 // ========== Egress（第三方代理出口，如购买的静态 IP SOCKS5/HTTP） ==========
 const showEg = ref(false)
-const egBlank = { id: 0, name: '', type: 'socks', host: '', port: 1080, username: '', password: '', tls_enabled: false, sni: '', tls_cert_id: 0, tls_insecure: false }
+const egBlank = {
+  id: 0, name: '', type: 'socks', host: '', port: 1080, username: '', password: '',
+  tls_enabled: false, sni: '', tls_cert_id: 0, tls_insecure: false,
+  udp_mode: '', connect_timeout_ms: 0,
+}
 const ee = reactive({ ...egBlank })
 function openEgress(r?: any) {
   Object.assign(ee, r
@@ -945,15 +1050,110 @@ function openEgress(r?: any) {
         id: r.id, name: r.name, type: r.type, host: r.host, port: r.port,
         username: r.username || '', password: r.password || '',
         tls_enabled: !!r.tls_enabled, sni: r.sni || '', tls_cert_id: r.tls_cert_id || 0, tls_insecure: !!r.tls_insecure,
+        udp_mode: r.udp_mode || '', connect_timeout_ms: r.connect_timeout_ms || 0,
       }
     : { ...egBlank })
+  egParseText.value = ''
   showEg.value = true
 }
+// 与后端 SbEgress.EffectiveUDPMode 同一套规则：留空＝按类型定。表单里照着算一遍，
+// 是为了让「自动」这一档也能显示出实际会生成什么，而不是留一个看不出结果的空档。
+const effectiveUdpMode = computed(() => {
+  if (ee.udp_mode === 'passthrough' || ee.udp_mode === 'block') return ee.udp_mode
+  return ee.type === 'http' ? 'block' : 'passthrough'
+})
 // sing-box 的 SOCKS5 出站没有 TLS 选项，切到 SOCKS5 时把开关一并关掉，
 // 否则表单看着是加密的、后端却会拒绝保存。
 function onEgressType(t: string) {
   ee.type = t
   if (t !== 'http') ee.tls_enabled = false
+  // HTTP 出站没有 UDP 通路，后端会拒绝 http + 透传；切过去时把这个选择收回「自动」，
+  // 免得点保存才报错。
+  if (t === 'http' && ee.udp_mode === 'passthrough') ee.udp_mode = ''
+}
+
+// ---- 粘贴链接解析 ----
+const egParseText = ref('')
+const egParsing = ref(false)
+// 单行解析→回填当前抽屉。名称只在为空时覆盖：编辑一条已有出口时换了地址，
+// 不该把管理员起的名字也一起冲掉。
+async function parseIntoForm() {
+  const text = egParseText.value.trim()
+  if (!text) return
+  egParsing.value = true
+  try {
+    const res: any = await apiPost('/api/admin/sb/egresses/parse', { text })
+    const it = (res.items || [])[0]
+    if (!it) throw new Error((res.errors || [])[0]?.error || '无法解析')
+    ee.type = it.type; ee.host = it.host; ee.port = it.port
+    ee.username = it.username || ''; ee.password = it.password || ''
+    ee.tls_enabled = !!it.tls_enabled; ee.sni = it.sni || ''
+    if (!ee.tls_enabled) { ee.tls_cert_id = 0; ee.tls_insecure = false }
+    if (ee.type === 'http' && ee.udp_mode === 'passthrough') ee.udp_mode = ''
+    if (!ee.name) ee.name = it.name
+    egParseText.value = ''
+    message.success(it.type_guessed ? `已填充，类型按端口猜为 ${it.type.toUpperCase()}，请核对` : '已填充')
+  } catch (e: any) { message.error(e.message) } finally { egParsing.value = false }
+}
+
+// ---- 批量粘贴导入 ----
+const showEgImport = ref(false)
+const egImportText = ref('')
+const egImportItems = ref<any[]>([])
+const egImportErrors = ref<any[]>([])
+const egImportParsing = ref(false)
+const egImporting = ref(false)
+function openEgressImport() {
+  egImportText.value = ''; egImportItems.value = []; egImportErrors.value = []
+  showEgImport.value = true
+}
+async function parseEgressImport() {
+  const text = egImportText.value.trim()
+  if (!text) { message.warning('请先粘贴内容'); return }
+  egImportParsing.value = true
+  try {
+    const res: any = await apiPost('/api/admin/sb/egresses/parse', { text })
+    egImportItems.value = res.items || []
+    egImportErrors.value = res.errors || []
+    // 超出上限被截掉的部分必须说出来，否则「导入成功」看起来像全都进去了。
+    if (res.truncated > 0) message.warning(`内容过长，只解析了前 500 行，已忽略后面 ${res.truncated} 行`)
+    if (!egImportItems.value.length) message.warning('没有解析出可导入的条目')
+  } catch (e: any) { message.error(e.message) } finally { egImportParsing.value = false }
+}
+// 逐条走普通的新建接口，而不是加一个批量写入端点：校验规则只有一份，
+// 批量导入和手工添加落到库里的东西必然一致。
+async function doEgressImport() {
+  egImporting.value = true
+  const stillFailing: any[] = []
+  let done = 0
+  let firstError = ''
+  try {
+    for (const it of egImportItems.value) {
+      try {
+        await apiPost('/api/admin/sb/egresses', {
+          name: it.name, type: it.type, host: it.host, port: it.port,
+          username: it.username || '', password: it.password || '',
+          tls_enabled: !!it.tls_enabled, sni: it.sni || '', tls_cert_id: 0, tls_insecure: false,
+          udp_mode: '', connect_timeout_ms: 0,
+        })
+        done++
+      } catch (e: any) {
+        // 按条目本身收集，不靠名字去匹配错误串——名称可重复，也允许含任意字符。
+        stillFailing.push(it)
+        if (!firstError) firstError = `${it.name}：${e.message}`
+      }
+    }
+  } finally { egImporting.value = false }
+  await load()
+  if (stillFailing.length) {
+    // 已成功的那些留在库里——回滚只会让管理员重来一遍。失败的留在列表里，改完可直接重试
+    // （重试只会再提交这些，不会把已成功的重复创建一遍）。
+    egImportItems.value = stillFailing
+    message.error(`导入 ${done} 条成功，${stillFailing.length} 条失败：${firstError}`)
+  } else {
+    message.success(`已导入 ${done} 条`)
+    showEgImport.value = false
+  }
 }
 // 出口方向我们是 TLS 客户端：这里选的证书是「信任锚」，用来校验上游代理，
 // 面板不会把它发出去，私钥那一半也用不到（sing-box 出站不支持 mTLS）。
@@ -969,6 +1169,7 @@ async function saveEgress() {
       name: ee.name, type: ee.type, host: ee.host, port: ee.port,
       username: ee.username, password: ee.password,
       tls_enabled: ee.tls_enabled, sni: ee.sni, tls_cert_id: ee.tls_cert_id, tls_insecure: ee.tls_insecure,
+      udp_mode: ee.udp_mode, connect_timeout_ms: ee.connect_timeout_ms || 0,
     }
     if (ee.id) await apiPut('/api/admin/sb/egresses/' + ee.id, body)
     else await apiPost('/api/admin/sb/egresses', body)
@@ -976,6 +1177,16 @@ async function saveEgress() {
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
 }
 async function deleteEgress(id: number) { try { await apiDelete('/api/admin/sb/egresses/' + id); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) } }
+// 克隆走服务端：列表里的密码是掩码 "***"，前端复制一份再新建会把这三个星号
+// 当成密码存进去（后端只在带 id 时才把 "***" 解释成「保持原值」）。
+async function cloneEgress(r: any) {
+  r._cloning = true
+  try {
+    const created: any = await apiPost(`/api/admin/sb/egresses/${r.id}/clone`, {})
+    await load()
+    message.success(`已克隆为「${created.name}」`)
+  } catch (e: any) { message.error(e.message) } finally { r._cloning = false }
+}
 const egressById = computed(() => { const m: Record<number, any> = {}; for (const e of egresses.value) m[e.id] = e; return m })
 function egressOf(r: any) { return r && r.egress_id ? (egressById.value[r.egress_id] || null) : null }
 function egressName(id: number) { const e = egressById.value[id]; return e ? e.name : '—' }
@@ -985,8 +1196,9 @@ const egressOpts = computed(() => [
 ])
 // 拓扑图「＋ 挂出口」的候选列表（不含「不使用」项）。
 const egressPopOpts = computed(() => egresses.value.map(e => ({ label: `${e.name} · ${(e.type || '').toUpperCase()} ${e.host}:${e.port}`, value: e.id })))
-// 编辑抽屉中当前所选出口的类型，用于 HTTP 出口的 UDP 警告。
+// 入站编辑抽屉中当前所选出口的类型／UDP 策略，用于 UDP 告警。
 const selectedEgressType = computed(() => { const e = egressById.value[ie.egress_id]; return e ? e.type : '' })
+const selectedEgressUdp = computed(() => { const e = egressById.value[ie.egress_id]; return e ? e.udp_mode_effective : '' })
 
 // 测试代理出口连通性：后端在引用该出口的节点机上（匹配 IP 白名单）经代理访问 IP 回显服务。
 async function testEgress(r: any) {
@@ -996,6 +1208,19 @@ async function testEgress(r: any) {
   } catch (e: any) {
     r._test = { ok: false, via_server: '—', output: e.message }
   } finally { r._testing = false }
+}
+
+// 并发探测：一次开 16 条连接，看供应商的并发上限在哪。
+// 单条测通不代表可用——所有绑定此出口的入站共用供应商那一个账号，
+// 打开一个网页就会同时开几十条连接，超出上限的会被代理侧直接掐掉，
+// 表现是网页加载一半而 App 一切正常。一条一条地测永远看不到这个。
+async function probeEgress(r: any) {
+  r._probing = true
+  try {
+    r._test = await apiPost(`/api/admin/sb/egresses/${r.id}/test?n=16`, {})
+  } catch (e: any) {
+    r._test = { ok: false, via_server: '—', output: e.message }
+  } finally { r._probing = false }
 }
 
 // 从拓扑图直接给某入站挂上代理出口，无需进编辑抽屉。
@@ -1328,6 +1553,11 @@ async function load() {
 .egress-test { font-size: 12px; margin: 6px 0 2px; padding: 6px 8px; border-radius: 6px; line-height: 1.5; word-break: break-all; }
 .egress-test.ok { background: rgba(24, 160, 88, 0.1); color: #18a058; }
 .egress-test.err { background: rgba(208, 48, 80, 0.1); color: #d03050; }
+.probe-hint { margin-top: 4px; opacity: 0.85; }
+.import-head { font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+.import-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--n-border-color, rgba(128,128,128,0.18)); font-size: 12px; }
+.import-addr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.import-user { opacity: 0.7; word-break: break-all; }
 
 /* 链路拓扑 */
 .topo { display: flex; flex-direction: column; gap: 18px; padding: 4px 2px; }
