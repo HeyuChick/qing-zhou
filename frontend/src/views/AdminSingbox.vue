@@ -422,7 +422,11 @@
                 <b>「阻断」买到的是确定性，不是提速</b>：实测（sing-box 1.13.18）阻断是在服务端把 UDP 丢掉，客户端只会超时，
                 不会收到明确拒绝、也不会因此更快回落 TCP。它的价值在于——代理「半通」的 UDP 比完全没有更糟：
                 QUIC 能握上手却中途卡死，浏览器反而不回落。阻断把「时好时坏」变成「一直没有」，客户端就知道该走 TCP。
-                代价是经此出口的入站不能玩 UDP 游戏／音视频。真要让浏览器秒回落，得在客户端订阅配置里禁 UDP/443。
+                代价是经此出口的入站不能玩 UDP 游戏／音视频。真要让浏览器秒回落，得在客户端订阅配置里禁 UDP/443。<br>
+                <b>DNS 不在阻断范围内</b>：选「阻断」时，面板会自动让节点就地应答该入站的 UDP:53 查询。
+                否则客户端的 DNS（也是 UDP）会跟着一起死——用 Clash／sing-box 订阅的人因为走 DoH 察觉不到，
+                而 v2rayN／v2rayNG 拿的是裸链接、默认走 UDP DNS，会变成「什么都打不开」。
+                若你在「sing-box 基础配置」里自己写过 DNS 规则，则以你的为准，面板不再插入。
               </div>
             </div>
           </n-form-item>
@@ -542,6 +546,7 @@
               <div class="form-tip">选择后本入站的流量经该 SOCKS5/HTTP 代理（如购买的静态 IP）出网，出口 IP 即代理的 IP；与「落地 / 中转」二选一。出口在「代理出口」页管理。</div>
               <n-alert v-if="selectedEgressUdp === 'block'" type="warning" :show-icon="false" style="margin-top:8px;">
                 所选出口的 <b>UDP 策略为「阻断」</b>：本入站的 UDP 会在服务端被丢弃（客户端表现为超时），TUIC / Hysteria / QUIC、以及依赖 UDP 的游戏和音视频将连不上。
+                <b>DNS 除外</b>——节点会就地应答 DNS 查询，客户端不必配 DoH 也能正常解析。
                 <template v-if="selectedEgressType === 'http'">HTTP 出口只能这样——sing-box 的 http 出站没有 UDP 通路。若本入站需要 UDP，请改选 <b>SOCKS5</b> 出口。</template>
                 <template v-else>要放开可在「代理出口」页把该出口改成「透传」——前提是供应商真的中转 UDP，半通比不通更糟。</template>
               </n-alert>

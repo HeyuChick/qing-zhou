@@ -142,6 +142,170 @@ func TestEgressUDPBlockRuleOrder(t *testing.T) {
 	}
 }
 
+// TestEgressUDPBlockRescuesDNS pins the rule that makes "block UDP" safe to turn
+// on without telling every user to go reconfigure their client.
+//
+// Blocking UDP on an egress also blocks the client's DNS, which is UDP. A client
+// with no DNS reports "no network" for everything — and only for SOME users,
+// because 轻舟's Clash/sing-box subscriptions ship DoH (TCP) while a v2rayN user
+// gets bare links and their client's UDP default. So the DNS rescue has to be
+// ahead of the reject, and it must not touch a passthrough egress.
+func TestEgressUDPBlockRescuesDNS(t *testing.T) {
+	st := newEgressTestStore(t)
+
+	blockID, err := st.SaveSbEgress(&SbEgress{
+		Name: "阻断UDP", Type: "socks", Host: "9.9.9.9", Port: 1080, UDPMode: UDPModeBlock,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	passID, err := st.SaveSbEgress(&SbEgress{
+		Name: "透传UDP", Type: "socks", Host: "8.8.8.8", Port: 1080, UDPMode: UDPModePassthrough,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ib := range []struct {
+		tag  string
+		port int
+		eg   int64
+	}{{"udp-blocked", 443, blockID}, {"udp-open", 444, passID}} {
+		if _, err := st.SaveSbInbound(&SbInbound{
+			Type: "vless", Tag: ib.tag, ListenPort: ib.port, Options: `{}`, Enabled: true, EgressID: ib.eg,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	user := []singbox.User{{Name: "u1", UUID: "11111111-1111-1111-1111-111111111111"}}
+	cfgBytes, err := st.BuildSingboxConfig(singbox.DefaultBaseConfig, "",
+		map[string][]singbox.User{"udp-blocked": user, "udp-open": user})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(cfgBytes, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	rules, _ := cfg["route"].(map[string]any)["rules"].([]any)
+
+	hijackAt, rejectAt := -1, -1
+	for i, r := range rules {
+		m, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		ins, _ := m["inbound"].([]any)
+		if m["action"] == "hijack-dns" {
+			if len(ins) != 1 || ins[0] != "udp-blocked" {
+				t.Errorf("DNS hijack must be scoped to the blocking egress's inbounds, got %v", ins)
+			}
+			if m["network"] != "udp" || m["port"] != float64(53) {
+				t.Errorf("hijack must be scoped to UDP:53, got network=%v port=%v", m["network"], m["port"])
+			}
+			hijackAt = i
+		}
+		if m["action"] == "reject" && m["network"] == "udp" && len(ins) == 1 && ins[0] == "udp-blocked" {
+			rejectAt = i
+		}
+	}
+	if hijackAt < 0 {
+		t.Fatalf("no DNS hijack for the UDP-blocking egress — its users lose name resolution:\n%s", cfgBytes)
+	}
+	if rejectAt < 0 {
+		t.Fatalf("no UDP reject rule:\n%s", cfgBytes)
+	}
+	if hijackAt > rejectAt {
+		t.Errorf("hijack at %d is behind the reject at %d — first-match means DNS still dies:\n%s",
+			hijackAt, rejectAt, cfgBytes)
+	}
+}
+
+// An admin who wrote their own DNS handling into sb_base_config keeps it: theirs
+// is evaluated first anyway, so a second rule would be dead weight that regrows
+// on every save.
+func TestEgressUDPBlockLeavesAdminDNSRuleAlone(t *testing.T) {
+	st := newEgressTestStore(t)
+
+	egID, err := st.SaveSbEgress(&SbEgress{
+		Name: "阻断UDP", Type: "socks", Host: "9.9.9.9", Port: 1080, UDPMode: UDPModeBlock,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveSbInbound(&SbInbound{
+		Type: "vless", Tag: "udp-blocked", ListenPort: 443, Options: `{}`, Enabled: true, EgressID: egID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	base := `{
+	  "log": {"level": "warn"},
+	  "dns": {"servers": [{"type": "local", "tag": "local"}]},
+	  "outbounds": [{"type": "direct", "tag": "direct"}],
+	  "route": {"rules": [{"network": "udp", "port": 53, "action": "hijack-dns"}], "final": "direct"}
+	}`
+	user := []singbox.User{{Name: "u1", UUID: "11111111-1111-1111-1111-111111111111"}}
+	cfgBytes, err := st.BuildSingboxConfig(base, "",
+		map[string][]singbox.User{"udp-blocked": user})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(cfgBytes, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	rules, _ := cfg["route"].(map[string]any)["rules"].([]any)
+
+	hijacks := 0
+	for _, r := range rules {
+		if m, ok := r.(map[string]any); ok && m["action"] == "hijack-dns" {
+			hijacks++
+			if _, scoped := m["inbound"]; scoped {
+				t.Errorf("the admin's unscoped rule was replaced by a generated one: %v", m)
+			}
+		}
+	}
+	if hijacks != 1 {
+		t.Errorf("want exactly the admin's 1 hijack rule, got %d:\n%s", hijacks, cfgBytes)
+	}
+}
+
+// A base config with no DNS server at all must not get a hijack rule: there
+// would be nothing to answer from, and a node that cannot start is worse than
+// one where this rescue is absent (same rule as injectPrivateBlock's resolver).
+func TestEgressUDPBlockSkipsDNSRescueWithoutResolver(t *testing.T) {
+	st := newEgressTestStore(t)
+
+	egID, err := st.SaveSbEgress(&SbEgress{
+		Name: "阻断UDP", Type: "socks", Host: "9.9.9.9", Port: 1080, UDPMode: UDPModeBlock,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveSbInbound(&SbInbound{
+		Type: "vless", Tag: "udp-blocked", ListenPort: 443, Options: `{}`, Enabled: true, EgressID: egID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	base := `{"log":{"level":"warn"},"outbounds":[{"type":"direct","tag":"direct"}],
+	          "route":{"rules":[],"final":"direct"}}`
+	user := []singbox.User{{Name: "u1", UUID: "11111111-1111-1111-1111-111111111111"}}
+	cfgBytes, err := st.BuildSingboxConfig(base, "",
+		map[string][]singbox.User{"udp-blocked": user})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cfgBytes), "hijack-dns") {
+		t.Errorf("emitted a DNS hijack with no DNS server to answer from:\n%s", cfgBytes)
+	}
+	// The reject itself must still be there — the rescue is optional, the block is not.
+	if !strings.Contains(string(cfgBytes), `"action": "reject"`) {
+		t.Errorf("UDP block went missing along with the rescue:\n%s", cfgBytes)
+	}
+}
+
 // TestEgressUDPBlockCoversEveryBoundInbound covers the grouping path: several
 // inbounds sharing one egress collapse onto a single outbound, and the tag list
 // is appended to AFTER the Relay (and its RejectUDP flag) was constructed for

@@ -238,6 +238,10 @@ func GenerateConfigWithOptions(base json.RawMessage, inbounds []Inbound, opt Opt
 			cfg["route"] = route
 		}
 		rules, _ := route["rules"].([]interface{})
+		// Whether a UDP-blocking egress should also get its DNS rescued — decided
+		// once, before any rule is appended, so it reflects the admin's config
+		// rather than what this loop has already added. See hijackDNSRule.
+		rescueDNS := !hasDNSHijackRule(rules) && hasDNSServer(cfg)
 		seenOut := map[string]bool{}
 		for _, r := range relays {
 			if r.Outbound == nil || len(r.InboundTags) == 0 {
@@ -255,6 +259,9 @@ func GenerateConfigWithOptions(base json.RawMessage, inbounds []Inbound, opt Opt
 			// first-match, so behind the steering rule this would never be
 			// consulted and the UDP would reach the outbound anyway.
 			if r.RejectUDP {
+				if rescueDNS {
+					rules = append(rules, hijackDNSRule(r.InboundTags))
+				}
 				rules = append(rules, map[string]interface{}{
 					"inbound": r.InboundTags,
 					"network": "udp",
@@ -285,6 +292,83 @@ func GenerateConfigWithOptions(base json.RawMessage, inbounds []Inbound, opt Opt
 
 	stripLegacyDomainStrategy(cfg)
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// hijackDNSRule answers plain UDP:53 from these inbounds on the node itself,
+// instead of letting it reach the outbound.
+//
+// It exists because the UDP reject that follows it is otherwise a foot-gun. A
+// client's DNS is UDP too, so blocking UDP on an egress takes the client's name
+// resolution with it — and a client with no DNS reports "no network" for
+// everything, which looks nothing like "this egress can't carry UDP" and sends
+// the admin looking at the line instead of the rule.
+//
+// The failure is invisible to whoever flips the switch, because it depends on
+// the client: 轻舟's own Clash and sing-box subscriptions configure DoH/DoT
+// (TCP), so those users see nothing wrong, while a v2rayN/v2rayNG user — who
+// gets the bare link list, no DNS config, and whose client defaults to UDP —
+// loses everything. Same panel, same node, same egress; the admin hears "some
+// people are fine, some can't open anything."
+//
+// Scoped to UDP:53 and to these inbounds only. Nothing else about the egress
+// changes: real UDP traffic still hits the reject on the next rule, and inbounds
+// on a passthrough egress keep resolving through the proxy, which is what that
+// setting asked for.
+//
+// Resolving at the node rather than at the proxy is not a leak: the DNS answer
+// only decides which address the node dials, and that connection still leaves
+// through the egress. The exit IP the destination sees is unchanged.
+func hijackDNSRule(inboundTags []string) map[string]interface{} {
+	return map[string]interface{}{
+		"inbound": inboundTags,
+		"network": "udp",
+		"port":    53,
+		"action":  "hijack-dns",
+	}
+}
+
+// hasDNSHijackRule reports whether the config already routes DNS somewhere
+// deliberate. An admin who wrote their own handling into sb_base_config keeps
+// it: theirs is evaluated first anyway (base rules land ahead of the ones this
+// file appends), so adding ours would be dead weight that grows the config on
+// every save — and if they routed DNS somewhere on purpose, a second rule is a
+// second thing to reason about when it misbehaves.
+func hasDNSHijackRule(rules []interface{}) bool {
+	for _, it := range rules {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if m["action"] == "hijack-dns" {
+			return true
+		}
+		// A rule that names port 53 is the admin steering DNS by hand, whatever
+		// it does with it — leave that alone too.
+		switch p := m["port"].(type) {
+		case int:
+			if p == 53 {
+				return true
+			}
+		case float64: // survives a JSON round-trip through sb_base_config
+			if p == 53 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasDNSServer reports whether the config has a DNS server for hijack-dns to
+// answer from. Same rule as injectPrivateBlock's resolver check: a node that
+// cannot start is worse than one missing this, so when there is nothing to
+// point at, the rule is not emitted and the UDP reject stands alone.
+func hasDNSServer(cfg map[string]interface{}) bool {
+	dns, _ := cfg["dns"].(map[string]interface{})
+	if dns == nil {
+		return false
+	}
+	servers, _ := dns["servers"].([]interface{})
+	return len(servers) > 0
 }
 
 // privateBlockRule is the route rule that keeps proxied traffic on the public

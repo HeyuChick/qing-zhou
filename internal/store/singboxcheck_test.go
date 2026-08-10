@@ -123,7 +123,8 @@ func TestServerConfigPassesSingboxCheck(t *testing.T) {
 			}
 			// Sanity: the things this test exists to validate must actually be
 			// present, or a passing `check` would only prove an empty config is valid.
-			for _, want := range []string{`"connect_timeout": "3000ms"`, `"network": "udp"`, `"action": "reject"`, `"multiplex"`} {
+			for _, want := range []string{`"connect_timeout": "3000ms"`, `"network": "udp"`, `"action": "reject"`,
+				`"action": "hijack-dns"`, `"multiplex"`} {
 				if !strings.Contains(string(cfg), want) {
 					t.Fatalf("generated config is missing %s — the check below would prove nothing:\n%s", want, cfg)
 				}
