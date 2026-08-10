@@ -31,6 +31,18 @@ func parseFloat(s string) float64 {
 	return f
 }
 
+// truncateRunesAPI caps s at n runes. Byte slicing would do for the ASCII that
+// remote command output usually is, but the diagnostics that carry it prepend a
+// Chinese explanation, and a cut inside a character reaches the panel as
+// replacement glyphs.
+func truncateRunesAPI(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 // shellQuoteAPI wraps s in single quotes (escaping embedded ones) so it is safe
 // to interpolate into a /bin/sh command line built in the API layer.
 func shellQuoteAPI(s string) string {

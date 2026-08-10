@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -262,5 +263,30 @@ func TestParseEgressEndpointEmpty(t *testing.T) {
 	a.handleAdminParseEgressLink(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400; body %s", w.Code, w.Body.String())
+	}
+}
+
+// The egress check caps its output before returning it. That cap used to slice
+// bytes, which was harmless while the output was curl's ASCII and stopped being
+// harmless once the timeout branch started prefixing a Chinese sentence.
+func TestTruncateRunesAPI(t *testing.T) {
+	for _, tc := range []struct {
+		name, in     string
+		n, wantRunes int
+	}{
+		{"short input is returned as is", "检测超时", 500, 4},
+		{"exactly at the cap", "检测超时", 4, 4},
+		{"cut lands between characters", strings.Repeat("超", 600), 500, 500},
+		{"ascii still cut where asked", strings.Repeat("x", 600), 500, 500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateRunesAPI(tc.in, tc.n)
+			if !utf8.ValidString(got) {
+				t.Fatalf("result is not valid UTF-8: %q", got)
+			}
+			if n := utf8.RuneCountInString(got); n != tc.wantRunes {
+				t.Errorf("kept %d runes, want %d", n, tc.wantRunes)
+			}
+		})
 	}
 }

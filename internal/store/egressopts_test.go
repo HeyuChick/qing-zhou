@@ -3,7 +3,9 @@ package store
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"qingzhou/internal/singbox"
 )
@@ -335,6 +337,44 @@ func TestCloneSbEgress(t *testing.T) {
 	st.SetSecretKey([]byte("different-key"))
 	if _, err := st.CloneSbEgress(srcID); err == nil {
 		t.Error("cloning an undecryptable egress should fail")
+	}
+}
+
+// TestCloneSbEgressLongName pins the name cap. The cap used to be applied to
+// the finished candidate, which broke twice over on a long Chinese name: the
+// byte cut landed inside a character, and — worse — it took the （副本）suffix
+// back off, so both clones came out holding the same truncated prefix while the
+// uniqueness loop that was supposed to prevent exactly that had already passed.
+func TestCloneSbEgressLongName(t *testing.T) {
+	st := newEgressTestStore(t)
+
+	long := strings.Repeat("香", 120) // 360 bytes, well past the old 200-byte cut
+	srcID, err := st.SaveSbEgress(&SbEgress{
+		Name: long, Type: "socks", Host: "1.2.3.4", Port: 1080, Password: fixtureEgressPassword,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := st.CloneSbEgress(srcID)
+	if err != nil || first == nil {
+		t.Fatalf("CloneSbEgress: %v", err)
+	}
+	second, err := st.CloneSbEgress(srcID)
+	if err != nil || second == nil {
+		t.Fatalf("second CloneSbEgress: %v", err)
+	}
+
+	for _, n := range []string{first.Name, second.Name} {
+		if !utf8.ValidString(n) {
+			t.Errorf("clone name is not valid UTF-8: %q", n)
+		}
+		if !strings.Contains(n, "（副本") {
+			t.Errorf("clone name lost its 副本 suffix: %q", n)
+		}
+	}
+	if first.Name == second.Name {
+		t.Errorf("two clones of a long name share %q", first.Name)
 	}
 }
 

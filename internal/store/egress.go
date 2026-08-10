@@ -247,20 +247,31 @@ func (s *Store) uniqueEgressName(base string) string {
 			}
 		}
 	}
+	// The column is TEXT so SQLite won't truncate, but a runaway name is still
+	// worth capping before it reaches every dropdown in the UI. Capped here on
+	// the base rather than on the finished candidate: cutting afterwards would
+	// take the （副本）suffix back off, so every attempt would collapse to the
+	// same prefix and the loop below could never find a free name. By runes, not
+	// bytes — these names are Chinese, and half a rune renders as garbage.
+	base = truncateRunes(base, 60)
 	for i := 1; ; i++ {
 		cand := base + "（副本）"
 		if i > 1 {
 			cand = fmt.Sprintf("%s（副本 %d）", base, i)
 		}
 		if !taken[cand] {
-			// The column is TEXT so SQLite won't truncate, but a runaway name is
-			// still worth capping before it reaches every dropdown in the UI.
-			if len(cand) > 200 {
-				cand = cand[:200]
-			}
 			return cand
 		}
 	}
+}
+
+// truncateRunes cuts s to at most n runes, never mid-character.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 func (s *Store) DeleteSbEgress(id int64) error {

@@ -1153,9 +1153,10 @@ func (a *API) handleAdminTestSbEgress(w http.ResponseWriter, r *http.Request) {
 		} else if out == "" {
 			out = runErr.Error()
 		}
-		if len(out) > 500 {
-			out = out[:500]
-		}
+		// By runes: the timeout message above is Chinese, so a byte cut can land
+		// inside a character and the tail arrives at the panel as replacement
+		// glyphs on top of an already-unhappy path.
+		out = truncateRunesAPI(out, 500)
 		resp["output"] = strings.TrimSpace(out)
 		ok(w, resp)
 		return
