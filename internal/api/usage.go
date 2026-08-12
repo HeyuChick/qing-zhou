@@ -36,16 +36,35 @@ const maxUsageUsers = 100
 // parseUserIDs reads the repeated/comma-joined `users` param. An empty result
 // means "every user", which is the report's default view.
 func parseUserIDs(r *http.Request) []int64 {
+	return parseIDList(r, "users", false)
+}
+
+// parsePackageIDs reads the `packages` param. Unlike users, non-positive ids
+// are meaningful here and must survive: 0 is the shared pool and -1 is the
+// pre-rollup unattributed bucket, which are two of the entries an admin most
+// wants to isolate.
+func parsePackageIDs(r *http.Request) []int64 {
+	return parseIDList(r, "packages", true)
+}
+
+// parseIDList reads a repeated/comma-joined id param, dropping anything that is
+// not an integer so it can never reach the query builder. allowNonPositive
+// keeps the synthetic package ids (0, -1); user ids are always positive, and
+// letting a 0 through there would silently widen nothing but confuse the echo.
+func parseIDList(r *http.Request, key string, allowNonPositive bool) []int64 {
 	seen := map[int64]bool{}
 	var out []int64
-	for _, raw := range r.URL.Query()["users"] {
+	for _, raw := range r.URL.Query()[key] {
 		for _, part := range strings.Split(raw, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
 			}
 			id, err := strconv.ParseInt(part, 10, 64)
-			if err != nil || id <= 0 || seen[id] {
+			if err != nil || seen[id] {
+				continue
+			}
+			if !allowNonPositive && id <= 0 {
 				continue
 			}
 			seen[id] = true
@@ -112,7 +131,9 @@ func usageWindowFromQuery(r *http.Request) (mode string, w store.UsageWindow, pr
 // coverage so the client can caveat the window.
 func (a *API) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	userIDs := parseUserIDs(r)
+	pkgIDs := parsePackageIDs(r)
 	mode, win, preset := usageWindowFromQuery(r)
+	filter := store.UsageFilter{UserIDs: userIDs, PackageIDs: pkgIDs, Window: win}
 
 	first, last, err := a.st.TrafficDailyCoverage()
 	if err != nil {
@@ -126,16 +147,17 @@ func (a *API) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 		"from":     win.From,
 		"to":       win.To,
 		"users":    userIDs,
+		"packages": pkgIDs,
 		"coverage": J{"first": first, "last": last},
 	}
 
 	if mode == usageModeLifetime {
-		byUser, err := a.st.UsageLifetimeByUser(userIDs)
+		byUser, err := a.st.UsageLifetimeByUser(filter)
 		if err != nil {
 			fail(w, http.StatusInternalServerError, "读取用量统计失败")
 			return
 		}
-		byPkg, err := a.st.UsageByPackageLifetime(userIDs)
+		byPkg, err := a.st.UsageByPackageLifetime(filter)
 		if err != nil {
 			fail(w, http.StatusInternalServerError, "读取套餐用量失败")
 			return
@@ -143,12 +165,12 @@ func (a *API) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 		// The daily curve has no lifetime equivalent — the counters are scalars.
 		// Send the rollup's full extent so the chart still has something true to
 		// draw, flagged by series_scope so the client can label it.
-		series, err := a.st.UsageDailyByUser(userIDs, store.UsageWindow{})
+		series, err := a.st.UsageDailyByUser(store.UsageFilter{UserIDs: userIDs, PackageIDs: pkgIDs})
 		if err != nil {
 			fail(w, http.StatusInternalServerError, "读取用量曲线失败")
 			return
 		}
-		total, err := a.st.UsageDailyTotal(userIDs, store.UsageWindow{})
+		total, err := a.st.UsageDailyTotal(store.UsageFilter{UserIDs: userIDs, PackageIDs: pkgIDs})
 		if err != nil {
 			fail(w, http.StatusInternalServerError, "读取用量曲线失败")
 			return
@@ -162,22 +184,22 @@ func (a *API) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	byUser, err := a.st.UsageWindowedByUser(userIDs, win)
+	byUser, err := a.st.UsageWindowedByUser(filter)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "读取用量统计失败")
 		return
 	}
-	byPkg, err := a.st.UsageByPackageWindowed(userIDs, win)
+	byPkg, err := a.st.UsageByPackageWindowed(filter)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "读取套餐用量失败")
 		return
 	}
-	series, err := a.st.UsageDailyByUser(userIDs, win)
+	series, err := a.st.UsageDailyByUser(filter)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "读取用量曲线失败")
 		return
 	}
-	total, err := a.st.UsageDailyTotal(userIDs, win)
+	total, err := a.st.UsageDailyTotal(filter)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "读取用量曲线失败")
 		return
@@ -199,6 +221,19 @@ func (a *API) handleAdminUsageUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	if rows == nil {
 		rows = []store.UsageCandidate{}
+	}
+	ok(w, rows)
+}
+
+// GET /api/admin/stats/usage/packages — the report's package picker.
+func (a *API) handleAdminUsagePackages(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.st.UsagePackageCandidates()
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "读取套餐列表失败")
+		return
+	}
+	if rows == nil {
+		rows = []store.UsagePackageCandidate{}
 	}
 	ok(w, rows)
 }

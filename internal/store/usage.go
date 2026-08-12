@@ -30,6 +30,25 @@ type UsageWindow struct {
 	To   string // YYYY-MM-DD inclusive; "" = through the last recorded day
 }
 
+// UsageFilter is everything that narrows a usage query. Carried as one struct
+// rather than as parallel arguments because every query in this file needs the
+// identical set, and a third dimension threaded positionally through six
+// functions is how one of them quietly ends up filtering on the wrong thing.
+//
+// Empty UserIDs / PackageIDs mean "no restriction on that axis", NOT "match
+// nothing" — the report's default view is everyone, everything.
+type UsageFilter struct {
+	UserIDs    []int64
+	PackageIDs []int64 // 0 = shared pool, -1 = unattributed; both are selectable
+	Window     UsageWindow
+}
+
+// HasPackageFilter reports whether a package restriction is in play. Callers in
+// lifetime mode need this: the per-user counters they normally read are scalars
+// with no package dimension, so a package filter forces them onto the bucket
+// counters instead (see UsageLifetimeByUser).
+func (f UsageFilter) HasPackageFilter() bool { return len(f.PackageIDs) > 0 }
+
 // UsageTotal is one subject's traffic. Subject is a user for the per-user
 // breakdown and a (user, package) pair for the per-package one.
 type UsageTotal struct {
@@ -80,29 +99,34 @@ func inClause(ids []int64) (string, []any, bool) {
 	return "(" + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + ")", args, true
 }
 
-// where builds the shared user/day filter. userIDs empty = every user.
-func usageWhere(userIDs []int64, w UsageWindow, userCol string) (string, []any) {
+// usageWhere builds the shared user/package/day filter against traffic_daily.
+// userCol / pkgCol are the qualified column names for the query being built.
+func usageWhere(f UsageFilter, userCol, pkgCol string) (string, []any) {
 	var sb strings.Builder
 	var args []any
-	if clause, ids, ok := inClause(userIDs); ok {
+	if clause, ids, ok := inClause(f.UserIDs); ok {
 		sb.WriteString(" AND " + userCol + " IN " + clause)
 		args = append(args, ids...)
 	}
-	if w.From != "" {
-		sb.WriteString(" AND day >= ?")
-		args = append(args, w.From)
+	if clause, ids, ok := inClause(f.PackageIDs); ok {
+		sb.WriteString(" AND " + pkgCol + " IN " + clause)
+		args = append(args, ids...)
 	}
-	if w.To != "" {
+	if f.Window.From != "" {
+		sb.WriteString(" AND day >= ?")
+		args = append(args, f.Window.From)
+	}
+	if f.Window.To != "" {
 		sb.WriteString(" AND day <= ?")
-		args = append(args, w.To)
+		args = append(args, f.Window.To)
 	}
 	return sb.String(), args
 }
 
 // UsageDailyByUser returns each selected user's daily curve inside the window,
 // sparse (only days with traffic). Callers fill gaps for plotting.
-func (s *Store) UsageDailyByUser(userIDs []int64, w UsageWindow) ([]UsageSeries, error) {
-	cond, args := usageWhere(userIDs, w, "t.user_id")
+func (s *Store) UsageDailyByUser(f UsageFilter) ([]UsageSeries, error) {
+	cond, args := usageWhere(f, "t.user_id", "t.package_id")
 	rows, err := s.db.Query(`
 		SELECT t.user_id, COALESCE(u.username,''), t.day,
 		       COALESCE(SUM(t.up),0), COALESCE(SUM(t.down),0)
@@ -140,8 +164,8 @@ func (s *Store) UsageDailyByUser(userIDs []int64, w UsageWindow) ([]UsageSeries,
 // the stacked chart's total line. Computed in SQL rather than by summing the
 // per-user series so a caller that only needs the total doesn't pay for the
 // per-user grouping.
-func (s *Store) UsageDailyTotal(userIDs []int64, w UsageWindow) ([]UsageDay, error) {
-	cond, args := usageWhere(userIDs, w, "user_id")
+func (s *Store) UsageDailyTotal(f UsageFilter) ([]UsageDay, error) {
+	cond, args := usageWhere(f, "user_id", "package_id")
 	rows, err := s.db.Query(`
 		SELECT day, COALESCE(SUM(up),0), COALESCE(SUM(down),0)
 		  FROM traffic_daily
@@ -168,8 +192,8 @@ func (s *Store) UsageDailyTotal(userIDs []int64, w UsageWindow) ([]UsageDay, err
 // The package name is resolved in three steps because a package row can be
 // deleted while its traffic history must stay readable: the live packages row
 // first, then the name snapshot the user's own bucket kept, then a placeholder.
-func (s *Store) UsageByPackageWindowed(userIDs []int64, w UsageWindow) ([]UsageTotal, error) {
-	cond, args := usageWhere(userIDs, w, "t.user_id")
+func (s *Store) UsageByPackageWindowed(f UsageFilter) ([]UsageTotal, error) {
+	cond, args := usageWhere(f, "t.user_id", "t.package_id")
 	rows, err := s.db.Query(`
 		SELECT t.user_id, COALESCE(u.username,''), t.package_id,
 		       COALESCE(NULLIF(p.name,''),
@@ -195,11 +219,15 @@ func (s *Store) UsageByPackageWindowed(userIDs []int64, w UsageWindow) ([]UsageT
 // counters — accurate for the whole life of the account, including before the
 // rollup existed. Buckets of the same package are summed, so an account that
 // repurchased before renewal stacking reads as one package.
-func (s *Store) UsageByPackageLifetime(userIDs []int64) ([]UsageTotal, error) {
+func (s *Store) UsageByPackageLifetime(f UsageFilter) ([]UsageTotal, error) {
 	var cond string
 	var args []any
-	if clause, ids, ok := inClause(userIDs); ok {
-		cond = " AND b.user_id IN " + clause
+	if clause, ids, ok := inClause(f.UserIDs); ok {
+		cond += " AND b.user_id IN " + clause
+		args = append(args, ids...)
+	}
+	if clause, ids, ok := inClause(f.PackageIDs); ok {
+		cond += " AND b.package_id IN " + clause
 		args = append(args, ids...)
 	}
 	rows, err := s.db.Query(`
@@ -253,20 +281,54 @@ func usagePackageLabel(id int64, name string) string {
 	}
 }
 
-// UsageLifetimeByUser returns each selected user's all-time total from the
-// mirrored user counter.
-func (s *Store) UsageLifetimeByUser(userIDs []int64) ([]UsageTotal, error) {
-	cond := ""
+// UsageLifetimeByUser returns each selected user's all-time total.
+//
+// Source depends on whether a package filter is in play, and it has to:
+// users.used_* is a single scalar per account with no package dimension, so
+// under a package filter it would report the user's WHOLE lifetime traffic
+// while the table beside it shows only the filtered packages — two numbers on
+// one screen disagreeing, with the bigger one wrong. With a filter, the bucket
+// counters answer instead; they carry package_id and sum to the same total when
+// nothing is filtered.
+//
+// Without a filter the users row still wins, because it also covers buckets
+// that have since been deleted — traffic the bucket table can no longer account
+// for but the account really did use.
+func (s *Store) UsageLifetimeByUser(f UsageFilter) ([]UsageTotal, error) {
+	var cond string
 	var args []any
-	if clause, ids, ok := inClause(userIDs); ok {
+	if f.HasPackageFilter() {
+		if clause, ids, ok := inClause(f.UserIDs); ok {
+			cond += " AND b.user_id IN " + clause
+			args = append(args, ids...)
+		}
+		if clause, ids, ok := inClause(f.PackageIDs); ok {
+			cond += " AND b.package_id IN " + clause
+			args = append(args, ids...)
+		}
+		return s.scanLifetimeUsers(`
+			SELECT b.user_id, COALESCE(u.username,''), 0, '',
+			       COALESCE(SUM(b.used_up),0), COALESCE(SUM(b.used_down),0)
+			  FROM user_plans b
+			  LEFT JOIN users u ON u.id = b.user_id
+			 WHERE 1=1`+cond+`
+			 GROUP BY b.user_id
+			HAVING SUM(b.used_up) + SUM(b.used_down) > 0
+			 ORDER BY (SUM(b.used_up)+SUM(b.used_down)) DESC`, args...)
+	}
+	if clause, ids, ok := inClause(f.UserIDs); ok {
 		cond = " AND id IN " + clause
 		args = append(args, ids...)
 	}
-	rows, err := s.db.Query(`
+	return s.scanLifetimeUsers(`
 		SELECT id, username, 0, '', used_up, used_down
 		  FROM users
 		 WHERE role='user'`+cond+`
 		 ORDER BY (used_up+used_down) DESC`, args...)
+}
+
+func (s *Store) scanLifetimeUsers(q string, args ...any) ([]UsageTotal, error) {
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -283,8 +345,8 @@ func (s *Store) UsageLifetimeByUser(userIDs []int64) ([]UsageTotal, error) {
 }
 
 // UsageWindowedByUser returns each selected user's total inside the window.
-func (s *Store) UsageWindowedByUser(userIDs []int64, w UsageWindow) ([]UsageTotal, error) {
-	cond, args := usageWhere(userIDs, w, "t.user_id")
+func (s *Store) UsageWindowedByUser(f UsageFilter) ([]UsageTotal, error) {
+	cond, args := usageWhere(f, "t.user_id", "t.package_id")
 	rows, err := s.db.Query(`
 		SELECT t.user_id, COALESCE(u.username,''), 0, '',
 		       COALESCE(SUM(t.up),0), COALESCE(SUM(t.down),0)
@@ -357,6 +419,50 @@ func (s *Store) UsageUserCandidates(q string, limit int) ([]UsageCandidate, erro
 		if err := rows.Scan(&c.ID, &c.Username, &c.Traffic); err != nil {
 			return nil, err
 		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// UsagePackageCandidate is one selectable package for the report's picker.
+type UsagePackageCandidate struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Traffic int64  `json:"traffic"` // recorded traffic, for ordering
+}
+
+// UsagePackageCandidates lists the packages that actually appear in the rollup,
+// heaviest first.
+//
+// Sourced from traffic_daily rather than from the packages table on purpose:
+// the picker must offer exactly what the report can filter to. A package with
+// no recorded traffic would filter to an empty screen, and — the other
+// direction — the pool and the unattributed bucket have no packages row at all
+// yet are two of the entries an admin most needs to isolate.
+func (s *Store) UsagePackageCandidates() ([]UsagePackageCandidate, error) {
+	rows, err := s.db.Query(`
+		SELECT t.package_id,
+		       COALESCE(NULLIF(p.name,''),
+		                NULLIF((SELECT b.name FROM user_plans b
+		                         WHERE b.package_id=t.package_id AND b.name<>''
+		                         ORDER BY b.id DESC LIMIT 1), ''),
+		                '') AS pkg_name,
+		       COALESCE(SUM(t.up),0) + COALESCE(SUM(t.down),0) AS v
+		  FROM traffic_daily t
+		  LEFT JOIN packages p ON p.id = t.package_id
+		 GROUP BY t.package_id
+		 ORDER BY v DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsagePackageCandidate
+	for rows.Next() {
+		var c UsagePackageCandidate
+		if err := rows.Scan(&c.ID, &c.Name, &c.Traffic); err != nil {
+			return nil, err
+		}
+		c.Name = usagePackageLabel(c.ID, c.Name)
 		out = append(out, c)
 	}
 	return out, rows.Err()

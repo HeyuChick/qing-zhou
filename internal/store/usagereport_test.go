@@ -121,7 +121,7 @@ func TestUsageByPackage_SplitsPerPackage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := st.UsageByPackageWindowed([]int64{uid}, UsageWindow{})
+	got, err := st.UsageByPackageWindowed(UsageFilter{UserIDs: []int64{uid}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestUsageWindow_FiltersByDay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	all, err := st.UsageWindowedByUser([]int64{uid}, UsageWindow{})
+	all, err := st.UsageWindowedByUser(UsageFilter{UserIDs: []int64{uid}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestUsageWindow_FiltersByDay(t *testing.T) {
 		t.Fatalf("unbounded window = %+v, want 1010 total", all)
 	}
 
-	recent, err := st.UsageWindowedByUser([]int64{uid}, UsageWindow{From: DaysAgo(29)})
+	recent, err := st.UsageWindowedByUser(UsageFilter{UserIDs: []int64{uid}, Window: UsageWindow{From: DaysAgo(29)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestUsageWindow_FiltersByDay(t *testing.T) {
 	}
 
 	// A window that ends before the old day sees nothing at all.
-	none, err := st.UsageWindowedByUser([]int64{uid}, UsageWindow{From: DaysAgo(60), To: DaysAgo(50)})
+	none, err := st.UsageWindowedByUser(UsageFilter{UserIDs: []int64{uid}, Window: UsageWindow{From: DaysAgo(60), To: DaysAgo(50)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestUsageSelection_ScopesToChosenUsers(t *testing.T) {
 		}
 	}
 
-	all, err := st.UsageWindowedByUser(nil, UsageWindow{})
+	all, err := st.UsageWindowedByUser(UsageFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestUsageSelection_ScopesToChosenUsers(t *testing.T) {
 		t.Fatalf("no selection should mean everyone: got %d rows, want 3", len(all))
 	}
 
-	two, err := st.UsageWindowedByUser([]int64{ids["u1"], ids["u3"]}, UsageWindow{})
+	two, err := st.UsageWindowedByUser(UsageFilter{UserIDs: []int64{ids["u1"], ids["u3"]}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestUsageLifetime_IncludesPreRollupTraffic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	life, err := st.UsageLifetimeByUser([]int64{uid})
+	life, err := st.UsageLifetimeByUser(UsageFilter{UserIDs: []int64{uid}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestUsageLifetime_IncludesPreRollupTraffic(t *testing.T) {
 		t.Fatalf("lifetime = %+v, want 1000", life)
 	}
 
-	pkgs, err := st.UsageByPackageLifetime([]int64{uid})
+	pkgs, err := st.UsageByPackageLifetime(UsageFilter{UserIDs: []int64{uid}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestUsageLifetime_IncludesPreRollupTraffic(t *testing.T) {
 	}
 
 	// The rollup, correctly, knows nothing about it.
-	win, err := st.UsageWindowedByUser([]int64{uid}, UsageWindow{})
+	win, err := st.UsageWindowedByUser(UsageFilter{UserIDs: []int64{uid}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestUsageDailySeries_PerUserOrdered(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	series, err := st.UsageDailyByUser([]int64{a, b}, UsageWindow{})
+	series, err := st.UsageDailyByUser(UsageFilter{UserIDs: []int64{a, b}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func TestUsageDailySeries_PerUserOrdered(t *testing.T) {
 		t.Errorf("user a should have 2 distinct days, got %d", aDays)
 	}
 
-	total, err := st.UsageDailyTotal([]int64{a, b}, UsageWindow{})
+	total, err := st.UsageDailyTotal(UsageFilter{UserIDs: []int64{a, b}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,5 +449,235 @@ func TestUsageUserCandidates_EscapesWildcards(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Username != "100%off" {
 		t.Errorf("search %q matched %+v, want only 100%%off", "100%", got)
+	}
+}
+
+// --- 套餐维度筛选 ---
+
+// The package filter must narrow every query the report draws from, and must
+// treat the two synthetic ids (pool = 0, unattributed = -1) as selectable —
+// they are exactly the entries an admin needs to isolate.
+func TestUsagePackageFilter_NarrowsWindowedQueries(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "gina")
+	basic := mkPlan(t, st, "基础版", 10, 100, 30)
+	pro := mkPlan(t, st, "专业版", 20, 200, 30)
+	buy(t, st, uid, basic)
+	buy(t, st, uid, pro)
+
+	rows, err := st.db.Query(`SELECT client_name, package_id FROM user_plans WHERE user_id=? AND kind='plan' ORDER BY id`, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type bk struct {
+		name string
+		pkg  int64
+	}
+	var bks []bk
+	for rows.Next() {
+		var b bk
+		if err := rows.Scan(&b.name, &b.pkg); err != nil {
+			t.Fatal(err)
+		}
+		bks = append(bks, b)
+	}
+	rows.Close()
+	if len(bks) != 2 {
+		t.Fatalf("want 2 plan buckets, got %d", len(bks))
+	}
+
+	if _, err := st.AddUsageBatch(map[string]UsageDelta{
+		bks[0].name: {Up: 1000, Down: 1000},
+		bks[1].name: {Up: 30, Down: 30},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	only := UsageFilter{PackageIDs: []int64{bks[0].pkg}}
+
+	byUser, err := st.UsageWindowedByUser(only)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byUser) != 1 || byUser[0].Up+byUser[0].Down != 2000 {
+		t.Errorf("per-user under package filter = %+v, want 2000", byUser)
+	}
+
+	byPkg, err := st.UsageByPackageWindowed(only)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byPkg) != 1 || byPkg[0].PackageID != bks[0].pkg {
+		t.Errorf("per-package under filter = %+v, want only package %d", byPkg, bks[0].pkg)
+	}
+
+	total, err := st.UsageDailyTotal(only)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum int64
+	for _, d := range total {
+		sum += d.Up + d.Down
+	}
+	if sum != 2000 {
+		t.Errorf("daily total under package filter = %d, want 2000", sum)
+	}
+
+	series, err := st.UsageDailyByUser(only)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ssum int64
+	for _, s := range series {
+		for _, d := range s.Days {
+			ssum += d.Up + d.Down
+		}
+	}
+	if ssum != 2000 {
+		t.Errorf("per-user series under package filter = %d, want 2000 — the trend chart would disagree with the table", ssum)
+	}
+}
+
+// Lifetime mode is the trap: users.used_* is a scalar with no package
+// dimension, so under a package filter it must NOT be the source, or the KPI
+// would show the account's whole lifetime beside a table showing one package.
+func TestUsagePackageFilter_LifetimeUsesBucketCounters(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "hana")
+	basic := mkPlan(t, st, "基础版", 10, 100, 30)
+	pro := mkPlan(t, st, "专业版", 20, 200, 30)
+	buy(t, st, uid, basic)
+	buy(t, st, uid, pro)
+
+	var pkgOfBasic int64
+	if err := st.db.QueryRow(`SELECT package_id FROM user_plans WHERE user_id=? AND package_id=?`,
+		uid, basic.ID).Scan(&pkgOfBasic); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE user_plans SET used_up=700, used_down=300 WHERE user_id=? AND package_id=?`, uid, basic.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE user_plans SET used_up=40, used_down=60 WHERE user_id=? AND package_id=?`, uid, pro.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE users SET used_up=740, used_down=360 WHERE id=?`, uid); err != nil {
+		t.Fatal(err)
+	}
+
+	unfiltered, err := st.UsageLifetimeByUser(UsageFilter{UserIDs: []int64{uid}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unfiltered) != 1 || unfiltered[0].Up+unfiltered[0].Down != 1100 {
+		t.Fatalf("unfiltered lifetime = %+v, want 1100 (the users counter)", unfiltered)
+	}
+
+	filtered, err := st.UsageLifetimeByUser(UsageFilter{UserIDs: []int64{uid}, PackageIDs: []int64{pkgOfBasic}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].Up+filtered[0].Down != 1000 {
+		t.Errorf("lifetime under package filter = %+v, want 1000 (基础版 only) — "+
+			"reading users.used_* here would report the whole account", filtered)
+	}
+
+	byPkg, err := st.UsageByPackageLifetime(UsageFilter{UserIDs: []int64{uid}, PackageIDs: []int64{pkgOfBasic}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byPkg) != 1 || byPkg[0].Up+byPkg[0].Down != 1000 {
+		t.Errorf("lifetime by package under filter = %+v, want a single 1000 row", byPkg)
+	}
+	// The two must agree — they are shown side by side on one screen.
+	if filtered[0].Up+filtered[0].Down != byPkg[0].Up+byPkg[0].Down {
+		t.Errorf("KPI (%d) and table (%d) disagree under the same filter",
+			filtered[0].Up+filtered[0].Down, byPkg[0].Up+byPkg[0].Down)
+	}
+}
+
+// The pool (0) and the unattributed bucket (-1) must be selectable, and the
+// picker must offer them — they have no `packages` row to join to.
+func TestUsagePackageCandidates_IncludesSyntheticIDs(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "ian")
+	pkg := mkPlan(t, st, "真套餐", 10, 100, 30)
+	buy(t, st, uid, pkg)
+	if _, err := st.AddUsageBatch(map[string]UsageDelta{
+		clientNameOf(t, st, uid, "plan"): {Up: 5, Down: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Pool + pre-rollup rows, as an upgraded install would have.
+	for _, r := range []struct {
+		pkgID int64
+		bkt   int64
+		bytes int64
+	}{{0, 900, 40}, {PackageIDUnattributed, 0, 70}} {
+		if _, err := st.db.Exec(`INSERT INTO traffic_daily (day, user_id, bucket_id, package_id, up, down)
+			VALUES (?,?,?,?,?,?)`, DaysAgo(2), uid, r.bkt, r.pkgID, r.bytes, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := st.UsagePackageCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[int64]string{}
+	for _, c := range got {
+		names[c.ID] = c.Name
+	}
+	if names[0] != poolPackageName {
+		t.Errorf("pool missing or unlabelled: %+v", got)
+	}
+	if names[PackageIDUnattributed] != unattributedPackageName {
+		t.Errorf("unattributed missing or unlabelled: %+v", got)
+	}
+	if names[pkg.ID] != "真套餐" {
+		t.Errorf("real package missing: %+v", got)
+	}
+	for _, c := range got {
+		if c.Name == "" {
+			t.Errorf("candidate %d has an empty label — renders as a blank picker row", c.ID)
+		}
+	}
+
+	// And filtering to a synthetic id actually works.
+	poolOnly, err := st.UsageWindowedByUser(UsageFilter{PackageIDs: []int64{0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(poolOnly) != 1 || poolOnly[0].Up+poolOnly[0].Down != 40 {
+		t.Errorf("pool-only filter = %+v, want 40", poolOnly)
+	}
+}
+
+// User and package filters must intersect, not union.
+func TestUsageFilters_Intersect(t *testing.T) {
+	st := newRefundStore(t)
+	pkgA := mkPlan(t, st, "A", 10, 100, 30)
+	pkgB := mkPlan(t, st, "B", 10, 100, 30)
+	u1 := mkUser(t, st, "j1")
+	u2 := mkUser(t, st, "j2")
+	for _, u := range []int64{u1, u2} {
+		buy(t, st, u, pkgA)
+		buy(t, st, u, pkgB)
+		rows, _ := st.db.Query(`SELECT client_name FROM user_plans WHERE user_id=? AND kind='plan'`, u)
+		for rows.Next() {
+			var n string
+			_ = rows.Scan(&n)
+			if _, err := st.AddUsageBatch(map[string]UsageDelta{n: {Up: 10, Down: 0}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rows.Close()
+	}
+
+	got, err := st.UsageWindowedByUser(UsageFilter{UserIDs: []int64{u1}, PackageIDs: []int64{pkgA.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UserID != u1 || got[0].Up+got[0].Down != 10 {
+		t.Errorf("u1 ∩ pkgA = %+v, want exactly one row of 10 bytes", got)
 	}
 }
