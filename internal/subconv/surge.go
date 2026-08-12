@@ -76,13 +76,23 @@ func surgeName(s string) string {
 	return s
 }
 
+// surgeUDPRelay renders the udp-relay flag: false for a node whose egress
+// drops UDP (see Proxy.udpBlocked), so Surge refuses UDP locally instead of
+// relaying it into a server-side black hole.
+func surgeUDPRelay(p *Proxy) string {
+	if p.udpBlocked() {
+		return "udp-relay=false"
+	}
+	return "udp-relay=true"
+}
+
 // surgeProxy returns the right-hand side of a Surge proxy line, or "" if Surge
 // can't express this protocol.
 func surgeProxy(p *Proxy) string {
 	switch p.Protocol {
 	case "ss":
 		parts := []string{"ss", p.Server, itoaPort(p.Port),
-			"encrypt-method=" + p.Method, "password=" + p.Password, "udp-relay=true"}
+			"encrypt-method=" + p.Method, "password=" + p.Password, surgeUDPRelay(p)}
 		return strings.Join(parts, ", ")
 	case "trojan":
 		parts := []string{"trojan", p.Server, itoaPort(p.Port), "password=" + p.Password}
@@ -92,7 +102,7 @@ func surgeProxy(p *Proxy) string {
 		if p.tlsInsecure() {
 			parts = append(parts, "skip-cert-verify=true")
 		}
-		parts = append(parts, "udp-relay=true")
+		parts = append(parts, surgeUDPRelay(p))
 		return strings.Join(parts, ", ")
 	case "vmess":
 		parts := []string{"vmess", p.Server, itoaPort(p.Port), "username=" + p.UUID}

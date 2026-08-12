@@ -262,7 +262,13 @@ func parseSS(raw string) (*Proxy, error) {
 		name, _ = url.QueryUnescape(body[i+1:])
 		body = body[:i]
 	}
+	// SIP002 puts options in the query (plugin=..., and 轻舟's own qz-udp).
+	// This used to be discarded wholesale, which was fine while nothing read
+	// it; keep the parsed form so ss nodes see the same params as URL-style
+	// links.
+	var params url.Values
 	if i := strings.Index(body, "?"); i >= 0 {
+		params, _ = url.ParseQuery(body[i+1:])
 		body = body[:i]
 	}
 	var method, password, server string
@@ -293,7 +299,7 @@ func parseSS(raw string) (*Proxy, error) {
 	if name == "" {
 		name = server
 	}
-	return &Proxy{Raw: raw, Protocol: "ss", Name: name, Server: server, Port: port, Method: method, Password: password}, nil
+	return &Proxy{Raw: raw, Protocol: "ss", Name: name, Server: server, Port: port, Method: method, Password: password, Params: params}, nil
 }
 
 // DecodeLinks returns the raw share-link lines from a subscription blob
@@ -324,6 +330,10 @@ var volatileParams = map[string]bool{
 	"packetEncoding": true, "packet_encoding": true,
 	"tfo": true, "mptcp": true, "mux": true,
 	"brutal_up": true, "brutal_down": true,
+	// The no-UDP marker follows the bound egress's udp_mode; an admin flipping
+	// that (or unbinding the egress) must not re-key the node and silently
+	// undo every user's blocklist entry for it.
+	"qz-udp": true,
 }
 
 // NodeKey returns a stable per-node identifier derived from a share link,
@@ -478,6 +488,21 @@ func (p *Proxy) param(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// udpBlocked reports whether the link marks its node as unable to relay UDP
+// (`qz-udp=block`, emitted for inbounds bound to a UDP-blocking proxy egress —
+// see singbox.LinkParams.NoUDP). The node drops UDP either way; this flag lets
+// the renderers say so in the client config, so the refusal happens instantly
+// client-side instead of as a silent server-side black hole each application
+// must time out against. Read from the query for URL-style links and from the
+// JSON map for vmess (safe to check both: the key is 轻舟's own, so the "type"
+// namespace collision that keeps param() and the vmess map apart can't occur).
+func (p *Proxy) udpBlocked() bool {
+	if p.param("qz-udp") == "block" {
+		return true
+	}
+	return p.VMess != nil && str(p.VMess["qz-udp"]) == "block"
 }
 
 // tlsParam reads a TLS-related setting from whichever namespace the proxy has:

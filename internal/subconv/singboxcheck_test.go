@@ -33,10 +33,25 @@ func TestRenderedConfigPassesSingboxCheck(t *testing.T) {
 
 	// Both a domain-addressed and an IP-addressed node: only the former forces
 	// the dialer to resolve, which is what the domain-resolver rule is about.
+	//
+	// The qz-udp=block variants cover the no-UDP marker, which renders as
+	// `"network": "tcp"` on the outbound. That field is whitelisted per
+	// protocol (see singboxOutbound) because sing-box refuses the whole config
+	// on an unknown one — exactly the failure this test exists to catch. One
+	// blocked node per whitelisted protocol, plus an anytls node that must NOT
+	// get the field.
 	links := []string{
 		"trojan://pw@node.example.com:443?security=tls&sni=node.example.com#A",
 		"hysteria2://pw@203.0.113.7:8443?security=tls&insecure=1&sni=node.example.com#B",
 		"tuic://11111111-2222-3333-4444-555555555555:pw@203.0.113.8:8444?security=tls&sni=node.example.com&udp_relay_mode=native#C",
+
+		"vless://11111111-2222-3333-4444-555555555555@node.example.com:443?security=tls&sni=node.example.com&packetEncoding=xudp&qz-udp=block#D-noudp",
+		"trojan://pw@node.example.com:443?security=tls&sni=node.example.com&qz-udp=block#E-noudp",
+		"hysteria2://pw@203.0.113.9:8443?security=tls&sni=node.example.com&qz-udp=block#F-noudp",
+		"tuic://11111111-2222-3333-4444-555555555555:pw@203.0.113.10:8444?security=tls&sni=node.example.com&udp_relay_mode=native&qz-udp=block#G-noudp",
+		"hysteria://203.0.113.11:8445?protocol=udp&auth=pw&peer=node.example.com&upmbps=50&downmbps=100&qz-udp=block#H-noudp",
+		"ss://YWVzLTI1Ni1nY206cHc@203.0.113.12:8388?qz-udp=block#I-noudp",
+		"anytls://pw@node.example.com:8443?security=tls&sni=node.example.com&qz-udp=block#J-noudp-anytls",
 	}
 
 	for _, tc := range []struct {
