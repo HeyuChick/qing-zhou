@@ -353,6 +353,7 @@ func (a *API) Router() http.Handler {
 		// 用量分析：多选用户 × 任意时间范围 × 套餐维度
 		ar.Get("/api/admin/stats/usage", a.handleAdminUsage)
 		ar.Get("/api/admin/stats/usage/users", a.handleAdminUsageUsers)
+		ar.Get("/api/admin/stats/usage/packages", a.handleAdminUsagePackages)
 
 		ar.Get("/api/admin/reg-codes", a.handleAdminListRegCodes)
 		ar.Post("/api/admin/reg-codes/generate", a.handleAdminGenerateRegCodes)

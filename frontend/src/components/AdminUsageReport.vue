@@ -22,6 +22,22 @@
         </div>
 
         <div class="ctl-group grow">
+          <span class="ctl-label">套餐</span>
+          <n-select
+            v-model:value="selectedPkgs"
+            multiple
+            filterable
+            clearable
+            size="small"
+            placeholder="全部套餐"
+            :options="pkgOptions"
+            :max-tag-count="3"
+            class="user-select"
+            @update:value="load"
+          />
+        </div>
+
+        <div class="ctl-group grow">
           <span class="ctl-label">用户</span>
           <n-select
             v-model:value="selected"
@@ -36,7 +52,9 @@
             class="user-select"
             @update:value="load"
           />
-          <n-button v-if="selected.length" size="small" quaternary @click="clearUsers">清空</n-button>
+          <n-button v-if="selected.length || selectedPkgs.length" size="small" quaternary @click="clearFilters">
+            清空筛选
+          </n-button>
         </div>
       </div>
 
@@ -84,7 +102,7 @@
         <n-card size="small" class="sec">
           <template #header>
             <span class="sec-title">套餐分布</span>
-            <span class="sec-note">按流量占比</span>
+            <span class="sec-note">按流量占比 · 点击扇区筛选</span>
           </template>
           <div v-if="!byPackage.length" class="empty">暂无套餐用量</div>
           <div v-show="byPackage.length" ref="pkgEl" class="chart" style="height:280px;" />
@@ -93,7 +111,7 @@
         <n-card size="small" class="sec">
           <template #header>
             <span class="sec-title">用户排行</span>
-            <span class="sec-note">前 {{ Math.min(byUser.length, 10) }} 名</span>
+            <span class="sec-note">前 {{ Math.min(byUser.length, 10) }} 名 · 点击柱条筛选</span>
           </template>
           <div v-if="!byUser.length" class="empty">暂无用户用量</div>
           <div v-show="byUser.length" ref="rankEl" class="chart" style="height:280px;" />
@@ -172,6 +190,7 @@ const presets = [
 const preset = ref('30d')
 const customRange = ref<[number, number] | null>(null)
 const selected = ref<number[]>([])
+const selectedPkgs = ref<number[]>([])
 const loading = ref(false)
 const loadingUsers = ref(false)
 
@@ -182,9 +201,18 @@ const totalSeries = ref<any[]>([])
 const byUser = ref<any[]>([])
 const byPackage = ref<any[]>([])
 const candidates = ref<any[]>([])
+const pkgCandidates = ref<any[]>([])
 
 const userOptions = computed(() =>
   candidates.value.map(c => ({ label: `${c.username}（${fmtBytes(c.traffic)}）`, value: c.id })))
+const pkgOptions = computed(() =>
+  pkgCandidates.value.map(c => ({ label: `${c.name}（${fmtBytes(c.traffic)}）`, value: c.id })))
+// 套餐名 -> id，供环图点击回填筛选（图上只有名字，没有 id）
+const pkgIdByName = computed(() => {
+  const m = new Map<string, number>()
+  pkgCandidates.value.forEach(c => m.set(c.name, c.id))
+  return m
+})
 
 // 未来日期没有数据，选了只会得到空图 —— 直接禁掉比让人选完再解释更好。
 function disableFuture(ts: number) { return ts > Date.now() }
@@ -276,9 +304,14 @@ const byteAxis = {
   axisLabel: { color: '#767676', fontSize: 11, formatter: (v: number) => fmtBytes(v) },
 }
 
-function draw(key: string, el: HTMLElement | null, option: any) {
+function draw(key: string, el: HTMLElement | null, option: any, onClick?: (p: any) => void) {
   if (!el || !el.clientWidth) return // 隐藏容器宽度为 0，此时 init 会画出永久 0 宽画布
-  if (!charts[key]) charts[key] = echarts.init(el)
+  if (!charts[key]) {
+    charts[key] = echarts.init(el)
+    // 只在实例创建时绑一次。setOption 不会清掉监听器，每次重画都绑会导致
+    // 点一下触发 N 次 load()。
+    if (onClick) charts[key].on('click', onClick)
+  }
   charts[key].setOption(option, true)
 }
 
@@ -357,10 +390,14 @@ function pkgOption() {
     legend: { type: 'scroll', orient: 'vertical', right: 0, top: 'center',
       textStyle: { color: '#767676', fontSize: 11 }, itemWidth: 10, itemHeight: 10 },
     series: [{
-      type: 'pie', radius: ['52%', '76%'], center: ['36%', '50%'],
+      type: 'pie', radius: ['52%', '76%'], center: ['36%', '50%'], cursor: 'pointer',
       avoidLabelOverlap: true, itemStyle: { borderColor: '#fff', borderWidth: 2 },
       label: { show: false }, labelLine: { show: false },
-      data: data.map((d, i) => ({ ...d, itemStyle: { color: PALETTE[i % PALETTE.length] } })),
+      data: data.map((d, i) => {
+        const id = pkgIdByName.value.get(d.name)
+        const dim = selectedPkgs.value.length && id !== undefined && !selectedPkgs.value.includes(id)
+        return { ...d, itemStyle: { color: PALETTE[i % PALETTE.length], opacity: dim ? 0.25 : 1 } }
+      }),
     }],
   }
 }
@@ -373,7 +410,8 @@ function rankOption() {
     xAxis: byteAxis,
     yAxis: { type: 'category', data: rows.map(r => r.username || `#${r.user_id}`), ...axisStyle },
     series: [{
-      type: 'bar', barMaxWidth: 16, itemStyle: { borderRadius: [0, 3, 3, 0], color: C.down },
+      type: 'bar', barMaxWidth: 16, cursor: 'pointer',
+      itemStyle: { borderRadius: [0, 3, 3, 0], color: C.down },
       data: rows.map(r => r.up + r.down),
       label: { show: true, position: 'right', color: '#767676', fontSize: 11,
         formatter: (p: any) => fmtBytes(p.value) },
@@ -383,8 +421,25 @@ function rankOption() {
 
 function renderAll() {
   draw('trend', trendEl.value, trendOption())
-  draw('pkg', pkgEl.value, pkgOption())
-  draw('rank', rankEl.value, rankOption())
+  draw('pkg', pkgEl.value, pkgOption(), onPkgClick)
+  draw('rank', rankEl.value, rankOption(), onRankClick)
+}
+
+// 环图按套餐名聚合（同名跨用户合并），所以点击只能拿到名字，需要回查 id。
+function onPkgClick(p: any) {
+  const id = pkgIdByName.value.get(p?.name)
+  if (id === undefined) return
+  toggleIn(selectedPkgs.value, id)
+  load()
+}
+
+function onRankClick(p: any) {
+  const row = [...byUser.value]
+    .sort((a, b) => (b.up + b.down) - (a.up + a.down))
+    .slice(0, 10).reverse()[p?.dataIndex]
+  if (!row) return
+  toggleIn(selected.value, row.user_id)
+  load()
 }
 
 let resizeTimer: any
@@ -411,9 +466,17 @@ function onPreset(v: string) {
   load()
 }
 
-function clearUsers() {
+function clearFilters() {
   selected.value = []
+  selectedPkgs.value = []
   load()
+}
+
+// 图表点击 = 筛选。再点一次同一项则取消，否则没有回到「全部」的路径。
+function toggleIn(list: number[], id: number) {
+  const i = list.indexOf(id)
+  if (i >= 0) list.splice(i, 1)
+  else list.push(id)
 }
 
 function buildQuery() {
@@ -424,6 +487,7 @@ function buildQuery() {
     q.set('to', toDay(customRange.value[1]))
   }
   if (selected.value.length) q.set('users', selected.value.join(','))
+  if (selectedPkgs.value.length) q.set('packages', selectedPkgs.value.join(','))
   return q.toString()
 }
 
@@ -458,13 +522,17 @@ async function loadUsers() {
   }
 }
 
+async function loadPkgs() {
+  try { pkgCandidates.value = await apiList('/api/admin/stats/usage/packages') } catch {}
+}
+
 // 父组件切到本标签页时容器才有宽度，此时补画。
 defineExpose({ refresh: () => { renderAll() } })
 
 watch(() => [byUser.value, byPackage.value], () => nextTick(renderAll), { deep: false })
 
 onMounted(async () => {
-  await Promise.all([loadUsers(), load()])
+  await Promise.all([loadUsers(), loadPkgs(), load()])
   window.addEventListener('resize', onResize)
 })
 onUnmounted(() => {
