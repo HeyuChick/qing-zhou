@@ -133,6 +133,13 @@
         </n-card>
       </n-tab-pane>
 
+      <!-- ========== 用量分析 ========== -->
+      <!-- 自带时间口径（含「累计」与自定义区间），所以刻意不受页头 range 影响：
+           页头那个是「近 N 天」的运营视角，这里要能回答任意区间与全生命周期。 -->
+      <n-tab-pane name="usage" tab="用量分析" display-directive="show:lazy">
+        <AdminUsageReport ref="usageReport" />
+      </n-tab-pane>
+
       <!-- ========== 用户分析 ========== -->
       <n-tab-pane name="user" tab="用户分析">
         <n-card size="small" class="sec">
@@ -230,8 +237,10 @@ import { NCard, NTabs, NTabPane, NRadioGroup, NRadioButton, NInput, NSelect, NCh
 import * as echarts from 'echarts'
 import { apiGet, apiList } from '@/api'
 import { fmtBytes, fmtTotal, fmtDate, timeAgo } from '@/utils/format'
+import AdminUsageReport from '@/components/AdminUsageReport.vue'
 
 const message = useMessage()
+const usageReport = ref<any>(null)
 
 // 图表配色沿用全站的暖中性色板（global.css 的 --info/--warn 等），不引入高饱和色。
 const C = { up: '#6f8f76', down: '#5e7a99', gold: '#bf9540', red: '#c2685c', gray: '#9aa0a6' }
@@ -437,7 +446,9 @@ function renderAll() {
 }
 
 // 切标签页时被隐藏的图表宽度为 0，回到该页要补画一次。
-watch(tab, () => nextTick(() => { renderAll(); redrawUserChart() }))
+// 标签页在隐藏时容器宽度为 0，echarts 会画出一个永久 0 宽的画布，所以每次切页
+// 都要让当前页重画一次 —— 用量分析在自己的组件里，通过 ref 转达。
+watch(tab, () => nextTick(() => { renderAll(); redrawUserChart(); usageReport.value?.refresh?.() }))
 
 function onResize() {
   Object.values(charts).forEach(c => c.resize())

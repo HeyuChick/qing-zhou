@@ -748,14 +748,14 @@ func (s *Store) AddBucketUsage(statName string, up, down int64) error {
 	// custom proxy_username. Both meter the same bucket. proxy_username can never
 	// equal a client_name (client_names are qz_-prefixed, proxy_usernames may not
 	// be) and is globally unique, so at most one row matches.
-	bucketID, userID, err := resolveStatsIdentity(tx, statName)
+	bucketID, userID, packageID, err := resolveStatsIdentity(tx, statName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // unknown identity (e.g. a just-removed bucket) — ignore, rolls back
 	}
 	if err != nil {
 		return err
 	}
-	if err = applyBucketUsage(tx, bucketID, userID, up, down, now); err != nil {
+	if err = applyBucketUsage(tx, bucketID, userID, packageID, up, down, now); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -803,7 +803,7 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 		if name == "" || (d.Up == 0 && d.Down == 0) {
 			continue
 		}
-		bucketID, userID, rerr := resolveStatsIdentity(tx, name)
+		bucketID, userID, packageID, rerr := resolveStatsIdentity(tx, name)
 		if errors.Is(rerr, sql.ErrNoRows) {
 			continue // unknown / just-removed identity — skip, not a failure
 		}
@@ -817,7 +817,7 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 		if _, err := tx.Exec(`SAVEPOINT usg`); err != nil {
 			return applied, err // savepoint itself failing means the tx is unusable
 		}
-		if werr := applyBucketUsage(tx, bucketID, userID, d.Up, d.Down, now); werr != nil {
+		if werr := applyBucketUsage(tx, bucketID, userID, packageID, d.Up, d.Down, now); werr != nil {
 			_, _ = tx.Exec(`ROLLBACK TO usg`)
 			_, _ = tx.Exec(`RELEASE usg`)
 			if firstErr == nil {
@@ -844,16 +844,21 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 // optional custom proxy_username. Both meter the same bucket; proxy_username can
 // never equal a client_name (client_names are qz_-prefixed, proxy_usernames may
 // not be) and is globally unique, so at most one row matches.
-func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID int64, err error) {
-	err = tx.QueryRow(`SELECT id, user_id FROM user_plans WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
-		statName, statName).Scan(&bucketID, &userID)
+//
+// packageID rides along for the traffic_daily rollup: resolving it here costs
+// nothing (the row is already being read) and saves a second lookup inside the
+// hot per-identity write path.
+func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID, packageID int64, err error) {
+	err = tx.QueryRow(`SELECT id, user_id, package_id FROM user_plans WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
+		statName, statName).Scan(&bucketID, &userID, &packageID)
 	return
 }
 
 // applyBucketUsage writes one identity's delta: the bucket counter, the mirrored
-// user aggregate + last_online, and the per-user time-series sample. Caller owns
-// the transaction (or savepoint) so these three land together or not at all.
-func applyBucketUsage(tx txLike, bucketID, userID, up, down, now int64) error {
+// user aggregate + last_online, the per-user time-series sample, and the daily
+// per-bucket rollup. Caller owns the transaction (or savepoint) so these land
+// together or not at all.
+func applyBucketUsage(tx txLike, bucketID, userID, packageID, up, down, now int64) error {
 	if _, err := tx.Exec(`UPDATE user_plans SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
 		up, down, now, now, bucketID); err != nil {
 		return err
@@ -864,6 +869,21 @@ func applyBucketUsage(tx txLike, bucketID, userID, up, down, now int64) error {
 	}
 	if _, err := tx.Exec(`INSERT INTO traffic_samples (user_id, ts, up, down) VALUES (?, ?, ?, ?)`,
 		userID, now, up, down); err != nil {
+		return err
+	}
+	// The day is derived in SQL from the same `now` the rest of the row uses,
+	// with the same 'localtime' modifier the daily read queries apply — deriving
+	// it in Go instead would put the boundary in a second place to keep in sync,
+	// and the two would disagree for anyone whose process TZ differs from
+	// SQLite's.
+	if _, err := tx.Exec(`
+		INSERT INTO traffic_daily (day, user_id, bucket_id, package_id, up, down)
+		VALUES (strftime('%Y-%m-%d', ?, 'unixepoch', 'localtime'), ?, ?, ?, ?, ?)
+		ON CONFLICT(day, user_id, bucket_id) DO UPDATE SET
+		  up = up + excluded.up,
+		  down = down + excluded.down,
+		  package_id = excluded.package_id`,
+		now, userID, bucketID, packageID, up, down); err != nil {
 		return err
 	}
 	return nil
