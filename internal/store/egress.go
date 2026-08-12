@@ -70,8 +70,21 @@ type SbEgress struct {
 	// already knows how to handle. It also stops sing-box attempting — and
 	// logging — a packet path that was never going to work.
 	//
-	// The lever for genuinely fast fallback is on the client side (rejecting
-	// UDP/443 in the subscription config), not here.
+	// Fast fallback is the client's half of this, and it is now wired: an
+	// inbound bound to a blocking egress renders its subscription entry as
+	// UDP-incapable (singbox.LinkParams.NoUDP -> clash `udp: false`, sing-box
+	// `"network": "tcp"`, Surge `udp-relay=false`), so the client refuses UDP
+	// locally the moment an application asks — no timeout, no black hole. That
+	// marker is per node, so nodes on other exits keep QUIC.
+	//
+	// A measured case, for calibration on what "relays it badly" looks like:
+	// one vendor accepted UDP ASSOCIATE, kept sessions alive past 90s, held the
+	// same exit IP as TCP, and relayed real datagrams — but capped a single
+	// datagram at 512 bytes (the pre-EDNS DNS message size; their relay buffer
+	// is DNS-shaped). RFC 9000 §14.1 pads a QUIC client Initial to ≥1200, so
+	// every QUIC handshake through it was dropped with no ICMP and no error.
+	// DNS was the one UDP service that worked, which is why hijackDNSRule
+	// exists and why "UDP works, I tested it" is not evidence.
 	//
 	// "" means unset — resolved by EffectiveUDPMode from the type, because a
 	// sensible default differs: sing-box's http outbound cannot carry UDP at all,

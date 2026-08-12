@@ -364,6 +364,28 @@ func clashProxy(p *Proxy) map[string]any {
 		_, hasFlow := m["flow"]
 		clashApplyTuning(m, t, hasFlow)
 	}
+	// A node that drops UDP at the server (egress udp_mode=block) must not
+	// advertise `udp: true`: mihomo would relay UDP into a black hole and every
+	// QUIC/STUN attempt would wait out its own timeout. Setting it false makes
+	// mihomo refuse the UDP session locally, so applications fall back to TCP
+	// at once. The packet-encoding keys go with it — they only describe how UDP
+	// would be encoded, and a node claiming "no UDP, xudp" invites the reader to
+	// trust the wrong half.
+	//
+	// Flipped only where the renderer already emitted `udp`, never introduced:
+	// mihomo's hysteria/hysteria2/tuic options have no such field (their
+	// transport is UDP by construction), and this file's discipline for a key a
+	// core might not know is to keep it out — one unparseable proxy fails the
+	// whole config for every subscriber holding that node, which is a far worse
+	// outcome than the black hole this avoids. Those three keep the node-side
+	// reject alone in Clash; the sing-box output covers them via `network`.
+	if p.udpBlocked() {
+		if _, emitted := m["udp"]; emitted {
+			m["udp"] = false
+		}
+		delete(m, "xudp")
+		delete(m, "packet-addr")
+	}
 	return m
 }
 

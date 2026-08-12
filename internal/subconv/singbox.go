@@ -310,6 +310,24 @@ func singboxOutbound(p *Proxy) map[string]any {
 		_, hasFlow := o["flow"]
 		sbApplyTuning(o, t, hasFlow)
 	}
+	// A node that drops UDP at the server (egress udp_mode=block) is rendered
+	// TCP-only, so sing-box refuses UDP connections locally — instantly — and
+	// applications take their TCP fallback instead of timing out against the
+	// server-side black hole.
+	//
+	// Whitelisted per protocol, same discipline as packet_encoding above:
+	// sing-box rejects an unknown field by refusing the whole config, so one
+	// wrong emission would take down every subscriber's profile. `network` is a
+	// documented option on the V2Ray family and the QUIC-transport protocols
+	// (their `network` restricts what they RELAY, not how they dial), but NOT
+	// on anytls — an anytls node keeps its unrestricted outbound and relies on
+	// the node-side reject alone (its clash/surge outputs do carry the flag).
+	if p.udpBlocked() {
+		switch p.Protocol {
+		case "vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "tuic":
+			o["network"] = "tcp"
+		}
+	}
 	return o
 }
 

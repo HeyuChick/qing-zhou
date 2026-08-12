@@ -88,7 +88,32 @@ type LinkParams struct {
 	Mux        bool
 	BrutalUp   int
 	BrutalDown int
+
+	// NoUDP marks a node that cannot relay UDP: its inbound is bound to a proxy
+	// egress whose UDP mode is block, so the node itself rejects every UDP
+	// packet (see singbox.Relay.RejectUDP). Without this flag the subscription
+	// still advertises the node as UDP-capable — clash `udp: true`, sing-box
+	// unrestricted network — and clients duly send UDP (QUIC, STUN) into what
+	// is, from their side, a silent black hole: nothing refuses the traffic, so
+	// every attempt runs out its own timeout before falling back to TCP.
+	//
+	// Carried as the custom `qz-udp=block` param (same convention as tfo/mux:
+	// 轻舟's own renderers read it back, unknown-key-tolerant clients ignore
+	// it), which 轻舟's renderers turn into clash `udp: false`, sing-box
+	// `"network": "tcp"` and Surge `udp-relay=false` — the client then refuses
+	// UDP locally, instantly, and applications take their TCP path without
+	// waiting on a timeout. Per-node by construction: nodes on other exits are
+	// untouched.
+	//
+	// Each renderer applies it only where its own core has a field for it (see
+	// singboxOutbound and clashProxy) — sing-box's anytls outbound and mihomo's
+	// hysteria/hysteria2/tuic proxies have none, and an unknown key there fails
+	// the whole config for every subscriber holding that node.
+	NoUDP bool
 }
+
+// noUDPParam is the query key/value advertising that a node cannot carry UDP.
+const noUDPParam = "qz-udp=block"
 
 // tuicUDPRelayModeNative is the UDP relay mode every mainstream TUIC
 // implementation already defaults to. It is emitted explicitly, never inferred.
@@ -219,6 +244,9 @@ func BuildShareLink(p LinkParams) string {
 		// fine). Pin xudp so both ends agree.
 		q = append(q, "packetEncoding=xudp")
 		q = append(q, p.tuningQuery(!visionActive)...) // mux is invalid with vision flow
+		if p.NoUDP {
+			q = append(q, noUDPParam)
+		}
 		return "vless://" + esc(p.UUID) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "trojan":
 		q := p.transportQuery()
@@ -227,6 +255,9 @@ func BuildShareLink(p LinkParams) string {
 			q = append(q, "allowInsecure=1")
 		}
 		q = append(q, p.tuningQuery(true)...)
+		if p.NoUDP {
+			q = append(q, noUDPParam)
+		}
 		return "trojan://" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "tuic":
 		q := []string{"security=tls"}
@@ -250,6 +281,9 @@ func BuildShareLink(p LinkParams) string {
 		// Stating the value that is already everyone's default costs nothing and
 		// removes the ambiguity.
 		q = append(q, "udp_relay_mode="+tuicUDPRelayModeNative)
+		if p.NoUDP {
+			q = append(q, noUDPParam)
+		}
 		return "tuic://" + esc(p.UUID) + ":" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "hysteria2":
 		q := []string{"security=tls"}
@@ -267,6 +301,9 @@ func BuildShareLink(p LinkParams) string {
 			if p.ObfsPassword != "" {
 				q = append(q, "obfs-password="+url.QueryEscape(p.ObfsPassword))
 			}
+		}
+		if p.NoUDP {
+			q = append(q, noUDPParam)
 		}
 		return "hysteria2://" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "vmess":
@@ -324,6 +361,9 @@ func BuildShareLink(p LinkParams) string {
 				m["brutal_down"] = strconv.Itoa(p.BrutalDown)
 			}
 		}
+		if p.NoUDP {
+			m["qz-udp"] = "block" // JSON-map twin of the URL-style noUDPParam
+		}
 		b, _ := json.Marshal(m)
 		return "vmess://" + base64.StdEncoding.EncodeToString(b)
 	case "shadowsocks":
@@ -331,11 +371,24 @@ func BuildShareLink(p LinkParams) string {
 		// password = serverPSK:userPSK.
 		userKey := DeriveSSKey(p.Password, p.Method)
 		userinfo := base64.RawURLEncoding.EncodeToString([]byte(p.Method + ":" + p.ServerKey + ":" + userKey))
+		if p.NoUDP {
+			// SIP002 URIs carry a query (the spec puts `plugin` there), so a
+			// custom key rides in the same place as on the URL-style links. The
+			// spec's optional "/" before it is deliberately omitted: canonicalLink
+			// splits at the first '?', so a slash would land in the base and give
+			// the node a different NodeKey than the same node unmarked — silently
+			// dropping every user's blocklist entry for it whenever an admin
+			// flips udp_mode.
+			return "ss://" + userinfo + "@" + hp + "?" + noUDPParam + frag
+		}
 		return "ss://" + userinfo + "@" + hp + frag
 	case "anytls":
 		q := []string{"security=tls", "fp=" + esc(fp), "sni=" + esc(p.SNI)}
 		if p.Insecure {
 			q = append(q, "insecure=1")
+		}
+		if p.NoUDP {
+			q = append(q, noUDPParam)
 		}
 		return "anytls://" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "hysteria":
@@ -354,6 +407,9 @@ func BuildShareLink(p LinkParams) string {
 		}
 		if p.PinSHA256 != "" {
 			q = append(q, "pinSHA256="+esc(p.PinSHA256))
+		}
+		if p.NoUDP {
+			q = append(q, noUDPParam)
 		}
 		return "hysteria://" + hp + "?" + strings.Join(q, "&") + frag
 	}

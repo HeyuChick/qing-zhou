@@ -707,6 +707,25 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 	// with no active owning bucket is omitted (no access).
 	owners, _ := s.UserOwnedInbounds(u.ID, time.Now().Unix())
 	nodeNames, _ := s.SelfBuiltNodeNames()
+	// Whether an inbound's bound egress drops UDP (udp_mode=block), so the link
+	// can say so (LinkParams.NoUDP) and clients refuse UDP locally instead of
+	// timing out against the node-side reject. Cached per egress id: several
+	// inbounds routinely share one egress.
+	egressNoUDP := map[int64]bool{}
+	noUDP := func(egressID int64) bool {
+		if egressID == 0 {
+			return false
+		}
+		if v, ok := egressNoUDP[egressID]; ok {
+			return v
+		}
+		v := false
+		if eg, _ := s.GetSbEgress(egressID); eg != nil {
+			v = eg.EffectiveUDPMode() == UDPModeBlock
+		}
+		egressNoUDP[egressID] = v
+		return v
+	}
 
 	var out []SelfBuiltLink
 	for _, ib := range inbounds {
@@ -757,6 +776,7 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		p := singbox.LinkParams{
 			Type: ib.Type, Tag: remark, Host: nodeHost, Port: ib.ListenPort,
 			UUID: owner.ClientUUID, Password: owner.ClientSecret,
+			NoUDP:       noUDP(ib.EgressID),
 			TLS:         ib.TlsID != 0,
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
