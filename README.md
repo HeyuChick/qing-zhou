@@ -137,7 +137,21 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/mllt992/qing-zhou/main/install.sh)
 ```
 
-常用选项：`--version vX.Y.Z` 装指定版本；`--force` 同版本强制重装；`--proxy https://mirror.ghproxy.com/` 国内下载加速；`uninstall` 卸载（数据默认保留）。装完后升级可重跑脚本，或直接用面板内「在线更新」。
+常用选项：`--version vX.Y.Z` 装指定版本；`--force` 同版本强制重装；`--proxy https://mirror.ghproxy.com/` 国内下载加速。装完后升级可重跑脚本，或直接用面板内「在线更新」。
+
+安装时会问「面板打算怎么访问」：**直接用 IP:端口打开选 1**（监听 `0.0.0.0:8081`，默认项）；前面有 nginx/caddy 反代才选 2（监听 `127.0.0.1:8081`）。选错了不用重装，改配置重启即可：
+
+```bash
+sed -i 's|^QZ_LISTEN=.*|QZ_LISTEN=0.0.0.0:8081|' /opt/qingzhou/qingzhou.env && systemctl restart qingzhou
+```
+
+**卸载**（脚本安装时已把自己存了一份到 `/opt/qingzhou/install.sh`）：
+
+```bash
+bash /opt/qingzhou/install.sh uninstall
+```
+
+先停服务、删 systemd 与二进制，再单独确认是否连数据库和配置一起删（输 `yes` 才删 `/opt/qingzhou`）。老版本装的没有这份副本，直接 `bash <(curl -fsSL https://raw.githubusercontent.com/mllt992/qing-zhou/main/install.sh) uninstall`。
 
 ### 一、Docker 一键部署（最省事）
 

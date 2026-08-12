@@ -49,8 +49,19 @@ curl -fsSL https://<你的面板域名>/install-singbox.sh | bash
 （配置不动、二进制原子替换，并顺带刷新 `QZ_PROBE_DIR` 里的探针）：
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/mllt992/qing-zhou/main/install.sh)
-# 选项：--version vX.Y.Z | --force | --proxy https://mirror.ghproxy.com/ | uninstall
+# 选项：--version vX.Y.Z | --force | --proxy https://mirror.ghproxy.com/
 ```
+
+监听地址问成二选一：`1` = `0.0.0.0:8081` 直连公网（默认），`2` = `127.0.0.1:8081` 走反代。
+选错不必重装：改 `QZ_LISTEN` 后 `systemctl restart qingzhou` 即可。`QZ_LISTEN` 环境变量存在时跳过询问。
+
+### 卸载
+安装时脚本会把自身存一份到 `/opt/qingzhou/install.sh`（curl 安装则回源下载一份），所以：
+```bash
+bash /opt/qingzhou/install.sh uninstall
+```
+先停服务、删 systemd 单元与二进制，再单独确认是否删除 `/opt/qingzhou`（数据库、配置、探针）。
+`QZ_SECRET_KEY` 在配置文件里，删掉后备份的加密内容将无法解密，删前想清楚。
 
 ### 手动安装
 ```bash

@@ -9,6 +9,8 @@
 #   --force            与当前版本相同也强制重装
 #   --proxy <前缀>     GitHub 下载加速前缀，如 https://mirror.ghproxy.com/
 #   uninstall          卸载（保留数据库与配置，除非再确认删除）
+#                      装好后本脚本会存一份到 /opt/qingzhou/install.sh，卸载直接：
+#                        bash /opt/qingzhou/install.sh uninstall
 #
 # 非交互环境（无 TTY，如 CI）下全新安装使用默认值，可用环境变量覆盖：
 #   QZ_LISTEN / QZ_PUBLIC_BASE / QZ_ADMIN_USER / QZ_ADMIN_PASS
@@ -113,6 +115,23 @@ dl() {
 # gh_url <path>：拼接 GitHub 下载地址（带可选加速前缀）
 gh_url() { echo "${GH_PROXY}https://github.com/${REPO}/$1"; }
 
+# save_self：把脚本自身留一份到 $INSTALL_DIR，卸载时才有东西可跑。
+# curl | bash 或 bash <(curl ...) 时 $0 不是可重读的普通文件（管道已被读到 EOF），
+# 这种情况回源下载一份。
+save_self() {
+  local dest="$INSTALL_DIR/install.sh"
+  case "$0" in
+    */install.sh|install.sh)
+      [ -r "$0" ] && cp -f "$0" "$dest" 2>/dev/null && { chmod 755 "$dest"; return; } ;;
+  esac
+  dl "${GH_PROXY}https://raw.githubusercontent.com/${REPO}/main/install.sh" "$dest" 2>/dev/null \
+    && chmod 755 "$dest" \
+    || echo "⚠️  未能保存卸载脚本到 $dest，卸载请重跑安装命令并加 uninstall"
+}
+
+# guess_ip：取本机出网网卡地址，用于安装完打印可点的面板地址（纯本地判断，不外连）
+guess_ip() { ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*[[:space:]]src[[:space:]]\([0-9.]*\).*/\1/p' | head -1; }
+
 # ---------- 卸载 ----------
 if [ "$ACTION" = "uninstall" ]; then
   info "停止并移除服务..."
@@ -201,8 +220,23 @@ if [ "$MODE" = "install" ]; then
   echo "========== 轻舟面板初始配置 =========="
   [ "$INTERACTIVE" = "0" ] && echo "（无终端交互，使用默认值/环境变量）"
 
-  ask "监听地址（用 nginx 反代选默认；无反代直接公网访问填 0.0.0.0:8081）" "${QZ_LISTEN:-127.0.0.1:8081}"
-  CFG_LISTEN="$REPLY_VALUE"
+  # 监听地址是最容易一路回车踩坑的一项：默认 127.0.0.1 时面板只有本机连得上，
+  # 没装反代的人会以为「装好了却打不开」。所以问成明确的二选一，且默认给能直连的那个。
+  if [ -n "${QZ_LISTEN:-}" ]; then
+    CFG_LISTEN="$QZ_LISTEN"
+    info "监听地址取自环境变量 QZ_LISTEN=$CFG_LISTEN"
+  else
+    echo ""
+    echo "面板打算怎么访问？"
+    echo "  1) 直接用 IP:端口 打开        → 监听 0.0.0.0:8081（明文 HTTP，公网可达）"
+    echo "  2) 前面有 nginx / caddy 反代  → 监听 127.0.0.1:8081（仅本机可连）"
+    ask "输入 1 或 2，也可直接填监听地址" "1"
+    case "$REPLY_VALUE" in
+      1) CFG_LISTEN="0.0.0.0:8081" ;;
+      2) CFG_LISTEN="127.0.0.1:8081" ;;
+      *) CFG_LISTEN="$REPLY_VALUE" ;;
+    esac
+  fi
 
   ask "面板对外访问地址，如 https://node.example.com（留空=按请求 Host 自动推断，也可后续在设置页填）" "${QZ_PUBLIC_BASE:-}"
   CFG_BASE="$REPLY_VALUE"
@@ -281,6 +315,7 @@ mv -f "$TMP_BIN" "$BIN_PATH"
 trap - EXIT
 rm -f "$TMP_SUMS"
 echo "$TAG" > "$VERSION_MARKER"
+save_self
 
 # 更新模式下若托管了探针，一并刷新
 if [ "$MODE" = "update" ]; then
@@ -324,8 +359,26 @@ if [ "$OK" = "1" ]; then
   if [ "$MODE" = "update" ]; then
     echo "✅ 更新完成：${CURRENT:-未知} → $TAG"
   else
-    echo "✅ 安装完成！版本 $TAG"
-    echo "   面板地址: http://${HEALTH_HOST}$( [ -n "${CFG_BASE:-}" ] && echo "（对外: $CFG_BASE，需自行配置反代/证书）" )"
+    PORT="${LISTEN##*:}"
+    case "$LISTEN" in
+      0.0.0.0:*|:*|\[::\]:*)
+        IP=$(guess_ip)
+        echo "✅ 安装完成！版本 $TAG"
+        echo "   面板地址: http://${IP:-<服务器IP>}:${PORT}$( [ -n "${CFG_BASE:-}" ] && echo "（对外: $CFG_BASE，需自行配置反代/证书）" )"
+        if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+          echo "   ⚠️  ufw 已启用，若打不开先放行端口: ufw allow ${PORT}/tcp"
+        elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+          echo "   ⚠️  firewalld 已启用，若打不开先放行端口: firewall-cmd --add-port=${PORT}/tcp --permanent && firewall-cmd --reload"
+        fi
+        echo "   ⚠️  当前是明文 HTTP，建议尽快套 nginx/caddy + 证书"
+        ;;
+      *)
+        echo "✅ 安装完成！版本 $TAG"
+        echo "   面板地址: http://${HEALTH_HOST}$( [ -n "${CFG_BASE:-}" ] && echo "（对外: $CFG_BASE，需自行配置反代/证书）" )"
+        echo "   ⚠️  只监听本机，外部访问不了。要直连公网请改 QZ_LISTEN=0.0.0.0:${PORT} 后重启："
+        echo "       sed -i 's|^QZ_LISTEN=.*|QZ_LISTEN=0.0.0.0:${PORT}|' $ENV_FILE && systemctl restart $SERVICE_NAME"
+        ;;
+    esac
     echo "   管理员:   ${CFG_ADMIN}"
     if [ "${PASS_GENERATED:-0}" = "1" ]; then
       echo "   初始密码: ${CFG_PASS}   ← 随机生成，请立即保存并在登录后修改"
@@ -334,7 +387,7 @@ if [ "$OK" = "1" ]; then
   fi
   echo "   常用命令: systemctl status $SERVICE_NAME | journalctl -u $SERVICE_NAME -f"
   echo "   更新:     重跑本脚本，或用面板内「在线更新」"
-  echo "   卸载:     bash install.sh uninstall"
+  echo "   卸载:     bash $INSTALL_DIR/install.sh uninstall"
 else
   echo "⚠️  服务未确认启动成功，请查看日志:"
   echo "   journalctl -u $SERVICE_NAME -n 30 --no-pager"
