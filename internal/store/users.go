@@ -330,6 +330,11 @@ func (s *Store) DeleteUser(id int64) error {
 		`DELETE FROM user_group_members WHERE user_id=?`,
 		`DELETE FROM user_plans WHERE user_id=?`,
 		`DELETE FROM traffic_samples WHERE user_id=?`,
+		// The daily rollup is keyed by user_id too, and unlike the samples it is
+		// never pruned by age — leaving it behind would keep a deleted account's
+		// bytes in every site-wide usage total forever, and hand them to whoever
+		// is next assigned that id.
+		`DELETE FROM traffic_daily WHERE user_id=?`,
 		`DELETE FROM users WHERE id=?`,
 	} {
 		if _, err := tx.Exec(q, id); err != nil {

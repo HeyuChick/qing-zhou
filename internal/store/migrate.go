@@ -382,6 +382,38 @@ CREATE TABLE IF NOT EXISTS traffic_samples (
 CREATE INDEX IF NOT EXISTS idx_traffic_samples_user_ts ON traffic_samples(user_id, ts);
 CREATE INDEX IF NOT EXISTS idx_traffic_samples_ts ON traffic_samples(ts);
 
+-- Per-day, per-bucket traffic rollup. Exists because traffic_samples answers
+-- neither question the usage report asks: it carries no bucket, so "which
+-- package did this traffic belong to" is unanswerable, and it is pruned to 35
+-- days, so any longer range comes back empty.
+--
+-- Kept forever, unlike the samples. One row per user per bucket per active day
+-- is tiny (1000 users × 2 buckets × 365 days ≈ 730k rows, tens of MB) and
+-- append-mostly, so there is no bloat argument for dropping history that an
+-- admin reconciling a year-old order would want.
+--
+-- day is the LOCAL calendar date (YYYY-MM-DD), matching what the existing
+-- strftime(...,'localtime') daily queries produce, so both views agree on where
+-- a day starts.
+--
+-- package_id is denormalised rather than joined through bucket_id: buckets are
+-- deleted by mergeDuplicatePlanBuckets, and history whose grouping key vanishes
+-- when an unrelated maintenance job runs is not history. 0 = the shared pool,
+-- -1 = traffic recorded before this table existed (see backfillTrafficDaily) —
+-- real bytes, but no attributable package, and the UI says so rather than
+-- silently folding them into a package that did not earn them.
+CREATE TABLE IF NOT EXISTS traffic_daily (
+  day        TEXT    NOT NULL,
+  user_id    INTEGER NOT NULL,
+  bucket_id  INTEGER NOT NULL DEFAULT 0,
+  package_id INTEGER NOT NULL DEFAULT 0,
+  up         INTEGER NOT NULL DEFAULT 0,
+  down       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, user_id, bucket_id)
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_daily_user_day ON traffic_daily(user_id, day);
+CREATE INDEX IF NOT EXISTS idx_traffic_daily_day ON traffic_daily(day);
+
 CREATE TABLE IF NOT EXISTS servers (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   name            TEXT    NOT NULL,
@@ -646,9 +678,38 @@ func (s *Store) Migrate() error {
 	if err := s.backfillFreeBuckets(); err != nil {
 		return err
 	}
+	// Seed traffic_daily from the samples still on disk (idempotent).
+	if err := s.backfillTrafficDaily(); err != nil {
+		return err
+	}
 	// Extract inline-PEM sb_tls (mode=tls) profiles into managed certificates
 	// rows and repoint them via cert_id (idempotent).
 	return s.backfillCerts()
+}
+
+// backfillTrafficDaily seeds the rollup from the traffic_samples still on disk
+// (up to 35 days) so the usage report is not blank on the day it ships.
+//
+// Those samples predate per-bucket recording, so the bytes are real but their
+// package is not knowable — they land under package_id -1, which the report
+// labels as unattributed instead of assigning it to a package that may not have
+// carried it.
+//
+// Idempotent by construction, and safe to run against a DB that has already
+// been recording properly: it only writes days that have NO row at all for that
+// user, so a day already attributed per bucket is never touched, and re-running
+// cannot double-count.
+func (s *Store) backfillTrafficDaily() error {
+	_, err := s.db.Exec(`
+		INSERT INTO traffic_daily (day, user_id, bucket_id, package_id, up, down)
+		SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') AS d,
+		       user_id, 0, -1, COALESCE(SUM(up),0), COALESCE(SUM(down),0)
+		  FROM traffic_samples
+		 GROUP BY d, user_id
+		HAVING NOT EXISTS (
+		         SELECT 1 FROM traffic_daily t
+		          WHERE t.day = d AND t.user_id = traffic_samples.user_id)`)
+	return err
 }
 
 // backfillFreeBuckets creates the free-group bucket for users provisioned before
