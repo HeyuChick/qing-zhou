@@ -6,7 +6,7 @@
 ![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white)
 ![Single Binary](https://img.shields.io/badge/deploy-single%20binary-success)
-![Platform](https://img.shields.io/badge/platform-Linux%20amd64-lightgrey)
+![Platform](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64-lightgrey)
 
 轻舟是一个**开箱即用的代理业务前台**：管理员在可视化后台管理节点、套餐和用户，普通用户注册后用积分自助购买流量包 / 订阅套餐，拿到一条**多端自适应**的订阅链接。真正承载流量的是 **sing-box**（作为独立进程运行），轻舟负责生成并下发它的配置、采集每用户流量、并把整套业务（注册登录、计费、订阅、统计、运营）包好。
 
@@ -67,23 +67,28 @@
 <tr valign="top"><td>
 
 - 注册 / 登录 / 邮箱验证 / 找回密码
-- 仪表盘：流量环、到期倒计时、积分、趋势图、公告
-- **我的订阅**：聚合链接 + 二维码，多端格式自适应
+- 控制台：按**套餐维度**呈现各桶的流量 / 到期 / 节点，积分、趋势图、公告
+- **我的订阅**：聚合链接 + 二维码，多端格式自适应；节点列表按套餐分组并显示链路拓扑
 - 智能优选：`♻️ 自动选择` / `⚡ 锁定服务器` / `✈️ 节点选择`
+- 订阅安全：「更换订阅地址」与「重置节点凭据」是两个独立操作，可只换链接不动凭据
 - **节点管理**：筛选、测速、条件启用、批量开关（仅对自己生效）
-- 商城：积分自助购买流量包 / 订阅套餐，订单与积分流水
+- mixed 代理账号一键复制为 URL，直接喂给浏览器插件 / 终端
+- 商城：积分自助购买流量包 / 订阅套餐，订单与积分流水（含可视化）
 - 个人中心：改邮箱 / 改密码 / 登录设备管理（远程注销）
 
 </td><td>
 
-- 数据总览：用户 / 在线 / 流量 / 积分趋势、Top 榜、分布
-- 用户管理：新建 / 充值 / 改额度·到期·封禁 / 重置密码 / 删除
-- 套餐运营：直接开通（赠送）、**按剩余比例退款**（退款前预览 + 撤销权益）、消费总览
+- 数据总览：时间范围 + 套餐 / 用户两个维度，Top 榜、分布、趋势
+- **用量分析**：多选用户 × 任意时间段 × 套餐维度看流量消耗，图表可点击反向筛选
+- 用户管理：按**套餐维度**呈现，新建 / 充值 / 改额度·到期·封禁 / 重置密码 / 移除套餐 / 删除
+- **用户组**：把用户分组，套餐可勾选「限定哪些组可购买」（不勾 = 公开）；注册码可携带用户组，用该码注册自动入组
+- 套餐运营：直接开通（赠送）、**按剩余比例退款**（退款前预览 + 撤销权益）、上下架、消费总览
 - 商品：流量包 / 订阅套餐 CRUD，套餐绑定节点分组
 - **原生 sing-box 管理**：可视化管 TLS/Reality + 9 协议入站；**证书中心**（ACME/粘贴/自签、自动续期）；**代理出口**（第三方静态 IP）
 - **链路拓扑**：客户端→入站→(多级中转→落地→代理出口)→互联网，一键串联落地 / 解除中转
 - 节点 & 分组：按分组卡片聚合、可手动排序；自建 + 外部机场源抓取（base64 / Clash YAML）
-- **服务器监控**：多机资源 / 流量 / 负载 / 可用性热力图
+- **服务器监控**：多机资源 / 流量 / 负载 / 可用性热力图；阈值告警按「事件」聚合，不刷重复条目
+- **在线更新**：升级 / 回滚上一版 / 指定任意历史版本；一键导出整库快照备份
 - 注册码、公告、帮助文档（Markdown 实时预览）、系统设置
 
 </td></tr>
@@ -121,8 +126,8 @@
 
 ### 环境要求
 
-- **Go 1.25+**（仅编译时需要）
-- 一台 **Linux amd64** 服务器（落地节点用）；面板本身跨平台
+- **Go 1.25+**（仅编译时需要；用 release 二进制或 Docker 则不需要）
+- 一台 **Linux amd64 / arm64** 服务器（落地节点用）；面板本身跨平台，但**在线更新与一键安装脚本仅支持 Linux**
 - 可选：域名 + HTTPS 证书（生产强烈建议）、SMTP（邮箱验证 / 找回密码用）
 - **客户端 sing-box ≥ 1.12**（仅当用户使用 sing-box 格式订阅时）。下发的 sing-box 模板用 1.12 引入的
   DNS 服务器写法（`{"type":"https","server":"1.1.1.1"}`），因为 **1.14 已移除旧的 `address` 写法**——
@@ -262,15 +267,18 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `QZ_LISTEN` | `127.0.0.1:8081` | 监听地址（生产建议只听本地 + 前置 nginx） |
-| `QZ_DB` | `qingzhou.db` | SQLite 数据库文件路径 |
-| `QZ_PUBLIC_BASE` | 设置页/请求推断 | 面板对外地址（订阅链接、探针安装、邮件链接、sing-box 安装命令），如 `https://node.example.com`。也可在「系统设置 → 面板访问地址」填；本变量优先 |
+| `QZ_LISTEN` | `127.0.0.1:8081` | 监听地址。**前置 nginx/Caddy 才用回环**；要用 `IP:端口` 直接访问须设 `0.0.0.0:8081`（一键脚本会问，默认给后者） |
+| `QZ_DB` | `qingzhou.db` | SQLite 数据库文件路径（相对路径基于进程工作目录） |
+| `QZ_PUBLIC_BASE` | 设置页/请求推断 | 面板对外地址（订阅链接、探针安装、邮件链接、sing-box 安装命令），如 `https://node.example.com`。也可在「系统设置 → 面板访问地址」填；本变量优先，且设了之后设置页对应字段变只读 |
+| `QZ_TRUSTED_PROXIES` | 空（仅信回环） | 受信任反代的 IP / CIDR，逗号分隔。**反代不在本机时必须设**，否则转发头被忽略，限流与链接生成会拿到反代的 IP |
 | `QZ_PROBE_DIR` | `cmd/probe/dist` | 探针二进制目录，面板据此提供下载。二进制部署须设为绝对目录（放入 `probe-linux-amd64/arm64`），否则探针安装 404 |
-| `QZ_WEB_DIR` | 空 | 设为 `frontend/dist` 开启前端热更新；生产留空用内嵌资源 |
-| `QZ_ADMIN_USER` | `mllt992` | 初始管理员用户名（仅首次 seed 生效） |
+| `QZ_WEB_DIR` | 空 | 设为 `frontend/dist` 从磁盘读前端；生产留空用内嵌资源 |
+| `QZ_ADMIN_USER` | `mllt992` | 初始管理员用户名（仅首次 seed 生效）。**一键脚本安装时会问，默认写入 `admin`** |
 | `QZ_ADMIN_PASS` | 随机生成 | 初始管理员密码；留空则随机生成并打印到日志 |
-| `QZ_SECRET_KEY` | 回退 jwt_secret | **加密库内敏感配置的主密钥**，建议 `openssl rand -hex 32`，置环境变量不入库 |
-| `QZ_SINGBOX_BIN` | `/usr/local/bin/sing-box` | sing-box 二进制路径 |
+| `QZ_SECRET_KEY` | 回退 jwt_secret | **加密库内敏感配置的主密钥**，建议 `openssl rand -hex 32`，置环境变量不入库。**一旦使用勿再更换**，否则已加密内容无法解密 |
+| `QZ_UPDATE_REPO` | `mllt992/qing-zhou` | 「在线更新」检查的 GitHub 仓库；fork 后想发自己的版本就改成你的仓库 |
+| `QZ_UPDATE_GITHUB_TOKEN` | 空 | 仅用于提升 GitHub API 匿名速率上限（60/时），公开仓库无需任何权限 |
+| `QZ_SINGBOX_BIN` | 自动探测 | sing-box 可执行路径。顺序：本变量 → 常见安装路径 → `PATH` |
 | `QZ_SINGBOX_CONFIG` | `/etc/sing-box/config.json` | 面板下发的配置路径 |
 | `QZ_SINGBOX_UNIT` | `sing-box` | sing-box 的 systemd 服务名 |
 | `QZ_SINGBOX_V2RAY` | `127.0.0.1:18080` | v2ray_api gRPC 监听地址（统计用，须与配置一致） |
@@ -287,7 +295,7 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 |---|---|
 | 后端 | Go 1.25，路由 `go-chi/v5`，鉴权 `golang-jwt/v5` |
 | 数据库 | SQLite（`modernc.org/sqlite`，纯 Go 免 CGO，WAL 模式） |
-| 前端 | Vue 3（无构建步骤，`embed.FS` 内嵌），手绘 SVG 图表 + `qrcode-generator` |
+| 前端 | Vue 3 + Vite 单页应用，构建产物由 `embed.FS` 编进二进制（**改前端必须先 `vite build`**），手绘 SVG 图表 + `qrcode-generator` |
 | sing-box 对接 | `internal/singbox`（配置生成 / 分享链接 / Reality 密钥）、`sbproc`（写→check→原子替换→reload）、`sbstats`（手写 gRPC-over-h2c 读 v2ray 统计）、`sbctl`（编排）、`sshctl`（多机下发）、`acmesh`（ACME 证书签发 / 续期） |
 | 订阅转换 | `internal/subconv`：vless/vmess/ss/trojan/hysteria2/tuic ↔ base64 / Clash / sing-box / Surge，注入优选组 + 防泄漏分流模板 |
 
@@ -297,9 +305,16 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 
 鉴权：`Authorization: Bearer <token>` 或 `qz_token` Cookie。
 
-- **公开**：`GET /api/health`、`GET /api/config`、`POST /api/auth/{login,register,forgot,reset}`、`GET /api/auth/verify`、`GET /sub/{token}`（聚合订阅，UA 自适应或 `?format=clash|singbox|surge`）
-- **用户**：`/api/user/{dashboard,plans,subscription,reset-sub,packages,purchase,orders,points,announcements,sessions,nodes,stats/traffic,password,email}`、`GET /api/auth/me`
-- **管理**：`/api/admin/{users,packages,nodes,node-groups,node-sources,reg-codes,announcements,orders,help,settings,stats/*}`、原生 sing-box 管理 `/api/admin/sb/*`（含 TLS、入站、代理出口 `sb/egresses`）、证书中心 `/api/admin/certs/*`、多落地 `/api/admin/servers`
+- **公开**：`GET /api/health`、`GET /api/config`、`POST /api/auth/{login,register,forgot,reset}`、`GET /api/auth/verify`、`GET /sub/{token}`（聚合订阅，UA 自适应或 `?format=clash|singbox|surge`）、`GET /install-singbox.sh`、`GET /api/monitor/{public,heatmap,install.sh,agent/{arch}}`
+- **用户**：`/api/user/{dashboard,plans,subscription,reset-sub,reset-node-creds,packages,purchase,orders,points,announcements,sessions,nodes,proxies,stats/traffic,password,email}`、`GET /api/auth/me`
+- **管理**：
+  - 业务 `/api/admin/{users,user-groups,packages,orders,reg-codes,announcements,help,settings}`（含 `orders/{id}/refund-preview`、`packages/{id}/retire`）
+  - 节点 `/api/admin/{nodes,node-groups,node-sources,servers}`（含 `nodes/singbox` 版本探测与 `nodes/{id}/singbox/upgrade` 一键重装）
+  - 原生 sing-box `/api/admin/sb/*`（TLS、入站、代理出口 `sb/egresses`、`sb/preview`、`sb/port-check`、`sb/sni-test`、`sb/import-remote/*`）
+  - 证书中心 `/api/admin/certs/*`
+  - 统计 `/api/admin/stats/{overview,traffic,top,distribution,packages,users,usage,usage/users,usage/packages}`
+  - 监控 `/api/admin/monitor/{dashboard,servers,heatmap,alerts}`
+  - 运维 `/api/admin/{backup,rebuild,update/*}`（`update` 含 `check`/`apply`/`releases`/`rollback`/`status`）
 
 ---
 
