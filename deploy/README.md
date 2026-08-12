@@ -16,19 +16,24 @@ docker compose logs -f qingzhou     # 首启打印随机管理员密码（未设
 发 release 时 `.github/workflows/docker.yml` 会自动构建并推送到 GHCR。
 
 ## sing-box（每台落地机）
-轻舟自管原生 sing-box。每台落地服务器先跑一键脚本（已装则检测、未装则装官方含
-`v2ray_api` 版到 `/usr/local/bin/sing-box` + systemd + 内核调优，并输出可填入面板
-「服务器」的信息）：
+轻舟自管原生 sing-box。每台落地服务器先跑一键脚本（已装则检测、未装则装到
+`/usr/local/bin/sing-box` + systemd + 内核调优，并输出可填入面板「服务器」的信息）：
 ```bash
 curl -fsSL https://<你的面板域名>/install-singbox.sh | bash
 ```
+> ⚠️ **必须用带 `v2ray_api` 的构建。** 脚本装的是**本项目发布页**的 sing-box —— 与上游同版本、
+> 同功能，但额外编入了 `with_v2ray_api`（`release.yml` 里从上游源码构建并断言该 tag 存在）。
+> **官方 release 不含这个插件**，而面板正是靠它读每用户流量：装官方版的节点流量恒为 0、配额
+> 永不生效，界面上还看不出异常。脚本从发布页下载失败时会回退官方版，并明确告警统计不可用。
+> 「服务器管理」页会显示各机实际版本，缺 `v2ray_api` 或版本过低都会点破，可逐台一键重装。
+
 面板「**系统设置 → 面板访问地址**」会按你配置的地址生成可一键复制的完整命令。访问地址来源优先级：
 `QZ_PUBLIC_BASE` 环境变量 > 设置页「访问地址」> 反代头/请求 Host。
 
 本机落地用脚本输出的默认值即可（`QZ_SINGBOX_*`）；远程落地在面板「服务器」新增并填写。
 
 ## 探针监控（可选，每台服务器）
-探针 `qingzhou-probe` 上报 CPU/内存/磁盘/负载，安装命令在面板「服务器监控」页获取。
+探针 `qingzhou-probe` 上报 CPU/内存/磁盘/负载，安装命令在面板「监控管理」页获取。
 
 > **注意**：探针二进制由面板托管下载（`/api/monitor/agent/linux-<arch>`），从 `QZ_PROBE_DIR`
 > 指定的目录读取，默认相对路径 `cmd/probe/dist`。二进制部署时该相对目录通常不存在，探针安装会
@@ -100,7 +105,7 @@ systemctl restart qingzhou
 # 1. 构建内嵌前端
 cd frontend && npm ci && npx vite build && cd ..
 # 2. 注入版本号（= 目标 release tag）构建面板
-go build -ldflags "-s -w -X qingzhou/internal/version.Version=v0.2.2" -o qingzhou .
+go build -ldflags "-s -w -X qingzhou/internal/version.Version=v0.2.38" -o qingzhou .
 ```
 不带 `-X ...version.Version` 时版本为 `dev`，在线更新页会把任意最新 release 视为「可更新」。
 
