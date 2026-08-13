@@ -11,6 +11,10 @@ Restart=on-failure
 RestartSec=5s
 # Harden a little
 NoNewPrivileges=true
+# /usr is read-only for this service and everything it forks. That is deliberate
+# — the panel only ever writes /opt/qingzhou and /etc/sing-box — but it also
+# means 面板本机 的「重装 sing-box」cannot install to /usr/local/bin from a
+# forked child; it goes through systemd-run instead (internal/api/nodever_admin.go).
 ProtectSystem=full
 
 [Install]

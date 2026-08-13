@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -244,15 +247,115 @@ func (a *API) upgradeRemoteSingBox(ctx context.Context, id int64) (string, error
 	return rm.UpgradeSingBox(ctx, sshConfigFor(sv), assets.InstallScript())
 }
 
+// localSingboxBinDir is where the install script puts the binary — it must stay
+// in step with BIN in internal/assets/install-singbox.sh, which
+// TestLocalSingboxBinDirMatchesScript checks.
+const localSingboxBinDir = "/usr/local/bin"
+
 // upgradeLocalSingBox runs the same script on the panel's own machine.
 func upgradeLocalSingBox(ctx context.Context) (string, error) {
 	if !runtimeIsLinux() {
 		return "", errLinuxOnly
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-s", "--", "--force")
+	systemdRun, _ := exec.LookPath("systemd-run")
+	argv := localInstallArgv(dirReadOnly(localSingboxBinDir), systemdRun)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdin = strings.NewReader(assets.InstallScript())
 	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if hint := localInstallHint(argv, string(out)); hint != "" {
+			err = fmt.Errorf("%w（%s）", err, hint)
+		}
+	}
 	return string(out), err
+}
+
+// localInstallHint explains a failed local install when the reason is the
+// panel's own sandbox rather than anything the script did.
+//
+// Both cases leave an operator with a message that points away from the truth —
+// an EROFS on a machine whose disk is plainly writable, or a systemd-run error
+// with no sign of the install it was supposed to run — so each says what
+// happened and how to install by hand regardless.
+//
+// It must stay silent on every other failure. A script that died on its own
+// terms (no network, not root, no such directory) already says so, and a wrong
+// "只读" on top of that is the exact kind of misdirection this exists to end.
+func localInstallHint(argv []string, out string) string {
+	// Wrapping only happens after the probe hit a genuine EROFS, so on that path
+	// the sandbox is the reason we are here whatever the failure looks like —
+	// including systemd-run failing before the script ever ran, which is the one
+	// failure that carries no trace of the install underneath it.
+	viaSystemdRun := argv[0] != "bash"
+	if !viaSystemdRun && !strings.Contains(out, "Read-only file system") {
+		return ""
+	}
+	manually := "请登录服务器手动执行：curl -fsSL <面板地址>/install-singbox.sh | bash -s -- --force"
+	if viaSystemdRun {
+		return "安装路径对面板进程只读，已改由 systemd-run 代跑，但仍失败。" + manually
+	}
+	return "安装路径对面板进程只读 —— 面板 systemd 单元的 ProtectSystem 把 /usr 挡在了外面。" + manually
+}
+
+// localInstallArgv is how the install script gets run on the panel's own
+// machine: directly under bash, or wrapped in systemd-run.
+//
+// Direct is the obvious choice and stays the default, but it is wrong on the
+// panel's own recommended deployment. deploy/qingzhou.service (and the unit
+// install.sh writes) sets ProtectSystem=full, which remounts /usr read-only
+// inside the service's mount namespace — and a forked child inherits that
+// namespace. The script installs to /usr/local/bin/sing-box, so clicking 重装
+// for 面板本机 could only ever fail with EROFS, while the very same script run
+// from a root shell on that machine succeeds. Nothing about the error said so:
+// `install` reports "Read-only file system" for a disk that is writable.
+//
+// systemd-run asks PID1 to start a transient unit, which is created fresh from
+// PID1's namespace and so sees /usr writable again. --pipe passes our stdin
+// (the script) in and the output back, --wait blocks until it exits and
+// propagates its status, --collect reaps the unit even when it fails. All four
+// flags predate systemd 236; --service-type=exec is deliberately not used, as
+// it needs 240.
+//
+// The wrapper is used only where the direct call is already doomed, so an
+// unsandboxed host keeps the plain, dependency-free path and a host with no
+// systemd-run at all still gets its attempt (and the EROFS hint above).
+//
+// The transient unit is named rather than anonymous, and capped: killing
+// systemd-run — which is what the job's timeout does — does not stop the unit
+// it asked PID1 to start. A fixed name makes the next click refuse to start a
+// second install over the top of the first (the same collision claimUpgrade
+// prevents in-process), and RuntimeMaxSec stops an orphan outliving the job
+// that is supposed to own it. --collect frees the name again either way.
+func localInstallArgv(binDirReadOnly bool, systemdRun string) []string {
+	direct := []string{"bash", "-s", "--", "--force"}
+	if !binDirReadOnly || systemdRun == "" {
+		return direct
+	}
+	return append([]string{
+		systemdRun, "--pipe", "--wait", "--collect", "--quiet",
+		"--unit=qingzhou-singbox-install", "-p", "RuntimeMaxSec=600", "--",
+	}, direct...)
+}
+
+// dirReadOnly reports whether dir sits on a mount this process cannot write to
+// at all — the panel's own sandbox — as opposed to merely being out of reach
+// for this user or missing entirely.
+//
+// It has to be answered by trying: the mount is read-only for this namespace,
+// not for this user, so permission bits say nothing about it. And the distinction
+// matters, because it is what the caller escalates to systemd-run over: a panel
+// running as non-root, or a host with no /usr/local/bin, is better served by the
+// script's own diagnosis ("请用 root 运行") than by a sandbox workaround that
+// cannot help it and a message blaming a read-only disk.
+func dirReadOnly(dir string) bool {
+	f, err := os.CreateTemp(dir, ".qz-writable-")
+	if err != nil {
+		return errors.Is(err, syscall.EROFS)
+	}
+	name := f.Name()
+	f.Close()
+	os.Remove(name)
+	return false
 }
 
 // trimOutput bounds what a node's script can push into an API response.

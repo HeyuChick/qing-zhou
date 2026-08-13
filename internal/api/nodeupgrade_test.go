@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"qingzhou/internal/assets"
 	"qingzhou/internal/store"
 )
 
@@ -129,6 +130,102 @@ func TestNodeSingboxUpgradeRejectsUnreachableConfig(t *testing.T) {
 				t.Fatal("a rejected request must not leave a job behind")
 			}
 		})
+	}
+}
+
+// TestLocalInstallEscapesProtectSystem covers why the local reinstall is not
+// simply `bash`.
+//
+// The panel's own systemd unit sets ProtectSystem=full, which remounts /usr
+// read-only for the service and every child it forks. The install script writes
+// /usr/local/bin/sing-box, so 重装 on 面板本机 failed with EROFS every single
+// time — on a machine where the identical script run from a root shell worked.
+// systemd-run hands the script to PID1 instead, which starts it in a fresh
+// namespace where /usr is writable again.
+func TestLocalInstallEscapesProtectSystem(t *testing.T) {
+	const sr = "/usr/bin/systemd-run"
+	direct := []string{"bash", "-s", "--", "--force"}
+	wrapped := []string{sr, "--pipe", "--wait", "--collect", "--quiet",
+		"--unit=qingzhou-singbox-install", "-p", "RuntimeMaxSec=600", "--",
+		"bash", "-s", "--", "--force"}
+	for _, tc := range []struct {
+		name     string
+		readOnly bool
+		sr       string
+		want     []string
+	}{{
+		// The common case: no sandbox in the way, so no extra moving part.
+		name: "writable bin dir runs bash directly", readOnly: false, sr: sr,
+		want: direct,
+	}, {
+		name: "read-only bin dir goes through systemd-run", readOnly: true, sr: sr,
+		want: wrapped,
+	}, {
+		// Nothing to escape with: still try, and let the script's own error
+		// (plus the hint upgradeLocalSingBox adds) explain the failure.
+		name: "no systemd-run falls back to bash", readOnly: true, sr: "",
+		want: direct,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := localInstallArgv(tc.readOnly, tc.sr)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("argv = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A local install that fails because of the panel's own sandbox must say so.
+// Left alone, both failures point the operator somewhere useless: an EROFS on a
+// machine whose disk is writable, or a systemd-run error with no trace of the
+// install underneath it.
+func TestLocalInstallHint(t *testing.T) {
+	direct := []string{"bash", "-s", "--", "--force"}
+	wrapped := []string{"/usr/bin/systemd-run", "--pipe", "--", "bash"}
+
+	if h := localInstallHint(direct, "install: Read-only file system"); !strings.Contains(h, "ProtectSystem") {
+		t.Fatalf("EROFS without systemd-run should explain the sandbox, got %q", h)
+	}
+	// systemd-run failing before the script ever ran is the one failure whose
+	// output carries no trace of the install — but the wrapper is only used
+	// after a real EROFS, so the sandbox is known to be the reason regardless.
+	if h := localInstallHint(wrapped, "Failed to start transient service"); !strings.Contains(h, "手动执行") {
+		t.Fatalf("a failed systemd-run should still offer the manual command, got %q", h)
+	}
+	// A script that failed on its own terms (no network, not root, no such
+	// directory) must not be blamed on the sandbox: a wrong 只读 on top of a
+	// correct diagnosis is the misdirection this whole change exists to end.
+	for _, out := range []string{
+		"curl: (7) Failed to connect",
+		"✗ 请用 root 运行（sudo bash）",
+		"install: cannot create regular file '/usr/local/bin/sing-box': No such file or directory",
+	} {
+		if h := localInstallHint(direct, out); h != "" {
+			t.Fatalf("unrelated failure %q got a sandbox hint: %q", out, h)
+		}
+	}
+}
+
+// dirReadOnly must answer by trying — on the panel's own host the directory is
+// root-owned and mode 755, so permission bits report writable while the mount
+// underneath is read-only — and it must answer only about the mount. A missing
+// directory is not a sandbox, and escalating it to systemd-run would replace
+// the script's accurate complaint with an irrelevant one.
+func TestDirReadOnly(t *testing.T) {
+	if dirReadOnly(t.TempDir()) {
+		t.Fatal("a fresh temp dir must not be reported read-only")
+	}
+	if dirReadOnly(filepath.Join(t.TempDir(), "no-such-dir")) {
+		t.Fatal("a missing directory is not a read-only mount")
+	}
+}
+
+// The constant the read-only probe checks has to be the directory the script
+// actually installs into, or the probe silently tests the wrong mount.
+func TestLocalSingboxBinDirMatchesScript(t *testing.T) {
+	want := "BIN=" + localSingboxBinDir + "/sing-box"
+	if !strings.Contains(assets.InstallScript(), want) {
+		t.Fatalf("install-singbox.sh no longer sets %q; localSingboxBinDir must follow it", want)
 	}
 }
 
