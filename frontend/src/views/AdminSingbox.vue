@@ -273,8 +273,12 @@
           <n-button size="small" :disabled="!previewJson" @click="copyPreview">复制配置</n-button>
           <n-button size="small" type="primary" :loading="previewLoading" @click="loadPreview">刷新预览</n-button>
         </div>
-        <p v-if="!showIp && previewJson" style="font-size:12px;color:var(--text-3);margin:0 0 8px;">
-          IP 已按打码显示（右上角可切换）。「复制配置」复制的仍是<b>真实</b>配置，不受影响。
+        <!-- 这条提醒不能省：这一页把打码开关做出来，就会有人以为「打了码=可以截图」。
+             打码只处理地址，配置里的 Reality 私钥、SS/Trojan 密码、用户 UUID 全是明文。 -->
+        <p v-if="previewJson" style="font-size:12px;color:var(--warning,#d97706);margin:0 0 8px;line-height:1.7;">
+          <template v-if="!showIp">IP 已按打码显示（右上角可切换），「复制配置」复制的仍是<b>真实</b>配置。</template>
+          ⚠️ 打码只管地址：这份配置里的 <b>Reality 私钥、Shadowsocks/Trojan 密码、用户 UUID</b> 仍是明文，
+          外发前请自行删改，别整页截图。
         </p>
         <p v-if="previewNoInbounds" style="font-size:12px;color:var(--warning,#d97706);margin:0 0 10px;line-height:1.7;">
           这台机器（{{ serverName(previewSid || 0) }}）下没有任何入站，因此配置里 <code>inbounds</code> 为空。
