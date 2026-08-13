@@ -193,16 +193,30 @@ func (a *API) handleMonitorDashboard(w http.ResponseWriter, r *http.Request) {
 	var totalCPU float64
 	var totalMemUsed, totalMemTotal, totalDiskUsed, totalDiskTotal int64
 	var count int
-	for _, v := range views {
-		if v.Metrics == nil {
-			continue
+	add := func(m *store.ServerMetrics) {
+		if m == nil {
+			return
 		}
-		totalCPU += v.Metrics.CPUPercent
-		totalMemUsed += v.Metrics.MemUsed
-		totalMemTotal += v.Metrics.MemTotal
-		totalDiskUsed += v.Metrics.DiskUsed
-		totalDiskTotal += v.Metrics.DiskTotal
+		totalCPU += m.CPUPercent
+		totalMemUsed += m.MemUsed
+		totalMemTotal += m.MemTotal
+		totalDiskUsed += m.DiskUsed
+		totalDiskTotal += m.DiskTotal
 		count++
+	}
+	for _, v := range views {
+		add(v.Metrics)
+	}
+	// The counts come from a SQL count over the servers table, which the panel's
+	// own machine is deliberately absent from. Left out, the header would say
+	// "0 台在线" on a panel that is plainly monitoring itself right below.
+	latest, _ := a.st.GetLatestMetricsForAll()
+	if local := a.localMonitorServer(latest); local != nil {
+		total++
+		if local.LastSeen >= time.Now().Add(-2*time.Minute).Unix() {
+			online++
+		}
+		add(latest[store.LocalNodeID])
 	}
 
 	ok(w, J{
@@ -222,35 +236,39 @@ func (a *API) handleMonitorDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
-	// Return ALL servers (not just probe-enabled) so the UI can manage probes.
-	servers, err := a.st.ListServers()
+	now := time.Now()
+	onlineWindow := now.Add(-2 * time.Minute).Unix()
+	latest, _ := a.st.GetLatestMetricsForAll() // one query instead of one per server
+	// Return ALL servers (not just probe-enabled) so the UI can manage probes,
+	// with the panel's own machine at the head — it has no servers row and needs
+	// none, but it is the machine the admin is most likely to want to see.
+	servers, err := a.serversWithLocal(latest)
 	if err != nil {
 		fail(w, 500, "查询失败")
 		return
 	}
 
 	type serverResp struct {
-		ID           int64                `json:"id"`
-		Name         string               `json:"name"`
-		Host         string               `json:"host"`
-		Enabled      bool                 `json:"enabled"`
-		ProbeEnabled bool                 `json:"probe_enabled"`
-		ProbeToken   string               `json:"probe_token"`
-		Provider     string               `json:"provider"`
-		Location     string               `json:"location"`
-		Spec         string               `json:"spec"`
-		Price        float64              `json:"price"`
-		ExpiryDate   int64                `json:"expiry_date"`
-		DaysLeft     *int                 `json:"days_left"`
-		Status       string               `json:"status"`
-		LastSeen     int64                `json:"last_seen"`
-		Metrics      *store.ServerMetrics `json:"metrics"`
-		Notes        string               `json:"notes"`
+		ID            int64                `json:"id"`
+		Name          string               `json:"name"`
+		Host          string               `json:"host"`
+		Local         bool                 `json:"local"`
+		Enabled       bool                 `json:"enabled"`
+		ProbeEnabled  bool                 `json:"probe_enabled"`
+		ProbeToken    string               `json:"probe_token"`
+		PublicVisible bool                 `json:"public_visible"`
+		Provider      string               `json:"provider"`
+		Location      string               `json:"location"`
+		Spec          string               `json:"spec"`
+		Price         float64              `json:"price"`
+		ExpiryDate    int64                `json:"expiry_date"`
+		DaysLeft      *int                 `json:"days_left"`
+		Status        string               `json:"status"`
+		LastSeen      int64                `json:"last_seen"`
+		Metrics       *store.ServerMetrics `json:"metrics"`
+		Notes         string               `json:"notes"`
 	}
 
-	now := time.Now()
-	onlineWindow := now.Add(-2 * time.Minute).Unix()
-	latest, _ := a.st.GetLatestMetricsForAll() // one query instead of one per server
 	var out []serverResp
 	for _, sv := range servers {
 		maskServerSecrets(sv)
@@ -271,22 +289,24 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 			dl = &d
 		}
 		out = append(out, serverResp{
-			ID:           sv.ID,
-			Name:         sv.Name,
-			Host:         sv.Host,
-			Enabled:      sv.Enabled,
-			ProbeEnabled: sv.ProbeEnabled,
-			ProbeToken:   sv.ProbeToken,
-			Provider:     sv.Provider,
-			Location:     sv.Location,
-			Spec:         sv.Spec,
-			Price:        sv.Price,
-			ExpiryDate:   sv.ExpiryDate,
-			DaysLeft:     dl,
-			Status:       status,
-			LastSeen:     sv.LastSeen,
-			Metrics:      m,
-			Notes:        sv.Notes,
+			ID:            sv.ID,
+			Name:          sv.Name,
+			Host:          sv.Host,
+			Local:         sv.ID == store.LocalNodeID,
+			Enabled:       sv.Enabled,
+			ProbeEnabled:  sv.ProbeEnabled,
+			ProbeToken:    sv.ProbeToken,
+			PublicVisible: sv.PublicVisible,
+			Provider:      sv.Provider,
+			Location:      sv.Location,
+			Spec:          sv.Spec,
+			Price:         sv.Price,
+			ExpiryDate:    sv.ExpiryDate,
+			DaysLeft:      dl,
+			Status:        status,
+			LastSeen:      sv.LastSeen,
+			Metrics:       m,
+			Notes:         sv.Notes,
 		})
 	}
 	if out == nil {
@@ -352,7 +372,7 @@ func (a *API) handleMonitorAlerts(w http.ResponseWriter, r *http.Request) {
 // Each cell value: 0=正常, 1=高负载, 2=离线/无数据.
 // Query: range=1h|6h|24h|7d (default 24h).
 func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
-	servers, buckets, matrix, rangeStr, bucketSec, good := a.buildHeatmap(w, r)
+	servers, buckets, matrix, rangeStr, bucketSec, good := a.buildHeatmap(w, r, false)
 	if !good {
 		return
 	}
@@ -379,7 +399,7 @@ func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
 // handleMonitorPublicHeatmap is the public (no-auth) version: returns only
 // server names (no IDs) for the public monitoring dashboard.
 func (a *API) handleMonitorPublicHeatmap(w http.ResponseWriter, r *http.Request) {
-	servers, buckets, matrix, rangeStr, bucketSec, good := a.buildHeatmap(w, r)
+	servers, buckets, matrix, rangeStr, bucketSec, good := a.buildHeatmap(w, r, true)
 	if !good {
 		return
 	}
@@ -423,12 +443,13 @@ func (a *API) handleMonitorPublicSparklines(w http.ResponseWriter, r *http.Reque
 		bucketSec = 1
 	}
 
-	servers, err := a.st.ListServers()
+	latest, _ := a.st.GetLatestMetricsForAll()
+	servers, err := a.serversWithLocal(latest)
 	if err != nil {
 		fail(w, 500, "查询失败")
 		return
 	}
-	// server_id -> row index (probe-enabled only, stable order)
+	// server_id -> row index (publicly listed machines only, stable order)
 	idx := map[int64]int{}
 	type spark struct {
 		Name string    `json:"name"`
@@ -438,7 +459,9 @@ func (a *API) handleMonitorPublicSparklines(w http.ResponseWriter, r *http.Reque
 	}
 	var rows []spark
 	for _, sv := range servers {
-		if !sv.ProbeEnabled {
+		// Same gate as the public server list — otherwise a machine kept off the
+		// status page would still be there in outline, named, in the sparklines.
+		if !sv.ProbeEnabled || !sv.PublicVisible {
 			continue
 		}
 		idx[sv.ID] = len(rows)
@@ -505,7 +528,12 @@ type heatRow struct {
 
 // buildHeatmap computes the server×time-bucket matrix shared by the admin and
 // public heatmap endpoints. On error it writes the response and returns ok=false.
-func (a *API) buildHeatmap(w http.ResponseWriter, r *http.Request) (rows []heatRow, buckets []int64, matrix [][]int, rangeStr string, bucketSec int64, success bool) {
+//
+// publicOnly drops machines the admin has chosen not to announce. The two
+// callers differ only in that, and getting it backwards would publish exactly
+// what the flag exists to keep private — so it is a parameter rather than
+// something each caller filters afterwards.
+func (a *API) buildHeatmap(w http.ResponseWriter, r *http.Request, publicOnly bool) (rows []heatRow, buckets []int64, matrix [][]int, rangeStr string, bucketSec int64, success bool) {
 	rangeStr = r.URL.Query().Get("range")
 	if rangeStr == "" {
 		rangeStr = "24h"
@@ -533,14 +561,15 @@ func (a *API) buildHeatmap(w http.ResponseWriter, r *http.Request) (rows []heatR
 	}
 
 	// Probe-enabled servers (rows), in stable order.
-	servers, err := a.st.ListServers()
+	latest, _ := a.st.GetLatestMetricsForAll()
+	servers, err := a.serversWithLocal(latest)
 	if err != nil {
 		fail(w, 500, "查询失败")
 		return nil, nil, nil, "", 0, false
 	}
 	idx := map[int64]int{} // server_id -> row index
 	for _, sv := range servers {
-		if !sv.ProbeEnabled {
+		if !sv.ProbeEnabled || (publicOnly && !sv.PublicVisible) {
 			continue
 		}
 		idx[sv.ID] = len(rows)
@@ -632,6 +661,39 @@ func (a *API) handleMarkAllAlertsRead(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
+
+	// Partial update: only monitor-related fields.
+	var body struct {
+		ProbeEnabled  *bool    `json:"probe_enabled"`
+		PublicVisible *bool    `json:"public_visible"`
+		ExpiryDate    *int64   `json:"expiry_date"`
+		Provider      *string  `json:"provider"`
+		Location      *string  `json:"location"`
+		Spec          *string  `json:"spec"`
+		Price         *float64 `json:"price"`
+		Notes         *string  `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		fail(w, 400, "请求格式错误")
+		return
+	}
+
+	// The panel's own machine has no servers row to update — the one thing that
+	// is settable about it lives in settings. Everything else on this endpoint
+	// describes a machine someone bought and can reach over SSH, none of which
+	// applies here, so it is accepted and ignored rather than 404'd.
+	if id == store.LocalNodeID {
+		if body.PublicVisible != nil {
+			if err := a.st.SetSettingBool(settingLocalPublic, *body.PublicVisible); err != nil {
+				fail(w, 500, "更新失败")
+				return
+			}
+		}
+		latest, _ := a.st.GetLatestMetricsForAll()
+		ok(w, a.localMonitorServer(latest))
+		return
+	}
+
 	sv, err := a.st.GetServer(id)
 	if err != nil {
 		fail(w, 500, "读取服务器失败")
@@ -642,21 +704,9 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Partial update: only monitor-related fields.
-	var body struct {
-		ProbeEnabled *bool    `json:"probe_enabled"`
-		ExpiryDate   *int64   `json:"expiry_date"`
-		Provider     *string  `json:"provider"`
-		Location     *string  `json:"location"`
-		Spec         *string  `json:"spec"`
-		Price        *float64 `json:"price"`
-		Notes        *string  `json:"notes"`
+	if body.PublicVisible != nil {
+		sv.PublicVisible = *body.PublicVisible
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		fail(w, 400, "请求格式错误")
-		return
-	}
-
 	if body.ProbeEnabled != nil {
 		sv.ProbeEnabled = *body.ProbeEnabled
 		if sv.ProbeEnabled && sv.ProbeToken == "" {
@@ -704,7 +754,8 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 // public monitoring dashboard. No authentication required; sensitive fields
 // (SSH keys, probe tokens, host IPs) are excluded.
 func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
-	servers, err := a.st.ListServers()
+	latestAll, _ := a.st.GetLatestMetricsForAll()
+	servers, err := a.serversWithLocal(latestAll)
 	if err != nil {
 		fail(w, 500, "查询失败")
 		return
@@ -744,10 +795,14 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 		LastSeen int64       `json:"last_seen"`
 	}
 
-	latest, _ := a.st.GetLatestMetricsForAll() // one query instead of one per server (this endpoint is unauthenticated/spammable)
+	latest := latestAll // already fetched above; one query, and this endpoint is unauthenticated/spammable
 	var out []pubServer
 	for _, sv := range servers {
-		if !sv.ProbeEnabled {
+		// Monitored and announced are two different decisions: an admin may want
+		// to watch a machine without telling the world it exists. Everything that
+		// existed before this flag was public, so the column defaults to visible
+		// and only the panel's own machine starts hidden.
+		if !sv.ProbeEnabled || !sv.PublicVisible {
 			continue
 		}
 		status := "offline"
@@ -805,6 +860,7 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 
 // StartMonitorTasks starts the periodic probe alert checker and metrics pruner.
 func (a *API) StartMonitorTasks(ctx context.Context) {
+	a.StartLocalMetrics(ctx)
 	go func() {
 		t := time.NewTicker(1 * time.Hour)
 		defer t.Stop()

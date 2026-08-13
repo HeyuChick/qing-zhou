@@ -568,6 +568,12 @@ func (s *Store) Migrate() error {
 		// Lookup index for the probe token: the token itself is now encrypted at
 		// rest, so the report endpoint matches on this SHA-256 hash instead.
 		`ALTER TABLE servers ADD COLUMN probe_token_hash TEXT NOT NULL DEFAULT ''`,
+		// Whether this machine appears on the unauthenticated status page.
+		// Defaults to 1 because that is what every probe-enabled server did
+		// before the flag existed — an upgrade must not quietly empty someone's
+		// public page. The panel's own machine is the opposite case and is not a
+		// row here: it defaults to hidden, via the monitor_local_public setting.
+		`ALTER TABLE servers ADD COLUMN public_visible INTEGER NOT NULL DEFAULT 1`,
 		// Prorated refunds: record how much was actually refunded on each order so
 		// admin reporting and idempotent re-reads reflect the real (possibly partial)
 		// amount instead of the original price. refund_ratio is the applied fraction

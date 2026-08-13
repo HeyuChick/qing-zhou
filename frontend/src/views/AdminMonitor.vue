@@ -103,13 +103,21 @@
           <div class="srv-head">
             <span class="dot" :class="s.status" />
             <span class="srv-name" @click="goDetail(s)">{{ s.name }}</span>
+            <!-- 本机没有资产信息可填、也不需要装探针，标一下省得找那两个按钮 -->
+            <n-tag v-if="s.local" size="small" type="info" :bordered="false">面板自采集</n-tag>
             <n-tag v-if="s.location" size="small" :bordered="false">{{ s.location }}</n-tag>
           </div>
         </template>
         <template #header-extra>
-          <n-space :size="4">
-            <n-button size="tiny" @click="openAsset(s)">编辑</n-button>
-            <n-button size="tiny" @click="copyInstall(s)">安装</n-button>
+          <n-space :size="4" align="center">
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-switch :value="s.public_visible" size="small" :loading="visSaving === s.id" @update:value="(v:boolean) => setPublicVisible(s, v)" />
+              </template>
+              {{ s.public_visible ? '显示在公开状态页' : '不显示在公开状态页' }}
+            </n-tooltip>
+            <n-button v-if="!s.local" size="tiny" @click="openAsset(s)">编辑</n-button>
+            <n-button v-if="!s.local" size="tiny" @click="copyInstall(s)">安装</n-button>
           </n-space>
         </template>
 
@@ -174,7 +182,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, shallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  NCard, NButton, NSpace, NTag, NProgress, NDrawer, NDrawerContent, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSelect, NEmpty, useMessage
+  NCard, NButton, NSpace, NTag, NProgress, NDrawer, NDrawerContent, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSelect, NEmpty, NTooltip, useMessage
 } from 'naive-ui'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { fmtBytes, fmtDateTime, fmtUptime, pct, toLocalDatetimeInput } from '@/utils/format'
@@ -383,6 +391,18 @@ async function dismissAll() {
     dash.value.alerts_unread = 0
     alertsExpanded.value = false
   } catch (e: any) { message.error(e.message) }
+}
+
+// 公开状态页是不鉴权的，所以「监控它」和「对外公布它」分成两件事。其他机器默认
+// 公开（和加这个开关之前的行为一致），面板本机默认不公开。
+const visSaving = ref<number | null>(null)
+async function setPublicVisible(s: any, v: boolean) {
+  visSaving.value = s.id
+  try {
+    await apiPut(`/api/admin/servers/${s.id}/monitor`, { public_visible: v })
+    s.public_visible = v
+    message.success(v ? `「${s.name}」已显示在公开状态页` : `「${s.name}」已从公开状态页隐藏`)
+  } catch (e: any) { message.error(e.message) } finally { visSaving.value = null }
 }
 
 function copyInstall(s: any) {

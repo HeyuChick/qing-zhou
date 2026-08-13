@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package sysmetrics
 
 import (
 	"bufio"
@@ -11,42 +11,57 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
-// Metrics holds one snapshot of system metrics.
-type Metrics struct {
-	CPUPercent    float64 `json:"cpu_percent"`
-	MemUsed       int64   `json:"mem_used"`
-	MemTotal      int64   `json:"mem_total"`
-	SwapUsed      int64   `json:"swap_used"`
-	SwapTotal     int64   `json:"swap_total"`
-	DiskUsed      int64   `json:"disk_used"`
-	DiskTotal     int64   `json:"disk_total"`
-	NetRx         int64   `json:"net_rx"`
-	NetTx         int64   `json:"net_tx"`
-	Load1         float64 `json:"load1"`
-	Load5         float64 `json:"load5"`
-	Load15        float64 `json:"load15"`
-	TCPConnections int    `json:"tcp_connections"`
-	ProcessCount  int     `json:"process_count"`
-	Uptime        int64   `json:"uptime"`
-	Hostname      string  `json:"hostname"`
-	Platform      string  `json:"platform"`
-	Kernel        string  `json:"kernel"`
-	Arch          string  `json:"arch"`
+// Supported reports whether this build can read host metrics at all.
+func Supported() bool { return true }
+
+// Sampler turns the counters in /proc into rates. CPU percentage and network
+// speed are deltas between two reads, so the first Sample of a process reports
+// zero for both and only later ones carry real numbers — keep one Sampler for
+// the lifetime of the collector rather than making a fresh one per tick.
+//
+// Not safe for concurrent use; one goroutine per Sampler.
+type Sampler struct {
+	prevCPU *cpuTickSample
+	prevNet *netIfaceSample
+	prevAt  time.Time
 }
 
-// cpuTickSample reads /proc/stat and returns the aggregate CPU tick counts.
-type cpuTickSample struct {
-	user, nice, system, idle, iowait, irq, softirq, steal uint64
-}
+// Sample reads one snapshot. Individual readings that fail are left at zero
+// rather than failing the whole snapshot: a machine with no swap, no
+// /etc/os-release, or an unreadable mount is still worth reporting.
+func (s *Sampler) Sample() Metrics {
+	var m Metrics
+	now := time.Now()
 
-func (s cpuTickSample) total() uint64 {
-	return s.user + s.nice + s.system + s.idle + s.iowait + s.irq + s.softirq + s.steal
-}
+	curCPU, err := readCPUTicks()
+	if err == nil {
+		if s.prevCPU != nil {
+			m.CPUPercent = calcCPUPercent(*s.prevCPU, curCPU)
+		}
+		s.prevCPU = &curCPU
+	}
 
-func (s cpuTickSample) busy() uint64 {
-	return s.total() - s.idle - s.iowait
+	m.MemUsed, m.MemTotal, m.SwapUsed, m.SwapTotal, _ = readMemInfo()
+	m.DiskUsed, m.DiskTotal, _ = readDiskUsage()
+
+	curNet, err := readNetDev()
+	if err == nil {
+		if s.prevNet != nil && !s.prevAt.IsZero() {
+			m.NetRx, m.NetTx = calcNetSpeed(*s.prevNet, curNet, now.Sub(s.prevAt).Seconds())
+		}
+		s.prevNet = &curNet
+	}
+	s.prevAt = now
+
+	m.Load1, m.Load5, m.Load15, _ = readLoadAvg()
+	m.TCPConnections = readTCPConnections()
+	m.ProcessCount = readProcessCount()
+	m.Uptime, _ = readUptime()
+	m.Hostname, m.Platform, m.Kernel, m.Arch = readSysInfo()
+	return m
 }
 
 func readCPUTicks() (cpuTickSample, error) {
@@ -75,16 +90,6 @@ func readCPUTicks() (cpuTickSample, error) {
 		return s, nil
 	}
 	return cpuTickSample{}, fmt.Errorf("no cpu line in /proc/stat")
-}
-
-// calcCPUPercent computes CPU usage % between two samples.
-func calcCPUPercent(prev, cur cpuTickSample) float64 {
-	totalDelta := cur.total() - prev.total()
-	if totalDelta == 0 {
-		return 0
-	}
-	busyDelta := cur.busy() - prev.busy()
-	return float64(busyDelta) / float64(totalDelta) * 100
 }
 
 // readMemInfo reads /proc/meminfo for memory and swap.
@@ -192,27 +197,7 @@ func readDiskUsage() (used, total int64, err error) {
 	return used, total, nil
 }
 
-// isPseudoFS reports whether the filesystem type is virtual/pseudo and should
-// be excluded from disk-usage aggregation.
-func isPseudoFS(fstype string) bool {
-	switch fstype {
-	case "proc", "sysfs", "tmpfs", "devtmpfs", "devpts", "cgroup", "cgroup2",
-		"pstore", "bpf", "mqueue", "hugetlbfs", "fuse", "fusectl", "fuse.gvfsd-fuse",
-		"autofs", "rpc_pipefs", "securityfs", "debugfs", "tracefs", "configfs",
-		"selinuxfs", "binfmt_misc", "efivarfs", "none", "overlay", "squashfs",
-		"iso9660", "nsfs", "anon_inode":
-		return true
-	}
-	return false
-}
-
-// netIfaceSample holds rx/tx byte counters for physical interfaces.
-type netIfaceSample struct {
-	rx, tx int64
-}
-
 // readNetDev reads /proc/net/dev and sums rx/tx for physical interfaces.
-// Physical interfaces are those matching eth*, ens*, enp*, wlan*, em*.
 func readNetDev() (netIfaceSample, error) {
 	data, err := os.ReadFile("/proc/net/dev")
 	if err != nil {
@@ -245,32 +230,6 @@ func readNetDev() (netIfaceSample, error) {
 		sample.tx += tx
 	}
 	return sample, nil
-}
-
-func isPhysicalIface(name string) bool {
-	prefixes := []string{"eth", "ens", "enp", "wlan", "em", "eno"}
-	for _, p := range prefixes {
-		if strings.HasPrefix(name, p) {
-			return true
-		}
-	}
-	return false
-}
-
-// calcNetSpeed computes bytes/s between two samples given the interval.
-func calcNetSpeed(prev, cur netIfaceSample, intervalSec float64) (rxSpeed, txSpeed int64) {
-	if intervalSec <= 0 {
-		return 0, 0
-	}
-	rxDelta := cur.rx - prev.rx
-	txDelta := cur.tx - prev.tx
-	if rxDelta < 0 {
-		rxDelta = 0
-	}
-	if txDelta < 0 {
-		txDelta = 0
-	}
-	return int64(float64(rxDelta) / intervalSec), int64(float64(txDelta) / intervalSec)
 }
 
 // readLoadAvg reads /proc/loadavg for 1/5/15 minute load averages.
@@ -375,46 +334,4 @@ func readSysInfo() (hostname, platform, kernel, arch string) {
 		}
 	}
 	return
-}
-
-// Collect gathers all system metrics. prevCPU and prevNet are the previous
-// samples (nil on first call); intervalSec is the time between samples.
-// Returns the metrics and the raw samples for the next call.
-func Collect(prevCPU *cpuTickSample, prevNet *netIfaceSample, intervalSec float64) (Metrics, cpuTickSample, netIfaceSample) {
-	var m Metrics
-
-	// CPU
-	curCPU, err := readCPUTicks()
-	if err == nil && prevCPU != nil {
-		m.CPUPercent = calcCPUPercent(*prevCPU, curCPU)
-	}
-
-	// Memory
-	m.MemUsed, m.MemTotal, m.SwapUsed, m.SwapTotal, _ = readMemInfo()
-
-	// Disk
-	m.DiskUsed, m.DiskTotal, _ = readDiskUsage()
-
-	// Network
-	curNet, err := readNetDev()
-	if err == nil && prevNet != nil {
-		m.NetRx, m.NetTx = calcNetSpeed(*prevNet, curNet, intervalSec)
-	}
-
-	// Load
-	m.Load1, m.Load5, m.Load15, _ = readLoadAvg()
-
-	// TCP connections
-	m.TCPConnections = readTCPConnections()
-
-	// Process count
-	m.ProcessCount = readProcessCount()
-
-	// Uptime
-	m.Uptime, _ = readUptime()
-
-	// System info
-	m.Hostname, m.Platform, m.Kernel, m.Arch = readSysInfo()
-
-	return m, curCPU, curNet
 }

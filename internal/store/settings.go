@@ -99,6 +99,14 @@ func (s *Store) GetSettingBool(key string) (bool, error) {
 	return v == "true" || v == "1", err
 }
 
+// SetSettingBool writes a boolean in the form GetSettingBool reads back.
+func (s *Store) SetSettingBool(key string, v bool) error {
+	if v {
+		return s.SetSetting(key, "true")
+	}
+	return s.SetSetting(key, "false")
+}
+
 func (s *Store) GetSettingInt64(key string, def int64) (int64, error) {
 	v, err := s.GetSetting(key)
 	if err != nil || v == "" {

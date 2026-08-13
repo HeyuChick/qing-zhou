@@ -11,6 +11,11 @@ import (
 // already uses for "local" (BuildSingboxConfigForServer, ScheduleRebuildServer).
 const LocalNodeID int64 = 0
 
+// LocalNodeName is what that machine is called wherever it is listed next to
+// real servers — the node version list, the monitor dashboard, its alerts.
+// One constant so the machine does not end up with a different name per page.
+const LocalNodeName = "面板本机"
+
 // NodeSingbox is what the panel last observed about one node's sing-box binary.
 type NodeSingbox struct {
 	ServerID    int64  `json:"server_id"`

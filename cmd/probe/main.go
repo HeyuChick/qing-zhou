@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"qingzhou/internal/sysmetrics"
 )
 
 var (
@@ -73,41 +75,23 @@ func main() {
 	reportURL := server + "/api/monitor/report"
 	log.Printf("qingzhou-probe starting: server=%s interval=%ds", server, interval)
 
-	// We need two samples 1 second apart for CPU and network speed deltas.
-	// On the first iteration, we collect a "previous" sample and skip reporting.
-	var prevCPU *cpuTickSample
-	var prevNet *netIfaceSample
-	var prevTime time.Time
+	// CPU percentage and network speed are deltas between two reads, so the
+	// first sample carries neither. Prime the sampler and throw that one away
+	// rather than reporting a snapshot that claims the machine is idle.
+	sampler := &sysmetrics.Sampler{}
+	sampler.Sample()
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
-	// Collect initial sample immediately.
-	cpu0, _ := readCPUTicks()
-	net0, _ := readNetDev()
-	prevCPU = &cpu0
-	prevNet = &net0
-	prevTime = time.Now()
-
-	// Wait 1 second for the first delta, then start the loop.
-	time.Sleep(time.Second)
-
 	for range ticker.C {
-		now := time.Now()
-		elapsed := now.Sub(prevTime).Seconds()
-
-		metrics, cpu, net := Collect(prevCPU, prevNet, elapsed)
-		prevCPU = &cpu
-		prevNet = &net
-		prevTime = now
-
-		if err := report(client, reportURL, token, metrics); err != nil {
+		if err := report(client, reportURL, token, sampler.Sample()); err != nil {
 			log.Printf("report failed: %v", err)
 		}
 	}
 }
 
-func report(client *http.Client, url, token string, m Metrics) error {
+func report(client *http.Client, url, token string, m sysmetrics.Metrics) error {
 	body, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)

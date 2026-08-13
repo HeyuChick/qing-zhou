@@ -218,10 +218,39 @@ func (s *Store) UnreadAlertCount() (int, error) {
 // CheckProbeAlerts evaluates all probe-enabled servers, raising alerts for the
 // conditions that hold and resolving the ones that no longer do. Should be
 // called periodically.
+// localAlertNode is the panel's own machine as the alert checker wants to see
+// it: a server row that does not exist in the table. Nil when the panel has
+// never sampled itself (not Linux, or only just started), so nothing is judged
+// on absent data.
+//
+// LastSeen comes from the newest sample rather than a last_seen column, which
+// is what makes the offline alert work for it too: if the collector goroutine
+// dies, the samples stop and the machine goes offline like any other.
+func (s *Store) localAlertNode() *Server {
+	m, err := s.GetLatestMetrics(LocalNodeID)
+	if err != nil || m == nil {
+		return nil
+	}
+	return &Server{
+		ID:           LocalNodeID,
+		Name:         LocalNodeName,
+		Enabled:      true,
+		ProbeEnabled: true,
+		LastSeen:     m.Ts,
+	}
+}
+
 func (s *Store) CheckProbeAlerts() error {
 	servers, err := s.ListServers()
 	if err != nil {
 		return err
+	}
+	// The panel's own machine is monitored without a servers row, so it would
+	// otherwise be the one machine that can fill its disk in silence — the same
+	// machine whose disk filling up takes the whole panel down with it. It has
+	// no expiry and no SSH, but CPU / memory / disk are the same measurements.
+	if local := s.localAlertNode(); local != nil {
+		servers = append(servers, local)
 	}
 	now := time.Now()
 	twoMinAgo := now.Add(-2 * time.Minute).Unix()
