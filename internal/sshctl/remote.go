@@ -30,6 +30,18 @@ func parsePrivateKey(pem, passphrase string) (ssh.Signer, error) {
 	return ssh.ParsePrivateKey([]byte(pem))
 }
 
+// Fingerprint renders a pinned host key (an authorized_keys line, as stored on
+// the server row) as the SHA256 form OpenSSH prints — so an admin can compare it
+// against `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the machine
+// itself. Returns "" when the stored value isn't a parseable key.
+func Fingerprint(authorizedKey string) string {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedKey))
+	if err != nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(pk)
+}
+
 // tunnelConn is a remote TCP connection carried over SSH. Closing it also closes
 // the SSH client that carries it, so a caller that only holds the net.Conn can't
 // leak the session underneath.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -128,6 +129,24 @@ func (a *API) handleAdminUpdateServer(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "更新服务器失败")
 		return
 	}
+	// Point the row at a different host and the pinned key stops being about the
+	// machine we are dialling: it belongs to the old one, so every later connect
+	// fails as "host key mismatch (possible MITM)" for what is really just a
+	// different machine. OpenSSH indexes known_hosts BY host for the same reason;
+	// storing the pin on the server row is what makes the host field mutable
+	// underneath it. Drop the pin so the next connect re-pins by TOFU.
+	//
+	// Deliberately NOT done for a credential change: a new SSH password says
+	// nothing about the machine's identity, and clearing on it would hand anyone
+	// who can talk an admin into a password rotation a free way to make the panel
+	// forget who it is talking to.
+	if stored != nil && stored.Host != sv.Host && stored.HostKey != "" {
+		if err := a.st.SetServerHostKey(id, ""); err != nil {
+			log.Printf("admin: clear pinned host key after host change on server %d: %v", id, err)
+		} else {
+			log.Printf("admin: server %d host changed %s -> %s, pinned SSH host key dropped", id, stored.Host, sv.Host)
+		}
+	}
 	saved, _ := a.st.GetServer(id)
 	maskServerSecrets(saved)
 	ok(w, saved)
@@ -202,6 +221,64 @@ func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
 	// once and forgetting, so the node version list is fresh after a test too.
 	_ = a.st.SetNodeSingbox(sv.ID, sbver.Parse(version))
 	ok(w, J{"status": "online", "message": "SSH 连接成功", "version": version})
+}
+
+// POST /api/admin/servers/{id}/clear-host-key — drop the pinned SSH host key and
+// re-pin whatever the machine presents now.
+//
+// The pin is what stops an attacker who can answer for this IP from harvesting
+// the root SSH credentials we would otherwise hand over. But it also refuses to
+// connect when the key legitimately changed — a reinstalled VPS regenerates
+// /etc/ssh/ssh_host_*, and reusing a server row for a replacement machine has
+// the same effect. Until now that left the panel wedged with no way out of the
+// UI: host_key is never sent to the client and editing the server doesn't touch
+// it, so recovering meant editing the database by hand.
+//
+// Reconnecting right away is the point: it re-pins in the same click and returns
+// the new fingerprint, so the admin can check it against the machine instead of
+// trusting silently. The client side gates this behind a warning — clearing a
+// pin that changed for reasons you can't explain is accepting a MITM.
+func (a *API) handleAdminClearServerHostKey(w http.ResponseWriter, r *http.Request) {
+	id := atoi(chi.URLParam(r, "id"))
+	sv, err := a.st.GetServer(id)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "读取服务器失败")
+		return
+	}
+	if sv == nil {
+		fail(w, http.StatusNotFound, "服务器不存在")
+		return
+	}
+	if err := a.st.SetServerHostKey(id, ""); err != nil {
+		fail(w, http.StatusInternalServerError, "清除失败")
+		return
+	}
+	// Root-level trust decision: leave a trace even when it works, since the
+	// panel keeps no other record of a pin being reset.
+	log.Printf("admin: cleared pinned SSH host key for server %d (%s)", id, sv.Host)
+
+	if sv.SSHKey == "" && sv.SSHPassword == "" {
+		ok(w, J{"message": "已清除固定的主机密钥；该服务器未配置 SSH 密钥或密码，无法立即重新连接"})
+		return
+	}
+	// Dial with the pin cleared so the callback trusts-on-first-use and persists
+	// the new key. sv still holds the OLD key in memory — zero it, or we would
+	// verify against exactly the key we just removed.
+	sv.HostKey = ""
+	rm := a.newRemoteManager(10 * time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if _, err := rm.TestConnection(ctx, sshConfigFor(sv)); err != nil {
+		_ = a.st.UpdateServerStatus(id, "error")
+		fail(w, http.StatusBadGateway, "已清除固定的主机密钥，但重新连接失败："+err.Error())
+		return
+	}
+	_ = a.st.UpdateServerStatus(id, "online")
+	var fp string
+	if cur, _ := a.st.GetServer(id); cur != nil {
+		fp = sshctl.Fingerprint(cur.HostKey)
+	}
+	ok(w, J{"message": "已重新信任这台机器", "fingerprint": fp})
 }
 
 // POST /api/admin/servers/{id}/rebuild — rebuild sing-box config for a single

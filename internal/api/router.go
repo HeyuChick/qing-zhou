@@ -307,6 +307,8 @@ func (a *API) Router() http.Handler {
 		ar.Delete("/api/admin/servers/{id}", a.handleAdminDeleteServer)
 		ar.Post("/api/admin/servers/{id}/test", a.handleAdminTestServer)
 		ar.Post("/api/admin/servers/{id}/rebuild", a.handleAdminRebuildServer)
+		// Recover from a legitimately changed host key (reinstalled/replaced node).
+		ar.Post("/api/admin/servers/{id}/clear-host-key", a.handleAdminClearServerHostKey)
 		ar.Put("/api/admin/servers/{id}/monitor", a.handleUpdateServerMonitor)
 
 		// monitor probe

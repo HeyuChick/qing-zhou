@@ -69,6 +69,7 @@
           <div class="lc-foot">
             <n-button size="tiny" @click="handleRebuild(s.id)">重建</n-button>
             <n-button size="tiny" @click="openForm(s)">编辑</n-button>
+            <n-button size="tiny" :loading="clearing === s.id" @click="handleClearHostKey(s)">清除密钥指纹</n-button>
             <n-button size="tiny" type="error" @click="handleDelete(s.id)">删除</n-button>
           </div>
         </div>
@@ -99,7 +100,7 @@
   </div>
 </template>
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, h } from 'vue'
 import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, NCard, useMessage, useDialog } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete, apiGet } from '@/api'
 import { fmtDateTime } from '@/utils/format'
@@ -130,6 +131,44 @@ async function handleSave(){
 }
 async function handleTest(){ testing.value=true; try{ const id=editing.value?.id; if(!id){message.warning('请先保存');return} await apiPost(`/api/admin/servers/${id}/test`); message.success('连接成功') }catch(e:any){message.error(e.message)}finally{testing.value=false} }
 async function handleRebuild(id:number){ try{await apiPost(`/api/admin/servers/${id}/rebuild`);message.success('重建成功')}catch(e:any){message.error(e.message)} }
+
+// 清除固定的 SSH 主机密钥并重新信任。
+// 面板首次连上一台机器时会记住它的主机密钥，此后每次连接都要求对得上——这是拦住
+// 「有人冒充这个 IP 骗走 root 凭据」的那道门。但机器重装系统会重新生成主机密钥，
+// 换机复用同一条记录也一样，那时面板就会一直拒连（表现为配置下发失败），而这道门
+// 只能从这里打开：host_key 不下发给前端，编辑服务器也不会动它。
+// 所以按钮必须带确认：清除等于放弃对这台机器身份的既有判断。
+const clearing = ref<number|null>(null)
+// 弹窗正文用 pre-line 渲染：naive 的 dialog 把 content 当普通文本塞进一个 div，
+// 字符串里的换行会被折掉——这段正好是要分行看的安全提示，挤成一坨就没人读了。
+const preLine = (text:string) => () => h('div', { style: 'white-space:pre-line;line-height:1.75;' }, text)
+function handleClearHostKey(s:any){
+  dialog.warning({
+    title: '清除已固定的主机密钥？',
+    content: preLine(`面板将忘记「${s.name || s.host}」当前记住的 SSH 主机密钥，并按下一次连接看到的密钥重新记住。\n\n`
+      + '✅ 机器重装过系统 / 换了机器 / 供应商做了迁移 → 这是正常操作。\n\n'
+      + '⛔ 你想不出它为什么会变 → 先别清。那可能是中间人在冒充这台机器，清掉就等于把 root 凭据交给它。'),
+    positiveText: '确认清除并重新连接',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      clearing.value = s.id
+      try{
+        const r:any = await apiPost(`/api/admin/servers/${s.id}/clear-host-key`)
+        message.success(r?.message || '已重新信任')
+        if(r?.fingerprint){
+          dialog.success({
+            title: '已重新记住这台机器',
+            content: preLine(`新指纹：${r.fingerprint}\n\n`
+              + '请在这台机器上执行 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 核对，对得上说明连的确实是你的机器。\n\n'
+              + '接着到「sing-box → 链路拓扑」点「重新下发」，把这段时间没同步上的配置和用户变更推过去。'),
+            positiveText: '知道了',
+          })
+        }
+        await load()
+      }catch(e:any){ message.error(e.message) }finally{ clearing.value = null }
+    },
+  })
+}
 async function handleDelete(id:number){ try{await apiDelete(`/api/admin/servers/${id}`);message.success('已删除');await load()}catch(e:any){message.error(e.message)} }
 async function load(){loading.value=true;try{servers.value=await apiList('/api/admin/servers')}catch{}finally{loading.value=false}}
 
