@@ -1,14 +1,16 @@
 <template>
   <div>
-    <h2 class="page-title">sing-box 配置</h2>
+    <!-- 打码开关放在标题行而不是某个页签里：它对整页生效（机器地址、出口地址、
+         拓扑、配置预览），截图前点一次就够。也别放进 n-tabs 的 suffix——那会从
+         页签栏里吃掉几十像素，375px 的手机上本来就装不下 5 个页签（可视 351px /
+         需要 395px，且 overflow:hidden 滚不动），再挤就直接够不着最后一个了。 -->
+    <div class="page-head">
+      <h2 class="page-title">sing-box 配置</h2>
+      <n-button size="tiny" quaternary :type="showIp ? 'warning' : 'default'" @click="toggleIp">
+        {{ showIp ? '🙈 隐藏 IP' : '👁 显示 IP' }}
+      </n-button>
+    </div>
     <n-tabs v-model:value="tab" animated @update:value="onTabChange">
-      <!-- 打码开关放在页签栏，因为它对整页生效（机器地址、出口地址、拓扑、配置预览），
-           而不是只对某一个页签生效——截图前点一次就够。 -->
-      <template #suffix>
-        <n-button size="tiny" quaternary :type="showIp ? 'warning' : 'default'" @click="toggleIp">
-          {{ showIp ? '🙈 隐藏 IP' : '👁 显示 IP' }}
-        </n-button>
-      </template>
       <n-tab-pane name="tls" tab="TLS 配置">
         <div class="page-toolbar">
           <n-input v-model:value="tlsSearch" placeholder="搜索名称/SNI" size="small" clearable style="width:200px;max-width:50%;" />
@@ -1691,6 +1693,9 @@ async function load() {
 </script>
 
 <style scoped>
+.page-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.page-head .page-title { margin: 0; }
+.page-head .n-button { margin-left: auto; }
 .page-title { font-size: 21px; margin-bottom: 16px; }
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
 
