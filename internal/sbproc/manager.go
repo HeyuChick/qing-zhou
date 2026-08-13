@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -24,7 +25,11 @@ type Manager struct {
 	configPath string // live config.json path
 	check      func(path string) error
 	reload     func() error
-	mu         sync.Mutex
+	// escalate writes the config from outside this process's mount namespace,
+	// for the one case where the panel's own sandbox owns the config directory.
+	// nil disables the escape (tests, and any caller that wants the raw error).
+	escalate func(configPath string, config []byte) error
+	mu       sync.Mutex
 
 	// reloadFailed records that the last reload attempt errored. The config file
 	// is swapped BEFORE the reload runs, so without this the no-op fast path
@@ -41,6 +46,7 @@ type Manager struct {
 func New(bin, configPath string, reload func() error) *Manager {
 	m := &Manager{bin: bin, configPath: configPath, reload: reload}
 	m.check = m.defaultCheck
+	m.escalate = systemdRunSwap
 	return m
 }
 
@@ -55,6 +61,166 @@ func (m *Manager) defaultCheck(path string) error {
 	out, err := exec.CommandContext(ctx, m.bin, "check", "-c", path).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sing-box check failed: %v: %s", err, out)
+	}
+	return nil
+}
+
+// sandboxHint names the one cause behind an EROFS on the config directory that
+// the error itself points away from: the directory is read-only *for this process
+// only*. The panel's own unit (install.sh, deploy/qingzhou.service) sets
+// ProtectSystem=full, which remounts /usr AND /etc read-only inside the service's
+// mount namespace — so `touch /etc/sing-box/x` from a root shell on the very same
+// machine succeeds, and the operator is left staring at a writable disk reporting
+// read-only. Same trap as the install path's localInstallHint (nodever_admin.go),
+// one directory over: that one is /usr for the binary, this is /etc for the config.
+//
+// Silent on every other error: a genuinely full disk or a missing directory says
+// so already, and a wrong "沙箱" on top of that is the misdirection this exists to end.
+func sandboxHint(dir string, err error) error {
+	if !errors.Is(err, syscall.EROFS) {
+		return err
+	}
+	return fmt.Errorf("%w —— %s 对面板进程只读，宿主机上能写不代表服务里能写："+
+		"面板 systemd 单元的 ProtectSystem 把它挡在了外面。放行后重启面板："+
+		"mkdir -p /etc/systemd/system/qingzhou.service.d && printf '[Service]\\nReadWritePaths=%s\\n' "+
+		"> /etc/systemd/system/qingzhou.service.d/10-singbox-rw.conf && systemctl daemon-reload && systemctl restart qingzhou",
+		err, dir, dir)
+}
+
+// swap replaces the live config with config, atomically, and escapes the panel's
+// own sandbox if that is what stands in the way.
+//
+// 一键安装 puts sing-box on the panel's own machine, and from that moment the
+// panel has to write /etc/sing-box/config.json. But the panel's unit sets
+// ProtectSystem=full, which mounts /etc read-only inside the service's mount
+// namespace — so every 下发 fails with EROFS on a machine where the same write
+// from a root shell succeeds. This is the second half of the problem 0ead49e
+// fixed for the binary: that one escaped /usr to *install* sing-box, this one
+// escapes /etc to *configure* it. Leaving it to the operator means editing
+// systemd by hand on a box they may have no shell on, for a machine the panel
+// itself set up.
+func (m *Manager) swap(config []byte) error {
+	return writeConfig(m.configPath, config, writeDirect, m.escalate)
+}
+
+// WriteConfig atomically installs config at path, escaping the panel's own mount
+// namespace if that directory is read-only for this process.
+//
+// Exported for sbctl.applyLocal, which writes the same file for a `servers` row
+// that happens to be this machine — a second copy of this write that would hit
+// the identical wall.
+func WriteConfig(path string, config []byte) error {
+	return writeConfig(path, config, writeDirect, systemdRunSwap)
+}
+
+// writeConfig takes both writers as parameters because the interesting behaviour
+// — escalate on EROFS and nothing else, then prove what landed — cannot be
+// reached from a test otherwise: no portable way to conjure a read-only mount.
+// escalate nil disables the escape and surfaces the raw (hinted) error.
+func writeConfig(path string, config []byte, direct, escalate func(string, []byte) error) error {
+	err := direct(path, config)
+	if err == nil || !errors.Is(err, syscall.EROFS) {
+		return err // unsandboxed hosts never leave this line
+	}
+	dir := filepath.Dir(path)
+	if escalate == nil {
+		return sandboxHint(dir, err)
+	}
+	if e := escalate(path, config); e != nil {
+		return fmt.Errorf("%w（已试过用 systemd-run 绕开沙箱，也失败了：%v）", sandboxHint(dir, err), e)
+	}
+	// The escalated write hands the bytes to another process down a pipe, so a
+	// clean EOF is indistinguishable from a truncated transfer: if this panel is
+	// killed mid-write, `cat` ends happily and installs a short config that stays
+	// invisible until the next sing-box restart refuses to parse it. Reading the
+	// file back settles it exactly, and reading is never what the mount forbids.
+	got, e := os.ReadFile(path)
+	if e != nil {
+		return fmt.Errorf("绕过沙箱写入后读回失败，无法确认 %s 的内容: %w", path, e)
+	}
+	if !bytes.Equal(got, config) {
+		return fmt.Errorf("绕过沙箱写入后内容不符：%s 落盘 %d 字节，应为 %d 字节（写到一半被打断），"+
+			"sing-box 下次重启会起不来，请检查该文件", path, len(got), len(config))
+	}
+	return nil
+}
+
+// writeDirect is the plain path: write a sibling temp file, then rename over the
+// live config. Same directory, so the rename is atomic — sing-box never sees a
+// half-written file.
+func writeDirect(path string, config []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".qz-sbcfg-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(config); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// systemdRunArgv is how the write gets out of the sandbox: systemd-run asks PID1
+// for a transient unit, which is built from PID1's namespace and so sees /etc
+// writable again. Flags match localInstallArgv (nodever_admin.go) — --pipe to
+// feed the config in on stdin, --wait to block and propagate status, --collect
+// to reap the unit even when it fails, all of them older than systemd 236.
+//
+// The config travels on stdin and the path as a positional argument, never
+// interpolated into the shell script: the path comes from a setting an operator
+// can edit, and a quote in it must not become shell syntax.
+//
+// Deliberately NOT named with --unit, unlike localInstallArgv. A fixed name is
+// right there, where it stops a second 重装 piling onto a running one; here it
+// would only invite collisions — one Rebuild escalates once for the panel's own
+// config and again for every `servers` row on this machine, and systemd refuses
+// a name it has not finished collecting yet. These writes are milliseconds long
+// and already serialized by their callers, so there is nothing to pile up.
+func systemdRunArgv(systemdRun, configPath string) []string {
+	// Same atomic swap as writeDirect, expressed for sh: sibling temp, then mv.
+	// umask matches os.CreateTemp's 0600 so the escalated path doesn't quietly
+	// widen the permissions on a file holding every user's credentials. The trap
+	// clears the temp when the write dies partway, so a failed attempt doesn't
+	// leave a stale half-config sitting next to the live one.
+	const script = `set -e; umask 077; trap 'rm -f "$1.qz-tmp"' EXIT; cat > "$1.qz-tmp"; mv "$1.qz-tmp" "$1"`
+	return []string{
+		systemdRun, "--pipe", "--wait", "--collect", "--quiet",
+		"-p", "RuntimeMaxSec=15", "--",
+		"/bin/sh", "-c", script, "sh", configPath,
+	}
+}
+
+// systemdRunSwap runs systemdRunArgv, feeding the config in on stdin.
+//
+// The timeout matters more than it looks: 「重建配置」 runs Rebuild inline in its
+// HTTP handler, and the server's WriteTimeout is 30s — a minute spent waiting on
+// a wedged systemd-run would surface to the operator as a dead request rather
+// than an error. Writing a few KB through a transient unit is a sub-second job,
+// so 15s is already far past generous, and RuntimeMaxSec caps the unit itself in
+// case our own kill leaves it behind.
+func systemdRunSwap(configPath string, config []byte) error {
+	bin, err := exec.LookPath("systemd-run")
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	argv := systemdRunArgv(bin, configPath)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdin = bytes.NewReader(config)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -102,24 +268,7 @@ func (m *Manager) Apply(config []byte) error {
 		return err // invalid: live config untouched, no reload
 	}
 
-	// Atomic swap: write to a sibling temp file then rename over the live path.
-	dir := filepath.Dir(m.configPath)
-	tmp, err := os.CreateTemp(dir, ".qz-sbcfg-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(config); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Rename(tmpPath, m.configPath); err != nil {
-		os.Remove(tmpPath)
+	if err := m.swap(config); err != nil {
 		return err
 	}
 

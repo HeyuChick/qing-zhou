@@ -20,7 +20,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,9 +233,12 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 		}
 	}
 
-	// Write to a sibling temp file, validate, then atomic rename.
-	dir := filepath.Dir(configPath)
-	tmp, err := os.CreateTemp(dir, ".qz-sbcfg-*.tmp")
+	// Validate a scratch copy first, then install. The scratch file goes to the
+	// temp dir rather than next to the live config: this machine is the panel's
+	// own, whose unit mounts /etc read-only for the service, and validating is
+	// not worth failing on a directory we have a way to write anyway (see
+	// sbproc.WriteConfig, which escapes that sandbox for the install itself).
+	tmp, err := os.CreateTemp("", "qz-sbcheck-*.json")
 	if err != nil {
 		return fmt.Errorf("create temp config: %w", err)
 	}
@@ -256,8 +258,7 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 		return fmt.Errorf("sing-box check failed: %v: %s", verr, vout)
 	}
 
-	// Atomic swap.
-	if err := os.Rename(tmpPath, configPath); err != nil {
+	if err := sbproc.WriteConfig(configPath, cfg); err != nil {
 		return fmt.Errorf("install config: %w", err)
 	}
 
