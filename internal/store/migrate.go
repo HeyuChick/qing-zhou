@@ -531,6 +531,10 @@ func (s *Store) Migrate() error {
 		// by id instead of inlining its PEM, so one cert serves many inbounds and a
 		// renewal touches a single row. 0 = legacy inline PEM (backfilled below).
 		`ALTER TABLE sb_tls ADD COLUMN cert_id INTEGER NOT NULL DEFAULT 0`,
+		// Display order of the TLS list (sb_inbounds has had one since creation).
+		// All existing rows default to 0 and tie-break by id, so an un-reordered
+		// list keeps its historical order.
+		`ALTER TABLE sb_tls ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN creds_reset_at INTEGER NOT NULL DEFAULT 0`,
 		// Rename legacy columns to neutral names on DBs created before the

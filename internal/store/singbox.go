@@ -24,7 +24,11 @@ type SbTls struct {
 	ClientJSON string `json:"client_json"`
 	// CertID references a managed certificate (certificates.id) for mode=tls
 	// profiles. 0 = none / legacy inline PEM held in ServerJSON.
-	CertID    int64 `json:"cert_id"`
+	CertID int64 `json:"cert_id"`
+	// SortOrder is the admin list's display order. Written only by ReorderSbTls —
+	// SaveSbTls leaves the column alone so an edit (which posts no sort_order)
+	// can't silently send the profile back to the top of the list.
+	SortOrder int   `json:"sort_order"`
 	CreatedAt int64 `json:"created_at"`
 	UpdatedAt int64 `json:"updated_at"`
 	// DecryptFailed is set when ServerJSON was stored encrypted but could not be
@@ -71,8 +75,8 @@ type SbInbound struct {
 // ---- sb_tls ----
 
 func (s *Store) ListSbTls() ([]*SbTls, error) {
-	rows, err := s.db.Query(`SELECT id, server_id, name, mode, server_json, client_json, cert_id, created_at, updated_at
-		FROM sb_tls ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, server_id, name, mode, server_json, client_json, cert_id, sort_order, created_at, updated_at
+		FROM sb_tls ORDER BY sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +84,7 @@ func (s *Store) ListSbTls() ([]*SbTls, error) {
 	out := []*SbTls{}
 	for rows.Next() {
 		var t SbTls
-		if err := rows.Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CertID, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CertID, &t.SortOrder, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		var ok bool
@@ -93,8 +97,8 @@ func (s *Store) ListSbTls() ([]*SbTls, error) {
 
 func (s *Store) GetSbTls(id int64) (*SbTls, error) {
 	var t SbTls
-	err := s.db.QueryRow(`SELECT id, server_id, name, mode, server_json, client_json, cert_id, created_at, updated_at
-		FROM sb_tls WHERE id=?`, id).Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CertID, &t.CreatedAt, &t.UpdatedAt)
+	err := s.db.QueryRow(`SELECT id, server_id, name, mode, server_json, client_json, cert_id, sort_order, created_at, updated_at
+		FROM sb_tls WHERE id=?`, id).Scan(&t.ID, &t.ServerID, &t.Name, &t.Mode, &t.ServerJSON, &t.ClientJSON, &t.CertID, &t.SortOrder, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -114,8 +118,11 @@ func (s *Store) SaveSbTls(t *SbTls) (int64, error) {
 	now := time.Now().Unix()
 	enc := s.encrypt(t.ServerJSON)
 	if t.ID == 0 {
-		res, err := s.db.Exec(`INSERT INTO sb_tls (server_id, name, mode, server_json, client_json, cert_id, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?)`, t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, t.CertID, now, now)
+		// New rows land at the end of the list. Leaving sort_order at 0 would drop
+		// them into the middle of a manually ordered list (0 ties with whatever the
+		// admin put first), which reads as the list reshuffling itself.
+		res, err := s.db.Exec(`INSERT INTO sb_tls (server_id, name, mode, server_json, client_json, cert_id, sort_order, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,(SELECT COALESCE(MAX(sort_order),0)+1 FROM sb_tls),?,?)`, t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, t.CertID, now, now)
 		if err != nil {
 			return 0, err
 		}
@@ -124,6 +131,37 @@ func (s *Store) SaveSbTls(t *SbTls) (int64, error) {
 	_, err := s.db.Exec(`UPDATE sb_tls SET server_id=?, name=?, mode=?, server_json=?, client_json=?, cert_id=?, updated_at=? WHERE id=?`,
 		t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, t.CertID, now, t.ID)
 	return t.ID, err
+}
+
+// ReorderSbTls sets sort_order to each id's position in the given slice, so
+// ListSbTls (ORDER BY sort_order, id) renders in this exact order. The admin
+// page groups TLS profiles by machine but sort_order is global, so callers
+// reorder by swapping global positions; ids not listed keep their old value.
+func (s *Store) ReorderSbTls(ids []int64) error {
+	return s.reorderByID("sb_tls", ids)
+}
+
+// ReorderSbInbounds does the same for the inbound list. Inbound order has no
+// effect on a running node (sing-box dispatches by listen port and tag); it only
+// decides where the inbound appears in the generated inbounds array.
+func (s *Store) ReorderSbInbounds(ids []int64) error {
+	return s.reorderByID("sb_inbounds", ids)
+}
+
+// reorderByID rewrites sort_order for the given ids in one transaction. table is
+// never caller-supplied — it comes from the two wrappers above.
+func (s *Store) reorderByID(table string, ids []int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for i, id := range ids {
+		if _, err := tx.Exec(`UPDATE `+table+` SET sort_order=? WHERE id=?`, i, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ErrInUse is returned when a delete is refused because other rows still
@@ -248,6 +286,11 @@ func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 		n.Listen = "::"
 	}
 	if n.ID == 0 {
+		if n.SortOrder == 0 {
+			// Append rather than tie with the first manually ordered row — see the
+			// same note in SaveSbTls.
+			_ = s.db.QueryRow(`SELECT COALESCE(MAX(sort_order),0)+1 FROM sb_inbounds`).Scan(&n.SortOrder)
+		}
 		res, err := s.db.Exec(`INSERT INTO sb_inbounds (server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, egress_id, created_at, updated_at)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			n.ServerID, n.Type, n.Tag, n.Listen, n.ListenPort, n.TlsID, n.Options, b2i(n.Enabled), n.SortOrder, n.UpstreamInboundID, n.RelaySecret, n.EgressID, now, now)

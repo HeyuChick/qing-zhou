@@ -18,6 +18,9 @@ type SyncStatus struct {
 	State string `json:"state"` // pending | running | ok | failed
 	Error string `json:"error,omitempty"`
 	At    int64  `json:"at"` // unix seconds of the last state change
+	// seq is the controller-wide revision of this write (see Controller.statusSeq).
+	// Internal bookkeeping, never serialized.
+	seq uint64
 }
 
 // ScheduleRebuild queues a full rebuild (all servers) and returns immediately.
@@ -37,7 +40,7 @@ func (c *Controller) schedule(target int64) {
 	} else {
 		c.pendingServer[target] = true
 	}
-	c.syncStatus[target] = SyncStatus{State: "pending", At: time.Now().Unix()}
+	c.putStatusLocked(target, SyncStatus{State: "pending", At: time.Now().Unix()})
 	if c.schedRunning {
 		c.schedMu.Unlock()
 		return
@@ -68,11 +71,17 @@ func (c *Controller) drain() {
 		c.schedMu.Unlock()
 
 		if all {
+			// Rebuild reports each machine's own outcome as it goes, so remember
+			// where every subsumed server stood before the pass and only fall back
+			// to the aggregate result for those it never reached (a disabled server,
+			// or a failure that aborted the loop early). Copying unconditionally
+			// would replace "SSH 下发失败: ..." on the machine that actually failed
+			// with the same generic line on every machine.
+			before := c.statusSeqs(servers)
 			c.runOne(AllTarget, c.Rebuild)
-			// Subsumed servers share the full rebuild's result.
 			st := c.status(AllTarget)
 			for _, id := range servers {
-				c.setStatusFrom(id, st)
+				c.setStatusFromIfUntouched(id, st, before[id])
 			}
 			continue
 		}
@@ -94,14 +103,38 @@ func (c *Controller) runOne(target int64, fn func() error) {
 
 func (c *Controller) setStatus(id int64, state, errMsg string) {
 	c.schedMu.Lock()
-	c.syncStatus[id] = SyncStatus{State: state, Error: errMsg, At: time.Now().Unix()}
+	c.putStatusLocked(id, SyncStatus{State: state, Error: errMsg, At: time.Now().Unix()})
 	c.schedMu.Unlock()
 }
 
-func (c *Controller) setStatusFrom(id int64, st SyncStatus) {
-	c.schedMu.Lock()
+// putStatusLocked stores st under id with the next revision. Caller holds schedMu.
+func (c *Controller) putStatusLocked(id int64, st SyncStatus) {
+	c.statusSeq++
+	st.seq = c.statusSeq
 	c.syncStatus[id] = st
-	c.schedMu.Unlock()
+}
+
+// statusSeqs snapshots the current revision of each id (0 when unknown).
+func (c *Controller) statusSeqs(ids []int64) map[int64]uint64 {
+	c.schedMu.Lock()
+	defer c.schedMu.Unlock()
+	out := make(map[int64]uint64, len(ids))
+	for _, id := range ids {
+		out[id] = c.syncStatus[id].seq
+	}
+	return out
+}
+
+// setStatusFromIfUntouched copies st onto id only if id's status has not been
+// rewritten since the given revision — i.e. nobody reported on that machine
+// specifically in the meantime.
+func (c *Controller) setStatusFromIfUntouched(id int64, st SyncStatus, since uint64) {
+	c.schedMu.Lock()
+	defer c.schedMu.Unlock()
+	if c.syncStatus[id].seq != since {
+		return
+	}
+	c.putStatusLocked(id, st)
 }
 
 func (c *Controller) status(id int64) SyncStatus {

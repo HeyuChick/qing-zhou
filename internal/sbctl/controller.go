@@ -108,6 +108,11 @@ type Controller struct {
 	pendingAll    bool
 	pendingServer map[int64]bool
 	syncStatus    map[int64]SyncStatus
+	// statusSeq is a monotonic revision stamped onto every SyncStatus write. A
+	// full rebuild reports each machine individually while it runs, so drain uses
+	// the revision to tell "this machine already has its own result" from "this
+	// machine was never reached" — timestamps can't, they share the same second.
+	statusSeq uint64
 }
 
 // statsProbe is a cached capability answer plus when it was taken.
@@ -360,12 +365,26 @@ func (c *Controller) Rebuild() error {
 
 	// Apply to local server (server_id=0, the legacy path).
 	var lastErr error
+	// record keeps a per-machine outcome alongside the aggregate lastErr. Without
+	// it a full rebuild reports one "下发失败" for the whole pass, and the admin
+	// UI can only say that *something* failed — not which machine, nor why.
+	record := func(id int64, err error) {
+		if err != nil {
+			c.setStatus(id, "failed", err.Error())
+			return
+		}
+		c.setStatus(id, "ok", "")
+	}
 	if cfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag); err != nil {
 		lastErr = fmt.Errorf("local build config: %w", err)
 		log.Printf("sbctl: local rebuild error: %v", err)
+		record(0, lastErr)
 	} else if err := c.mgr.Apply(cfg); err != nil {
 		lastErr = fmt.Errorf("local apply: %w", err)
 		log.Printf("sbctl: local apply error: %v", err)
+		record(0, lastErr)
+	} else {
+		record(0, nil)
 	}
 
 	// Apply to each enabled server. Servers whose host is the local machine
@@ -390,7 +409,9 @@ func (c *Controller) Rebuild() error {
 		cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.statsListenFor(sv), byTag)
 		if err != nil {
 			log.Printf("sbctl: server %d (%s) build config error: %v", sv.ID, sv.Name, err)
+			e := fmt.Errorf("生成配置失败: %w", err)
 			setErr(fmt.Errorf("server %d build config: %w", sv.ID, err))
+			record(sv.ID, e)
 			continue
 		}
 		// Local server entry — apply directly without SSH.
@@ -398,12 +419,16 @@ func (c *Controller) Rebuild() error {
 			if err := c.applyLocal(sv, cfg); err != nil {
 				log.Printf("sbctl: server %d (%s) local apply error: %v", sv.ID, sv.Name, err)
 				setErr(fmt.Errorf("server %d apply: %w", sv.ID, err))
+				record(sv.ID, fmt.Errorf("本机下发失败: %w", err))
+			} else {
+				record(sv.ID, nil)
 			}
 			continue
 		}
 		// Remote server — apply via SSH.
 		if c.remoteMgr == nil {
 			setErr(fmt.Errorf("server %d apply: remote manager not configured", sv.ID))
+			record(sv.ID, fmt.Errorf("未配置远程管理器，无法通过 SSH 下发"))
 			continue
 		}
 		serverCfg := serverConfigFor(sv)
@@ -417,7 +442,10 @@ func (c *Controller) Rebuild() error {
 			if err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg); err != nil {
 				log.Printf("sbctl: server %d (%s) apply error: %v", sv.ID, sv.Name, err)
 				setErr(fmt.Errorf("server %d apply: %w", sv.ID, err))
+				record(sv.ID, fmt.Errorf("SSH 下发失败: %w", err))
+				return
 			}
+			record(sv.ID, nil)
 		}(sv, serverCfg, cfg)
 	}
 	wg.Wait()

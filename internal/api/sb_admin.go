@@ -388,6 +388,7 @@ func (a *API) handleAdminListSbTls(w http.ResponseWriter, r *http.Request) {
 			"server_json": t.ServerJSON,
 			"client_json": t.ClientJSON,
 			"cert_id":     t.CertID,
+			"sort_order":  t.SortOrder,
 			"created_at":  t.CreatedAt,
 			"updated_at":  t.UpdatedAt,
 		}
@@ -436,6 +437,26 @@ func (a *API) handleAdminSaveSbTls(w http.ResponseWriter, r *http.Request) {
 	}
 	saved, _ := a.st.GetSbTls(newID)
 	ok(w, saved)
+}
+
+// handleAdminReorderSbTls persists a new display order for the TLS list.
+// Body: {"ids":[...]} — TLS ids in the desired global order (the page groups by
+// machine but sort_order is global, so the client submits the whole list).
+// Only sort_order is rewritten: TLS profiles are referenced by id, so their
+// order never reaches a node's config and no rebuild is needed.
+func (a *API) handleAdminReorderSbTls(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.IDs) == 0 {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := a.st.ReorderSbTls(req.IDs); err != nil {
+		fail(w, http.StatusInternalServerError, "保存排序失败")
+		return
+	}
+	ok(w, J{"count": len(req.IDs)})
 }
 
 func (a *API) handleAdminDeleteSbTls(w http.ResponseWriter, r *http.Request) {
@@ -1371,6 +1392,38 @@ func (a *API) handleAdminSbSyncStatus(w http.ResponseWriter, r *http.Request) {
 	ok(w, out)
 }
 
+// handleAdminSbResync re-queues a config push after a failed sync, so a machine
+// that failed for a transient reason (node rebooting, SSH hiccup) can be retried
+// from the 链路拓扑 page instead of waiting for the next periodic pass or faking
+// an edit. Body: {"server_id":N} — omit it to re-push every machine.
+//
+// Queued, never awaited: an SSH apply is bounded at 90s per node while the HTTP
+// server's WriteTimeout is 30s, so doing it inline would report a torn
+// connection ("下发失败") for pushes that actually succeeded. The caller polls
+// /api/admin/sb/sync-status for the outcome.
+func (a *API) handleAdminSbResync(w http.ResponseWriter, r *http.Request) {
+	if a.sbctl == nil {
+		fail(w, http.StatusServiceUnavailable, "sing-box 控制器未初始化")
+		return
+	}
+	var req struct {
+		ServerID *int64 `json:"server_id"`
+	}
+	// An empty body is a valid "re-push everything" request.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.ServerID == nil {
+		a.sbctl.ScheduleRebuild()
+		ok(w, J{"queued": "all"})
+		return
+	}
+	if *req.ServerID < 0 {
+		fail(w, http.StatusBadRequest, "无效的服务器 ID")
+		return
+	}
+	a.sbctl.ScheduleRebuildServer(*req.ServerID)
+	ok(w, J{"queued": *req.ServerID})
+}
+
 // ---- sb_inbounds ----
 
 func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) {
@@ -1403,6 +1456,28 @@ func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) 
 		out = append(out, m)
 	}
 	ok(w, out)
+}
+
+// handleAdminReorderSbInbounds persists a new display order for the inbound
+// list. Body: {"ids":[...]} — inbound ids in the desired global order (the page
+// groups by machine but sort_order is global, so the client submits the whole
+// list). Only sort_order is rewritten, and no rebuild is triggered: order
+// decides where an inbound appears in the generated `inbounds` array and nothing
+// else — sing-box dispatches by listen port and tag — so the running nodes need
+// no push. The next rebuild picks the new order up on its own.
+func (a *API) handleAdminReorderSbInbounds(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.IDs) == 0 {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := a.st.ReorderSbInbounds(req.IDs); err != nil {
+		fail(w, http.StatusInternalServerError, "保存排序失败")
+		return
+	}
+	ok(w, J{"count": len(req.IDs)})
 }
 
 var sbInboundTypes = map[string]bool{"vless": true, "hysteria2": true, "tuic": true, "trojan": true, "vmess": true, "shadowsocks": true, "anytls": true, "hysteria": true, "mixed": true}

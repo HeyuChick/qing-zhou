@@ -95,6 +95,29 @@ a { color: var(--accent-strong); text-decoration: none; }
 .list-card .lc-foot { display: flex; gap: 6px; align-items: center; margin-top: 2px; }
 .list-card .lc-empty { color: var(--text-3); font-size: 13px; }
 
+/* 长选项下拉菜单：配合 n-select 的 menu-props / n-popselect 的 class 使用。
+   选项名带机器、协议、地址时很容易超出触发器宽度，默认的单行省略号会把结尾
+   （恰恰是区分度最高的部分）切掉，让人选不对。这里允许菜单比触发器宽、并让
+   选项文本换行完整显示。换行与虚拟滚动的固定行高冲突，用它的地方需同时
+   :virtual-scroll="false"。
+   选择器要压过 naive 自己那条 `.n-base-select-menu .n-base-select-option
+   .n-base-select-option__content { white-space: nowrap; text-overflow: ellipsis }`
+   ——它是三层类、且运行时注入排在本文件之后，权重不够就完全不生效。 */
+.qz-wide-menu { max-width: min(92vw, 620px); }
+.n-base-select-menu.qz-wide-menu .n-base-select-option .n-base-select-option__content {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-all;
+  line-height: 1.45;
+}
+.n-base-select-menu.qz-wide-menu .n-base-select-option {
+  height: auto;
+  min-height: 34px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
 /* 统计行（多卡片并排）自动换行 */
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 14px; }

@@ -261,6 +261,7 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/sb/tls/quick-selfsigned", a.handleAdminQuickSelfSignedTls)
 		ar.Post("/api/admin/sb/tls/acme", a.handleAdminAcmeCert)
 		ar.Post("/api/admin/sb/tls/cert", a.handleAdminSaveCertTls)
+		ar.Post("/api/admin/sb/tls/reorder", a.handleAdminReorderSbTls)
 		ar.Put("/api/admin/sb/tls/cert/{id}", a.handleAdminSaveCertTls)
 		ar.Put("/api/admin/sb/tls/{id}", a.handleAdminSaveSbTls)
 		ar.Delete("/api/admin/sb/tls/{id}", a.handleAdminDeleteSbTls)
@@ -284,8 +285,12 @@ func (a *API) Router() http.Handler {
 		ar.Delete("/api/admin/sb/egresses/{id}", a.handleAdminDeleteSbEgress)
 		ar.Post("/api/admin/sb/egresses/{id}/test", a.handleAdminTestSbEgress)
 		ar.Get("/api/admin/sb/sync-status", a.handleAdminSbSyncStatus)
+		// Re-push config to a machine whose last sync failed. Queued, not awaited.
+		ar.Post("/api/admin/sb/resync", a.handleAdminSbResync)
 		ar.Get("/api/admin/sb/inbounds", a.handleAdminListSbInbounds)
 		ar.Post("/api/admin/sb/inbounds", a.handleAdminSaveSbInbound)
+		// Before the /{id} routes: chi would otherwise read "reorder" as an id.
+		ar.Post("/api/admin/sb/inbounds/reorder", a.handleAdminReorderSbInbounds)
 		ar.Put("/api/admin/sb/inbounds/{id}", a.handleAdminSaveSbInbound)
 		ar.Delete("/api/admin/sb/inbounds/{id}", a.handleAdminDeleteSbInbound)
 		ar.Post("/api/admin/sb/inbounds/{id}/ack-upstream", a.handleAdminAckUpstreamBroken)

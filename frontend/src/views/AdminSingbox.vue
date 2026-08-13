@@ -2,6 +2,13 @@
   <div>
     <h2 class="page-title">sing-box 配置</h2>
     <n-tabs v-model:value="tab" animated @update:value="onTabChange">
+      <!-- 打码开关放在页签栏，因为它对整页生效（机器地址、出口地址、拓扑、配置预览），
+           而不是只对某一个页签生效——截图前点一次就够。 -->
+      <template #suffix>
+        <n-button size="tiny" quaternary :type="showIp ? 'warning' : 'default'" @click="toggleIp">
+          {{ showIp ? '🙈 隐藏 IP' : '👁 显示 IP' }}
+        </n-button>
+      </template>
       <n-tab-pane name="tls" tab="TLS 配置">
         <div class="page-toolbar">
           <n-input v-model:value="tlsSearch" placeholder="搜索名称/SNI" size="small" clearable style="width:200px;max-width:50%;" />
@@ -16,7 +23,7 @@
                 <div class="machine-head">
                   <span class="machine-name">{{ g.machine.name }}</span>
                   <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
-                  <span class="machine-host">{{ g.machine.host }}</span>
+                  <span class="machine-host">{{ dispHost(g.machine.host) }}</span>
                 </div>
               </template>
               <template #header-extra>
@@ -26,9 +33,9 @@
                 </div>
               </template>
               <div v-if="g.items.length" class="card-grid">
-                <div v-for="r in g.items" :key="r.id" class="list-card">
+                <div v-for="(r, idx) in g.items" :key="r.id" class="list-card">
                   <div class="lc-head">
-                    <span class="lc-title">{{ r.name || '—' }}</span>
+                    <span class="lc-title wrap" :title="r.name || ''">{{ r.name || '—' }}</span>
                     <n-tag :type="r.mode === 'reality' ? 'success' : 'info'" size="tiny" bordered="false">{{ r.mode === 'reality' ? 'Reality' : '证书 TLS' }}</n-tag>
                     <n-tag v-if="r.cert_info" :type="r.cert_info.expired ? 'error' : r.cert_info.expiring ? 'warning' : 'success'" size="tiny" bordered="false">
                       {{ r.cert_info.expired ? '已过期' : r.cert_info.days_left + '天' }}
@@ -42,6 +49,10 @@
                     <n-button size="tiny" @click="openTls(r)">编辑</n-button>
                     <n-button size="tiny" @click="cloneTls(r)">克隆</n-button>
                     <n-button size="tiny" type="error" @click="deleteTls(r.id)">删除</n-button>
+                    <span class="lc-order">
+                      <n-button size="tiny" quaternary :disabled="idx === 0 || reordering" title="上移" @click="moveTls(g, idx, -1)">↑</n-button>
+                      <n-button size="tiny" quaternary :disabled="idx === g.items.length - 1 || reordering" title="下移" @click="moveTls(g, idx, 1)">↓</n-button>
+                    </span>
                   </div>
                 </div>
               </div>
@@ -72,7 +83,7 @@
                 <div class="machine-head">
                   <span class="machine-name">{{ g.machine.name }}</span>
                   <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
-                  <span class="machine-host">{{ g.machine.host }}</span>
+                  <span class="machine-host">{{ dispHost(g.machine.host) }}</span>
                   <n-tag v-if="!g.machine.enabled" size="tiny" type="warning" bordered="false">已禁用</n-tag>
                 </div>
               </template>
@@ -84,24 +95,28 @@
                 </div>
               </template>
               <div v-if="g.items.length" class="card-grid">
-                <div v-for="r in g.items" :key="r.id" class="list-card">
+                <div v-for="(r, idx) in g.items" :key="r.id" class="list-card">
                   <div class="lc-head">
                     <n-checkbox :checked="checkedIds.has(r.id)" @update:checked="toggleCheck(r.id)" style="margin-right:6px;" />
-                    <span class="lc-title">{{ r.tag || '—' }}</span>
+                    <span class="lc-title wrap" :title="r.tag || ''">{{ r.tag || '—' }}</span>
                     <n-tag :type="r.enabled ? 'success' : 'error'" size="tiny" bordered="false" style="cursor:pointer;" @click="toggleInbound(r)">{{ r.enabled ? '启用' : '停用' }}</n-tag>
                   </div>
                   <div class="lc-meta">
                     <span class="kv"><n-tag size="tiny" bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag></span>
                     <span class="kv">端口 <b>{{ r.listen_port }}</b></span>
                     <span class="kv">用户 <b>{{ r.user_count ?? 0 }}</b></span>
-                    <span class="kv">TLS <b>{{ tlsName(r.tls_id) }}</b></span>
-                    <span v-if="r.egress_id" class="kv">出口 <b>{{ egressName(r.egress_id) }}</b></span>
+                    <span class="kv">TLS <b :title="tlsName(r.tls_id)">{{ tlsName(r.tls_id) }}</b></span>
+                    <span v-if="r.egress_id" class="kv">出口 <b :title="egressName(r.egress_id)">{{ egressName(r.egress_id) }}</b></span>
                   </div>
                   <div class="lc-foot">
                     <n-button size="tiny" @click="openInbound(r)">编辑</n-button>
                     <n-button size="tiny" @click="cloneInbound(r)">克隆</n-button>
                     <n-button size="tiny" :loading="portChecking === r.id" @click="checkPort(r)">测端口</n-button>
                     <n-button size="tiny" type="error" @click="deleteInbound(r.id)">删除</n-button>
+                    <span class="lc-order">
+                      <n-button size="tiny" quaternary :disabled="idx === 0 || reordering" title="上移" @click="moveInbound(g, idx, -1)">↑</n-button>
+                      <n-button size="tiny" quaternary :disabled="idx === g.items.length - 1 || reordering" title="下移" @click="moveInbound(g, idx, 1)">↓</n-button>
+                    </span>
                   </div>
                   <div v-if="portResult[r.id]" class="port-result" :class="{ ok: portResult[r.id].reachable, err: !portResult[r.id].reachable }">
                     {{ portResult[r.id].reachable ? '可达 · ' + portResult[r.id].ms.toFixed(0) + 'ms' : '不可达 · ' + (portResult[r.id].error || '失败') }}
@@ -127,14 +142,14 @@
           <div v-if="egresses.length" class="card-grid">
             <div v-for="r in egresses" :key="r.id" class="list-card">
               <div class="lc-head">
-                <span class="lc-title">{{ r.name }}</span>
+                <span class="lc-title wrap" :title="r.name">{{ r.name }}</span>
                 <n-tag size="tiny" type="info" bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag>
                 <n-tag v-if="r.tls_enabled" size="tiny" :type="r.tls_insecure ? 'warning' : 'success'" bordered="false">
                   {{ r.tls_insecure ? 'TLS·不校验' : 'TLS' }}
                 </n-tag>
               </div>
               <div class="lc-meta">
-                <span class="kv">地址 <b>{{ r.host }}:{{ r.port }}</b></span>
+                <span class="kv">地址 <b>{{ dispHost(r.host) }}:{{ r.port }}</b></span>
                 <span class="kv">用户名 <b>{{ r.username || '—' }}</b></span>
                 <span v-if="r.tls_enabled && r.sni" class="kv">SNI <b>{{ r.sni }}</b></span>
                 <span class="kv">UDP <b>{{ r.udp_mode_effective === 'block' ? '阻断' : '透传' }}</b></span>
@@ -144,7 +159,7 @@
               <div v-if="r._test" class="egress-test" :class="r._test.ok ? 'ok' : 'err'">
                 <template v-if="r._test.mode === 'probe'">
                   <template v-if="r._test.ok_count + r._test.fail_count === 0">
-                    ❓ 并发探测没有拿到结果（经 {{ r._test.via_server }}）：{{ r._test.output || '节点无输出' }}
+                    ❓ 并发探测没有拿到结果（经 {{ r._test.via_server }}）：{{ dispText(r._test.output) || '节点无输出' }}
                   </template>
                   <template v-else>
                     <template v-if="r._test.ok">✅ 并发 {{ r._test.requested }} 条全部成功</template>
@@ -153,15 +168,15 @@
                       · 延迟 {{ r._test.latency_min_ms }}/{{ r._test.latency_p50_ms }}/{{ r._test.latency_max_ms }}ms（最小/中位/最大）
                     </template>
                     · 经 {{ r._test.via_server }}
-                    <div v-for="(e, i) in (r._test.errors || [])" :key="i">× {{ e.count }} 次：{{ e.msg }}</div>
+                    <div v-for="(e, i) in (r._test.errors || [])" :key="i">× {{ e.count }} 次：{{ dispText(e.msg) }}</div>
                     <div v-if="r._test.fail_count > 0" class="probe-hint">
                       部分失败通常是供应商的并发连接数上限——所有绑定此出口的入站共用一个账号，浏览网页一次就会开几十条连接。
                       但先看上面的错误信息：出现 <b>429</b> 或 rate limit 字样的是 IP 回显服务在限流，不是你的出口到顶了。
                     </div>
                   </template>
                 </template>
-                <template v-else-if="r._test.ok">✅ 出口 IP <b>{{ r._test.ip }}</b> · {{ r._test.latency_ms }}ms · 经 {{ r._test.via_server }}</template>
-                <template v-else>❌ 不通（经 {{ r._test.via_server }}）：{{ r._test.output }}</template>
+                <template v-else-if="r._test.ok">✅ 出口 IP <b>{{ dispHost(r._test.ip) }}</b> · {{ r._test.latency_ms }}ms · 经 {{ r._test.via_server }}</template>
+                <template v-else>❌ 不通（经 {{ r._test.via_server }}）：{{ dispText(r._test.output) }}</template>
               </div>
               <div class="lc-foot">
                 <n-button size="tiny" :loading="r._testing" @click="testEgress(r)">测试连通</n-button>
@@ -185,17 +200,23 @@
               <span><i class="dot landing"></i>落地入站</span>
               <span><i class="dot egress"></i>代理出口</span>
               <span><i class="dot inet"></i>互联网</span>
-              <span style="flex:1;"></span>
-              <n-button size="tiny" quaternary @click="showTopoIp = !showTopoIp">{{ showTopoIp ? '🙈 隐藏 IP' : '👁 显示 IP' }}</n-button>
             </div>
             <div v-for="g in inboundGroups" :key="g.machine.id" class="topo-machine">
               <div class="topo-mhead">
                 <span class="machine-name">{{ g.machine.name }}</span>
                 <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
-                <span class="machine-host">{{ showTopoIp ? g.machine.host : maskHost(g.machine.host) }}</span>
-                <n-tag v-if="syncBadge(g.machine.id)" size="tiny" :type="syncBadge(g.machine.id)!.type" :bordered="false" :title="syncBadge(g.machine.id)!.title">
+                <span class="machine-host">{{ dispHost(g.machine.host) }}</span>
+                <n-tag v-if="syncBadge(g.machine.id)" size="tiny" :type="syncBadge(g.machine.id)!.type" :bordered="false">
                   {{ syncBadge(g.machine.id)!.text }}
                 </n-tag>
+                <span v-if="syncBadge(g.machine.id)" class="sync-time">{{ agoText(syncAt(g.machine.id)) }}</span>
+                <span style="flex:1;"></span>
+                <n-button size="tiny" quaternary :loading="resyncing === g.machine.id" @click="resync(g.machine.id)">重新下发</n-button>
+              </div>
+              <!-- 失败原因必须直接摆出来：一个光秃秃的「下发失败」徽标等于没说，
+                   管理员没有别的地方能看到这条错误（面板日志在服务器上）。 -->
+              <div v-if="syncError(g.machine.id) !== null" class="sync-err">
+                <b>下发失败</b>：{{ dispText(syncError(g.machine.id) || '') || '未记录具体原因——常见于 SSH 不可达、节点上 sing-box 校验不通过。点右上角「重新下发」可重试并拿到本次的错误。' }}
               </div>
               <div v-for="r in g.items" :key="r.id" class="topo-row" :class="{ off: !r.enabled }">
                 <span class="topo-node client">👤 客户端</span>
@@ -219,7 +240,7 @@
                     <span class="topo-node egress">
                       <b>{{ seg.eg.name }}</b>
                       <span class="topo-proto">{{ (seg.eg.type || '').toUpperCase() }}</span>
-                      <span class="topo-loc">{{ showTopoIp ? seg.eg.host : maskHost(seg.eg.host) }}</span>
+                      <span class="topo-loc">{{ dispHost(seg.eg.host) }}</span>
                     </span>
                   </template>
                   <span v-else-if="seg.kind === 'broken-landing'" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
@@ -229,7 +250,7 @@
                 <span class="topo-node inet">🌐 互联网</span>
                 <span class="topo-actions">
                   <n-button v-if="!r.upstream_inbound_id && !r.egress_id" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
-                  <n-popselect v-if="!r.upstream_inbound_id && !r.egress_id && egresses.length" :options="egressPopOpts" @update:value="(v: number) => attachEgress(r, v)">
+                  <n-popselect v-if="!r.upstream_inbound_id && !r.egress_id && egresses.length" :options="egressPopOpts" class="qz-wide-menu" scrollable @update:value="(v: number) => attachEgress(r, v)">
                     <n-button size="tiny" quaternary type="primary">＋ 挂出口</n-button>
                   </n-popselect>
                   <n-button v-else-if="r.upstream_inbound_id" size="tiny" quaternary type="warning" @click="unlinkRelay(r)">解除中转</n-button>
@@ -244,12 +265,15 @@
 
       <n-tab-pane name="preview" tab="配置预览">
         <div class="page-toolbar">
-          <n-select v-model:value="previewSid" :options="serverOpts" placeholder="本机" clearable style="width:200px;max-width:60%;" size="small" @update:value="onPreviewServerChange" />
+          <n-select v-model:value="previewSid" :options="serverOpts" v-bind="longSelFor(serverOpts.length)" placeholder="本机" clearable style="width:200px;max-width:60%;" size="small" @update:value="onPreviewServerChange" />
           <span class="spacer" />
           <n-button size="small" :loading="checkLoading" :disabled="!previewJson" @click="runCheck">正确性检查</n-button>
           <n-button size="small" :disabled="!previewJson" @click="copyPreview">复制配置</n-button>
           <n-button size="small" type="primary" :loading="previewLoading" @click="loadPreview">刷新预览</n-button>
         </div>
+        <p v-if="!showIp && previewJson" style="font-size:12px;color:var(--text-3);margin:0 0 8px;">
+          IP 已按打码显示（右上角可切换）。「复制配置」复制的仍是<b>真实</b>配置，不受影响。
+        </p>
         <p v-if="previewNoInbounds" style="font-size:12px;color:var(--warning,#d97706);margin:0 0 10px;line-height:1.7;">
           这台机器（{{ serverName(previewSid || 0) }}）下没有任何入站，因此配置里 <code>inbounds</code> 为空。
           请在上方下拉切换到入站所在的机器，或回「入站」页确认入站的**归属机器**与**已启用**状态。
@@ -264,7 +288,7 @@
           </ul>
           <pre v-if="checkResult.output" class="check-out">{{ checkResult.output }}</pre>
         </div>
-        <n-code :code="previewJson" language="json" style="max-height:60vh;overflow:auto;" />
+        <n-code :code="previewShown" language="json" style="max-height:60vh;overflow:auto;" />
       </n-tab-pane>
     </n-tabs>
 
@@ -279,7 +303,7 @@
             </n-radio-group>
           </n-form-item>
           <n-form-item label="名称"><n-input v-model:value="te.name" /></n-form-item>
-          <n-form-item label="所属服务器"><n-select v-model:value="te.server_id" :options="serverOpts" placeholder="本机" clearable /></n-form-item>
+          <n-form-item label="所属服务器"><n-select v-model:value="te.server_id" :options="serverOpts" v-bind="longSelFor(serverOpts.length)" placeholder="本机" clearable /></n-form-item>
           <n-form-item label="SNI 伪装域名">
             <n-input-group>
               <n-input v-model:value="te.server_name" placeholder="www.microsoft.com" style="flex:1;" />
@@ -333,7 +357,7 @@
           </template>
           <template v-if="te.mode === 'tls'">
             <n-form-item label="引用证书">
-              <n-select :value="te.cert_id" :options="certOpts" @update:value="onCertPick" />
+              <n-select :value="te.cert_id" :options="certOpts" v-bind="longSelFor(certOpts.length)" @update:value="onCertPick" />
             </n-form-item>
             <n-form-item v-if="te.cert_id" label=" ">
               <n-tag type="success" size="small" style="white-space:normal;height:auto;">已引用「证书管理」中的证书：SNI 自动取证书域名，真实证书自动关闭「允许不安全」；续期与管理请到证书管理页。</n-tag>
@@ -458,7 +482,7 @@
             </n-form-item>
             <n-form-item label="信任证书">
               <div style="width:100%;">
-                <n-select v-model:value="ee.tls_cert_id" :options="egressTrustOpts" />
+                <n-select v-model:value="ee.tls_cert_id" :options="egressTrustOpts" v-bind="longSelFor(egressTrustOpts.length)" />
                 <div class="form-tip">
                   这一跳面板是<b>客户端</b>，选的证书只用来<b>校验对方</b>，不会发出去。<br>
                   商用代理保持「系统根证书」；只有代理是你自己搭的、用的正是证书管理里这张证书（含自签）时才需要指定。
@@ -533,16 +557,16 @@
           <n-form-item label="名称 / Tag"><n-input v-model:value="ie.tag" /></n-form-item>
           <n-form-item label="监听地址"><n-select v-model:value="ie.listen" :options="listenOpts" /></n-form-item>
           <n-form-item label="监听端口"><n-input-number v-model:value="ie.listen_port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
-          <n-form-item label="所属服务器"><n-select v-model:value="ie.server_id" :options="serverOpts" placeholder="本机" clearable /></n-form-item>
+          <n-form-item label="所属服务器"><n-select v-model:value="ie.server_id" :options="serverOpts" v-bind="longSelFor(serverOpts.length)" placeholder="本机" clearable /></n-form-item>
           <n-form-item label="落地 / 中转">
             <div style="width:100%;">
-              <n-select v-model:value="ie.upstream_inbound_id" :options="landingOpts" @update:value="(v: number) => { if (v) ie.egress_id = 0 }" />
+              <n-select v-model:value="ie.upstream_inbound_id" :options="landingOpts" v-bind="longSelFor(landingOpts.length)" @update:value="(v: number) => { if (v) ie.egress_id = 0 }" />
               <div class="form-tip">直接出网＝本入站即落地机；选择某入站＝本入站作为线路机，流量转发到该落地入站再出网。</div>
             </div>
           </n-form-item>
           <n-form-item label="代理出口">
             <div style="width:100%;">
-              <n-select v-model:value="ie.egress_id" :options="egressOpts" @update:value="(v: number) => { if (v) ie.upstream_inbound_id = 0 }" />
+              <n-select v-model:value="ie.egress_id" :options="egressOpts" v-bind="longSelFor(egressOpts.length)" @update:value="(v: number) => { if (v) ie.upstream_inbound_id = 0 }" />
               <div class="form-tip">选择后本入站的流量经该 SOCKS5/HTTP 代理（如购买的静态 IP）出网，出口 IP 即代理的 IP；与「落地 / 中转」二选一。出口在「代理出口」页管理。</div>
               <n-alert v-if="selectedEgressUdp === 'block'" type="warning" :show-icon="false" style="margin-top:8px;">
                 所选出口的 <b>UDP 策略为「阻断」</b>：本入站的 UDP 会在服务端被丢弃（客户端表现为超时），TUIC / Hysteria / QUIC、以及依赖 UDP 的游戏和音视频将连不上。
@@ -552,7 +576,7 @@
               </n-alert>
             </div>
           </n-form-item>
-          <n-form-item v-if="ie.type !== 'shadowsocks'" label="TLS / Reality"><n-select v-model:value="ie.tls_id" :options="tlsOpts" placeholder="无" clearable /></n-form-item>
+          <n-form-item v-if="ie.type !== 'shadowsocks'" label="TLS / Reality"><n-select v-model:value="ie.tls_id" :options="tlsOpts" v-bind="longSelFor(tlsOpts.length)" placeholder="无" clearable /></n-form-item>
           <n-form-item v-if="ie.type === 'mixed' && !ie.tls_id" label=" ">
             <div style="width:100%;">
               <n-button size="small" :loading="quickCertLoading" @click="quickBindCert">🔒 一键生成自签证书并绑定（→ HTTPS 代理）</n-button>
@@ -630,7 +654,31 @@ const tab = ref('tls')
 const loading = ref(false)
 const saving = ref(false)
 const quickCertLoading = ref(false)
-const showTopoIp = ref(false) // 链路拓扑默认对 IP 打码，避免截图/分享泄露真实地址
+// 整页对 IP 打码，默认开启：这一页几乎每个视图都会把机器/出口的真实地址摆出来，
+// 截图发群里就漏了。选择记在 localStorage，免得每次进来都要再点一次。
+const IP_KEY = 'qz.sb.showIp'
+const showIp = ref(localStorage.getItem(IP_KEY) === '1')
+function toggleIp() {
+  showIp.value = !showIp.value
+  try { localStorage.setItem(IP_KEY, showIp.value ? '1' : '0') } catch {}
+}
+// 长下拉统一配置：选项名普遍很长（「入站 · 协议 @ 机器」「名称 · 类型 地址:端口」），
+// 单行省略号一截就分不清谁是谁。菜单不跟随触发器宽度 + 选项换行 + 可搜索；
+// 换行与虚拟滚动的固定行高冲突（行是按 index×行高 定位的，换行会压到下一行上），
+// 所以换行时必须关掉虚拟滚动。
+const longSel = {
+  filterable: true,
+  virtualScroll: false,
+  consistentMenuWidth: false,
+  menuProps: { class: 'qz-wide-menu' },
+}
+// 但列表可以很大——出口「粘贴导入」一次就允许 500 条。到那个量级，一次性渲染
+// 全部选项的代价比省略号更疼，于是保留虚拟滚动、放弃换行，靠「菜单按内容宽度」
+// 兜住长名字。给绑定动态列表的下拉用。
+const VIRTUAL_FROM = 120
+function longSelFor(n: number) {
+  return n > VIRTUAL_FROM ? { filterable: true, consistentMenuWidth: false } : longSel
+}
 const genLoading = ref(false)
 
 // 抽屉宽度：移动端全屏，桌面 500px
@@ -670,6 +718,35 @@ function syncBadge(machineId: number): SyncBadge | null {
     default: return null
   }
 }
+// 失败原因原文。返回 null 表示这台机器没失败（'' 表示失败但后端没记下原因）。
+function syncError(machineId: number): string | null {
+  const s = syncStatus.value[String(machineId)]
+  if (!s || s.state !== 'failed') return null
+  return s.error || ''
+}
+function syncAt(machineId: number): number {
+  const s = syncStatus.value[String(machineId)]
+  return s?.at || 0
+}
+function agoText(ts: number): string {
+  if (!ts) return ''
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - ts)
+  if (d < 60) return `${d} 秒前`
+  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`
+  if (d < 86400) return `${Math.floor(d / 3600)} 小时前`
+  return `${Math.floor(d / 86400)} 天前`
+}
+// 重新下发：排队一次该机器的配置推送。后端立即返回（SSH 推送最长 90s，HTTP
+// 写超时 30s，同步等会把「其实成功了」报成失败），结果靠轮询 sync-status 回显。
+const resyncing = ref<number | null>(null)
+async function resync(machineId: number) {
+  resyncing.value = machineId
+  try {
+    await apiPost('/api/admin/sb/resync', { server_id: machineId })
+    message.success('已排队重新下发，稍候看这台机器的状态')
+    pollSyncStatus()
+  } catch (e: any) { message.error(e.message || '重新下发失败') } finally { resyncing.value = null }
+}
 
 const tlsList = ref<any[]>([])
 const certList = ref<any[]>([])
@@ -681,6 +758,8 @@ const previewLoading = ref(false)
 const previewSid = ref<number | null>(null)
 // True when a preview rendered successfully but has zero inbounds — the usual
 // cause of a "空的" preview is having the wrong machine selected.
+// 预览区显示用文本：隐藏 IP 时按打码渲染，复制/校验仍走 previewJson 原文。
+const previewShown = computed(() => (showIp.value ? previewJson.value : maskConfigText(previewJson.value)))
 const previewNoInbounds = computed(() => {
   if (!previewJson.value) return false
   try { return (JSON.parse(previewJson.value).inbounds || []).length === 0 } catch { return false }
@@ -740,6 +819,37 @@ let expandedInit = false
 const allExpanded = computed(() => expandedMachines.value.length >= machines.value.length)
 function toggleAllMachines() {
   expandedMachines.value = allExpanded.value ? [] : machines.value.map(m => m.id)
+}
+
+// ===== 列表排序 =====
+// TLS 与入站都按 sort_order 全局排，页面只是按机器分组展示，所以「上移/下移」＝
+// 在全局数组里和同组的相邻项对调，再把完整 id 顺序提交给后端。乐观更新，失败回滚重载。
+const reordering = ref(false)
+async function moveWithin(list: any[], setList: (v: any[]) => void, groupItems: any[], idx: number, dir: -1 | 1, url: string) {
+  const target = idx + dir
+  if (target < 0 || target >= groupItems.length || reordering.value) return
+  const aId = groupItems[idx].id
+  const bId = groupItems[target].id
+  const arr = [...list]
+  const i = arr.findIndex(x => x.id === aId)
+  const j = arr.findIndex(x => x.id === bId)
+  if (i < 0 || j < 0) return
+  ;[arr[i], arr[j]] = [arr[j], arr[i]]
+  setList(arr)
+  reordering.value = true
+  try {
+    await apiPost(url, { ids: arr.map(x => x.id) })
+  } catch (e: any) {
+    message.error(e.message || '排序失败'); await load()
+  } finally { reordering.value = false }
+}
+// 搜索状态下组内看到的是过滤后的子集，相邻两项在全局里未必相邻——照样只交换这两项，
+// 结果与所见一致。
+function moveTls(g: any, idx: number, dir: -1 | 1) {
+  return moveWithin(tlsList.value, v => (tlsList.value = v), g.items, idx, dir, '/api/admin/sb/tls/reorder')
+}
+function moveInbound(g: any, idx: number, dir: -1 | 1) {
+  return moveWithin(inbounds.value, v => (inbounds.value = v), g.items, idx, dir, '/api/admin/sb/inbounds/reorder')
 }
 
 // 在指定机器下新增入站（预填所属服务器）。
@@ -881,6 +991,37 @@ function maskHost(h: string): string {
   if (h.length <= 6) return '***'
   return h.slice(0, 2) + '***' + h.slice(-2)
 }
+// 页面里所有展示地址的地方都走这里，由右上角开关统一决定明文还是打码。
+function dispHost(h: string): string { return showIp.value ? h : maskHost(h) }
+
+// 私有/回环/链路本地地址不打码：它们本来就不泄露任何东西，打了反而让
+// 「listen: 127.0.0.1」这类配置读不懂。
+function isPrivateV4(ip: string): boolean {
+  const p = ip.split('.').map(Number)
+  if (p.length !== 4 || p.some(n => !(n >= 0 && n <= 255))) return true // 不是合法 IP，别动
+  if (p[0] === 0 || p[0] === 10 || p[0] === 127) return true
+  if (p[0] === 192 && p[1] === 168) return true
+  if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true
+  if (p[0] === 169 && p[1] === 254) return true
+  if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true // CGNAT
+  if (p[0] >= 224) return true                               // 组播/广播
+  return false
+}
+// 给配置预览打码：先按已知主机（机器、代理出口，含域名）整串替换，再兜底扫一遍
+// 公网 IPv4 字面量。只影响显示，「复制配置」拿的仍是 previewJson 原文。
+function maskConfigText(s: string): string {
+  if (!s) return s
+  const hosts = new Set<string>()
+  for (const m of machines.value) if (m.host && /[.:]/.test(m.host)) hosts.add(m.host)
+  for (const e of egresses.value) if (e.host) hosts.add(e.host)
+  let out = s
+  // 长的先替换，否则 "a.example.com" 会被其后缀 "example.com" 先切掉一半。
+  for (const h of [...hosts].sort((a, b) => b.length - a.length)) out = out.split(h).join(maskHost(h))
+  return out.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, ip => (isPrivateV4(ip) ? ip : maskHost(ip)))
+}
+// 后端返回的自由文本（下发失败原因、出口测试输出）同样会带上地址——
+// 「ssh connect 179.253.224.226: ...」照抄出来，打码开关就等于没开。
+function dispText(s: string): string { return showIp.value ? s : maskConfigText(s || '') }
 function serverName(id: number) { if (!id) return '本机'; const s = servers.value.find(s => s.id === id); return s ? s.name : '#' + id }
 function tlsName(id: number) { if (!id) return '无'; const t = tlsList.value.find(t => t.id === id); return t ? t.name : '#' + id }
 function tlsUseCount(id: number) { return inbounds.value.filter(n => n.tls_id === id).length }
@@ -1197,10 +1338,10 @@ function egressOf(r: any) { return r && r.egress_id ? (egressById.value[r.egress
 function egressName(id: number) { const e = egressById.value[id]; return e ? e.name : '—' }
 const egressOpts = computed(() => [
   { label: '不使用（直接出网）', value: 0 },
-  ...egresses.value.map(e => ({ label: `${e.name} · ${(e.type || '').toUpperCase()} ${e.host}:${e.port}`, value: e.id })),
+  ...egresses.value.map(e => ({ label: `${e.name} · ${(e.type || '').toUpperCase()} ${dispHost(e.host)}:${e.port}`, value: e.id })),
 ])
 // 拓扑图「＋ 挂出口」的候选列表（不含「不使用」项）。
-const egressPopOpts = computed(() => egresses.value.map(e => ({ label: `${e.name} · ${(e.type || '').toUpperCase()} ${e.host}:${e.port}`, value: e.id })))
+const egressPopOpts = computed(() => egresses.value.map(e => ({ label: `${e.name} · ${(e.type || '').toUpperCase()} ${dispHost(e.host)}:${e.port}`, value: e.id })))
 // 入站编辑抽屉中当前所选出口的类型／UDP 策略，用于 UDP 告警。
 const selectedEgressType = computed(() => { const e = egressById.value[ie.egress_id]; return e ? e.type : '' })
 const selectedEgressUdp = computed(() => { const e = egressById.value[ie.egress_id]; return e ? e.udp_mode_effective : '' })
@@ -1554,6 +1695,26 @@ async function load() {
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
 
 .form-tip { font-size: 12px; color: var(--text-3, #999); margin-top: 4px; line-height: 1.5; }
+
+/* 名称普遍很长（「DMIT洛杉矶-代理出口-300M体验」这种），全站默认的单行省略号
+   会把区分度最高的尾巴切掉，这一页改成换行显示，宁可卡片高一点。 */
+.list-card .lc-title.wrap { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-all; line-height: 1.35; }
+/* 多了一组排序按钮，窄卡片里要能换行，否则最后一个按钮被挤出卡片外。 */
+.list-card .lc-foot { flex-wrap: wrap; }
+.lc-order { margin-left: auto; display: inline-flex; gap: 2px; }
+
+/* 下发失败原因 */
+.sync-err {
+  margin: -2px 0 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: rgba(208, 48, 80, 0.09);
+  color: #d03050;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+.sync-time { font-size: 11px; color: var(--text-3, #999); }
 
 .egress-test { font-size: 12px; margin: 6px 0 2px; padding: 6px 8px; border-radius: 6px; line-height: 1.5; word-break: break-all; }
 .egress-test.ok { background: rgba(24, 160, 88, 0.1); color: #18a058; }
