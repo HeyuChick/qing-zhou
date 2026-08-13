@@ -42,10 +42,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # install-singbox.sh is piped into `bash` as root on every landing node —
-      # a syntax error there is a broken node, so at minimum it must parse.
-      - name: Parse install script
-        run: bash -n internal/assets/install-singbox.sh
+      # Both scripts are piped into `bash` as root — install.sh on the panel
+      # host, install-singbox.sh on every landing node. A syntax error in either
+      # is a broken machine, so at minimum they must parse.
+      - name: Parse install scripts
+        run: |
+          bash -n internal/assets/install-singbox.sh
+          bash -n install.sh
 
   frontend:
     runs-on: ubuntu-latest

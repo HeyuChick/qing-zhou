@@ -173,7 +173,7 @@ CURRENT=""
 if [ -x "$BIN_PATH" ]; then
   # 优先问运行中的面板（/api/health 免认证返回版本），失败退回安装标记文件
   LISTEN=$(env_get QZ_LISTEN)
-  LISTEN="${LISTEN:-127.0.0.1:8081}"
+  LISTEN="${LISTEN:-0.0.0.0:8081}"   # 与二进制的默认值一致（internal/config）
   HEALTH_HOST="${LISTEN/0.0.0.0/127.0.0.1}"
   if [ "$HAVE_CURL" = "1" ]; then
     CURRENT=$(curl -fsS --connect-timeout 3 "http://${HEALTH_HOST}/api/health" 2>/dev/null \
@@ -334,6 +334,17 @@ if [ "$MODE" = "update" ]; then
   fi
 fi
 
+# 升级不能顺手扩大监听范围。二进制在 QZ_LISTEN 缺失时默认 0.0.0.0:8081，而这台
+# 机器上一版在同样缺失时跑的是回环 —— 直接重启就等于把一个只给本机开的面板推上
+# 公网。配置里没写过的按原行为显式钉住；要直连公网是一次明确的选择，不该由升级
+# 替人做主。全新安装不走这里：上面已按用户的选择写过 QZ_LISTEN。
+if [ "$MODE" = "update" ] && [ -f "$ENV_FILE" ] && [ -z "$(env_get QZ_LISTEN)" ]; then
+  printf 'QZ_LISTEN=127.0.0.1:8081\n' >> "$ENV_FILE"
+  echo "⚠️  $ENV_FILE 里没有 QZ_LISTEN。新版在缺省时改为监听 0.0.0.0:8081（公网可达），"
+  echo "    为免升级把面板暴露出去，已按原行为写入 QZ_LISTEN=127.0.0.1:8081。"
+  echo "    要用 IP:端口 直连，改成 0.0.0.0:8081 再 systemctl restart $SERVICE_NAME"
+fi
+
 info "启动服务 ..."
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
@@ -342,7 +353,7 @@ systemctl restart "$SERVICE_NAME"
 # ---------- 启动确认 ----------
 sleep 2
 LISTEN=$(env_get QZ_LISTEN)
-LISTEN="${LISTEN:-127.0.0.1:8081}"
+LISTEN="${LISTEN:-0.0.0.0:8081}"   # 与二进制的默认值一致（internal/config）
 HEALTH_HOST="${LISTEN/0.0.0.0/127.0.0.1}"
 OK=0
 for _ in 1 2 3 4 5; do
