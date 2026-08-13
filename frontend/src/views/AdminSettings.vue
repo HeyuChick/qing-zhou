@@ -48,6 +48,21 @@
               已由环境变量 QZ_PUBLIC_BASE 固定；如需在面板内修改，请移除该环境变量后重启。
             </span>
           </n-form-item>
+          <!-- 和上面那栏长得像，但不是一回事：上面是「客户端去哪儿取订阅」，这里是
+               「订阅里的节点连到哪儿」。留空且一台服务器都没加过时，自建节点不会
+               出现在任何人的订阅里 —— 节点建好了、套餐也生效，订阅却是空的。 -->
+          <n-form-item label="节点对外地址">
+            <div style="width:100%;max-width:560px;">
+              <n-input v-model:value="form.node_host_override"
+                placeholder="留空 = 用第一台已启用服务器的地址" style="max-width:420px;" />
+              <p style="font-size:12px;color:var(--text-3);margin-top:6px;line-height:1.7;">
+                写进订阅里的节点地址（只填域名或 IP，不带端口和 <code>http://</code>）。留空时自动取第一台已启用「服务器」的地址。
+                <b>节点跑在面板本机时必须填这里</b> —— 本机不是一条「服务器」记录（它不需要 SSH 下发），
+                自动取值取不到，订阅会是空的：节点列表显示「共 0 个节点」。
+                <br>面板挂在 Cloudflare 橙云等反代后面时，这里要填<b>源站 IP</b>，不能填被代理的域名。
+              </p>
+            </div>
+          </n-form-item>
           <n-form-item label="sing-box 安装命令">
             <div style="width:100%;max-width:560px;">
               <n-input-group>
@@ -345,6 +360,9 @@ onMounted(async () => {
     ])
     if (data) {
       Object.assign(form, data)
+      // 从未设置过的键不会出现在响应里，而 n-input 需要一个受控的空串而不是
+      // undefined —— 否则第一次输入前它不是一个受控输入。
+      form.node_host_override ??= ''
       emailVerify.value = data.email_verify_required === 'true'
       pointsRate.value = parseInt(data.points_per_cny) || 10
       signupBonus.value = parseInt(data.signup_bonus_points) || 0
