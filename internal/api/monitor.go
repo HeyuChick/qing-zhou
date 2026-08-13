@@ -213,8 +213,13 @@ func (a *API) handleMonitorDashboard(w http.ResponseWriter, r *http.Request) {
 	latest, _ := a.st.GetLatestMetricsForAll()
 	if local := a.localMonitorServer(latest); local != nil {
 		total++
-		if local.LastSeen >= time.Now().Add(-2*time.Minute).Unix() {
+		now := time.Now()
+		if local.LastSeen >= now.Add(-2*time.Minute).Unix() {
 			online++
+		}
+		// Same 3-day window CountProbeServers uses.
+		if local.ExpiryDate > now.Unix() && local.ExpiryDate <= now.AddDate(0, 0, 3).Unix() {
+			expiring++
 		}
 		add(latest[store.LocalNodeID])
 	}
@@ -678,16 +683,41 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// The panel's own machine has no servers row to update — the one thing that
-	// is settable about it lives in settings. Everything else on this endpoint
-	// describes a machine someone bought and can reach over SSH, none of which
-	// applies here, so it is accepted and ignored rather than 404'd.
+	// The panel's own machine has no servers row, so its settable fields live in
+	// settings instead. Everything an admin records about a rented box still
+	// applies — including, most of all, the expiry date: this is the machine
+	// whose lapsing takes the whole service down. probe_enabled is the one field
+	// that genuinely does not apply (the panel samples itself, there is no probe
+	// to switch off) and is accepted and ignored.
 	if id == store.LocalNodeID {
 		if body.PublicVisible != nil {
 			if err := a.st.SetSettingBool(settingLocalPublic, *body.PublicVisible); err != nil {
 				fail(w, 500, "更新失败")
 				return
 			}
+		}
+		asset := a.st.LocalAsset()
+		if body.Provider != nil {
+			asset.Provider = *body.Provider
+		}
+		if body.Location != nil {
+			asset.Location = *body.Location
+		}
+		if body.Spec != nil {
+			asset.Spec = *body.Spec
+		}
+		if body.Price != nil {
+			asset.Price = *body.Price
+		}
+		if body.ExpiryDate != nil {
+			asset.ExpiryDate = *body.ExpiryDate
+		}
+		if body.Notes != nil {
+			asset.Notes = *body.Notes
+		}
+		if err := a.st.SetLocalAsset(asset); err != nil {
+			fail(w, 500, "更新失败")
+			return
 		}
 		latest, _ := a.st.GetLatestMetricsForAll()
 		ok(w, a.localMonitorServer(latest))

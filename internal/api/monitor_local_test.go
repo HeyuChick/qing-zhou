@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -156,6 +157,69 @@ func setVisible(t *testing.T, a *API, id int64, v bool) {
 	a.handleUpdateServerMonitor(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("set public_visible=%v on %d: status %d, body %s", v, id, w.Code, w.Body.String())
+	}
+}
+
+// The panel's machine is rented like any other, and its expiry is the one that
+// takes the whole service down rather than a single node — so the asset fields
+// have to be editable for it too, even though it has no servers row to hold
+// them. Only 启用探针 genuinely does not apply.
+func TestLocalNodeAssetFieldsRoundTrip(t *testing.T) {
+	a, st := newNodeUpgradeAPI(t)
+	sampleLocal(t, st, 3)
+
+	expiry := time.Now().AddDate(0, 0, 2).Unix() // inside the 3-day warning window
+	body := `{"provider":"索隆云","location":"美国-洛杉矶","spec":"1H1G","price":39,` +
+		`"expiry_date":` + strconv.FormatInt(expiry, 10) + `,"notes":"面板机","probe_enabled":false}`
+	req := httptest.NewRequest("PUT", "/x", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "0")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.handleUpdateServerMonitor(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body.String())
+	}
+
+	var list struct {
+		Data []struct {
+			Provider     string  `json:"provider"`
+			Location     string  `json:"location"`
+			Spec         string  `json:"spec"`
+			Price        float64 `json:"price"`
+			ExpiryDate   int64   `json:"expiry_date"`
+			DaysLeft     *int    `json:"days_left"`
+			Notes        string  `json:"notes"`
+			ProbeEnabled bool    `json:"probe_enabled"`
+		} `json:"data"`
+	}
+	getJSON(t, a.handleMonitorServers, "/api/admin/monitor/servers", &list)
+	if len(list.Data) != 1 {
+		t.Fatalf("want the local machine, got %+v", list.Data)
+	}
+	row := list.Data[0]
+	if row.Provider != "索隆云" || row.Location != "美国-洛杉矶" || row.Spec != "1H1G" || row.Price != 39 || row.Notes != "面板机" {
+		t.Fatalf("asset fields did not round-trip: %+v", row)
+	}
+	if row.ExpiryDate != expiry || row.DaysLeft == nil {
+		t.Fatalf("expiry did not round-trip: %+v", row)
+	}
+	// probe_enabled is meaningless here and must not be able to switch the panel's
+	// own collection off — the card would go blank with no way to bring it back.
+	if !row.ProbeEnabled {
+		t.Fatal("local collection must stay on regardless of what is posted")
+	}
+
+	// The expiry has to reach the dashboard's 即将到期 counter, or an admin who
+	// filled it in still gets no warning.
+	var dash struct {
+		Data struct {
+			ExpiringSoon int `json:"expiring_soon"`
+		} `json:"data"`
+	}
+	getJSON(t, a.handleMonitorDashboard, "/api/admin/monitor/dashboard", &dash)
+	if dash.Data.ExpiringSoon != 1 {
+		t.Fatalf("expiring_soon = %d, want 1", dash.Data.ExpiringSoon)
 	}
 }
 

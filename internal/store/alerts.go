@@ -237,6 +237,10 @@ func (s *Store) localAlertNode() *Server {
 		Enabled:      true,
 		ProbeEnabled: true,
 		LastSeen:     m.Ts,
+		// Whatever expiry the admin recorded for this box. Of every machine the
+		// panel warns about, this is the one worth warning about most: a landing
+		// node lapsing costs a node, this one lapsing costs the panel.
+		ExpiryDate: s.LocalAsset().ExpiryDate,
 	}
 }
 

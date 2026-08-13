@@ -89,9 +89,18 @@ func (a *API) localMonitorServer(latest map[int64]*store.ServerMetrics) *store.S
 	if m == nil {
 		return nil
 	}
+	asset := a.st.LocalAsset()
 	return &store.Server{
 		ID:   store.LocalNodeID,
 		Name: store.LocalNodeName,
+		// The panel's machine is usually rented too, and its expiry is the one
+		// that takes the whole service with it rather than a single node.
+		Provider:   asset.Provider,
+		Location:   asset.Location,
+		Spec:       asset.Spec,
+		Price:      asset.Price,
+		ExpiryDate: asset.ExpiryDate,
+		Notes:      asset.Notes,
 		// Host stays empty: the panel's address is not a secret, but printing it
 		// on a status page next to "this is the control panel" is free targeting
 		// help. The hostname in the metrics is what the detail view shows.

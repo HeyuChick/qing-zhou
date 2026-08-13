@@ -116,7 +116,8 @@
               </template>
               {{ s.public_visible ? '显示在公开状态页' : '不显示在公开状态页' }}
             </n-tooltip>
-            <n-button v-if="!s.local" size="tiny" @click="openAsset(s)">编辑</n-button>
+            <n-button size="tiny" @click="openAsset(s)">编辑</n-button>
+            <!-- 本机是面板自采集，没有探针可装 -->
             <n-button v-if="!s.local" size="tiny" @click="copyInstall(s)">安装</n-button>
           </n-space>
         </template>
@@ -162,7 +163,10 @@
 
     <!-- 资产编辑抽屉 -->
     <n-drawer v-model:show="showAsset" :width="drawerW" placement="right">
-      <n-drawer-content title="编辑资产信息" closable>
+      <n-drawer-content :title="assetServer?.local ? '编辑资产信息 · 面板本机' : '编辑资产信息'" closable>
+        <n-alert v-if="assetServer?.local" type="info" :bordered="false" style="margin-bottom:12px;">
+          面板本机由面板自采集，无需探针。这里记的是这台机器本身 —— 到期提醒尤其值得填：落地机到期只掉一个节点，面板机到期是整站。
+        </n-alert>
         <n-form v-if="assetServer" label-placement="left" label-width="80">
           <n-form-item label="提供商"><n-input v-model:value="assetForm.provider" /></n-form-item>
           <n-form-item label="位置"><n-input v-model:value="assetForm.location" /></n-form-item>
@@ -170,7 +174,7 @@
           <n-form-item label="月费 (¥)"><n-input-number v-model:value="assetForm.price" :min="0" style="width:100%;" /></n-form-item>
           <n-form-item label="到期时间"><n-input v-model:value="assetExpiry" type="datetime-local" style="width:100%;" /></n-form-item>
           <n-form-item label="备注"><n-input v-model:value="assetForm.notes" type="textarea" :rows="2" /></n-form-item>
-          <n-form-item label="启用探针"><n-switch v-model:value="assetForm.probe_enabled" /></n-form-item>
+          <n-form-item v-if="!assetServer.local" label="启用探针"><n-switch v-model:value="assetForm.probe_enabled" /></n-form-item>
         </n-form>
         <n-button type="primary" block :loading="saving" @click="handleSaveAsset">保存</n-button>
       </n-drawer-content>
@@ -182,7 +186,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, shallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  NCard, NButton, NSpace, NTag, NProgress, NDrawer, NDrawerContent, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSelect, NEmpty, NTooltip, useMessage
+  NCard, NButton, NSpace, NTag, NProgress, NDrawer, NDrawerContent, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSelect, NEmpty, NTooltip, NAlert, useMessage
 } from 'naive-ui'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { fmtBytes, fmtDateTime, fmtUptime, pct, toLocalDatetimeInput } from '@/utils/format'
@@ -370,7 +374,10 @@ async function handleSaveAsset() {
   saving.value = true
   try {
     const body: any = { ...assetForm }
-    if (assetExpiry.value) body.expiry_date = Math.floor(new Date(assetExpiry.value).getTime() / 1000)
+    // 本机没有探针可启用，别把这个字段发过去（后端也会忽略）
+    if (assetServer.value.local) delete body.probe_enabled
+    // 清空到期时间要能存回去，否则填错了就再也去不掉
+    body.expiry_date = assetExpiry.value ? Math.floor(new Date(assetExpiry.value).getTime() / 1000) : 0
     await apiPut(`/api/admin/servers/${assetServer.value.id}/monitor`, body)
     message.success('保存成功'); showAsset.value = false; await load()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
