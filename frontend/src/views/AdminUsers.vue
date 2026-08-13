@@ -181,19 +181,19 @@
         <!-- 分配：不扣积分的手动开通，就放在套餐列表下面，看完再决定 -->
         <div class="pm-assign">
           <div class="pm-assign-title">分配套餐（不扣积分）</div>
-          <!-- 管理员账号的 assign-plan 后端直接拒绝，别摆一个必然报错的按钮 -->
-          <div v-if="plansUser?.role === 'admin'" class="pm-assign-hint">管理员账号无需开通套餐。</div>
-          <template v-else>
-            <div class="pm-assign-row">
-              <n-select v-model:value="assignPkgId" :options="pkgOptions" placeholder="选择套餐" filterable style="flex:1;" />
-              <n-button type="primary" :loading="saving" :disabled="!assignPkgId" @click="handleAssign">
-                {{ assignWillQueue ? '分配并排队' : '分配' }}
-              </n-button>
-            </div>
-            <div v-if="assignWillQueue" class="pm-assign-hint">
-              该用户已有此套餐在生效，新的一份会排队，等当前份用完或到期后自动启用。
-            </div>
-          </template>
+          <div class="pm-assign-row">
+            <n-select v-model:value="assignPkgId" :options="pkgOptions" placeholder="选择套餐" filterable style="flex:1;" />
+            <n-button type="primary" :loading="saving" :disabled="!assignPkgId" @click="handleAssign">
+              {{ assignWillQueue ? '分配并排队' : '分配' }}
+            </n-button>
+          </div>
+          <div v-if="assignWillQueue" class="pm-assign-hint">
+            该用户已有此套餐在生效，新的一份会排队，等当前份用完或到期后自动启用。
+          </div>
+          <!-- 管理员账号也能分配：它在 sing-box 侧就是一个普通身份，自己拿来当订阅用很常见 -->
+          <div v-if="plansUser?.role === 'admin' && !assignWillQueue" class="pm-assign-hint">
+            管理员账号同样可以持有套餐，分配后即可用自己的订阅链接。
+          </div>
         </div>
       </n-spin>
     </n-modal>
@@ -364,9 +364,6 @@ function hasAnyPlan(u: any) {
 function planNote(u: any) {
   const s = u.plan_summary
   if (!s) return '点击查看套餐明细'
-  // 管理员账号不走套餐：assign-plan 对它直接返回「管理员账号无需开通套餐」，
-  // 所以别在这里请人去点一个必然失败的操作。
-  if (u.role === 'admin' && !hasAnyPlan(u)) return '管理员账号，无需套餐'
   if (!hasAnyPlan(u)) return '点击分配一个套餐'
   if (!s.active) return '没有生效中的套餐，点击处理'
   const names = activeNamesText(s)
@@ -382,8 +379,13 @@ function activeNamesText(s: any) {
   if (!parts.length) return ''
   return parts.slice(0, 2).join('、') + (parts.length > 2 ? ` +${parts.length - 2}` : '')
 }
-// 管理员账号没有套餐是正常状态，不该被算进「无生效套餐」催办
-function needsPlan(u: any) { return u.role !== 'admin' && !u.plan_summary?.active }
+// 管理员现在也能持有套餐，但很多站点的 admin 只用来管理、从不走代理：无条件
+// 把它算进「无生效套餐」会留下一个永远清不掉的待办。只有当它确实拿过套餐
+// （说明这个号在当订阅用）时才催办。
+function needsPlan(u: any) {
+  if (u.plan_summary?.active) return false
+  return u.role !== 'admin' || hasAnyPlan(u)
+}
 function expiringSoon(u: any) {
   const ts = u.plan_summary?.next_expiry_at
   if (!ts) return false

@@ -24,10 +24,10 @@ func (a *API) handleAdminRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	disabled := 0
+	// UsersWithClient only returns accounts that were provisioned a proxy identity,
+	// so an admin in this list is being used as a subscription and must be treated
+	// like any other user — skipping it left its cached links stale after a rebuild.
 	for _, u := range users {
-		if u.Role == "admin" {
-			continue
-		}
 		a.invalidateLinks(u.ID)
 		if u.Status != "banned" && !a.userHasNodeAccess(u) {
 			disabled++
@@ -366,10 +366,10 @@ func (a *API) handleAdminAssignPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "用户不存在")
 		return
 	}
-	if u.Role == "admin" {
-		fail(w, http.StatusBadRequest, "管理员账号无需开通套餐")
-		return
-	}
+	// Admins are not excluded: BuildUsersByTag provisions an admin holding an
+	// active plan like any other user, and 积分购买 already lets an admin buy one
+	// for themselves. Refusing only the free comp here made the panel owner's own
+	// account the one account they couldn't equip.
 	pkg, err := a.st.GetPackage(req.PackageID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "服务器错误")
