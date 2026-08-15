@@ -63,17 +63,7 @@ func (a *API) handleDetectNodeHost(w http.ResponseWriter, r *http.Request) {
 	// VPN, container and hypervisor adapters has several, none of them the
 	// answer, and they would bury the one that is.
 	out = append(out, localInterfaceCandidates(len(echoed) == 0)...)
-	out = dedupeNodeHostCandidates(out)
-	// Only a measured address is endorsed. The configured 访问地址 is the one
-	// candidate that is routinely wrong (橙云), so when the probes are blocked
-	// and it is all that is left, it is offered — with its warning — but never
-	// marked 推荐 and never filled in without the admin reading it.
-	for i := range out {
-		if out[i].Source == "echo" {
-			out[i].Recommended = true
-			break
-		}
-	}
+	out = recommendMeasured(dedupeNodeHostCandidates(out))
 	ok(w, J{"candidates": out})
 }
 
@@ -93,6 +83,11 @@ func detectEgressIPs(ctx context.Context) []nodeHostCandidate {
 	)
 	for _, family := range []string{"tcp4", "tcp6"} {
 		client := echoClient(family)
+		// The client is per-call, so its keep-alive connections have no second
+		// user and nothing to time them out (a zero-value Transport keeps idle
+		// conns forever). Left open, every click parks up to six established TLS
+		// connections, and their read loops, until the far end happens to hang up.
+		defer client.CloseIdleConnections()
 		for _, u := range nodeHostEchoURLs {
 			wg.Add(1)
 			go func(family, u string) {
@@ -313,6 +308,21 @@ func localInterfaceCandidates(includePrivate bool) []nodeHostCandidate {
 		}
 	}
 	return out
+}
+
+// recommendMeasured endorses at most one candidate, and only one we actually
+// measured. The configured 访问地址 is the candidate that is routinely wrong
+// (橙云 proxies it), so when the probes are blocked and it is all that is left
+// it is still offered — with its warning — but never marked 推荐, and the UI
+// keys its one-click fill off this flag rather than off "there is only one".
+func recommendMeasured(in []nodeHostCandidate) []nodeHostCandidate {
+	for i := range in {
+		if in[i].Source == "echo" {
+			in[i].Recommended = true
+			break
+		}
+	}
+	return in
 }
 
 // dedupeNodeHostCandidates keeps the first occurrence of each address, so a

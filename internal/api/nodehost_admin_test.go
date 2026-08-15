@@ -104,6 +104,37 @@ func TestLocalInterfaceCandidatesHidePrivateUnlessAsked(t *testing.T) {
 	}
 }
 
+// 推荐 doubles as the UI's permission to fill the field in one click, so it
+// must never land on a guess. The 访问地址 candidate is the one that is
+// routinely wrong (橙云 proxies it) and it is exactly what remains when the
+// probes are blocked — the case where an unearned 推荐 would do damage.
+func TestRecommendOnlyMeasuredCandidates(t *testing.T) {
+	noEcho := recommendMeasured([]nodeHostCandidate{
+		{Value: "panel.example.com", Source: "public_base"},
+		{Value: "1.2.3.4", Source: "server"},
+	})
+	for _, c := range noEcho {
+		if c.Recommended {
+			t.Errorf("unmeasured candidate recommended: %+v", c)
+		}
+	}
+
+	withEcho := recommendMeasured([]nodeHostCandidate{
+		{Value: "panel.example.com", Source: "public_base"},
+		{Value: "45.12.88.125", Source: "echo"},
+		{Value: "203.0.113.9", Source: "echo"},
+	})
+	var rec []string
+	for _, c := range withEcho {
+		if c.Recommended {
+			rec = append(rec, c.Value)
+		}
+	}
+	if len(rec) != 1 || rec[0] != "45.12.88.125" {
+		t.Errorf("want exactly the first measured candidate recommended, got %v", rec)
+	}
+}
+
 // The echo probe must reject anything that is not a usable public address —
 // a captive portal or an error page would otherwise be written into every
 // subscription link.
