@@ -215,6 +215,7 @@ func (a *API) Router() http.Handler {
 		ar.Put("/api/admin/settings", a.handlePutSettings)
 		ar.Get("/api/admin/settings/default-templates", a.handleGetDefaultTemplates)
 		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
+		ar.Get("/api/admin/settings/detect-node-host", a.handleDetectNodeHost)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
 		ar.Get("/api/admin/backup", a.handleAdminBackup)
 		// Which sing-box each node runs, plus a per-node reinstall.

@@ -53,8 +53,23 @@
                出现在任何人的订阅里 —— 节点建好了、套餐也生效，订阅却是空的。 -->
           <n-form-item label="节点对外地址">
             <div style="width:100%;max-width:560px;">
-              <n-input v-model:value="form.node_host_override"
-                placeholder="留空 = 用第一台已启用服务器的地址" style="max-width:420px;" />
+              <n-input-group style="max-width:420px;">
+                <n-input v-model:value="form.node_host_override"
+                  placeholder="留空 = 用第一台已启用服务器的地址" />
+                <n-button ghost :loading="detecting" @click="detectNodeHost">自动获取</n-button>
+              </n-input-group>
+              <!-- 探测只给候选、不直接落库：填错的代价不对等。留空的表现是「共 0 个
+                   节点」，一眼看得出；静默填错（比如橙云代理的域名）变成「订阅里
+                   有链接但连不上」，排查成本高得多。所以来源要摆在眼前让人挑。 -->
+              <div v-if="hostCandidates.length" class="host-cands">
+                <div class="host-cands-t">点一条填入：</div>
+                <button v-for="c in hostCandidates" :key="c.value" type="button"
+                  class="host-cand" @click="pickNodeHost(c)">
+                  <span class="host-cand-v">{{ c.value }}</span>
+                  <span class="host-cand-l">{{ c.label }}<template v-if="c.recommended"> · 推荐</template></span>
+                  <span class="host-cand-n">{{ c.note }}</span>
+                </button>
+              </div>
               <p style="font-size:12px;color:var(--text-3);margin-top:6px;line-height:1.7;">
                 写进订阅里的节点地址（只填域名或 IP，不带端口和 <code>http://</code>）。留空时自动取第一台已启用「服务器」的地址。
                 <b>节点跑在面板本机时必须填这里</b> —— 本机不是一条「服务器」记录（它不需要 SSH 下发），
@@ -284,6 +299,31 @@ function envLocked(key: string): boolean {
   return (form._env_keys || '').split(',').includes(key)
 }
 
+type NodeHostCandidate = { value: string; source: string; label: string; note: string; recommended?: boolean }
+const detecting = ref(false)
+const hostCandidates = ref<NodeHostCandidate[]>([])
+
+// 「节点对外地址」自动获取：后端并发探出口 IP，并把面板访问地址、第一台已启用
+// 服务器、本机网卡一起作为候选返回。只有一条时直接填，多条时列出来让管理员挑。
+async function detectNodeHost() {
+  detecting.value = true
+  try {
+    const res = await apiGet<{ candidates: NodeHostCandidate[] }>('/api/admin/settings/detect-node-host')
+    const list = res?.candidates || []
+    hostCandidates.value = list
+    if (!list.length) { message.warning('没探测到可用地址，请手动填写'); return }
+    // 只有「实测出来的那条」才直接填。剩下的（面板访问地址、本机网卡）都带着
+    // 「什么时候不能用」的说明，得让人看过再点。
+    if (list.length === 1 && list[0].recommended) pickNodeHost(list[0])
+  } catch (e: any) { message.error(e.message || '探测失败') } finally { detecting.value = false }
+}
+
+function pickNodeHost(c: NodeHostCandidate) {
+  form.node_host_override = c.value
+  hostCandidates.value = []
+  message.success(`已填入 ${c.value}（${c.label}），记得点保存`)
+}
+
 async function copyInstall() {
   try {
     await navigator.clipboard.writeText(installCmd.value)
@@ -392,6 +432,15 @@ onMounted(async () => {
 .cf-guide ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
 .cf-guide li { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
 .cf-guide a { color: var(--accent-strong); }
+.host-cands { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.host-cands-t { font-size: 12px; color: var(--text-3); }
+.host-cand { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; width: 100%; max-width: 420px;
+  text-align: left; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; cursor: pointer; font: inherit; }
+.host-cand:hover { border-color: var(--accent-strong); }
+.host-cand-v { font-family: monospace; font-size: 13px; color: var(--text); }
+.host-cand-l { font-size: 12px; color: var(--text-2); align-self: center; }
+.host-cand-n { grid-column: 1 / -1; font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
 .cf-guide-n { margin-top: 10px; font-size: 12px; color: var(--text-3); line-height: 1.55; }
 .cf-guide code { background: var(--border); padding: 0 4px; border-radius: 4px; }
 </style>
