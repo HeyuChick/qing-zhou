@@ -1019,7 +1019,11 @@ func firstShortID(v interface{}) string {
 // any other user (so an admin account can also be used as a subscription). With
 // no node groups configured at all it falls back to "every user's first active
 // bucket in every inbound" (zero-config).
+// inboundUser identifies one emitted user within one inbound, for deduplication.
+type inboundUser struct{ tag, name string }
+
 func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
+	seen := map[inboundUser]bool{}
 	inbounds, err := s.ListSbInbounds()
 	if err != nil {
 		return nil, err
@@ -1031,9 +1035,9 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 	// included: an admin who buys a plan gets a normal metered bucket and should
 	// be usable as a subscription just like any other user. Only active buckets
 	// (orderBuckets below) end up provisioned, so plan-less admins add nothing.
-	rows, err := s.db.Query(`SELECT ` + bucketCols + ` FROM user_plans
-		WHERE user_id IN (SELECT id FROM users WHERE status!='banned')
-		ORDER BY user_id, id`)
+	rows, err := s.db.Query(`SELECT ` + bucketCols + bucketFrom + `
+		WHERE p.user_id IN (SELECT id FROM users WHERE status!='banned')
+		ORDER BY p.user_id, p.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1087,13 +1091,27 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 			// separate from the plan. Skip a bucket whose proxy credential has expired
 			// so its user drops out of the mixed inbound (and GenerateConfig then omits
 			// a now-userless mixed inbound rather than exposing an open proxy).
+			// A whole subscription line shares one identity, so two live份 of the
+			// same line would otherwise be emitted as the same user twice. The
+			// queue promotes one份 at a time and retires the rest, so this should
+			// not arise — but a duplicate user in an inbound is the kind of thing
+			// sing-box may reject outright, and taking every user's nodes down is
+			// too expensive an outcome to leave to "should not arise".
 			if ib.Type == "mixed" {
 				if !b.ProxyActive(now) {
 					continue
 				}
-				out[ib.Tag] = append(out[ib.Tag], singbox.User{Name: b.ProxyName(), Password: b.ProxySecret()})
+				u := singbox.User{Name: b.ProxyName(), Password: b.ProxySecret()}
+				if !seen[inboundUser{ib.Tag, u.Name}] {
+					seen[inboundUser{ib.Tag, u.Name}] = true
+					out[ib.Tag] = append(out[ib.Tag], u)
+				}
 			} else {
-				out[ib.Tag] = append(out[ib.Tag], singbox.User{Name: b.ClientName, UUID: b.ClientUUID, Password: b.ClientSecret})
+				u := singbox.User{Name: b.ClientName, UUID: b.ClientUUID, Password: b.ClientSecret}
+				if !seen[inboundUser{ib.Tag, u.Name}] {
+					seen[inboundUser{ib.Tag, u.Name}] = true
+					out[ib.Tag] = append(out[ib.Tag], u)
+				}
 			}
 		}
 	}

@@ -368,6 +368,35 @@ CREATE TABLE IF NOT EXISTS user_plans (
   updated_at     INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_client ON user_plans(client_name);
+
+-- The credentials a user's client authenticates with, per subscription line —
+-- one row per (user, package), NOT per purchase.
+--
+-- Each purchase gets its own user_plans row because metering is per份: every月
+-- needs its own quota and its own counters. Credentials are the opposite: they
+-- must never change, or every client silently stops working the moment one份
+-- hands over to the next. Keeping both on the same row forced the credentials to
+-- be shuffled between rows at every handoff, which broke whenever the row they
+-- were being read from had been deleted (a refund, an admin revoke).
+--
+-- Splitting them means a handoff is just two status changes. This table is the
+-- authority; user_plans.client_* survives only for pool/free/grant buckets,
+-- which are one-per-user and never hand over.
+CREATE TABLE IF NOT EXISTS plan_identities (
+  user_id          INTEGER NOT NULL,
+  package_id       INTEGER NOT NULL,
+  client_name      TEXT    NOT NULL,
+  client_uuid      TEXT    NOT NULL,
+  client_secret    TEXT    NOT NULL,
+  proxy_username   TEXT    NOT NULL DEFAULT '',
+  proxy_password   TEXT    NOT NULL DEFAULT '',
+  proxy_expires_at INTEGER NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  PRIMARY KEY (user_id, package_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_identities_client ON plan_identities(client_name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_identities_proxy ON plan_identities(proxy_username) WHERE proxy_username <> '';
 CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id);
 
 -- Per-user traffic time-series, one row per stats poll that saw traffic. Feeds
@@ -681,6 +710,12 @@ func (s *Store) Migrate() error {
 	// Mark the已用完份 of existing queue chains as retired BEFORE the merge below,
 	// so a progressed queue is never mistaken for legacy duplicates (idempotent).
 	if err := s.backfillRetiredBuckets(); err != nil {
+		return err
+	}
+	// Lift each subscription line's credentials out of its buckets and into
+	// plan_identities, taking them from the份 in service so nobody's client is
+	// disconnected by the upgrade (idempotent).
+	if err := s.backfillPlanIdentities(); err != nil {
 		return err
 	}
 	// Collapse duplicate plan buckets left by pre-renewal repurchases (idempotent).

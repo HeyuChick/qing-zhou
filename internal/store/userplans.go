@@ -32,9 +32,16 @@ type txLike interface {
 // (expiry_at=0) and is invisible to the config until advanceUserQueues promotes
 // it. The caller runs advanceUserQueues right after, so a first purchase (no
 // active head yet) activates immediately while a repeat purchase waits in line.
-func enqueuePlanBucket(ex execer, userID int64, username string, pkg *Package, orderID, now int64) error {
+func enqueuePlanBucket(tx txLike, userID int64, username string, pkg *Package, orderID, now int64) error {
+	// The credentials belong to the subscription line, minted once. The row still
+	// gets a unique client_name of its own because user_plans.client_name carries a
+	// UNIQUE index, but it is an internal row label now — never a credential, and
+	// never what a client authenticates with (see bucketCols).
+	if err := ensurePlanIdentity(tx, userID, pkg.ID, username, now); err != nil {
+		return err
+	}
 	uu, ss := genBucketCreds()
-	_, err := insertBucket(ex, &Bucket{
+	_, err := insertBucket(tx, &Bucket{
 		UserID: userID, Kind: "plan", PackageID: pkg.ID, Name: pkg.Name,
 		ClientName: fmt.Sprintf("qz_%s_p%d", username, orderID),
 		ClientUUID: uu, ClientSecret: ss,
@@ -78,72 +85,42 @@ const usableHeadPredicate = `h.kind='plan' AND h.status='active'
 // still renders as 已过期/已用尽 and still stays out of every config.
 const StatusRetired = "retired"
 
-// bucketIdentity is the credential set a user's client actually authenticates
-// with: the sing-box client identity, plus the optional mixed (HTTP/SOCKS5)
-// proxy account.
-type bucketIdentity struct {
-	ID           int64 // 0 = there was no live份 to inherit from
-	ClientName   string
-	ClientUUID   string
-	ClientSecret string
-	ProxyUser    string
-	ProxyPass    string
-	ProxyExpires int64
+// planIdentityCols is the credential set a subscription line carries.
+const planIdentityCols = `client_name, client_uuid, client_secret,
+	proxy_username, proxy_password, proxy_expires_at`
+
+// PlanIdentity is one subscription line's credentials — stable for the life of
+// the line, no matter how many份 pass through it.
+type PlanIdentity struct {
+	ClientName     string
+	ClientUUID     string
+	ClientSecret   string
+	ProxyUsername  string
+	ProxyPassword  string
+	ProxyExpiresAt int64
 }
 
-// liveIdentity returns the credentials currently in service for this user's
-// package — the most recently activated份, which is the one whose uuid/password
-// the user's client is holding. Must be read BEFORE the next份 is flipped to
-// 'active', or that份 would select itself.
-func liveIdentity(tx txLike, userID, pkgID int64) (bucketIdentity, error) {
-	var b bucketIdentity
-	err := tx.QueryRow(`SELECT id, client_name, client_uuid, client_secret,
-		proxy_username, proxy_password, proxy_expires_at
-		FROM user_plans WHERE user_id=? AND kind='plan' AND package_id=? AND status='active'
-		ORDER BY id DESC LIMIT 1`, userID, pkgID).
-		Scan(&b.ID, &b.ClientName, &b.ClientUUID, &b.ClientSecret, &b.ProxyUser, &b.ProxyPass, &b.ProxyExpires)
-	if errors.Is(err, sql.ErrNoRows) {
-		return bucketIdentity{}, nil // first份 of this package — nothing to inherit
-	}
-	return b, err
-}
-
-// carryIdentity hands the retiring份's credentials to the份 that just took over,
-// so a handoff is invisible to the user's client.
+// ensurePlanIdentity mints this (user, package) line's credentials the first time
+// the user buys the package, and returns the existing ones every time after.
 //
-// Each purchase mints its own bucket with its own uuid/password, which is right
-// for METERING — every份 needs a distinct stats identity — but it also meant the
-// credentials rotated every time the queue advanced. The links a client already
-// imported name the retired份, which is no longer in any inbound, so the user
-// silently lost service at every rollover until their client happened to refetch
-// the subscription (Profile-Update-Interval is 12h). Someone handed six months as
-// six monthly份 hit that five times.
-//
-// Metering is unaffected: each份 keeps its own row and its own counters, and
-// resolveStatsIdentity maps the name to whichever bucket holds it, so traffic
-// bills to the份 that is actually live. History is keyed by bucket_id, so the
-// retired份's past usage stays attributed to it.
-//
-// The retired份 is renamed rather than left sharing the name: client_name carries
-// a UNIQUE index (and proxy_username a unique partial one), so the name has to be
-// freed before it can be taken. Its new name is derived from its own id, which is
-// unique by construction and cannot collide with a real qz_* name. The promoted
-// 份's originally-minted credentials are simply dropped — a queued份 is never
-// rendered into a config or a link, so they were never in service anywhere.
-func carryIdentity(tx txLike, outgoing bucketIdentity, promotedID, now int64) error {
-	if outgoing.ID == 0 || outgoing.ID == promotedID {
-		return nil // first份 of this package: it keeps the identity it was minted with
-	}
-	// Retire the outgoing份 in the same breath as taking its name: the two must
-	// not drift, or liveIdentity would keep offering a name it no longer owns.
-	if _, err := tx.Exec(`UPDATE user_plans SET status=?, client_name=?, proxy_username='', updated_at=? WHERE id=?`,
-		StatusRetired, fmt.Sprintf("zz_retired_%d", outgoing.ID), now, outgoing.ID); err != nil {
+// This is why a handoff no longer touches credentials at all: the份 that takes
+// over does not inherit anything, it simply belongs to a line that already has an
+// identity. A refund or a revoke can delete any份 — even the one in service —
+// without the line losing its credentials.
+func ensurePlanIdentity(tx txLike, userID, packageID int64, username string, now int64) error {
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM plan_identities WHERE user_id=? AND package_id=?`,
+		userID, packageID).Scan(&exists); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`UPDATE user_plans SET client_name=?, client_uuid=?, client_secret=?,
-		proxy_username=?, proxy_password=?, proxy_expires_at=?, updated_at=? WHERE id=?`,
-		outgoing.ClientName, outgoing.ClientUUID, outgoing.ClientSecret,
-		outgoing.ProxyUser, outgoing.ProxyPass, outgoing.ProxyExpires, now, promotedID)
+	if exists > 0 {
+		return nil
+	}
+	uu, ss := genBucketCreds()
+	_, err := tx.Exec(`INSERT INTO plan_identities
+		(user_id, package_id, client_name, client_uuid, client_secret, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?)`,
+		userID, packageID, fmt.Sprintf("qz_%s_s%d", username, packageID), uu, ss, now, now)
 	return err
 }
 
@@ -203,13 +180,6 @@ func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
 		if err != nil {
 			return changed, err
 		}
-		// Read the retiring head's identity BEFORE promoting — after the status
-		// flip the newly-active份 would be the newest 'active' row and would
-		// select itself.
-		outgoing, err := liveIdentity(tx, userID, pkgID)
-		if err != nil {
-			return changed, err
-		}
 		newExpiry := int64(0) // duration 0 = unlimited-duration plan → never expires
 		if dur > 0 {
 			newExpiry = now + dur*86400
@@ -218,7 +188,11 @@ func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
 			newExpiry, now, id); err != nil {
 			return changed, err
 		}
-		if err := carryIdentity(tx, outgoing, id, now); err != nil {
+		// Retire whoever was holding the slot. Nothing is moved: the credentials
+		// live on the subscription line, so the份 taking over already has them.
+		if _, err := tx.Exec(`UPDATE user_plans SET status=?, updated_at=?
+			WHERE user_id=? AND kind='plan' AND package_id=? AND status='active' AND id<>?`,
+			StatusRetired, now, userID, pkgID, id); err != nil {
 			return changed, err
 		}
 		changed = true
@@ -670,9 +644,38 @@ func (b *Bucket) Active(now int64) bool {
 	return b.NotExpired(now) && b.HasQuota()
 }
 
-const bucketCols = `id, user_id, kind, package_id, name, client_name, client_uuid, client_secret,
-	traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, created_at, updated_at,
-	proxy_username, proxy_password, proxy_expires_at, status, duration_days`
+// bucketCols selects a bucket with its credentials already resolved.
+//
+// For a plan份 the credentials come from plan_identities — the subscription line
+// it belongs to — so every份 of the same (user, package) reports the SAME
+// identity no matter how many times the queue has advanced. p.client_* is the
+// fallback, which is what pool/free/grant buckets (one per user, never handed
+// over) use, and what a plan份 uses until the identity row exists.
+//
+// Resolving here rather than at each call site means everything downstream —
+// config generation, link building, ownership — keeps reading b.ClientUUID and
+// simply gets the stable value.
+//
+// The proxy account falls back as a UNIT and only when the line has none: a
+// plain COALESCE would not do, because an identity row stores an empty string
+// rather than NULL for "no proxy account", and empty is a value — it would shadow
+// account still sitting on the bucket row instead of falling through to it.
+const bucketCols = `p.id, p.user_id, p.kind, p.package_id, p.name,
+	COALESCE(i.client_name, p.client_name), COALESCE(i.client_uuid, p.client_uuid),
+	COALESCE(i.client_secret, p.client_secret),
+	p.traffic_limit, p.used_up, p.used_down, p.expiry_at, p.last_online_at, p.order_id,
+	p.created_at, p.updated_at,
+	CASE WHEN COALESCE(i.proxy_username,'')<>'' THEN i.proxy_username ELSE p.proxy_username END,
+	CASE WHEN COALESCE(i.proxy_username,'')<>'' THEN i.proxy_password ELSE p.proxy_password END,
+	CASE WHEN COALESCE(i.proxy_username,'')<>'' THEN i.proxy_expires_at ELSE p.proxy_expires_at END,
+	p.status, p.duration_days`
+
+// bucketFrom is the FROM clause bucketCols expects. The join is scoped to real
+// plan份 (package_id>0); pool/free and the package-less grants keep their own row
+// credentials.
+const bucketFrom = ` FROM user_plans p
+	LEFT JOIN plan_identities i
+	  ON i.user_id=p.user_id AND i.package_id=p.package_id AND p.kind='plan' AND p.package_id>0`
 
 func scanBucket(sc scanner) (*Bucket, error) {
 	var b Bucket
@@ -691,7 +694,7 @@ func scanBucket(sc scanner) (*Bucket, error) {
 
 // ListBuckets returns all of a user's buckets (plans + pool), oldest first.
 func (s *Store) ListBuckets(userID int64) ([]*Bucket, error) {
-	rows, err := s.db.Query(`SELECT `+bucketCols+` FROM user_plans WHERE user_id=? ORDER BY id`, userID)
+	rows, err := s.db.Query(`SELECT `+bucketCols+bucketFrom+` WHERE p.user_id=? ORDER BY p.id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -716,8 +719,8 @@ func (s *Store) ListBucketsBulk(userIDs []int64) (map[int64][]*Bucket, error) {
 	if len(userIDs) == 0 {
 		return out, nil
 	}
-	q := `SELECT ` + bucketCols + ` FROM user_plans WHERE user_id IN (?` +
-		strings.Repeat(`,?`, len(userIDs)-1) + `) ORDER BY user_id, id`
+	q := `SELECT ` + bucketCols + bucketFrom + ` WHERE p.user_id IN (?` +
+		strings.Repeat(`,?`, len(userIDs)-1) + `) ORDER BY p.user_id, p.id`
 	args := make([]any, len(userIDs))
 	for i, id := range userIDs {
 		args[i] = id
@@ -772,7 +775,7 @@ func (s *Store) DeleteBucket(userID, bucketID int64) (*Bucket, error) {
 		}
 	}()
 
-	b, err := scanBucket(tx.QueryRow(`SELECT `+bucketCols+` FROM user_plans WHERE id=? AND user_id=?`, bucketID, userID))
+	b, err := scanBucket(tx.QueryRow(`SELECT `+bucketCols+bucketFrom+` WHERE p.id=? AND p.user_id=?`, bucketID, userID))
 	if err != nil {
 		return nil, err
 	}
@@ -801,8 +804,18 @@ func (s *Store) DeleteBucket(userID, bucketID int64) (*Bucket, error) {
 }
 
 // BucketByClientName resolves a sing-box stats identity to its bucket.
+//
+// A whole subscription line shares one name, so this has to pick the same份
+// resolveStatsIdentity would — the one in service — rather than whichever row the
+// query happened to return first.
 func (s *Store) BucketByClientName(name string) (*Bucket, error) {
-	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+` FROM user_plans WHERE client_name=?`, name))
+	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+bucketFrom+`
+		WHERE COALESCE(i.client_name, p.client_name)=?
+		ORDER BY (p.status='active'
+		          AND (p.expiry_at=0 OR p.expiry_at>strftime('%s','now'))
+		          AND (p.traffic_limit=0 OR p.used_up+p.used_down<p.traffic_limit)) DESC,
+		         p.id DESC
+		LIMIT 1`, name))
 }
 
 // proxyUsernameRe restricts a custom mixed-proxy username to safe characters: it
@@ -837,18 +850,56 @@ func (s *Store) SetBucketProxyCred(bucketID, userID int64, username, password st
 	if expiresAt < 0 {
 		return errors.New("有效期非法")
 	}
-	// Reject a username already taken by another bucket's proxy_username or by any
-	// client_name (belt-and-suspenders; the qz_ ban already excludes client_names).
+	// A plan份's proxy account belongs to its subscription line, like the rest of
+	// its credentials — written to the row it would be lost at the next handoff,
+	// which is the whole class of bug the line exists to prevent. pool/free and the
+	// package-less grants have no line and keep it on the row.
+	var pkgID int64
+	var kind string
+	switch err := s.db.QueryRow(`SELECT package_id, kind FROM user_plans WHERE id=? AND user_id=?`,
+		bucketID, userID).Scan(&pkgID, &kind); {
+	case errors.Is(err, sql.ErrNoRows):
+		return errors.New("套餐不存在或无权修改")
+	case err != nil:
+		return err
+	}
+	onLine := kind == "plan" && pkgID > 0
+	// Reject a username already taken by another bucket's proxy_username, another
+	// line's, or any client_name (belt-and-suspenders; the qz_ ban already excludes
+	// client_names). The row/line being written is excluded, so re-saving the same
+	// username is not a collision with itself.
+	lineUser, linePkg := int64(-1), int64(-1)
+	if onLine {
+		lineUser, linePkg = userID, pkgID
+	}
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_plans WHERE (proxy_username=? AND id<>?) OR client_name=?`,
-		username, bucketID, username).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM user_plans WHERE (proxy_username=? AND id<>?) OR client_name=?)
+	  + (SELECT COUNT(*) FROM plan_identities
+	     WHERE (proxy_username=? OR client_name=?) AND NOT (user_id=? AND package_id=?))`,
+		username, bucketID, username, username, username, lineUser, linePkg).Scan(&n); err != nil {
 		return err
 	}
 	if n > 0 {
 		return errors.New("该用户名已被占用，请换一个")
 	}
+	now := time.Now().Unix()
+	if onLine {
+		res, err := s.db.Exec(`UPDATE plan_identities SET proxy_username=?, proxy_password=?,
+			proxy_expires_at=?, updated_at=? WHERE user_id=? AND package_id=?`,
+			username, password, expiresAt, now, userID, pkgID)
+		if err != nil {
+			return errors.New("保存失败，用户名可能已被占用")
+		}
+		// Never report success on a write that matched nothing: the user would be
+		// told their proxy login was saved and then fail to connect with it.
+		if aff, _ := res.RowsAffected(); aff == 0 {
+			return errors.New("套餐不存在或无权修改")
+		}
+		return nil
+	}
 	res, err := s.db.Exec(`UPDATE user_plans SET proxy_username=?, proxy_password=?, proxy_expires_at=?, updated_at=? WHERE id=? AND user_id=?`,
-		username, password, expiresAt, time.Now().Unix(), bucketID, userID)
+		username, password, expiresAt, now, bucketID, userID)
 	if err != nil {
 		return errors.New("保存失败，用户名可能已被占用") // unique-index guard against a concurrent duplicate
 	}
@@ -860,7 +911,7 @@ func (s *Store) SetBucketProxyCred(bucketID, userID int64, username, password st
 
 // PoolBucket returns the user's traffic-package pool bucket (or nil).
 func (s *Store) PoolBucket(userID int64) (*Bucket, error) {
-	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+` FROM user_plans WHERE user_id=? AND kind='pool' ORDER BY id LIMIT 1`, userID))
+	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+bucketFrom+` WHERE p.user_id=? AND p.kind='pool' ORDER BY p.id LIMIT 1`, userID))
 }
 
 // genBucketCreds mints a fresh sing-box identity (mirrors idgen.NewCredentials).
@@ -1022,7 +1073,30 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 // nothing (the row is already being read) and saves a second lookup inside the
 // hot per-identity write path.
 func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID, packageID int64, kind string, err error) {
-	err = tx.QueryRow(`SELECT id, user_id, package_id, kind FROM user_plans WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
+	// A subscription line's name is shared by every份 that has passed through it,
+	// so it resolves to the line first and then to the份 that is actually in
+	// service — that is what makes the bytes land on the right month. Preference
+	// order within the line: the usable份, else the most recent one, so traffic
+	// arriving in the moment a份 runs out is still attributed rather than dropped.
+	err = tx.QueryRow(`SELECT p.id, p.user_id, p.package_id, p.kind
+		FROM plan_identities i
+		JOIN user_plans p ON p.user_id=i.user_id AND p.package_id=i.package_id
+		                 AND p.kind='plan' AND p.status<>'queued'
+		WHERE i.client_name=? OR (i.proxy_username<>'' AND i.proxy_username=?)
+		ORDER BY (p.status='active' AND (p.expiry_at=0 OR p.expiry_at>strftime('%s','now'))
+		          AND (p.traffic_limit=0 OR p.used_up+p.used_down<p.traffic_limit)) DESC,
+		         p.id DESC
+		LIMIT 1`, statName, statName).Scan(&bucketID, &userID, &packageID, &kind)
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	// Not a plan line: the pool, the free bucket and the package-less grants keep
+	// their credentials on the row itself.
+	err = tx.QueryRow(`SELECT id, user_id, package_id, kind FROM user_plans
+		WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
 		statName, statName).Scan(&bucketID, &userID, &packageID, &kind)
 	return
 }
@@ -1072,6 +1146,37 @@ func applyBucketUsage(tx txLike, bucketID, userID, packageID int64, kind string,
 		return err
 	}
 	return nil
+}
+
+// backfillPlanIdentities lifts each existing subscription line's credentials out
+// of its buckets and into plan_identities.
+//
+// Which份 to take them from matters more than anything else here: it has to be
+// the one whose uuid/password every client is CURRENTLY holding, or the upgrade
+// itself would disconnect everyone. That is the份 in service — the usable one —
+// and failing that the most recently activated, which is where the old
+// carry-forward left them. Queued份 are never a source: their credentials were
+// minted but never rendered into a config or a link, so nobody is using them.
+//
+// Idempotent: a line that already has a row is left untouched, so this can run on
+// every boot and re-running it can never rotate a live credential.
+func (s *Store) backfillPlanIdentities() error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO plan_identities
+		(user_id, package_id, `+planIdentityCols+`, created_at, updated_at)
+		SELECT p.user_id, p.package_id, p.client_name, p.client_uuid, p.client_secret,
+		       p.proxy_username, p.proxy_password, p.proxy_expires_at, ?, ?
+		FROM user_plans p
+		WHERE p.kind='plan' AND p.package_id>0 AND p.status<>'queued'
+		  AND p.id = (SELECT x.id FROM user_plans x
+		      WHERE x.user_id=p.user_id AND x.package_id=p.package_id
+		        AND x.kind='plan' AND x.status<>'queued'
+		      ORDER BY (x.status='active'
+		                AND (x.expiry_at=0 OR x.expiry_at>?)
+		                AND (x.traffic_limit=0 OR x.used_up+x.used_down<x.traffic_limit)) DESC,
+		               x.id DESC
+		      LIMIT 1)`, now, now, now)
+	return err
 }
 
 // backfillRetiredBuckets marks the已用完份 of a queue chain that predate the

@@ -73,14 +73,12 @@ func TestRetire_RestartLeavesTheChainIntact(t *testing.T) {
 			t.Fatalf("份 ids changed across restart: %v → %v", before[i].ID, b.ID)
 		}
 	}
-	var stillLive int
+	// The line's credentials must be the same ones the client had before the
+	// restart — every份 of a line reports them, so compare against the live one.
 	for _, b := range after {
-		if b.ClientName == liveName {
-			stillLive++
+		if b.Status == "active" && b.ClientName != liveName {
+			t.Fatalf("live identity changed across restart: %s → %s", liveName, b.ClientName)
 		}
-	}
-	if stillLive != 1 {
-		t.Fatalf("%d份 hold the live identity after restart, want 1 — the in-service份 was deleted", stillLive)
 	}
 }
 

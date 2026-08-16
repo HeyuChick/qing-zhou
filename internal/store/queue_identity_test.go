@@ -1,7 +1,6 @@
 package store
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
@@ -24,9 +23,9 @@ func liveCreds(t *testing.T, st *Store, uid, now int64) (name, uuid, secret stri
 }
 
 // The scenario this exists for: six months sold as six monthly份 assigned to one
-// user. Each rollover must be invisible to their client — same uuid, same
-// password, same everything — because the links the client already imported name
-// the份 that just retired, and a client only refetches the subscription every 12h.
+// user. Every rollover must be invisible to their client, because the links it
+// already imported are the ones it keeps using — a client only refetches the
+// subscription every 12h.
 func TestQueueIdentity_SurvivesEveryHandoff(t *testing.T) {
 	st := newRefundStore(t)
 	uid := mkUser(t, st, "zoe")
@@ -36,8 +35,7 @@ func TestQueueIdentity_SurvivesEveryHandoff(t *testing.T) {
 		buy(t, st, uid, pkg)
 	}
 
-	now := time.Now().Unix()
-	name0, uuid0, secret0 := liveCreds(t, st, uid, now)
+	name0, uuid0, secret0 := liveCreds(t, st, uid, time.Now().Unix())
 	if name0 == "" || uuid0 == "" {
 		t.Fatal("no credentials on the first month")
 	}
@@ -51,41 +49,83 @@ func TestQueueIdentity_SurvivesEveryHandoff(t *testing.T) {
 		if !changed {
 			t.Fatalf("month %d: nothing was activated", m)
 		}
-		now = time.Now().Unix()
-		name, uuid, secret := liveCreds(t, st, uid, now)
+		name, uuid, secret := liveCreds(t, st, uid, time.Now().Unix())
 		if name != name0 || uuid != uuid0 || secret != secret0 {
 			t.Fatalf("month %d: credentials changed (%s/%s → %s/%s) — every client would drop",
 				m, name0, uuid0, name, uuid)
 		}
 	}
-
-	// All six份 were consumed, one at a time.
 	if got := planStatusCount(t, st, uid, "queued"); got != 0 {
 		t.Fatalf("queued份 left = %d, want 0", got)
 	}
-	// Exactly one份 holds the live name; the retired ones were renamed out of the
-	// way so the UNIQUE index on client_name still holds.
-	bs, _ := st.ListBuckets(uid)
-	live, retired := 0, 0
-	for _, b := range bs {
-		switch {
-		case b.ClientName == name0:
-			live++
-		case strings.HasPrefix(b.ClientName, "zz_retired_"):
-			retired++
-		}
+	// The line owns exactly one identity, however many份 have passed through it.
+	var lines int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM plan_identities WHERE user_id=?`, uid).Scan(&lines); err != nil {
+		t.Fatal(err)
 	}
-	if live != 1 {
-		t.Fatalf("%d份 hold the live name, want exactly 1", live)
-	}
-	if retired != months-1 {
-		t.Fatalf("retired份 = %d, want %d", retired, months-1)
+	if lines != 1 {
+		t.Fatalf("plan_identities rows = %d, want 1 for a single-package user", lines)
 	}
 }
 
-// Metering must still be per-份: after a handoff, traffic on the (unchanged)
-// identity has to bill to the份 that is actually live, and the retired份 must
-// keep the usage it accumulated while it was in service.
+// The case the old carry-forward could not cover: the份 in service is DELETED
+// (a refund, or an admin revoking it) rather than running out. The credentials
+// belong to the line, not to that row, so the next份 must still take over with
+// the identity the client is holding.
+func TestQueueIdentity_SurvivesRemovalOfTheLiveShare(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "amy")
+	pkg := mkPlan(t, st, "月付", 100, 100, 30)
+	var orders []int64
+	for i := 0; i < 3; i++ {
+		orders = append(orders, buy(t, st, uid, pkg))
+	}
+	_, uuid0, secret0 := liveCreds(t, st, uid, time.Now().Unix())
+
+	// Roll over once, then refund the month that is now in service.
+	expireActive(t, st, uid, time.Now().Unix()-10)
+	if _, err := st.AdvanceQueueFor(uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.RefundOrder(orders[1], 0, "prorated", noopSync); err != nil {
+		t.Fatal(err)
+	}
+
+	_, uuid, secret := liveCreds(t, st, uid, time.Now().Unix())
+	if uuid != uuid0 || secret != secret0 {
+		t.Fatalf("credentials changed after the live份 was removed (%s → %s) — the client would drop",
+			uuid0, uuid)
+	}
+}
+
+// An admin revoking the份 in service must not rotate the line's credentials
+// either.
+func TestQueueIdentity_SurvivesAdminRevoke(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "bea")
+	pkg := mkPlan(t, st, "月付", 100, 100, 30)
+	buy(t, st, uid, pkg)
+	buy(t, st, uid, pkg)
+	_, uuid0, _ := liveCreds(t, st, uid, time.Now().Unix())
+
+	var liveID int64
+	if err := st.db.QueryRow(`SELECT id FROM user_plans
+		WHERE user_id=? AND kind='plan' AND status='active'`, uid).Scan(&liveID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DeleteBucket(uid, liveID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, uuid, _ := liveCreds(t, st, uid, time.Now().Unix())
+	if uuid != uuid0 {
+		t.Fatalf("credentials changed after an admin revoke (%s → %s)", uuid0, uuid)
+	}
+}
+
+// Metering must still be per-份: traffic on the (unchanged) line identity has to
+// bill to the份 actually in service, and a spent份 must keep what it used while
+// it was.
 func TestQueueIdentity_MeteringFollowsTheLiveShare(t *testing.T) {
 	st := newRefundStore(t)
 	uid := mkUser(t, st, "yuri")
@@ -93,18 +133,23 @@ func TestQueueIdentity_MeteringFollowsTheLiveShare(t *testing.T) {
 	buy(t, st, uid, pkg)
 	buy(t, st, uid, pkg)
 
-	now := time.Now().Unix()
-	name, _, _ := liveCreds(t, st, uid, now)
-	if err := st.AddBucketUsage(name, 7*giB, 0); err != nil { // first month's usage
+	name, _, _ := liveCreds(t, st, uid, time.Now().Unix())
+	var firstID int64
+	if err := st.db.QueryRow(`SELECT id FROM user_plans
+		WHERE user_id=? AND kind='plan' AND status='active'`, uid).Scan(&firstID); err != nil {
 		t.Fatal(err)
 	}
-	var firstID int64
-	if err := st.db.QueryRow(`SELECT id FROM user_plans WHERE client_name=?`, name).Scan(&firstID); err != nil {
+	if err := st.AddBucketUsage(name, 7*giB, 0); err != nil { // first month's usage
 		t.Fatal(err)
 	}
 
 	expireActive(t, st, uid, time.Now().Unix()-10)
 	if _, err := st.AdvanceQueueFor(uid); err != nil {
+		t.Fatal(err)
+	}
+	var secondID int64
+	if err := st.db.QueryRow(`SELECT id FROM user_plans
+		WHERE user_id=? AND kind='plan' AND status='active'`, uid).Scan(&secondID); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.AddBucketUsage(name, 3*giB, 0); err != nil { // second month, same identity
@@ -115,7 +160,7 @@ func TestQueueIdentity_MeteringFollowsTheLiveShare(t *testing.T) {
 	if err := st.db.QueryRow(`SELECT used_up FROM user_plans WHERE id=?`, firstID).Scan(&firstUsed); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.db.QueryRow(`SELECT used_up FROM user_plans WHERE client_name=?`, name).Scan(&secondUsed); err != nil {
+	if err := st.db.QueryRow(`SELECT used_up FROM user_plans WHERE id=?`, secondID).Scan(&secondUsed); err != nil {
 		t.Fatal(err)
 	}
 	if firstUsed != 7*giB {
@@ -126,73 +171,109 @@ func TestQueueIdentity_MeteringFollowsTheLiveShare(t *testing.T) {
 	}
 }
 
-// A user's custom mixed-proxy account (their HTTP/SOCKS5 login) must survive a
-// handoff too — it is a credential they typed into a client by hand.
-func TestQueueIdentity_CarriesTheProxyAccount(t *testing.T) {
+// A user's custom mixed-proxy account (their HTTP/SOCKS5 login) belongs to the
+// line too, so it survives handoffs like everything else.
+func TestQueueIdentity_ProxyAccountBelongsToTheLine(t *testing.T) {
 	st := newRefundStore(t)
 	uid := mkUser(t, st, "xena")
 	pkg := mkPlan(t, st, "月付", 100, 100, 30)
 	buy(t, st, uid, pkg)
 	buy(t, st, uid, pkg)
 
-	name, _, _ := liveCreds(t, st, uid, time.Now().Unix())
-	if _, err := st.db.Exec(`UPDATE user_plans SET proxy_username='xena_proxy', proxy_password='pw'
-		WHERE client_name=?`, name); err != nil {
+	if _, err := st.db.Exec(`UPDATE plan_identities SET proxy_username='xena_proxy', proxy_password='pw'
+		WHERE user_id=? AND package_id=?`, uid, pkg.ID); err != nil {
 		t.Fatal(err)
 	}
-
 	expireActive(t, st, uid, time.Now().Unix()-10)
 	if _, err := st.AdvanceQueueFor(uid); err != nil {
 		t.Fatal(err)
 	}
 
-	var user, pass string
-	if err := st.db.QueryRow(`SELECT proxy_username, proxy_password FROM user_plans WHERE client_name=?`,
-		name).Scan(&user, &pass); err != nil {
-		t.Fatal(err)
+	bs, _ := st.ListBuckets(uid)
+	for _, o := range orderBuckets(bs, time.Now().Unix(), 0, func(int64) []int64 { return nil }) {
+		if o.b.Kind == "plan" && o.b.PackageID > 0 {
+			if o.b.ProxyName() != "xena_proxy" || o.b.ProxySecret() != "pw" {
+				t.Fatalf("proxy account after handoff = %q/%q, want xena_proxy/pw",
+					o.b.ProxyName(), o.b.ProxySecret())
+			}
+			return
+		}
 	}
-	if user != "xena_proxy" || pass != "pw" {
-		t.Fatalf("proxy account after handoff = %q/%q, want xena_proxy/pw", user, pass)
-	}
-	// And only one row may hold it — proxy_username has a unique partial index.
-	var n int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM user_plans WHERE proxy_username='xena_proxy'`).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("%d rows hold the proxy account, want 1", n)
-	}
+	t.Fatal("no live份 after the handoff")
 }
 
-// Different packages have independent identity chains — advancing one must not
-// hand another package's credentials around.
-func TestQueueIdentity_ChainsArePerPackage(t *testing.T) {
+// Each package is its own subscription line with its own credentials — they
+// cover different node groups, so they must not be conflated.
+func TestQueueIdentity_LinesArePerPackage(t *testing.T) {
 	st := newRefundStore(t)
 	uid := mkUser(t, st, "wade")
 	a := mkPlan(t, st, "香港", 100, 100, 30)
 	b := mkPlan(t, st, "日本", 100, 200, 30)
 	buy(t, st, uid, a)
-	buy(t, st, uid, a)
 	buy(t, st, uid, b)
 
-	before := map[int64]string{}
-	bs, _ := st.ListBuckets(uid)
-	for _, x := range bs {
-		if x.Kind == "plan" && x.PackageID == b.ID {
-			before[x.PackageID] = x.ClientName
-		}
+	var nameA, nameB string
+	if err := st.db.QueryRow(`SELECT client_name FROM plan_identities WHERE user_id=? AND package_id=?`,
+		uid, a.ID).Scan(&nameA); err != nil {
+		t.Fatal(err)
 	}
+	if err := st.db.QueryRow(`SELECT client_name FROM plan_identities WHERE user_id=? AND package_id=?`,
+		uid, b.ID).Scan(&nameB); err != nil {
+		t.Fatal(err)
+	}
+	if nameA == nameB {
+		t.Fatalf("both packages share the identity %q", nameA)
+	}
+}
 
+// Existing accounts must come through the upgrade on the credentials their
+// clients are already holding — the migration must take them from the份 in
+// service, not from an arbitrary row.
+func TestQueueIdentity_BackfillKeepsTheInServiceCredentials(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "vera")
+	pkg := mkPlan(t, st, "月付", 100, 100, 30)
+	buy(t, st, uid, pkg)
+	buy(t, st, uid, pkg)
+	buy(t, st, uid, pkg)
 	expireActive(t, st, uid, time.Now().Unix()-10)
 	if _, err := st.AdvanceQueueFor(uid); err != nil {
 		t.Fatal(err)
 	}
+	// Put the account back the way an upgrading panel finds it: no line, and the
+	// credentials sitting on the份 that is in service (where the old carry-forward
+	// left them). The queued份 keep their own, never-used ones.
+	if _, err := st.db.Exec(`DELETE FROM plan_identities WHERE user_id=?`, uid); err != nil {
+		t.Fatal(err)
+	}
+	const liveUUID = "11111111-2222-3333-4444-555555555555"
+	if _, err := st.db.Exec(`UPDATE user_plans SET client_uuid=?
+		WHERE user_id=? AND kind='plan' AND status='active'`, liveUUID, uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.backfillPlanIdentities(); err != nil {
+		t.Fatal(err)
+	}
 
-	bs, _ = st.ListBuckets(uid)
-	for _, x := range bs {
-		if x.Kind == "plan" && x.PackageID == b.ID && x.ClientName != before[b.ID] {
-			t.Fatalf("package B's identity changed (%s → %s) while package A advanced",
-				before[b.ID], x.ClientName)
-		}
+	var got string
+	if err := st.db.QueryRow(`SELECT client_uuid FROM plan_identities WHERE user_id=? AND package_id=?`,
+		uid, pkg.ID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != liveUUID {
+		t.Fatalf("backfilled uuid = %s, want the in-service one %s — the upgrade would disconnect this user",
+			got, liveUUID)
+	}
+	// Re-running must never rotate a live credential.
+	if err := st.backfillPlanIdentities(); err != nil {
+		t.Fatal(err)
+	}
+	var again string
+	if err := st.db.QueryRow(`SELECT client_uuid FROM plan_identities WHERE user_id=? AND package_id=?`,
+		uid, pkg.ID).Scan(&again); err != nil {
+		t.Fatal(err)
+	}
+	if again != got {
+		t.Fatalf("a second backfill rotated the credential (%s → %s)", got, again)
 	}
 }
