@@ -57,11 +57,22 @@ func enqueuePlanBucket(tx txLike, userID int64, username string, pkg *Package, o
 // exists the queued份 behind it wait; when none does, the slot is free and the
 // oldest queued份 is promoted.
 //
-// Kept in one place because two queries must agree on it exactly: the promotion
-// itself, and the cheap "is anything due for this user?" check the read path
-// runs. If those drifted, the check would skip users the promotion would have
-// advanced — a silent version of the very bug this fixes. Expects the table
-// aliased `h` and one bound parameter: now.
+// Kept in one place because every query that asks it must agree exactly: the
+// promotion, the cheap "is anything due for this user?" check the read path runs,
+// the stats attribution, and the migration. If any of those drifted, one would
+// skip a份 another considers live — a silent version of the very bug this fixes.
+//
+// usableExpr renders it for a given table alias against SQLite's own clock;
+// usableHeadPredicate is the promotion's variant, which also pins kind and takes
+// `now` as a bound parameter because it runs inside a transaction that has
+// already fixed a timestamp.
+func usableExpr(alias string) string {
+	a := alias + "."
+	return `(` + a + `status='active'
+		AND (` + a + `expiry_at=0 OR ` + a + `expiry_at>strftime('%s','now'))
+		AND (` + a + `traffic_limit=0 OR ` + a + `used_up+` + a + `used_down<` + a + `traffic_limit))`
+}
+
 const usableHeadPredicate = `h.kind='plan' AND h.status='active'
 	AND (h.expiry_at=0 OR h.expiry_at>?)
 	AND (h.traffic_limit=0 OR h.used_up+h.used_down<h.traffic_limit)`
@@ -814,10 +825,7 @@ func (s *Store) DeleteBucket(userID, bucketID int64) (*Bucket, error) {
 func (s *Store) BucketByClientName(name string) (*Bucket, error) {
 	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+bucketFrom+`
 		WHERE COALESCE(i.client_name, p.client_name)=?
-		ORDER BY (p.status='active'
-		          AND (p.expiry_at=0 OR p.expiry_at>strftime('%s','now'))
-		          AND (p.traffic_limit=0 OR p.used_up+p.used_down<p.traffic_limit)) DESC,
-		         p.id DESC
+		ORDER BY `+usableExpr("p")+` DESC, p.id DESC
 		LIMIT 1`, name))
 }
 
@@ -1086,9 +1094,7 @@ func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID, package
 		JOIN user_plans p ON p.user_id=i.user_id AND p.package_id=i.package_id
 		                 AND p.kind='plan' AND p.status<>'queued'
 		WHERE i.client_name=? OR (i.proxy_username<>'' AND i.proxy_username=?)
-		ORDER BY (p.status='active' AND (p.expiry_at=0 OR p.expiry_at>strftime('%s','now'))
-		          AND (p.traffic_limit=0 OR p.used_up+p.used_down<p.traffic_limit)) DESC,
-		         p.id DESC
+		ORDER BY `+usableExpr("p")+` DESC, p.id DESC
 		LIMIT 1`, statName, statName).Scan(&bucketID, &userID, &packageID, &kind)
 	if err == nil {
 		return
@@ -1151,13 +1157,6 @@ func applyBucketUsage(tx txLike, bucketID, userID, packageID int64, kind string,
 	return nil
 }
 
-// backfillLiveExpr is "this份 is currently usable", written without a bound
-// parameter so the ORDER BY below can repeat it. strftime here is the same clock
-// as time.Now().Unix() and SQLite compares it numerically against the column.
-const backfillLiveExpr = `(x.status='active'
-	AND (x.expiry_at=0 OR x.expiry_at>strftime('%s','now'))
-	AND (x.traffic_limit=0 OR x.used_up+x.used_down<x.traffic_limit))`
-
 // backfillPlanIdentities lifts each existing subscription line's credentials out
 // of its buckets and into plan_identities.
 //
@@ -1195,11 +1194,11 @@ func (s *Store) backfillPlanIdentities() error {
 		  AND p.id = (SELECT x.id FROM user_plans x
 		      WHERE x.user_id=p.user_id AND x.package_id=p.package_id
 		        AND x.kind='plan' AND x.status<>'queued'
-		      ORDER BY ` + backfillLiveExpr + ` DESC,
-		               CASE WHEN ` + backfillLiveExpr + `
+		      ORDER BY `+usableExpr("x")+` DESC,
+		               CASE WHEN `+usableExpr("x")+`
 		                    THEN (CASE WHEN x.expiry_at=0 THEN 9223372036854775807 ELSE x.expiry_at END)
 		                    ELSE 0 END ASC,
-		               CASE WHEN ` + backfillLiveExpr + ` THEN x.id ELSE -x.id END ASC
+		               CASE WHEN `+usableExpr("x")+` THEN x.id ELSE -x.id END ASC
 		      LIMIT 1)`, now, now)
 	return err
 }
@@ -1222,15 +1221,13 @@ func (s *Store) backfillPlanIdentities() error {
 // never do. In a healthy chain the two conditions coincide; where they do not,
 // this errs toward leaving the份 alone.
 func (s *Store) backfillRetiredBuckets() error {
-	now := time.Now().Unix()
 	_, err := s.db.Exec(`UPDATE user_plans SET status=? WHERE id IN (
 		SELECT b.id FROM user_plans b
 		WHERE b.kind='plan' AND b.package_id>0 AND b.status='active' AND b.duration_days>0
-		  AND NOT ((b.expiry_at=0 OR b.expiry_at>?)
-		           AND (b.traffic_limit=0 OR b.used_up+b.used_down<b.traffic_limit))
+		  AND NOT `+usableExpr("b")+`
 		  AND EXISTS (SELECT 1 FROM user_plans n
 		      WHERE n.user_id=b.user_id AND n.package_id=b.package_id AND n.kind='plan'
-		        AND n.status='active' AND n.duration_days>0 AND n.id>b.id))`, StatusRetired, now)
+		        AND n.status='active' AND n.duration_days>0 AND n.id>b.id))`, StatusRetired)
 	return err
 }
 
