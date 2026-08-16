@@ -100,7 +100,10 @@ func main() {
 	app.StartMaintenance(ctx, time.Hour)
 	app.StartMonitorTasks(ctx)
 	app.StartCertRenew(ctx, 12*time.Hour)
-	app.StartQueueAdvance(ctx, 2*time.Minute)
+	// Tracked in bgWG for the same reason the controller is: it opens write
+	// transactions, so shutdown must let an in-flight sweep finish before the
+	// deferred st.Close() runs.
+	app.StartQueueAdvance(ctx, 2*time.Minute, &bgWG)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

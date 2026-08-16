@@ -36,14 +36,123 @@ func enqueuePlanBucket(ex execer, userID int64, username string, pkg *Package, o
 	uu, ss := genBucketCreds()
 	_, err := insertBucket(ex, &Bucket{
 		UserID: userID, Kind: "plan", PackageID: pkg.ID, Name: pkg.Name,
-		ClientName:   fmt.Sprintf("qz_%s_p%d", username, orderID),
-		ClientUUID:   uu, ClientSecret: ss,
+		ClientName: fmt.Sprintf("qz_%s_p%d", username, orderID),
+		ClientUUID: uu, ClientSecret: ss,
 		TrafficLimit: pkg.TrafficBytes,
 		Status:       "queued", ExpiryAt: 0, DurationDays: pkg.DurationDays,
 		OrderID: orderID, CreatedAt: now,
 	})
 	return err
 }
+
+// usableHeadPredicate matches the plan bucket that currently OWNS a package's
+// queue slot: an active head that is neither expired nor out of quota. While one
+// exists the queued份 behind it wait; when none does, the slot is free and the
+// oldest queued份 is promoted.
+//
+// Kept in one place because two queries must agree on it exactly: the promotion
+// itself, and the cheap "is anything due for this user?" check the read path
+// runs. If those drifted, the check would skip users the promotion would have
+// advanced — a silent version of the very bug this fixes. Expects the table
+// aliased `h` and one bound parameter: now.
+const usableHeadPredicate = `h.kind='plan' AND h.status='active'
+	AND (h.expiry_at=0 OR h.expiry_at>?)
+	AND (h.traffic_limit=0 OR h.used_up+h.used_down<h.traffic_limit)`
+
+// StatusRetired marks a plan bucket that has finished its turn and handed the
+// package's slot (and the user's credentials) to the next份.
+//
+// Such a份 used to keep status='active' forever, which conflated "is the current
+// plan" with "was once the current plan" — and two things read that column as the
+// former:
+//
+//   - mergeDuplicatePlanBuckets, the one-time repair for pre-queue accounts, saw
+//     a progressed queue as same-package duplicates and collapsed every consumed
+//     month into a single bucket on the next restart, deleting the live one;
+//   - liveIdentity, once the live份 was removed by a refund, picked a consumed份
+//     as the credential holder and tried to hand its already-retired name to the
+//     next份, violating the UNIQUE index and failing the refund outright.
+//
+// Everything else keys off expiry/quota rather than this column, and a retired份
+// is by definition out of one or the other, so nothing else changes behaviour: it
+// still renders as 已过期/已用尽 and still stays out of every config.
+const StatusRetired = "retired"
+
+// bucketIdentity is the credential set a user's client actually authenticates
+// with: the sing-box client identity, plus the optional mixed (HTTP/SOCKS5)
+// proxy account.
+type bucketIdentity struct {
+	ID           int64 // 0 = there was no live份 to inherit from
+	ClientName   string
+	ClientUUID   string
+	ClientSecret string
+	ProxyUser    string
+	ProxyPass    string
+	ProxyExpires int64
+}
+
+// liveIdentity returns the credentials currently in service for this user's
+// package — the most recently activated份, which is the one whose uuid/password
+// the user's client is holding. Must be read BEFORE the next份 is flipped to
+// 'active', or that份 would select itself.
+func liveIdentity(tx txLike, userID, pkgID int64) (bucketIdentity, error) {
+	var b bucketIdentity
+	err := tx.QueryRow(`SELECT id, client_name, client_uuid, client_secret,
+		proxy_username, proxy_password, proxy_expires_at
+		FROM user_plans WHERE user_id=? AND kind='plan' AND package_id=? AND status='active'
+		ORDER BY id DESC LIMIT 1`, userID, pkgID).
+		Scan(&b.ID, &b.ClientName, &b.ClientUUID, &b.ClientSecret, &b.ProxyUser, &b.ProxyPass, &b.ProxyExpires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return bucketIdentity{}, nil // first份 of this package — nothing to inherit
+	}
+	return b, err
+}
+
+// carryIdentity hands the retiring份's credentials to the份 that just took over,
+// so a handoff is invisible to the user's client.
+//
+// Each purchase mints its own bucket with its own uuid/password, which is right
+// for METERING — every份 needs a distinct stats identity — but it also meant the
+// credentials rotated every time the queue advanced. The links a client already
+// imported name the retired份, which is no longer in any inbound, so the user
+// silently lost service at every rollover until their client happened to refetch
+// the subscription (Profile-Update-Interval is 12h). Someone handed six months as
+// six monthly份 hit that five times.
+//
+// Metering is unaffected: each份 keeps its own row and its own counters, and
+// resolveStatsIdentity maps the name to whichever bucket holds it, so traffic
+// bills to the份 that is actually live. History is keyed by bucket_id, so the
+// retired份's past usage stays attributed to it.
+//
+// The retired份 is renamed rather than left sharing the name: client_name carries
+// a UNIQUE index (and proxy_username a unique partial one), so the name has to be
+// freed before it can be taken. Its new name is derived from its own id, which is
+// unique by construction and cannot collide with a real qz_* name. The promoted
+// 份's originally-minted credentials are simply dropped — a queued份 is never
+// rendered into a config or a link, so they were never in service anywhere.
+func carryIdentity(tx txLike, outgoing bucketIdentity, promotedID, now int64) error {
+	if outgoing.ID == 0 || outgoing.ID == promotedID {
+		return nil // first份 of this package: it keeps the identity it was minted with
+	}
+	// Retire the outgoing份 in the same breath as taking its name: the two must
+	// not drift, or liveIdentity would keep offering a name it no longer owns.
+	if _, err := tx.Exec(`UPDATE user_plans SET status=?, client_name=?, proxy_username='', updated_at=? WHERE id=?`,
+		StatusRetired, fmt.Sprintf("zz_retired_%d", outgoing.ID), now, outgoing.ID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE user_plans SET client_name=?, client_uuid=?, client_secret=?,
+		proxy_username=?, proxy_password=?, proxy_expires_at=?, updated_at=? WHERE id=?`,
+		outgoing.ClientName, outgoing.ClientUUID, outgoing.ClientSecret,
+		outgoing.ProxyUser, outgoing.ProxyPass, outgoing.ProxyExpires, now, promotedID)
+	return err
+}
+
+// queueDuePredicate matches a user who has a queued份 whose slot is free, i.e.
+// someone whose next套餐 should be live right now. Expects `q` bound to
+// user_plans and one parameter (now) for the head predicate inside.
+const queueDuePredicate = `q.kind='plan' AND q.status='queued' AND q.package_id>0
+	AND NOT EXISTS (SELECT 1 FROM user_plans h
+	    WHERE h.user_id=q.user_id AND h.package_id=q.package_id AND ` + usableHeadPredicate + `)`
 
 // advanceUserQueues promotes queued plan buckets whose slot is now free. For each
 // package the user has a queued bucket for, if there is no currently-USABLE active
@@ -75,10 +184,8 @@ func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
 	for _, pkgID := range pkgIDs {
 		// A usable active head blocks promotion: not expired AND has quota.
 		var usable int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM user_plans
-			WHERE user_id=? AND kind='plan' AND package_id=? AND status='active'
-			  AND (expiry_at=0 OR expiry_at>?)
-			  AND (traffic_limit=0 OR used_up+used_down<traffic_limit)`,
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM user_plans h
+			WHERE h.user_id=? AND h.package_id=? AND `+usableHeadPredicate,
 			userID, pkgID, now).Scan(&usable); err != nil {
 			return changed, err
 		}
@@ -96,12 +203,22 @@ func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
 		if err != nil {
 			return changed, err
 		}
+		// Read the retiring head's identity BEFORE promoting — after the status
+		// flip the newly-active份 would be the newest 'active' row and would
+		// select itself.
+		outgoing, err := liveIdentity(tx, userID, pkgID)
+		if err != nil {
+			return changed, err
+		}
 		newExpiry := int64(0) // duration 0 = unlimited-duration plan → never expires
 		if dur > 0 {
 			newExpiry = now + dur*86400
 		}
 		if _, err := tx.Exec(`UPDATE user_plans SET status='active', expiry_at=?, updated_at=? WHERE id=?`,
 			newExpiry, now, id); err != nil {
+			return changed, err
+		}
+		if err := carryIdentity(tx, outgoing, id, now); err != nil {
 			return changed, err
 		}
 		changed = true
@@ -121,13 +238,25 @@ func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
 }
 
 // AdvanceAllQueues promotes due queued buckets across every user (exhausted or
-// expired heads free their slot). Each user is advanced in its own transaction so
-// one failure doesn't abort the rest. Returns the users whose queue changed, so
-// the caller can push fresh config only where an identity actually activated.
+// expired heads free their slot). Returns the users whose queue changed, so the
+// caller can push fresh config only where an identity actually activated.
+//
+// One user's failure must not abort the rest. The loop used to return on the
+// first error, which turned a single unlucky transaction into a PERMANENT outage
+// for every user behind them in id order: the next tick started from the same
+// user and failed the same way, so their paid份 never activated and they stayed
+// on an expired套餐 indefinitely. Failures are collected and reported, never
+// allowed to short-circuit the sweep.
+//
+// Only users who actually have a promotion pending get a transaction. Open() sets
+// _txlock=immediate, so the old version — which opened one for every user holding
+// any queued份, including the majority whose head was still fine — took SQLite's
+// single write lock every two minutes against the stats poll, which is where
+// those unlucky failures came from in the first place.
 func (s *Store) AdvanceAllQueues() ([]int64, error) {
 	now := time.Now().Unix()
-	rows, err := s.db.Query(`SELECT DISTINCT user_id FROM user_plans
-		WHERE kind='plan' AND status='queued' AND package_id>0`)
+	rows, err := s.db.Query(`SELECT DISTINCT q.user_id FROM user_plans q
+		WHERE `+queueDuePredicate+` ORDER BY q.user_id`, now)
 	if err != nil {
 		return nil, err
 	}
@@ -146,24 +275,68 @@ func (s *Store) AdvanceAllQueues() ([]int64, error) {
 	}
 
 	var changed []int64
+	var firstErr error
+	failed := 0
 	for _, uid := range userIDs {
-		tx, err := s.db.Begin()
+		ch, err := s.advanceOne(uid, now)
 		if err != nil {
-			return changed, err
-		}
-		ch, aerr := advanceUserQueues(tx, uid, now)
-		if aerr != nil {
-			_ = tx.Rollback()
-			return changed, aerr
-		}
-		if err := tx.Commit(); err != nil {
-			return changed, err
+			failed++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("user %d: %w", uid, err)
+			}
+			continue
 		}
 		if ch {
 			changed = append(changed, uid)
 		}
 	}
+	if firstErr != nil {
+		return changed, fmt.Errorf("%d of %d due user(s) failed to advance; first: %w", failed, len(userIDs), firstErr)
+	}
 	return changed, nil
+}
+
+// advanceOne runs one user's promotion in its own transaction.
+func (s *Store) advanceOne(userID, now int64) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	ch, err := advanceUserQueues(tx, userID, now)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return ch, nil
+}
+
+// AdvanceQueueFor promotes this one user's due queued份 right now, and reports
+// whether anything activated.
+//
+// This is the fix that actually guarantees the user gets what they paid for. A
+// periodic sweep is a hope, not a guarantee — it can be behind, it can have
+// failed on this user, it does not run at all in a process where the background
+// loops were never started — and while it is not running the user sits looking at
+// an expired套餐 with the next one already bought. Calling this before answering
+// a read means the answer is never "已到期" while a paid份 is sitting due.
+//
+// Cheap when there is nothing to do: the due check is a plain indexed read
+// (user_plans has an index on user_id), so no write transaction is opened in the
+// common case.
+func (s *Store) AdvanceQueueFor(userID int64) (bool, error) {
+	now := time.Now().Unix()
+	var due int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_plans q
+		WHERE q.user_id=? AND `+queueDuePredicate, userID, now).Scan(&due); err != nil {
+		return false, err
+	}
+	if due == 0 {
+		return false, nil
+	}
+	return s.advanceOne(userID, now)
 }
 
 // reversePlanBucket undoes one plan order's contribution to its package bucket
@@ -748,14 +921,14 @@ func (s *Store) AddBucketUsage(statName string, up, down int64) error {
 	// custom proxy_username. Both meter the same bucket. proxy_username can never
 	// equal a client_name (client_names are qz_-prefixed, proxy_usernames may not
 	// be) and is globally unique, so at most one row matches.
-	bucketID, userID, packageID, err := resolveStatsIdentity(tx, statName)
+	bucketID, userID, packageID, kind, err := resolveStatsIdentity(tx, statName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // unknown identity (e.g. a just-removed bucket) — ignore, rolls back
 	}
 	if err != nil {
 		return err
 	}
-	if err = applyBucketUsage(tx, bucketID, userID, packageID, up, down, now); err != nil {
+	if err = applyBucketUsage(tx, bucketID, userID, packageID, kind, up, down, now); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -803,7 +976,7 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 		if name == "" || (d.Up == 0 && d.Down == 0) {
 			continue
 		}
-		bucketID, userID, packageID, rerr := resolveStatsIdentity(tx, name)
+		bucketID, userID, packageID, kind, rerr := resolveStatsIdentity(tx, name)
 		if errors.Is(rerr, sql.ErrNoRows) {
 			continue // unknown / just-removed identity — skip, not a failure
 		}
@@ -817,7 +990,7 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 		if _, err := tx.Exec(`SAVEPOINT usg`); err != nil {
 			return applied, err // savepoint itself failing means the tx is unusable
 		}
-		if werr := applyBucketUsage(tx, bucketID, userID, packageID, d.Up, d.Down, now); werr != nil {
+		if werr := applyBucketUsage(tx, bucketID, userID, packageID, kind, d.Up, d.Down, now); werr != nil {
 			_, _ = tx.Exec(`ROLLBACK TO usg`)
 			_, _ = tx.Exec(`RELEASE usg`)
 			if firstErr == nil {
@@ -848,9 +1021,9 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 // packageID rides along for the traffic_daily rollup: resolving it here costs
 // nothing (the row is already being read) and saves a second lookup inside the
 // hot per-identity write path.
-func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID, packageID int64, err error) {
-	err = tx.QueryRow(`SELECT id, user_id, package_id FROM user_plans WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
-		statName, statName).Scan(&bucketID, &userID, &packageID)
+func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID, packageID int64, kind string, err error) {
+	err = tx.QueryRow(`SELECT id, user_id, package_id, kind FROM user_plans WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
+		statName, statName).Scan(&bucketID, &userID, &packageID, &kind)
 	return
 }
 
@@ -858,13 +1031,25 @@ func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID, package
 // user aggregate + last_online, the per-user time-series sample, and the daily
 // per-bucket rollup. Caller owns the transaction (or savepoint) so these land
 // together or not at all.
-func applyBucketUsage(tx txLike, bucketID, userID, packageID, up, down, now int64) error {
+// The users.used_* mirror deliberately skips FREE buckets, matching
+// recomputeUserAggregate — those two are the only writers of that counter and
+// they have to agree. They did not: the recompute excluded free usage while this
+// per-poll path added it, so between entitlement events unmetered free-group
+// traffic quietly piled onto the user's paid counter, until the quota check
+// tripped and the subscription started answering with an empty node list.
+// last_online_at, the trend samples and the daily rollup still record free
+// traffic — it really happened, it just is not billable.
+func applyBucketUsage(tx txLike, bucketID, userID, packageID int64, kind string, up, down, now int64) error {
 	if _, err := tx.Exec(`UPDATE user_plans SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
 		up, down, now, now, bucketID); err != nil {
 		return err
 	}
+	mUp, mDown := up, down
+	if kind == KindFree {
+		mUp, mDown = 0, 0
+	}
 	if _, err := tx.Exec(`UPDATE users SET used_up=used_up+?, used_down=used_down+?, last_online_at=?, updated_at=? WHERE id=?`,
-		up, down, now, now, userID); err != nil {
+		mUp, mDown, now, now, userID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO traffic_samples (user_id, ts, up, down) VALUES (?, ?, ?, ?)`,
@@ -889,6 +1074,37 @@ func applyBucketUsage(tx txLike, bucketID, userID, packageID, up, down, now int6
 	return nil
 }
 
+// backfillRetiredBuckets marks the已用完份 of a queue chain that predate the
+// 'retired' status, so existing accounts get the same protection new ones do.
+//
+// A queue-era份 is retired iff a NEWER same-package份 has already taken over
+// (promotion is in id order, so "newer" means a higher id). Those are exactly the
+// rows mergeDuplicatePlanBuckets would otherwise see as duplicates and flatten,
+// and the rows liveIdentity could otherwise mistake for the credential holder.
+//
+// Runs before the merge and is idempotent: once marked, they no longer match.
+// Legacy (duration_days=0) rows are left alone — the merge is still the right
+// answer for those.
+//
+// The份 must ALSO be finished (out of time or out of quota) to be marked. Having
+// a newer sibling is how the chain is recognised, but it is not on its own proof
+// that this份 is spent, and a migration that shelved a份 the user could still
+// spend would be quietly taking entitlement away — the one thing a backfill must
+// never do. In a healthy chain the two conditions coincide; where they do not,
+// this errs toward leaving the份 alone.
+func (s *Store) backfillRetiredBuckets() error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`UPDATE user_plans SET status=? WHERE id IN (
+		SELECT b.id FROM user_plans b
+		WHERE b.kind='plan' AND b.package_id>0 AND b.status='active' AND b.duration_days>0
+		  AND NOT ((b.expiry_at=0 OR b.expiry_at>?)
+		           AND (b.traffic_limit=0 OR b.used_up+b.used_down<b.traffic_limit))
+		  AND EXISTS (SELECT 1 FROM user_plans n
+		      WHERE n.user_id=b.user_id AND n.package_id=b.package_id AND n.kind='plan'
+		        AND n.status='active' AND n.duration_days>0 AND n.id>b.id))`, StatusRetired, now)
+	return err
+}
+
 // mergeDuplicatePlanBuckets collapses pre-existing duplicate plan buckets (same
 // user + package) into one, summing traffic quota and usage and taking the
 // latest expiry. This repairs accounts that repurchased a plan before renewal
@@ -900,9 +1116,16 @@ func applyBucketUsage(tx txLike, bucketID, userID, packageID, up, down, now int6
 func (s *Store) mergeDuplicatePlanBuckets() error {
 	// Only collapse legacy 'active' duplicates. Never touch 'queued' buckets —
 	// merging them would re-create the very stacking the queue model removes.
+	// duration_days is the discriminator: a queue-era bucket always carries the
+	// package's duration (plan packages must have a positive one), while the rows
+	// this repair exists for predate the column and got 0 from its ALTER TABLE
+	// default. Without this the pass stops being a one-time legacy repair and
+	// starts eating live queues — a user holding six monthly份 has several
+	// same-package buckets by design, and merging them destroys the per-month
+	// accounting and deletes whichever份 is currently in service.
 	rows, err := s.db.Query(`SELECT user_id, package_id, MIN(id),
 		SUM(traffic_limit), SUM(used_up), SUM(used_down), MAX(expiry_at)
-		FROM user_plans WHERE kind='plan' AND package_id>0 AND status='active'
+		FROM user_plans WHERE kind='plan' AND package_id>0 AND status='active' AND duration_days=0
 		GROUP BY user_id, package_id HAVING COUNT(*)>1`)
 	if err != nil {
 		return err
@@ -929,7 +1152,10 @@ func (s *Store) mergeDuplicatePlanBuckets() error {
 			d.limit, d.up, d.down, d.expiry, now, d.keepID); err != nil {
 			return err
 		}
-		if _, err := s.db.Exec(`DELETE FROM user_plans WHERE kind='plan' AND user_id=? AND package_id=? AND id<>? AND status='active'`,
+		// Same scoping as the SELECT above — the delete must not reach past the
+		// legacy rows the merge was computed from.
+		if _, err := s.db.Exec(`DELETE FROM user_plans WHERE kind='plan' AND user_id=? AND package_id=? AND id<>?
+			AND status='active' AND duration_days=0`,
 			d.userID, d.packageID, d.keepID); err != nil {
 			return err
 		}
@@ -952,10 +1178,10 @@ func (s *Store) backfillUserPlans() error {
 		return err
 	}
 	type urec struct {
-		id                     int64
-		username               string
-		name, cuuid, csecret   sql.NullString
-		planID                 sql.NullInt64
+		id                      int64
+		username                string
+		name, cuuid, csecret    sql.NullString
+		planID                  sql.NullInt64
 		limit, up, down, expiry int64
 	}
 	var us []urec

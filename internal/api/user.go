@@ -222,12 +222,73 @@ func (a *API) syncEntitlement(_ *store.User, _ bool) error { return nil }
 
 // ---- User dashboard / subscription ----
 
+// advanceQueueOnRead activates this user's next queued套餐 if the current one has
+// finished, before a read renders their state.
+//
+// This is the core of the stuck-queue fix. Promotion used to happen only in a
+// 2-minute background sweep, so a user whose套餐 expired kept seeing that expired
+// plan — and got no nodes — until the sweep reached them, which for anyone the
+// sweep had failed on was never. Doing it here means the two moments the user
+// actually asks ("open the panel", "refresh the subscription") are themselves the
+// repair, and no background loop has to be healthy for them to get what they paid
+// for.
+//
+// No-op, and no write transaction, unless a promotion is genuinely due. Reports
+// whether anything activated, because a promotion rewrites the caller's user row
+// (expiry/traffic) and a caller holding the copy it read a moment ago would
+// otherwise still be looking at the expired套餐 it just replaced.
+func (a *API) advanceQueueOnRead(userID int64) bool {
+	changed, err := a.st.AdvanceQueueFor(userID)
+	if err != nil {
+		log.Printf("queue advance (user %d): %v", userID, err)
+		return false
+	}
+	if changed {
+		a.onQueuePromoted(userID)
+	}
+	return changed
+}
+
+// refreshAfterPromotion re-reads the user when their queue just advanced, so the
+// request answers from the state it created rather than the one it walked in
+// with. Without it the promotion would not take effect until the NEXT refresh —
+// handleSub decides whether to serve any nodes from these very fields, so the
+// user would still be told 已到期 on the request that fixed them.
+func (a *API) refreshAfterPromotion(u *store.User, promoted bool) *store.User {
+	if !promoted {
+		return u
+	}
+	if fresh, err := a.st.UserByID(u.ID); err == nil && fresh != nil {
+		return fresh
+	}
+	return u
+}
+
+// onQueuePromoted is what has to follow a promotion, wherever it came from.
+//
+// Dropping the cached links is not optional: every self-built link carries its
+// OWNING bucket's uuid/password, so activating the next份 changes the
+// credentials, and collectEntries caches a user's links for 30s. Without this the
+// request that promotes can answer from a cache built moments earlier and hand
+// back the retired份's credentials — links that authenticate against nothing, at
+// exactly the moment the user is checking whether their new套餐 works.
+//
+// The rebuild is scheduled, never awaited: pushing config to every node takes far
+// longer than an HTTP response may.
+func (a *API) onQueuePromoted(userIDs ...int64) {
+	for _, id := range userIDs {
+		a.invalidateLinks(id)
+	}
+	a.sbRebuildLog()
+}
+
 func (a *API) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
 		fail(w, http.StatusUnauthorized, "未登录")
 		return
 	}
+	u = a.refreshAfterPromotion(u, a.advanceQueueOnRead(u.ID))
 	buckets, _ := a.st.ListBuckets(u.ID)
 	pkgNames, _ := a.st.PackageNames()
 	tr := dashboardTraffic(buckets)
@@ -696,6 +757,11 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// A套餐 that has just run out must not cost the user the next one they already
+	// paid for. Promote here too — a client refreshing its subscription is the most
+	// likely first contact after service stops — and re-read the user, because the
+	// serviceable check below reads exactly the fields the promotion just rewrote.
+	u = a.refreshAfterPromotion(u, a.advanceQueueOnRead(u.ID))
 	// Over-quota / expired users are served an empty node list (still a valid,
 	// well-formed config) rather than working links. sing-box self-built access is
 	// enforced separately, but external-node links must be withheld here too.

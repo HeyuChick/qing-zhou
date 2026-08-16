@@ -678,6 +678,11 @@ func (s *Store) Migrate() error {
 	if err := s.backfillUserPlans(); err != nil {
 		return err
 	}
+	// Mark the已用完份 of existing queue chains as retired BEFORE the merge below,
+	// so a progressed queue is never mistaken for legacy duplicates (idempotent).
+	if err := s.backfillRetiredBuckets(); err != nil {
+		return err
+	}
 	// Collapse duplicate plan buckets left by pre-renewal repurchases (idempotent).
 	if err := s.mergeDuplicatePlanBuckets(); err != nil {
 		return err
