@@ -277,3 +277,51 @@ func TestQueueIdentity_BackfillKeepsTheInServiceCredentials(t *testing.T) {
 		t.Fatalf("a second backfill rotated the credential (%s → %s)", got, again)
 	}
 }
+
+// When two份 of a line are somehow both usable, the migration must lift the
+// credentials of the one a node would actually be served from — the soonest
+// expiry, then lowest id, exactly as orderBuckets/pickOwner choose. Picking any
+// other row disconnects every client of that account at upgrade, which is the
+// worst thing a migration can do.
+func TestQueueIdentity_BackfillMatchesWhoActuallyServes(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "ulla")
+	pkg := mkPlan(t, st, "月付", 100, 100, 30)
+	now := time.Now().Unix()
+
+	// Two usable份: the LOWER id expires sooner, so it is the one in service.
+	serving, err := insertBucket(st.db, &Bucket{
+		UserID: uid, Kind: "plan", PackageID: pkg.ID, Name: "月付",
+		ClientName: "qz_ulla_serving", ClientUUID: "serving-uuid", ClientSecret: "s1",
+		TrafficLimit: 100 * giB, ExpiryAt: now + 10*86400, DurationDays: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := insertBucket(st.db, &Bucket{
+		UserID: uid, Kind: "plan", PackageID: pkg.ID, Name: "月付",
+		ClientName: "qz_ulla_later", ClientUUID: "later-uuid", ClientSecret: "s2",
+		TrafficLimit: 100 * giB, ExpiryAt: now + 20*86400, DurationDays: 30,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Whoever pickOwner would serve is the credential that must survive.
+	bs, _ := st.ListBuckets(uid)
+	ord := orderBuckets(bs, now, 0, func(int64) []int64 { return nil })
+	if len(ord) == 0 || ord[0].b.ID != serving {
+		t.Fatalf("setup: expected份%d to be the one in service, got %v", serving, ord)
+	}
+
+	if err := st.backfillPlanIdentities(); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := st.db.QueryRow(`SELECT client_uuid FROM plan_identities WHERE user_id=? AND package_id=?`,
+		uid, pkg.ID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "serving-uuid" {
+		t.Fatalf("backfilled %q, want the credential actually in service — every client of this account would drop", got)
+	}
+}

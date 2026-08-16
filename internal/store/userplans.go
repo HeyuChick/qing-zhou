@@ -76,13 +76,16 @@ const usableHeadPredicate = `h.kind='plan' AND h.status='active'
 //   - mergeDuplicatePlanBuckets, the one-time repair for pre-queue accounts, saw
 //     a progressed queue as same-package duplicates and collapsed every consumed
 //     month into a single bucket on the next restart, deleting the live one;
-//   - liveIdentity, once the live份 was removed by a refund, picked a consumed份
-//     as the credential holder and tried to hand its already-retired name to the
-//     next份, violating the UNIQUE index and failing the refund outright.
+//   - the credential carry-forward, once the live份 was removed by a refund,
+//     picked a consumed份 as the credential holder and tried to hand it a name it
+//     already had, failing the refund outright.
 //
-// Everything else keys off expiry/quota rather than this column, and a retired份
-// is by definition out of one or the other, so nothing else changes behaviour: it
-// still renders as 已过期/已用尽 and still stays out of every config.
+// Credentials have since moved to the subscription line, so that second reason is
+// gone — but the first stands on its own: without this status a progressed queue
+// is indistinguishable from legacy duplicates and the merge eats it. Everything
+// else keys off expiry/quota rather than this column, and a retired份 is by
+// definition out of one or the other, so nothing else changes behaviour: it still
+// renders as 已过期/已用尽 and still stays out of every config.
 const StatusRetired = "retired"
 
 // planIdentityCols is the credential set a subscription line carries.
@@ -1153,10 +1156,18 @@ func applyBucketUsage(tx txLike, bucketID, userID, packageID int64, kind string,
 //
 // Which份 to take them from matters more than anything else here: it has to be
 // the one whose uuid/password every client is CURRENTLY holding, or the upgrade
-// itself would disconnect everyone. That is the份 in service — the usable one —
-// and failing that the most recently activated, which is where the old
-// carry-forward left them. Queued份 are never a source: their credentials were
-// minted but never rendered into a config or a link, so nobody is using them.
+// itself would disconnect everyone.
+//
+// That is whichever份 orderBuckets/pickOwner would hand a node to, so the tie-break
+// mirrors them exactly: usable first, then SOONEST expiry (0 = never sorts last),
+// then lowest id. A normal chain has exactly one usable份 so any ordering would
+// agree — but backfillRetiredBuckets deliberately leaves two usable份 alone when
+// it finds them, and there the two orderings would disagree and this would lift
+// credentials nobody is using. Failing that (nothing usable), the most recently
+// activated份, which is where the old carry-forward left them.
+//
+// Queued份 are never a source: their credentials were minted but never rendered
+// into a config or a link, so nobody is holding them.
 //
 // Idempotent: a line that already has a row is left untouched, so this can run on
 // every boot and re-running it can never rotate a live credential.
@@ -1174,7 +1185,8 @@ func (s *Store) backfillPlanIdentities() error {
 		      ORDER BY (x.status='active'
 		                AND (x.expiry_at=0 OR x.expiry_at>?)
 		                AND (x.traffic_limit=0 OR x.used_up+x.used_down<x.traffic_limit)) DESC,
-		               x.id DESC
+		               CASE WHEN x.expiry_at=0 THEN 9223372036854775807 ELSE x.expiry_at END ASC,
+		               x.id ASC
 		      LIMIT 1)`, now, now, now)
 	return err
 }
@@ -1184,8 +1196,7 @@ func (s *Store) backfillPlanIdentities() error {
 //
 // A queue-era份 is retired iff a NEWER same-package份 has already taken over
 // (promotion is in id order, so "newer" means a higher id). Those are exactly the
-// rows mergeDuplicatePlanBuckets would otherwise see as duplicates and flatten,
-// and the rows liveIdentity could otherwise mistake for the credential holder.
+// rows mergeDuplicatePlanBuckets would otherwise see as duplicates and flatten.
 //
 // Runs before the merge and is idempotent: once marked, they no longer match.
 // Legacy (duration_days=0) rows are left alone — the merge is still the right
