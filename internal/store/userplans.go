@@ -1151,6 +1151,13 @@ func applyBucketUsage(tx txLike, bucketID, userID, packageID int64, kind string,
 	return nil
 }
 
+// backfillLiveExpr is "this份 is currently usable", written without a bound
+// parameter so the ORDER BY below can repeat it. strftime here is the same clock
+// as time.Now().Unix() and SQLite compares it numerically against the column.
+const backfillLiveExpr = `(x.status='active'
+	AND (x.expiry_at=0 OR x.expiry_at>strftime('%s','now'))
+	AND (x.traffic_limit=0 OR x.used_up+x.used_down<x.traffic_limit))`
+
 // backfillPlanIdentities lifts each existing subscription line's credentials out
 // of its buckets and into plan_identities.
 //
@@ -1158,13 +1165,19 @@ func applyBucketUsage(tx txLike, bucketID, userID, packageID int64, kind string,
 // the one whose uuid/password every client is CURRENTLY holding, or the upgrade
 // itself would disconnect everyone.
 //
-// That is whichever份 orderBuckets/pickOwner would hand a node to, so the tie-break
-// mirrors them exactly: usable first, then SOONEST expiry (0 = never sorts last),
-// then lowest id. A normal chain has exactly one usable份 so any ordering would
-// agree — but backfillRetiredBuckets deliberately leaves two usable份 alone when
-// it finds them, and there the two orderings would disagree and this would lift
-// credentials nobody is using. Failing that (nothing usable), the most recently
-// activated份, which is where the old carry-forward left them.
+// The two halves need OPPOSITE orderings, which is why this switches on the flag
+// rather than applying one rule throughout:
+//
+//   - among USABLE份, whichever orderBuckets/pickOwner would hand a node to —
+//     soonest expiry (0 = never sorts last), then lowest id. A normal chain has
+//     exactly one usable份 so any ordering agrees, but backfillRetiredBuckets
+//     deliberately leaves two usable份 alone when it finds them, and there a
+//     different order would lift credentials nobody is using.
+//   - when NONE is usable the account is already being served nothing, so the
+//     credentials worth keeping are the ones it last authenticated with: the most
+//     recently activated份, i.e. the highest id. Buying the package again reuses
+//     the line, so getting this right is the difference between the user's client
+//     resuming immediately and staying broken until its next refresh.
 //
 // Queued份 are never a source: their credentials were minted but never rendered
 // into a config or a link, so nobody is holding them.
@@ -1182,12 +1195,12 @@ func (s *Store) backfillPlanIdentities() error {
 		  AND p.id = (SELECT x.id FROM user_plans x
 		      WHERE x.user_id=p.user_id AND x.package_id=p.package_id
 		        AND x.kind='plan' AND x.status<>'queued'
-		      ORDER BY (x.status='active'
-		                AND (x.expiry_at=0 OR x.expiry_at>?)
-		                AND (x.traffic_limit=0 OR x.used_up+x.used_down<x.traffic_limit)) DESC,
-		               CASE WHEN x.expiry_at=0 THEN 9223372036854775807 ELSE x.expiry_at END ASC,
-		               x.id ASC
-		      LIMIT 1)`, now, now, now)
+		      ORDER BY ` + backfillLiveExpr + ` DESC,
+		               CASE WHEN ` + backfillLiveExpr + `
+		                    THEN (CASE WHEN x.expiry_at=0 THEN 9223372036854775807 ELSE x.expiry_at END)
+		                    ELSE 0 END ASC,
+		               CASE WHEN ` + backfillLiveExpr + ` THEN x.id ELSE -x.id END ASC
+		      LIMIT 1)`, now, now)
 	return err
 }
 

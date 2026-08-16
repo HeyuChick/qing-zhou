@@ -325,3 +325,35 @@ func TestQueueIdentity_BackfillMatchesWhoActuallyServes(t *testing.T) {
 		t.Fatalf("backfilled %q, want the credential actually in service — every client of this account would drop", got)
 	}
 }
+
+// When the whole chain is spent, nothing is in service, so the credentials worth
+// keeping are the ones the account last authenticated with — the most recently
+// activated份. Buying the package again reuses the line, and getting this wrong
+// is the difference between the client resuming and staying broken until its next
+// refresh.
+func TestQueueIdentity_BackfillSpentChainKeepsTheLastServed(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "nate")
+	pkg := mkPlan(t, st, "月付", 100, 100, 30)
+	const past = int64(1000000)
+	for i, e := range []int64{past, past + 86400} { // 份2 served last
+		if _, err := insertBucket(st.db, &Bucket{
+			UserID: uid, Kind: "plan", PackageID: pkg.ID, Name: "月付",
+			ClientName:   "qz_nate_" + string(rune('a'+i)),
+			ClientUUID:   []string{"first-uuid", "last-served-uuid"}[i],
+			ClientSecret: "s", TrafficLimit: 100 * giB, ExpiryAt: e, DurationDays: 30,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.backfillPlanIdentities(); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := st.db.QueryRow(`SELECT client_uuid FROM plan_identities WHERE user_id=?`, uid).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "last-served-uuid" {
+		t.Fatalf("backfilled %q, want the last-served credential", got)
+	}
+}
