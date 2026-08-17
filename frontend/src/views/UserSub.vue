@@ -65,7 +65,7 @@
            完全放得下，多份并存时横向排开比一路往下堆省掉大半屏高度。
            auto-fill + minmax 让它在窄屏自动退回单列，不用另写断点。 -->
       <div class="plan-grid">
-        <div v-for="p in sortedPlans" :key="p.id" class="plan-row" :class="{ queued: p.status === 'queued' }">
+        <div v-for="p in visiblePlans" :key="p.id" class="plan-row" :class="{ queued: p.status === 'queued' }">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px;">
             <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ p.name || '套餐 #' + p.id }}</span>
             <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
@@ -77,6 +77,13 @@
             <span style="white-space:nowrap;">{{ planTime(p) }}</span>
           </div>
         </div>
+      </div>
+      <!-- 已结束的份默认收起：续费之后新旧两份同名并排，过期那份只是历史，
+           留在列表里反而要每次分辨哪份还在用。想看仍然能展开。 -->
+      <div v-if="canFoldFinished" class="plan-more">
+        <n-button size="tiny" quaternary @click="showFinished = !showFinished">
+          {{ showFinished ? '收起已结束的套餐' : `另有 ${finishedPlans.length} 份已结束（已过期 / 已用完）` }}
+        </n-button>
       </div>
     </n-card>
 
@@ -221,6 +228,13 @@ const sortedPlans = computed<any[]>(() => {
   return list
 })
 const hasQueued = computed(() => plans.value.some(p => p.status === 'queued'))
+// 已过期 / 已用尽的份（planSortKey 的第三档）不参与日常查看：默认只列还在用和排
+// 队中的。全部都结束时不折叠——那时列表会整块空掉，看不出服务为什么停了。
+const finishedPlans = computed<any[]>(() => sortedPlans.value.filter(p => planSortKey(p) === 2))
+const canFoldFinished = computed(() => finishedPlans.value.length > 0 && finishedPlans.value.length < plans.value.length)
+const showFinished = ref(false)
+const visiblePlans = computed<any[]>(() =>
+  showFinished.value || !canFoldFinished.value ? sortedPlans.value : sortedPlans.value.filter(p => planSortKey(p) !== 2))
 function planPct(p: any) { return p.status === 'queued' ? 0 : pct(p.used, p.traffic_limit) }
 const planStatus = planStatusMeta
 const planTime = (p: any) => planTimeText(p, fmtDate)
@@ -539,6 +553,8 @@ onMounted(async () => {
 .plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
 .plan-row { padding: 12px; background: var(--bg-soft); border-radius: 10px; min-width: 0; }
 .plan-row.queued { opacity: .72; border: 1px dashed var(--border); background: transparent; }
+.plan-more { margin-top: 8px; }
+.plan-more :deep(.n-button) { color: var(--text-3); font-size: 12px; }
 .proxy-row { margin-bottom: 8px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; }
 .proxy-row:last-child { margin-bottom: 0; }
 /* 一行放不下时按钮整体换行，地址不被挤成省略号 */
