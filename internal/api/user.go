@@ -575,6 +575,18 @@ type planView struct {
 	// refund action, which is a different thing from removing the份.
 	CreatedAt int64 `json:"created_at"`
 	OrderID   int64 `json:"order_id"`
+	// DurationDays is the period this份 was sold for. Now that one package can be
+	// sold at several lengths, it is the only thing that tells two份 of the same
+	// package apart — without it the subscription timeline would show the 30-day
+	// and the 365-day份 as identical rows. 0 = legacy份 (bought before the queue
+	// model) or a grant with no duration.
+	DurationDays int64 `json:"duration_days,omitempty"`
+	// StartedAt is when this份 began counting down, so the UI can draw a real
+	// period (起 → 止) instead of only an end date. Derived, not stored: promotion
+	// sets expiry = activation + duration, so the difference IS the activation
+	// instant. Falls back to the grant time when either half is unknown (legacy份,
+	// or one that never expires). 0 for a queued份 — it has not started.
+	StartedAt int64 `json:"started_at,omitempty"`
 }
 
 // queueActivations estimates, for each queued plan bucket, the LATEST time it
@@ -697,6 +709,23 @@ func dashboardTraffic(buckets []*store.Bucket) dashTraffic {
 	return d
 }
 
+// startedAt recovers when a份 began counting down. advanceUserQueues sets
+// expiry = promotion instant + duration, so subtracting the duration back out
+// gives the activation exactly — there is no stored activation column, and
+// created_at is the PURCHASE time, which for a份 that waited in the queue can be
+// months earlier. A queued份 has not started at all (0); anything missing a
+// duration or an expiry falls back to created_at, which is then the best known
+// lower bound.
+func startedAt(b *store.Bucket) int64 {
+	if b.Status == "queued" {
+		return 0
+	}
+	if b.ExpiryAt > 0 && b.DurationDays > 0 {
+		return b.ExpiryAt - b.DurationDays*86400
+	}
+	return b.CreatedAt
+}
+
 func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planView {
 	now := time.Now().Unix()
 	acts := queueActivations(buckets, now)
@@ -715,7 +744,8 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 			}
 		}
 		pv := planView{ID: b.ID, Kind: b.Kind, PackageID: b.PackageID, Name: name, TrafficLimit: b.TrafficLimit,
-			Used: b.Used(), ExpiryAt: b.ExpiryAt, Remaining: -1, CreatedAt: b.CreatedAt, OrderID: b.OrderID}
+			Used: b.Used(), ExpiryAt: b.ExpiryAt, Remaining: -1, CreatedAt: b.CreatedAt, OrderID: b.OrderID,
+			DurationDays: b.DurationDays, StartedAt: startedAt(b)}
 		if b.TrafficLimit > 0 {
 			if rem := b.TrafficLimit - b.Used(); rem > 0 {
 				pv.Remaining = rem

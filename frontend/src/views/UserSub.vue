@@ -65,24 +65,57 @@
            完全放得下，多份并存时横向排开比一路往下堆省掉大半屏高度。
            auto-fill + minmax 让它在窄屏自动退回单列，不用另写断点。 -->
       <div class="plan-grid">
-        <div v-for="p in visiblePlans" :key="p.id" class="plan-row" :class="{ queued: p.status === 'queued' }">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px;">
-            <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ p.name || '套餐 #' + p.id }}</span>
-            <n-tag :type="planStatus(p).type" size="small" bordered>{{ planStatus(p).label }}</n-tag>
+        <template v-for="line in visibleLines" :key="line.key">
+          <!-- 只买过一份：还是原来那张卡，信息量没变就别换样子 -->
+          <div v-if="line.all.length === 1" class="plan-row" :class="{ queued: line.segs[0].status === 'queued' }">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px;">
+              <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ line.name }}</span>
+              <n-tag :type="planStatus(line.segs[0]).type" size="small" bordered>{{ planStatus(line.segs[0]).label }}</n-tag>
+            </div>
+            <n-progress v-if="line.segs[0].status !== 'queued'" type="line" :percentage="planPct(line.segs[0])" :color="planPct(line.segs[0])>90?'#c2685c':'#6f8f76'" />
+            <div v-else class="pl-stripe"></div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;gap:8px;">
+              <span>{{ segUsage(line.segs[0]) }}</span>
+              <span style="white-space:nowrap;">{{ planTime(line.segs[0]) }}</span>
+            </div>
           </div>
-          <n-progress v-if="p.status !== 'queued'" type="line" :percentage="planPct(p)" :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
-          <div v-else style="height:6px;border-radius:3px;background:repeating-linear-gradient(45deg,var(--border),var(--border) 4px,transparent 4px,transparent 8px);"></div>
-          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;gap:8px;">
-            <span>{{ p.status === 'queued' ? '待用流量 ' + (p.traffic_limit>0 ? fmtTotal(p.traffic_limit) : '不限') : '剩余 ' + (p.remaining < 0 ? '不限' : fmtBytes(p.remaining)) + '（' + fmtBytes(p.used) + ' / ' + fmtTotal(p.traffic_limit) + '）' }}</span>
-            <span style="white-space:nowrap;">{{ planTime(p) }}</span>
+
+          <!-- 同一个套餐买过好几份（续费、买不同时长）：它们其实是一条订阅线，
+               一份结束下一份接上。摊成同名的几张卡片就分不清哪份在用、上一段又
+               用掉了多少，所以按时间先后串成一条时间线，每段各自记自己的流量。 -->
+          <div v-else class="plan-row line">
+            <div class="pl-head">
+              <span class="pl-name">{{ line.name }}</span>
+              <span class="pl-sub">{{ line.all.length }} 段 · 累计已用 {{ fmtBytes(line.totalUsed) }}</span>
+            </div>
+            <!-- 展开键在时间线上方：历史段按时间序插在最前，键放下面的话，点开
+                 之后内容在按钮上方冒出来，按钮连同下半页一起被推走。 -->
+            <n-button v-if="line.hidden || expandedLines.includes(line.key)" size="tiny" quaternary
+                      class="pl-more" @click="toggleLine(line.key)">
+              {{ expandedLines.includes(line.key) ? '收起历史' : `查看更早的 ${line.hidden} 段` }}
+            </n-button>
+            <div class="pl-tl">
+              <div v-for="p in line.segs" :key="p.id" class="pl-seg" :class="segCls(p)">
+                <span class="pl-dot"></span>
+                <div class="pl-when">
+                  <span class="pl-range">{{ segRange(p) }}</span>
+                  <span v-if="p.duration_days" class="pl-len">{{ p.duration_days }} 天</span>
+                  <n-tag :type="planStatus(p).type" size="tiny" bordered>{{ planStatus(p).label }}</n-tag>
+                </div>
+                <n-progress v-if="p.status !== 'queued'" type="line" :percentage="planPct(p)" :height="5"
+                            :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
+                <div v-else class="pl-stripe"></div>
+                <div class="pl-use">{{ segUsage(p) }}</div>
+              </div>
+            </div>
           </div>
-        </div>
+        </template>
       </div>
-      <!-- 已结束的份默认收起：续费之后新旧两份同名并排，过期那份只是历史，
-           留在列表里反而要每次分辨哪份还在用。想看仍然能展开。 -->
+      <!-- 整条线都结束的套餐默认收起：它既不影响现在能用多少，也不影响什么时候
+           到期，留在列表里只会跟还在用的混在一起。想看仍然能展开。 -->
       <div v-if="canFoldFinished" class="plan-more">
         <n-button size="tiny" quaternary @click="showFinished = !showFinished">
-          {{ showFinished ? '收起已结束的套餐' : `另有 ${finishedPlans.length} 份已结束（已过期 / 已用完）` }}
+          {{ showFinished ? '收起已结束的套餐' : `另有 ${finishedLines.length} 个已结束的套餐（已过期 / 已用完）` }}
         </n-button>
       </div>
     </n-card>
@@ -228,13 +261,91 @@ const sortedPlans = computed<any[]>(() => {
   return list
 })
 const hasQueued = computed(() => plans.value.some(p => p.status === 'queued'))
-// 已过期 / 已用尽的份（planSortKey 的第三档）不参与日常查看：默认只列还在用和排
-// 队中的。全部都结束时不折叠——那时列表会整块空掉，看不出服务为什么停了。
-const finishedPlans = computed<any[]>(() => sortedPlans.value.filter(p => planSortKey(p) === 2))
-const canFoldFinished = computed(() => finishedPlans.value.length > 0 && finishedPlans.value.length < plans.value.length)
+
+// ---- 订阅线：同一个套餐的若干份合成一条时间线 ----
+//
+// 后端按份独立计量，续费或买了不同时长就会有好几份同名的份并存。它们在时间上
+// 是首尾相接的一条线（一份用完/到期，下一份自动接上），所以按套餐归组、组内按
+// 时间先后排，比平铺几张同名卡片好读得多，也才能让每一段各自显示自己的用量。
+// 不属于套餐的份（流量池、管理员赠送）没有这种接续关系，各自成一条单段线。
+type PlanLine = {
+  key: string
+  name: string
+  all: any[]       // 这条线的全部份，已按时间先后排好
+  segs: any[]      // 当前显示的段（默认不含已结束的）
+  hidden: number   // 被收起的历史段数
+  finished: boolean
+  totalUsed: number
+}
+// 一段落在时间线的哪一档：已结束的在前（过去），使用中居中，排队的在后（将来）。
+function chronoKey(p: any): number {
+  const s = planSortKey(p)
+  return s === 2 ? 0 : s === 0 ? 1 : 2
+}
+// 这一段是什么时候开始的。started_at 由后端从「到期时间 − 时长」还原；拿不到就
+// 退回发放时间（老数据 / 不过期的份）。
+function segStart(p: any): number { return p.started_at || p.created_at || 0 }
+
+const expandedLines = ref<string[]>([])
+function toggleLine(key: string) {
+  const i = expandedLines.value.indexOf(key)
+  if (i >= 0) expandedLines.value.splice(i, 1)
+  else expandedLines.value.push(key)
+}
+
+const planLines = computed<PlanLine[]>(() => {
+  const byKey = new Map<string, any[]>()
+  // 用 sortedPlans 的顺序建组，于是组的先后仍是「使用中的套餐在前」。
+  for (const p of sortedPlans.value) {
+    const key = p.kind === 'plan' && p.package_id > 0 ? 'pkg:' + p.package_id : 'one:' + p.id
+    const arr = byKey.get(key)
+    if (arr) arr.push(p)
+    else byKey.set(key, [p])
+  }
+  const out: PlanLine[] = []
+  for (const [key, arr] of byKey) {
+    const all = [...arr].sort((a, b) =>
+      chronoKey(a) - chronoKey(b) ||
+      (segStart(a) || a.activate_by || 0) - (segStart(b) || b.activate_by || 0) ||
+      a.id - b.id)
+    const finished = all.every(p => planSortKey(p) === 2)
+    // 整条线都结束时不再收起段落——那张卡片本来就是历史，收了就没内容了。
+    const segs = finished || expandedLines.value.includes(key) ? all : all.filter(p => planSortKey(p) !== 2)
+    out.push({
+      key, name: all[0].name || '套餐 #' + all[0].id, all, segs,
+      hidden: all.length - segs.length, finished,
+      totalUsed: all.reduce((n, p) => n + (p.used || 0), 0),
+    })
+  }
+  return out
+})
+// 整条线都已结束的套餐默认收起；全部套餐都结束时不折叠，否则列表会整块空掉，
+// 看不出服务为什么停了。
+const finishedLines = computed(() => planLines.value.filter(l => l.finished))
+const canFoldFinished = computed(() => finishedLines.value.length > 0 && finishedLines.value.length < planLines.value.length)
 const showFinished = ref(false)
-const visiblePlans = computed<any[]>(() =>
-  showFinished.value || !canFoldFinished.value ? sortedPlans.value : sortedPlans.value.filter(p => planSortKey(p) !== 2))
+const visibleLines = computed<PlanLine[]>(() =>
+  showFinished.value || !canFoldFinished.value ? planLines.value : planLines.value.filter(l => !l.finished))
+
+function segCls(p: any) {
+  const k = planSortKey(p)
+  return { fin: k === 2, now: k === 0, q: k === 1 }
+}
+// 一段的时间区间。排队中的还没开始，只能给个预计生效时间。
+function segRange(p: any): string {
+  if (p.status === 'queued') {
+    return p.activate_by ? `预计 ${fmtDate(p.activate_by)} 起` : '前一段结束后开始'
+  }
+  const start = segStart(p)
+  const end = p.expiry_at ? fmtDate(p.expiry_at) : '不过期'
+  return start ? `${fmtDate(start)} → ${end}` : end
+}
+// 一段用掉了多少。排队中的还没开始计量，只报待用额度。
+function segUsage(p: any): string {
+  if (p.status === 'queued') return '待用流量 ' + (p.traffic_limit > 0 ? fmtTotal(p.traffic_limit) : '不限')
+  if (p.traffic_limit <= 0) return `已用 ${fmtBytes(p.used)} · 不限流量`
+  return `已用 ${fmtBytes(p.used)} / ${fmtTotal(p.traffic_limit)} · 剩 ${fmtBytes(p.remaining < 0 ? 0 : p.remaining)}`
+}
 function planPct(p: any) { return p.status === 'queued' ? 0 : pct(p.used, p.traffic_limit) }
 const planStatus = planStatusMeta
 const planTime = (p: any) => planTimeText(p, fmtDate)
@@ -555,6 +666,27 @@ onMounted(async () => {
 .plan-row.queued { opacity: .72; border: 1px dashed var(--border); background: transparent; }
 .plan-more { margin-top: 8px; }
 .plan-more :deep(.n-button) { color: var(--text-3); font-size: 12px; }
+
+/* 订阅线：整行独占，段落纵向串成时间线（左侧一竖线 + 每段一个圆点） */
+.plan-row.line { grid-column: 1 / -1; }
+.pl-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.pl-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-sub { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.pl-seg { position: relative; padding: 0 0 14px 20px; }
+.pl-seg:last-child { padding-bottom: 0; }
+/* 连接线从圆点下方一直画到下一段，最后一段不画 */
+.pl-seg::before { content: ''; position: absolute; left: 4px; top: 14px; bottom: 0; width: 1px; background: var(--border); }
+.pl-seg:last-child::before { display: none; }
+.pl-dot { position: absolute; left: 0; top: 4px; width: 9px; height: 9px; border-radius: 50%; background: var(--border); }
+.pl-seg.now .pl-dot { background: #6f8f76; box-shadow: 0 0 0 3px rgba(111, 143, 118, .16); }
+.pl-seg.q .pl-dot { background: transparent; border: 1px dashed var(--text-3); }
+.pl-seg.fin { opacity: .62; }
+.pl-when { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 5px; }
+.pl-range { font-size: 12px; color: var(--text-2); }
+.pl-len { font-size: 11px; color: var(--text-3); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
+.pl-use { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+.pl-stripe { height: 6px; border-radius: 3px; background: repeating-linear-gradient(45deg, var(--border), var(--border) 4px, transparent 4px, transparent 8px); }
+.pl-more { margin: -2px 0 8px; color: var(--text-3); }
 .proxy-row { margin-bottom: 8px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; }
 .proxy-row:last-child { margin-bottom: 0; }
 /* 一行放不下时按钮整体换行，地址不被挤成省略号 */
