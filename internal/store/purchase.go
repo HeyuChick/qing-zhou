@@ -48,7 +48,17 @@ type PurchaseResult struct {
 //
 // sync receives the updated user snapshot and whether traffic counters should
 // be reset (expired-plan renewal).
+//
+// Buys the package's default duration; PurchaseDuration takes the buyer's choice.
 func (s *Store) Purchase(userID int64, pkg *Package, idemKey string, sync func(updated *User, resetUsed bool) error) (*PurchaseResult, error) {
+	return s.PurchaseDuration(userID, pkg, 0, idemKey, sync)
+}
+
+// PurchaseDuration is Purchase for a package that sells several durations:
+// days picks one of pkg.Options (0 = the default one). The choice is re-resolved
+// against the fresh in-tx package, so the price charged and the quota granted are
+// the ones currently published for that duration — never the ones the client saw.
+func (s *Store) PurchaseDuration(userID int64, pkg *Package, days int64, idemKey string, sync func(updated *User, resetUsed bool) error) (*PurchaseResult, error) {
 	if !pkg.Enabled {
 		return nil, ErrPackageDisabled
 	}
@@ -105,7 +115,12 @@ func (s *Store) Purchase(userID int64, pkg *Package, idemKey string, sync func(u
 		return nil, ErrPackageDisabled
 	}
 	fresh.GroupIDs = pkg.GroupIDs // not a column; preserve caller-supplied bindings
-	pkg = fresh
+	// Apply the buyer's duration choice to the fresh row: from here on pkg carries
+	// the price, traffic and duration of the selected option, so the funds check,
+	// the bucket, the snapshot and the ledger all agree on one combination.
+	if pkg, err = fresh.forDuration(days); err != nil {
+		return nil, err
+	}
 	if !pkg.Enabled {
 		return nil, ErrPackageDisabled
 	}
@@ -239,7 +254,20 @@ func (s *Store) Purchase(userID int64, pkg *Package, idemKey string, sync func(u
 // (traffic + expiry, and current plan for "plan" packages), records a 0-price
 // order for audit, and runs sync inside the transaction so a sync failure rolls
 // the whole thing back. Package enabled/stock are ignored (admin override).
+//
+// Grants the package's default duration; AssignPackageDuration takes a choice.
 func (s *Store) AssignPackage(userID int64, pkg *Package, operatorID int64, sync func(updated *User, resetUsed bool) error) (*PurchaseResult, error) {
+	return s.AssignPackageDuration(userID, pkg, 0, operatorID, sync)
+}
+
+// AssignPackageDuration is AssignPackage for a multi-duration package: days picks
+// one of pkg.Options (0 = the default one), so a comp can be handed out as the
+// 7-day trial rather than always the headline length.
+func (s *Store) AssignPackageDuration(userID int64, pkg *Package, days, operatorID int64, sync func(updated *User, resetUsed bool) error) (*PurchaseResult, error) {
+	pkg, err := pkg.forDuration(days)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err

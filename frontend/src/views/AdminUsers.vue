@@ -183,6 +183,9 @@
           <div class="pm-assign-title">分配套餐（不扣积分）</div>
           <div class="pm-assign-row">
             <n-select v-model:value="assignPkgId" :options="pkgOptions" placeholder="选择套餐" filterable style="flex:1;" />
+            <!-- 多时长套餐才需要挑一档；单时长的照旧不出现这个选择框 -->
+            <n-select v-if="assignDurationOptions.length" v-model:value="assignDays" :options="assignDurationOptions"
+                      placeholder="时长" style="width:130px;flex:none;" />
             <n-button type="primary" :loading="saving" :disabled="!assignPkgId" @click="handleAssign">
               {{ assignWillQueue ? '分配并排队' : '分配' }}
             </n-button>
@@ -288,7 +291,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, h } from 'vue'
+import { ref, computed, reactive, watch, onMounted, h } from 'vue'
 import {
   NSpin, NInput, NInputNumber, NButton, NModal, NForm, NFormItem, NIcon,
   NSwitch, NTag, NSelect, NEmpty, NCheckbox, NDropdown, NRadioGroup, NRadioButton,
@@ -619,14 +622,25 @@ function syncPlansUser() {
 
 // ---- 分配套餐（在套餐面板内）----
 const assignPkgId = ref<number | null>(null)
+const assignDays = ref<number | null>(null)
 const pkgOptions = ref<any[]>([])
+const pkgList = ref<any[]>([])
 const assignWillQueue = computed(() =>
   !!assignPkgId.value && userPlans.value.some((p: any) =>
     p.kind === 'plan' && p.package_id === assignPkgId.value && bucketOf(p) === 'active'))
+// 选中套餐若有多档时长，就让管理员挑一档（比如只送 7 天体验）；默认第一档。
+const assignDurationOptions = computed(() => {
+  const pkg = pkgList.value.find((p: any) => p.id === assignPkgId.value)
+  const opts = pkg?.options || []
+  if (opts.length < 2) return []
+  return opts.map((o: any) => ({ label: `${o.days} 天`, value: o.days }))
+})
+watch(assignDurationOptions, (opts) => { assignDays.value = opts.length ? opts[0].value : null })
 async function loadPackages() {
   if (pkgOptions.value.length) return
   try {
     const pkgs = await apiList<any>('/api/admin/packages')
+    pkgList.value = pkgs
     pkgOptions.value = pkgs.map((p: any) => ({ label: `${p.name} (${p.type})`, value: p.id }))
   } catch {}
 }
@@ -634,7 +648,8 @@ async function handleAssign() {
   if (!assignPkgId.value || !plansUser.value) { message.warning('请选择套餐'); return }
   saving.value = true
   try {
-    await apiPost(`/api/admin/users/${plansUser.value.id}/assign-plan`, { package_id: assignPkgId.value })
+    await apiPost(`/api/admin/users/${plansUser.value.id}/assign-plan`,
+      { package_id: assignPkgId.value, duration_days: assignDays.value || 0 })
     message.success(assignWillQueue.value ? '已分配并加入队列' : '分配成功')
     assignPkgId.value = null
     await Promise.all([loadPlans(plansUser.value.id), load()])

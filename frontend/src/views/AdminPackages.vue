@@ -26,6 +26,12 @@
             <span v-if="p.duration_days" class="kv">{{ p.duration_days }}天</span>
             <span v-if="p.device_add" class="kv">+{{ p.device_add }}设备</span>
           </div>
+          <!-- 多时长套餐：把每档时长的价格摊开，免得只看到默认那档 -->
+          <div v-if="p.options?.length > 1" class="lc-opts">
+            <span v-for="(o, i) in p.options" :key="o.days" class="opt-chip" :class="{ def: i === 0 }">
+              {{ o.days }}天 · {{ o.price_points }}分<template v-if="o.traffic_bytes"> · {{ fmtTotal(o.traffic_bytes) }}</template>
+            </span>
+          </div>
           <div v-if="p.user_group_ids?.length" class="lc-meta" style="color:var(--text-3);">
             <span class="kv">仅限 <b>{{ userGroupNames(p.user_group_ids) }}</b> 购买</span>
           </div>
@@ -61,10 +67,40 @@
             </div>
           </div>
         </n-form-item>
-        <n-form-item label="流量 (GB)"><n-input-number v-model:value="form.traffic_gb" :min="0" style="width:100%;" /></n-form-item>
-        <n-form-item label="天数"><n-input-number v-model:value="form.days" :min="0" style="width:100%;" /></n-form-item>
+        <!-- 订阅计划：时长可以有多档，用户在商城里自己挑；流量按档单独给，
+             因为一份套餐的流量在有效期内不会按月重置，长档不加量就是更亏。 -->
+        <n-form-item v-if="form.type==='plan'" label="时长/价格">
+          <div style="width:100%;">
+            <div class="opt-head">
+              <span>天数</span><span>流量 (GB)</span><span>积分</span><span />
+            </div>
+            <div v-for="(o, i) in form.options" :key="i" class="opt-row">
+              <n-input-number v-model:value="o.days" :min="1" :show-button="false" placeholder="30" />
+              <n-input-number v-model:value="o.traffic_gb" :min="0" :show-button="false" placeholder="100" />
+              <n-input-number v-model:value="o.price" :min="0" :show-button="false" placeholder="100" />
+              <n-button quaternary size="small" :disabled="form.options.length <= 1"
+                        title="删除该档" @click="removeOption(i)">✕</n-button>
+            </div>
+            <div class="opt-actions">
+              <n-button size="tiny" dashed :disabled="form.options.length >= 8" @click="addOption()">+ 添加时长</n-button>
+              <span class="opt-quick">快捷：</span>
+              <n-button v-for="d in [7, 30, 90, 180, 365]" :key="d" size="tiny" quaternary
+                        :disabled="form.options.length >= 8 || form.options.some(o => o.days === d)"
+                        @click="addOption(d)">{{ d }}天</n-button>
+            </div>
+            <div class="opt-tip">
+              第一档是默认档：商城卡片默认选中它，管理员分配套餐不指定时长时也用它。
+              最多 8 档，天数不能重复。只留一档就是普通的单时长套餐。
+              快捷添加会按第一档的单价自动折算流量和积分，可再手动改。
+            </div>
+          </div>
+        </n-form-item>
+        <template v-else>
+          <n-form-item label="流量 (GB)"><n-input-number v-model:value="form.traffic_gb" :min="0" style="width:100%;" /></n-form-item>
+          <n-form-item label="天数"><n-input-number v-model:value="form.days" :min="0" style="width:100%;" /></n-form-item>
+          <n-form-item label="积分"><n-input-number v-model:value="form.price" :min="0" style="width:100%;" /></n-form-item>
+        </template>
         <n-form-item v-if="form.type==='device'" label="设备数"><n-input-number v-model:value="form.device_add" :min="1" style="width:100%;" /></n-form-item>
-        <n-form-item label="积分"><n-input-number v-model:value="form.price" :min="0" style="width:100%;" /></n-form-item>
         <n-form-item label="库存（-1不限）"><n-input-number v-model:value="form.stock" :min="-1" style="width:100%;" /></n-form-item>
         <n-form-item v-if="form.type==='plan'" label="节点分组">
           <n-select v-model:value="form.group_ids" :options="groupOptions" multiple placeholder="买了这个套餐，能用哪些节点" />
@@ -110,7 +146,30 @@ const saving = ref(false)
 const reordering = ref(false)
 const showForm = ref(false)
 const editing = ref<any>(null)
-const form = reactive({ name: '', type: 'traffic', description: '', highlights: [] as string[], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [] as number[], user_group_ids: [] as number[] })
+type OptRow = { days: number | null; traffic_gb: number | null; price: number | null }
+const form = reactive({ name: '', type: 'traffic', description: '', highlights: [] as string[], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, options: [] as OptRow[], group_ids: [] as number[], user_group_ids: [] as number[] })
+
+const GB = 1024 * 1024 * 1024
+
+// 订阅计划的时长档位。表单里始终至少有一档：单档保存成普通套餐（不写
+// options），多档才写成可选时长。
+function addOption(days?: number) {
+  const first = form.options[0]
+  if (days && first?.days) {
+    // 按第一档的单价折算，长档通常还要打折——这里只给个起点，管理员再改。
+    const k = days / first.days
+    form.options.push({
+      days,
+      traffic_gb: Math.round((first.traffic_gb || 0) * k * 100) / 100,
+      price: Math.round((first.price || 0) * k),
+    })
+  } else {
+    form.options.push({ days: days || null, traffic_gb: first?.traffic_gb ?? 0, price: first?.price ?? 0 })
+  }
+}
+function removeOption(i: number) {
+  if (form.options.length > 1) form.options.splice(i, 1)
+}
 
 // groups = node groups (which nodes a plan grants); userGroups = who may buy it.
 const groupOptions = computed(() => groups.value.map(g => ({ label: g.name, value: g.id })))
@@ -123,18 +182,27 @@ function userGroupNames(ids: number[]) {
     .join('、')
 }
 
+// 已保存的套餐若没有多档，就用它自身的天数/流量/积分当作第一档，这样把类型
+// 切成「订阅计划」时表格里是原来的数，而不是空的。
+function optRowsOf(pkg?: any): OptRow[] {
+  const opts = Array.isArray(pkg?.options) ? pkg.options : []
+  if (opts.length) return opts.map((o: any) => ({ days: o.days, traffic_gb: (o.traffic_bytes || 0) / GB, price: o.price_points || 0 }))
+  return [{ days: pkg?.duration_days || 30, traffic_gb: (pkg?.traffic_bytes || 0) / GB, price: pkg?.price_points ?? 100 }]
+}
+
 function openForm(pkg?: any) {
   editing.value = pkg || null
   if (pkg) {
     Object.assign(form, {
       name: pkg.name, type: pkg.type, description: pkg.description || '',
       highlights: Array.isArray(pkg.highlights) ? [...pkg.highlights] : [],
-      traffic_gb: (pkg.traffic_bytes || 0) / (1024 * 1024 * 1024), days: pkg.duration_days || 0,
+      traffic_gb: (pkg.traffic_bytes || 0) / GB, days: pkg.duration_days || 0,
       device_add: pkg.device_add || 1, price: pkg.price_points || 0, stock: pkg.stock ?? -1,
+      options: optRowsOf(pkg),
       group_ids: pkg.group_ids || [], user_group_ids: pkg.user_group_ids || [],
     })
   } else {
-    Object.assign(form, { name: '', type: 'traffic', description: '', highlights: [], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, group_ids: [], user_group_ids: [] })
+    Object.assign(form, { name: '', type: 'traffic', description: '', highlights: [], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, options: optRowsOf(), group_ids: [], user_group_ids: [] })
   }
   showForm.value = true
 }
@@ -142,8 +210,20 @@ function openForm(pkg?: any) {
 async function handleSave() {
   saving.value = true
   try {
-    const { traffic_gb, days, price, ...rest } = form
-    const body = { ...rest, traffic_bytes: Math.round(traffic_gb * 1024 * 1024 * 1024), duration_days: days, price_points: price }
+    const { traffic_gb, days, price, options, ...rest } = form
+    const isPlan = form.type === 'plan'
+    // 计划的价格/流量/天数都来自档位表；单档不写 options，存成普通套餐。
+    const opts = isPlan
+      ? options.map(o => ({ days: o.days || 0, price_points: o.price || 0, traffic_bytes: Math.round((o.traffic_gb || 0) * GB) }))
+      : []
+    const first = opts[0]
+    const body = {
+      ...rest,
+      options: opts.length > 1 ? opts : [],
+      traffic_bytes: isPlan ? (first?.traffic_bytes || 0) : Math.round(traffic_gb * GB),
+      duration_days: isPlan ? (first?.days || 0) : days,
+      price_points: isPlan ? (first?.price_points || 0) : price,
+    }
     if (editing.value) await apiPut(`/api/admin/packages/${editing.value.id}`, body)
     else await apiPost('/api/admin/packages', body)
     message.success('保存成功'); showForm.value = false; editing.value = null; await load()
@@ -211,3 +291,30 @@ async function load() {
 }
 onMounted(load)
 </script>
+
+<style scoped>
+/* 时长档位表：三列等宽 + 删除按钮，列头只写一次 */
+.opt-head, .opt-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 28px;
+  gap: 6px;
+  align-items: center;
+}
+.opt-head { font-size: 12px; color: var(--text-3); margin-bottom: 4px; }
+.opt-row { margin-bottom: 6px; }
+.opt-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.opt-quick { font-size: 12px; color: var(--text-3); margin-left: 4px; }
+.opt-tip { margin-top: 6px; font-size: 12px; color: var(--text-3); line-height: 1.5; }
+
+.lc-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.opt-chip {
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--bg-2, #f6f6f6);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.opt-chip.def { color: var(--text); font-weight: 600; }
+</style>

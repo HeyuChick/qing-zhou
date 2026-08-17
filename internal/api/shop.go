@@ -24,7 +24,10 @@ func (a *API) handleUserPackages(w http.ResponseWriter, r *http.Request) {
 	ok(w, pkgs)
 }
 
-// POST /api/user/purchase {package_id}
+// POST /api/user/purchase {package_id, duration_days?}
+//
+// duration_days picks one of the package's selectable durations; 0/absent buys
+// the default one (and is the only valid value for a single-duration package).
 func (a *API) handlePurchase(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
@@ -33,6 +36,7 @@ func (a *API) handlePurchase(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		PackageID      int64  `json:"package_id"`
+		DurationDays   int64  `json:"duration_days"`
 		IdempotencyKey string `json:"idempotency_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PackageID <= 0 {
@@ -54,11 +58,13 @@ func (a *API) handlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := a.st.Purchase(u.ID, pkg, req.IdempotencyKey, func(updated *store.User, resetUsed bool) error {
+	result, err := a.st.PurchaseDuration(u.ID, pkg, req.DurationDays, req.IdempotencyKey, func(updated *store.User, resetUsed bool) error {
 		return a.syncEntitlement(updated, resetUsed)
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, store.ErrOptionNotFound):
+			fail(w, http.StatusBadRequest, "所选时长已调整，请刷新后重新选择")
 		case errors.Is(err, store.ErrInsufficientFunds):
 			fail(w, http.StatusPaymentRequired, "积分不足")
 		case errors.Is(err, store.ErrPackageDisabled):

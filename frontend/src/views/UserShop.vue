@@ -17,6 +17,17 @@
           <li v-for="(h, i) in pkg.highlights" :key="i">{{ h }}</li>
         </ul>
 
+        <!-- 多时长套餐：选哪档，下面的规格和价格就跟着变 -->
+        <div v-if="pkg.options?.length > 1" class="sc-durations">
+          <button v-for="o in pkg.options" :key="o.days" type="button" class="sc-dur"
+                  :class="{ on: chosenDays[pkg.id] === o.days }"
+                  @click="chosenDays[pkg.id] = o.days">
+            <span class="d">{{ o.days }} 天</span>
+            <span class="p">{{ o.price_points }} 积分</span>
+            <span v-if="saveHint(pkg, o)" class="off">{{ saveHint(pkg, o) }}</span>
+          </button>
+        </div>
+
         <div class="sc-specs">
           <div v-for="s in specsOf(pkg)" :key="s.label" class="sc-spec">
             <span class="k">{{ s.label }}</span>
@@ -27,10 +38,10 @@
         <div class="sc-foot">
           <div v-if="willQueue(pkg)" class="sc-queue-note">✓ 已在使用 · 再买将排队，当前份结束后自动启用</div>
           <div class="sc-price">
-            <span class="sc-points">{{ pkg.price_points }}</span>
+            <span class="sc-points">{{ priceOf(pkg) }}</span>
             <span class="sc-unit">积分</span>
           </div>
-          <div class="sc-yuan">{{ yuan(pkg.price_points) }}</div>
+          <div class="sc-yuan">{{ yuan(priceOf(pkg)) }}</div>
           <div v-if="pkg.stock >= 0" class="sc-stock" :class="{ hot: pkg.stock <= 5 }">
             {{ pkg.stock === 0 ? '已售罄' : `仅剩 ${pkg.stock} 件` }}
           </div>
@@ -75,17 +86,37 @@ function typeMeta(type: string) {
   return { label: '设备扩展', cls: 't-device' }
 }
 
+// 一个套餐可以有多档时长（30/90/365 天…）。chosenDays 记住每张卡片当前选中的
+// 那档，默认第一档；没有多档的套餐用套餐自身的字段，跟以前完全一样。
+const chosenDays = ref<Record<number, number>>({})
+function optOf(pkg: any) {
+  const opts = pkg.options || []
+  if (!opts.length) return { days: pkg.duration_days, price_points: pkg.price_points, traffic_bytes: pkg.traffic_bytes }
+  return opts.find((o: any) => o.days === chosenDays.value[pkg.id]) || opts[0]
+}
+function priceOf(pkg: any): number { return optOf(pkg).price_points || 0 }
+
+// saveHint 用第一档的单价当基准，标出长档便宜多少——不便宜就不标，免得凑数。
+function saveHint(pkg: any, o: any): string {
+  const base = pkg.options?.[0]
+  if (!base?.days || !base.price_points || o.days === base.days) return ''
+  const full = (base.price_points / base.days) * o.days
+  const off = Math.round((1 - o.price_points / full) * 100)
+  return off >= 1 ? `省${off}%` : ''
+}
+
 function canAfford(pkg: any): boolean {
-  return (auth.user?.points || 0) >= pkg.price_points
+  return (auth.user?.points || 0) >= priceOf(pkg)
 }
 
 // specsOf 为每张卡片生成对齐一致的规格行，方便用户逐项对比不同套餐。
 function specsOf(pkg: any) {
+  const opt = optOf(pkg)
   const s: { label: string; value: string }[] = []
   if (pkg.type === 'traffic' || pkg.type === 'plan') {
-    s.push({ label: '流量', value: pkg.traffic_bytes ? fmtTotal(pkg.traffic_bytes) : '不限' })
+    s.push({ label: '流量', value: opt.traffic_bytes ? fmtTotal(opt.traffic_bytes) : '不限' })
   }
-  s.push({ label: '有效期', value: pkg.duration_days ? `${pkg.duration_days} 天` : '永久' })
+  s.push({ label: '有效期', value: opt.days ? `${opt.days} 天` : '永久' })
   if (pkg.device_add) s.push({ label: '设备', value: `+${pkg.device_add} 台` })
   return s
 }
@@ -94,37 +125,49 @@ function genKey(): string {
   try { if (crypto?.randomUUID) return crypto.randomUUID() } catch {}
   return 'k-' + Date.now() + '-' + Math.random().toString(36).slice(2)
 }
-async function purchaseWithRetry(packageId: number, key: string) {
+async function purchaseWithRetry(packageId: number, days: number, key: string) {
+  const body = { package_id: packageId, duration_days: days, idempotency_key: key }
   try {
-    return await apiPost('/api/user/purchase', { package_id: packageId, idempotency_key: key })
+    return await apiPost('/api/user/purchase', body)
   } catch (e: any) {
     // Retry ONCE on a network-level failure (an error with no HTTP status): the first
     // request may have committed server-side before its response was lost. Reusing the
     // same key makes the backend return the existing order instead of charging twice.
     if (e && e.status === undefined) {
-      return await apiPost('/api/user/purchase', { package_id: packageId, idempotency_key: key })
+      return await apiPost('/api/user/purchase', body)
     }
     throw e
   }
 }
 function handleBuy(pkg: any) {
   const queue = willQueue(pkg)
+  const opt = optOf(pkg)
+  const what = `「${pkg.name}」${pkg.options?.length > 1 ? `（${opt.days} 天）` : ''}`
   const content = queue
-    ? `确定花费 ${pkg.price_points} 积分购买「${pkg.name}」？\n你已在使用该套餐，本次购买将排队，在当前份用完或到期后自动启用（有效期届时才开始计算）。`
-    : `确定花费 ${pkg.price_points} 积分购买「${pkg.name}」？`
+    ? `确定花费 ${opt.price_points} 积分购买${what}？\n你已在使用该套餐，本次购买将排队，在当前份用完或到期后自动启用（有效期届时才开始计算）。`
+    : `确定花费 ${opt.price_points} 积分购买${what}？`
   dialog.warning({ title: '确认购买', content, positiveText: '确定', negativeText: '取消',
     onPositiveClick: async () => {
       buying.value = pkg.id
       const key = genKey() // one key per confirmed purchase intent; stable across the retry
       try {
-        await purchaseWithRetry(pkg.id, key)
+        // 单时长套餐照旧只报 package_id（duration_days=0 表示默认档）：万一后台刚
+        // 改过天数，也不会因为页面上的旧值被判成「所选时长不可用」。
+        await purchaseWithRetry(pkg.id, pkg.options?.length ? (opt.days || 0) : 0, key)
         message.success(queue ? '已购买并加入队列，将在当前套餐结束后自动启用' : '购买成功，已生效！')
         await auth.fetchMe(); await loadHeld()
       }
       catch (e: any) { message.error(e.message) } finally { buying.value = null }
     } })
 }
-onMounted(async () => { try { packages.value = await apiList('/api/user/packages') } catch {}; loadHeld() })
+onMounted(async () => {
+  try {
+    packages.value = await apiList('/api/user/packages')
+    // 默认选中第一档，卡片一进来就有一档是高亮的
+    for (const p of packages.value) if (p.options?.length) chosenDays.value[p.id] = p.options[0].days
+  } catch {}
+  loadHeld()
+})
 </script>
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 4px; }
@@ -185,6 +228,45 @@ onMounted(async () => { try { packages.value = await apiList('/api/user/packages
   font-size: 12px;
   font-weight: 700;
   color: #4b7a5c;
+}
+
+/* 时长档位：整块可点，选中的一档描边加深，价格直接写在里面便于横向比较 */
+.sc-durations {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 8px;
+}
+.sc-dur {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 6px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text-2);
+  transition: border-color .15s ease, background .15s ease, color .15s ease;
+}
+.sc-dur:hover { border-color: #c9c9c9; }
+.sc-dur.on { border-color: var(--accent-strong); color: var(--text); background: #f6f9f7; }
+.sc-dur .d { font-size: 13px; font-weight: 650; }
+.sc-dur .p { font-size: 12px; color: var(--text-3); }
+.sc-dur.on .p { color: var(--text-2); }
+.sc-dur .off {
+  position: absolute;
+  top: -7px;
+  right: -4px;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--accent-strong);
 }
 
 .sc-specs {

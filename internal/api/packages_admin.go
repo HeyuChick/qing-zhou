@@ -32,8 +32,49 @@ func validatePackage(p *store.Package) string {
 	if p.DurationDays < 0 {
 		return "有效期不能为负"
 	}
-	if p.Type == "plan" && p.DurationDays <= 0 {
+	if msg := validateOptions(p); msg != "" {
+		return msg
+	}
+	// With options set, the columns checked here are mirrored from the first one
+	// (applyDefaultOption), so this still guards the single-duration case only.
+	if p.Type == "plan" && len(p.Options) == 0 && p.DurationDays <= 0 {
 		return "订阅套餐必须设置正的有效期（天）"
+	}
+	return ""
+}
+
+// maxPlanOptions caps the duration list: it renders as a row of chips in the shop,
+// and a package with dozens of lengths is a pricing table, not a choice.
+const maxPlanOptions = 8
+
+// validateOptions checks the selectable durations. Duplicated days are the one
+// that really matters: a purchase names its option BY days, so two rows sharing a
+// length would make the price charged depend on list order.
+func validateOptions(p *store.Package) string {
+	if len(p.Options) == 0 {
+		return ""
+	}
+	if p.Type != "plan" {
+		return "只有订阅计划支持多时长选择"
+	}
+	if len(p.Options) > maxPlanOptions {
+		return fmt.Sprintf("时长选项最多 %d 个", maxPlanOptions)
+	}
+	seen := map[int64]bool{}
+	for _, o := range p.Options {
+		if o.Days <= 0 {
+			return "每个时长选项都要填写正的天数"
+		}
+		if seen[o.Days] {
+			return fmt.Sprintf("时长选项重复：%d 天出现了两次", o.Days)
+		}
+		seen[o.Days] = true
+		if o.PricePoints < 0 {
+			return "时长选项的价格不能为负"
+		}
+		if o.TrafficBytes < 0 {
+			return "时长选项的流量不能为负"
+		}
 	}
 	return ""
 }

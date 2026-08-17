@@ -8,33 +8,46 @@ import (
 	"time"
 )
 
+// PlanOption is one purchasable duration of a plan package — "30 天 / 100GB /
+// 500 分". A package with options sells the same subscription at several lengths
+// so the buyer picks one at checkout instead of the admin publishing a separate
+// package per length. Traffic is per-option because a bucket's quota does not
+// reset inside its period: a 90-day option that kept the 30-day quota would be a
+// worse deal, not a longer one.
+type PlanOption struct {
+	Days         int64 `json:"days"`
+	PricePoints  int64 `json:"price_points"`
+	TrafficBytes int64 `json:"traffic_bytes"`
+}
+
 type Package struct {
-	ID           int64    `json:"id"`
-	Type         string   `json:"type"` // traffic | plan | device
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Highlights   []string `json:"highlights"` // selling-point bullets shown in the shop
-	PricePoints  int64    `json:"price_points"`
-	TrafficBytes int64    `json:"traffic_bytes"`
-	DeviceAdd    int64    `json:"device_add"`
-	DurationDays int64    `json:"duration_days"`
-	Stock        int64    `json:"stock"` // -1 = unlimited
-	Enabled      bool     `json:"enabled"`
-	SortOrder    int64    `json:"sort_order"`
-	CreatedAt    int64    `json:"created_at"`
-	GroupIDs     []int64  `json:"group_ids,omitempty"`      // plan↔node-groups: which nodes it grants (not a column)
-	UserGroupIDs []int64  `json:"user_group_ids,omitempty"` // package↔user-groups: who may buy it; empty = public (not a column)
-	Subscribers  int64    `json:"subscribers,omitempty"`    // users currently on this plan (not a column)
+	ID           int64        `json:"id"`
+	Type         string       `json:"type"` // traffic | plan | device
+	Name         string       `json:"name"`
+	Description  string       `json:"description"`
+	Highlights   []string     `json:"highlights"` // selling-point bullets shown in the shop
+	PricePoints  int64        `json:"price_points"`
+	TrafficBytes int64        `json:"traffic_bytes"`
+	DeviceAdd    int64        `json:"device_add"`
+	DurationDays int64        `json:"duration_days"`
+	Options      []PlanOption `json:"options"` // selectable durations; empty = single-duration package
+	Stock        int64        `json:"stock"`   // -1 = unlimited
+	Enabled      bool         `json:"enabled"`
+	SortOrder    int64        `json:"sort_order"`
+	CreatedAt    int64        `json:"created_at"`
+	GroupIDs     []int64      `json:"group_ids,omitempty"`      // plan↔node-groups: which nodes it grants (not a column)
+	UserGroupIDs []int64      `json:"user_group_ids,omitempty"` // package↔user-groups: who may buy it; empty = public (not a column)
+	Subscribers  int64        `json:"subscribers,omitempty"`    // users currently on this plan (not a column)
 }
 
 const pkgCols = `id, type, name, description, highlights, price_points, traffic_bytes, device_add,
-	duration_days, stock, enabled, sort_order, created_at`
+	duration_days, duration_options, stock, enabled, sort_order, created_at`
 
 func scanPackage(sc scanner) (*Package, error) {
 	var p Package
-	var highlights string
+	var highlights, options string
 	err := sc.Scan(&p.ID, &p.Type, &p.Name, &p.Description, &highlights, &p.PricePoints, &p.TrafficBytes,
-		&p.DeviceAdd, &p.DurationDays, &p.Stock, &p.Enabled, &p.SortOrder, &p.CreatedAt)
+		&p.DeviceAdd, &p.DurationDays, &options, &p.Stock, &p.Enabled, &p.SortOrder, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -42,7 +55,87 @@ func scanPackage(sc scanner) (*Package, error) {
 		return nil, err
 	}
 	p.Highlights = decodeHighlights(highlights)
+	p.Options = decodeOptions(options)
 	return &p, nil
+}
+
+// decodeOptions parses the stored JSON array of durations. A blank value (a
+// package created before options existed, or one that sells a single duration)
+// yields nil — the caller then falls back to the package's own duration/price.
+func decodeOptions(s string) []PlanOption {
+	if s == "" {
+		return nil
+	}
+	var out []PlanOption
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// encodeOptions serialises the duration list for storage, dropping entries with
+// no duration (a blank row left in the admin form). Empty list → "" (not "[]"),
+// so a single-duration package reads back as nil.
+func encodeOptions(opts []PlanOption) string {
+	clean := make([]PlanOption, 0, len(opts))
+	for _, o := range opts {
+		if o.Days > 0 {
+			clean = append(clean, o)
+		}
+	}
+	if len(clean) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(clean)
+	return string(b)
+}
+
+// applyDefaultOption keeps the package's own duration/price/traffic columns equal
+// to its FIRST option, so everything that reads a package without caring about
+// the choice — the admin list, the shop card's headline price, an order snapshot,
+// a grant that takes the default — sees a real, sellable combination instead of a
+// stale leftover from before the options were edited.
+func (p *Package) applyDefaultOption() {
+	p.Options = decodeOptions(encodeOptions(p.Options)) // drop blank rows once, here
+	if len(p.Options) == 0 {
+		return
+	}
+	first := p.Options[0]
+	p.DurationDays = first.Days
+	p.PricePoints = first.PricePoints
+	p.TrafficBytes = first.TrafficBytes
+}
+
+// ErrOptionNotFound means the requested duration is not (or is no longer) on sale
+// for this package — an edited package, or a client posting an arbitrary length.
+var ErrOptionNotFound = errors.New("所选时长不可用")
+
+// forDuration returns the package as it should be charged and granted for the
+// chosen duration: a copy whose price/traffic/duration are the selected option's.
+// days == 0 means "the default" (the first option, or the package itself when it
+// sells a single duration). Everything downstream — the points charged, the
+// bucket minted, the order snapshot the refund later prorates against — reads
+// these fields, so resolving here is the only place the choice is applied.
+func (p *Package) forDuration(days int64) (*Package, error) {
+	if len(p.Options) == 0 {
+		if days == 0 || days == p.DurationDays {
+			return p, nil
+		}
+		return nil, ErrOptionNotFound
+	}
+	if days == 0 {
+		days = p.Options[0].Days
+	}
+	for _, o := range p.Options {
+		if o.Days == days {
+			eff := *p
+			eff.DurationDays = o.Days
+			eff.PricePoints = o.PricePoints
+			eff.TrafficBytes = o.TrafficBytes
+			return &eff, nil
+		}
+	}
+	return nil, ErrOptionNotFound
 }
 
 // decodeHighlights parses the stored JSON array of selling points. A blank value
@@ -152,11 +245,12 @@ func (s *Store) ListPackagesForUser(userID int64) ([]*Package, error) {
 }
 
 func (s *Store) CreatePackage(p Package) (int64, error) {
+	p.applyDefaultOption()
 	res, err := s.db.Exec(`INSERT INTO packages
-		(type, name, description, highlights, price_points, traffic_bytes, device_add, duration_days, stock, enabled, sort_order, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(type, name, description, highlights, price_points, traffic_bytes, device_add, duration_days, duration_options, stock, enabled, sort_order, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes, p.DeviceAdd,
-		p.DurationDays, p.Stock, boolToInt(p.Enabled), p.SortOrder, time.Now().Unix())
+		p.DurationDays, encodeOptions(p.Options), p.Stock, boolToInt(p.Enabled), p.SortOrder, time.Now().Unix())
 	if err != nil {
 		return 0, err
 	}
@@ -164,11 +258,12 @@ func (s *Store) CreatePackage(p Package) (int64, error) {
 }
 
 func (s *Store) UpdatePackage(p Package) error {
+	p.applyDefaultOption()
 	_, err := s.db.Exec(`UPDATE packages SET
 		type=?, name=?, description=?, highlights=?, price_points=?, traffic_bytes=?, device_add=?,
-		duration_days=?, stock=?, enabled=?, sort_order=? WHERE id=?`,
+		duration_days=?, duration_options=?, stock=?, enabled=?, sort_order=? WHERE id=?`,
 		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes, p.DeviceAdd,
-		p.DurationDays, p.Stock, boolToInt(p.Enabled), p.SortOrder, p.ID)
+		p.DurationDays, encodeOptions(p.Options), p.Stock, boolToInt(p.Enabled), p.SortOrder, p.ID)
 	return err
 }
 

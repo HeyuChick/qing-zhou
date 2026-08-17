@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -345,13 +346,15 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	ok(w, a.adminUserViewLoadGroups(out))
 }
 
-// POST /api/admin/users/{id}/assign-plan {package_id} — admin grants a package
-// to a user without charging points (manual activation / comp). Applies the same
-// entitlement as a purchase and pushes it to sing-box.
+// POST /api/admin/users/{id}/assign-plan {package_id, duration_days?} — admin
+// grants a package to a user without charging points (manual activation / comp).
+// Applies the same entitlement as a purchase and pushes it to sing-box.
+// duration_days picks one of the package's selectable durations (0 = default).
 func (a *API) handleAdminAssignPlan(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	var req struct {
-		PackageID int64 `json:"package_id"`
+		PackageID    int64 `json:"package_id"`
+		DurationDays int64 `json:"duration_days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PackageID <= 0 {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -390,10 +393,12 @@ func (a *API) handleAdminAssignPlan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	operatorID, _ := r.Context().Value(ctxUserID).(int64)
-	if _, err := a.st.AssignPackage(id, pkg, operatorID, a.syncEntitlement); err != nil {
+	if _, err := a.st.AssignPackageDuration(id, pkg, req.DurationDays, operatorID, a.syncEntitlement); err != nil {
 		switch {
 		case err == store.ErrUnknownPkgType:
 			fail(w, http.StatusBadRequest, "未知套餐类型")
+		case errors.Is(err, store.ErrOptionNotFound):
+			fail(w, http.StatusBadRequest, "所选时长不可用，请刷新套餐列表")
 		default:
 			fail(w, http.StatusBadGateway, "开通失败，已回滚："+err.Error())
 		}
