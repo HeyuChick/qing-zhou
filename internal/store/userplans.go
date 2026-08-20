@@ -875,23 +875,19 @@ func (s *Store) SetBucketProxyCred(bucketID, userID int64, username, password st
 		return err
 	}
 	onLine := kind == "plan" && pkgID > 0
-	// Reject a username already taken by another bucket's proxy_username, another
-	// line's, or any client_name (belt-and-suspenders; the qz_ ban already excludes
-	// client_names). The row/line being written is excluded, so re-saving the same
+	// Reject a username already taken anywhere in the proxy identity namespace —
+	// another bucket, another line, another user's account credential, or any
+	// client_name. The row/line being written is excluded, so re-saving the same
 	// username is not a collision with itself.
 	lineUser, linePkg := int64(-1), int64(-1)
 	if onLine {
 		lineUser, linePkg = userID, pkgID
 	}
-	var n int
-	if err := s.db.QueryRow(`SELECT
-		(SELECT COUNT(*) FROM user_plans WHERE (proxy_username=? AND id<>?) OR client_name=?)
-	  + (SELECT COUNT(*) FROM plan_identities
-	     WHERE (proxy_username=? OR client_name=?) AND NOT (user_id=? AND package_id=?))`,
-		username, bucketID, username, username, username, lineUser, linePkg).Scan(&n); err != nil {
+	taken, err := s.proxyNameTaken(username, proxyNameOwner{bucketID: bucketID, lineUser: lineUser, linePkg: linePkg})
+	if err != nil {
 		return err
 	}
-	if n > 0 {
+	if taken {
 		return errors.New("该用户名已被占用，请换一个")
 	}
 	now := time.Now().Unix()
@@ -983,7 +979,7 @@ func (s *Store) AddBucketUsage(statName string, up, down int64) error {
 	// custom proxy_username. Both meter the same bucket. proxy_username can never
 	// equal a client_name (client_names are qz_-prefixed, proxy_usernames may not
 	// be) and is globally unique, so at most one row matches.
-	bucketID, userID, packageID, kind, err := resolveStatsIdentity(tx, statName)
+	bucketID, userID, packageID, kind, err := s.resolveStatsIdentity(tx, statName, nil)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // unknown identity (e.g. a just-removed bucket) — ignore, rolls back
 	}
@@ -1020,6 +1016,9 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 	if len(deltas) == 0 {
 		return 0, nil
 	}
+	// Before the write lock, not under it: account-level identities need the
+	// owner's whole bucket order to know which份 they spend.
+	acctTargets, acctErr := s.accountTargets(deltas)
 	now := time.Now().Unix()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1033,12 +1032,15 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 	}()
 
 	applied, failed := 0, 0
-	var firstErr error
+	// A pre-pass failure is reported, not fatal: those identities fall back to
+	// resolving inside the loop (acctTargets nil) or are simply skipped, and the
+	// rest of the poll must still land.
+	firstErr := acctErr
 	for name, d := range deltas {
 		if name == "" || (d.Up == 0 && d.Down == 0) {
 			continue
 		}
-		bucketID, userID, packageID, kind, rerr := resolveStatsIdentity(tx, name)
+		bucketID, userID, packageID, kind, rerr := s.resolveStatsIdentity(tx, name, acctTargets)
 		if errors.Is(rerr, sql.ErrNoRows) {
 			continue // unknown / just-removed identity — skip, not a failure
 		}
@@ -1074,16 +1076,25 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 	return applied, nil
 }
 
-// resolveStatsIdentity maps a sing-box stats name to its bucket. A bucket has up
-// to two identities: client_name (every protocol) and, for mixed inbounds, an
-// optional custom proxy_username. Both meter the same bucket; proxy_username can
-// never equal a client_name (client_names are qz_-prefixed, proxy_usernames may
-// not be) and is globally unique, so at most one row matches.
+// resolveStatsIdentity maps a sing-box stats name to the bucket it meters.
+// Three kinds of name arrive here: a bucket's client_name (every protocol), its
+// optional custom proxy_username (mixed inbounds), and the user's account-level
+// proxy username (mixed inbounds, one login across all their nodes). The first
+// two name their own bucket; the third names a user, and the bucket it spends is
+// decided by ownership priority (see accountMeterBucket).
+//
+// All three share one uniqueness namespace (proxyNameTaken), so at most one
+// matches and the order below is a matter of cost, not correctness.
 //
 // packageID rides along for the traffic_daily rollup: resolving it here costs
 // nothing (the row is already being read) and saves a second lookup inside the
 // hot per-identity write path.
-func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID, packageID int64, kind string, err error) {
+//
+// acctTargets, when non-nil, is this poll's pre-resolved account-level
+// identities (see accountTargets) — non-nil means "the account question has
+// already been asked and answered", so a name missing from it is simply not an
+// account identity and no further lookup is due.
+func (s *Store) resolveStatsIdentity(tx txLike, statName string, acctTargets map[string]*Bucket) (bucketID, userID, packageID int64, kind string, err error) {
 	// A subscription line's name is shared by every份 that has passed through it,
 	// so it resolves to the line first and then to the份 that is actually in
 	// service — that is what makes the bytes land on the right month. Preference
@@ -1107,7 +1118,29 @@ func resolveStatsIdentity(tx txLike, statName string) (bucketID, userID, package
 	err = tx.QueryRow(`SELECT id, user_id, package_id, kind FROM user_plans
 		WHERE client_name=? OR (proxy_username<>'' AND proxy_username=?)`,
 		statName, statName).Scan(&bucketID, &userID, &packageID, &kind)
-	return
+	if !errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	// Last: the account-level HTTP/SOCKS5 credential, which belongs to a user
+	// rather than to a bucket and so has to be told which bucket it spends.
+	// Reached only after the bucket identities miss, which is safe because all
+	// three live in one uniqueness namespace (proxyNameTaken) — a name can never
+	// be both.
+	var b *Bucket
+	if acctTargets != nil {
+		b = acctTargets[statName]
+		if b == nil {
+			return 0, 0, 0, "", sql.ErrNoRows
+		}
+	} else {
+		if userID, err = accountUserID(tx, statName); err != nil {
+			return
+		}
+		if b, err = s.accountMeterBucket(userID); err != nil {
+			return
+		}
+	}
+	return b.ID, b.UserID, b.PackageID, b.Kind, nil
 }
 
 // applyBucketUsage writes one identity's delta: the bucket counter, the mirrored

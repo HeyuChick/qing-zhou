@@ -123,6 +123,25 @@
     <!-- HTTP/SOCKS5 代理（mixed 节点，不在订阅里，单独复制填入 1Panel/Docker 等） -->
     <n-card v-if="proxies.length" size="small" class="sec" title="HTTP / SOCKS5 代理">
       <template #header-extra><span style="font-size:11px;color:var(--text-3);">可填入 1Panel、Docker、git 等只认 HTTP/SOCKS 代理的地方</span></template>
+      <!-- 通用账号：一个账号在所有节点上通用，节点换分组、套餐续费都不会变它。
+           放在节点列表之前，因为它是这张卡片里唯一需要保存到别处的东西，下面每个
+           节点只剩地址和端口的差别。 -->
+      <div v-if="acct" class="px-acct">
+        <div class="px-head">
+          <span class="px-name">通用账号</span>
+          <n-tag v-if="acct.expired" type="error" size="small" bordered>已过期</n-tag>
+          <n-tag v-else type="info" size="small" bordered>所有节点通用</n-tag>
+          <span style="flex:1;"></span>
+          <n-button size="tiny" @click="openEditProxy({ ...acct, account: true, custom: true })">编辑账号</n-button>
+        </div>
+        <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="acct.username" readonly size="small" /><n-button size="small" @click="copy(acct.username)">复制</n-button></n-input-group></div></div>
+        <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="acct.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(acct.password)">复制</n-button></n-input-group></div></div>
+        <div class="pxrow"><span class="pxk">有效期</span><span style="font-size:12px;color:var(--text-2);flex:1;">{{ acct.expires_at ? fmtDate(acct.expires_at) : '永久' }}</span></div>
+        <div class="px-hint">
+          <template v-if="acct.expired">已过期，下面的节点暂时改用各自套餐的账号。点「编辑账号」续期即可恢复通用。</template>
+          <template v-else>与登录账号无关，可随时改。<template v-if="acct.meter_plan">这些节点的代理流量统一计入「{{ acct.meter_plan }}」。</template></template>
+        </div>
+      </div>
       <!-- 默认只留一行：节点 + 地址:端口 + 复制链接。原先六行「标签 + 只读输入框 +
            复制」每个代理就吃掉大半屏，而有了整串 URL，逐字段复制只在 1Panel 这类
            分字段表单里才需要——那是少数情况，收进「详情」里按需展开。 -->
@@ -159,13 +178,20 @@
           <div class="pxrow"><span class="pxk">类型</span><span style="font-size:13px;">{{ p.tls ? 'HTTPS' : 'HTTP / SOCKS5' }}</span></div>
           <div class="pxrow"><span class="pxk">地址</span><div class="pxv"><n-input-group><n-input :value="p.host" readonly size="small" /><n-button size="small" @click="copy(p.host)">复制</n-button></n-input-group></div></div>
           <div class="pxrow"><span class="pxk">端口</span><div class="pxv"><n-input-group><n-input :value="String(p.port)" readonly size="small" /><n-button size="small" @click="copy(String(p.port))">复制</n-button></n-input-group></div></div>
-          <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="p.username" readonly size="small" /><n-button size="small" @click="copy(p.username)">复制</n-button></n-input-group></div></div>
-          <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="p.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(p.password)">复制</n-button></n-input-group></div></div>
-          <div class="pxrow">
-            <span class="pxk">有效期</span>
-            <span style="font-size:12px;color:var(--text-2);flex:1;">{{ p.expires_at ? fmtDate(p.expires_at) : '永久' }}</span>
-            <n-button size="tiny" @click="openEditProxy(p)">编辑账号</n-button>
-          </div>
+          <!-- 用通用账号的节点不再各自列一遍账号：重复列会让人以为每个节点一套，
+               而「换个节点就得换密码」正是通用账号要消掉的事。 -->
+          <template v-if="p.account">
+            <div class="pxrow"><span class="pxk">账号</span><span style="font-size:12px;color:var(--text-2);flex:1;">用上方「通用账号」，所有节点相同</span></div>
+          </template>
+          <template v-else>
+            <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="p.username" readonly size="small" /><n-button size="small" @click="copy(p.username)">复制</n-button></n-input-group></div></div>
+            <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="p.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(p.password)">复制</n-button></n-input-group></div></div>
+            <div class="pxrow">
+              <span class="pxk">有效期</span>
+              <span style="font-size:12px;color:var(--text-2);flex:1;">{{ p.expires_at ? fmtDate(p.expires_at) : '永久' }}</span>
+              <n-button size="tiny" @click="openEditProxy(p)">编辑账号</n-button>
+            </div>
+          </template>
         </div>
       </div>
       <div style="font-size:11px;color:var(--text-3);margin-top:10px;">命令行 / Docker / git 等直接点「复制 HTTP」「复制 SOCKS5」，拿到的是 <code>scheme://用户名:密码@地址:端口</code> 整串。1Panel 这类分字段的表单展开「详情」逐项复制：代理类型选 <b>HTTP</b> 或 <b>SOCKS5</b>（标着 <b>HTTPS</b> 的节点则选 HTTPS）。</div>
@@ -174,7 +200,9 @@
     <!-- 编辑代理账号 -->
     <n-modal v-model:show="showEditProxy" preset="card" title="编辑代理账号" style="max-width:440px;">
       <n-form label-placement="left" label-width="72">
-        <n-form-item label="节点"><n-input :value="editForm.tag" readonly /></n-form-item>
+        <n-form-item label="适用范围">
+          <n-input :value="editForm.account ? '所有节点（通用账号）' : editForm.tag" readonly />
+        </n-form-item>
         <n-form-item label="用户名">
           <n-input v-model:value="editForm.username" placeholder="仅字母/数字/ _.@- ，不能以 qz_ 开头" />
         </n-form-item>
@@ -190,7 +218,10 @@
             <n-date-picker v-if="!editForm.permanent" v-model:value="editForm.expireTs" type="datetime" clearable style="width:100%;" />
           </div>
         </n-form-item>
-        <div style="font-size:11px;color:var(--text-3);margin-bottom:12px;">这是仅用于该协议的独立账号，与登录账号无关。密码泄露可随时来此更改；到期后该代理自动停用（可续期）。</div>
+        <div style="font-size:11px;color:var(--text-3);margin-bottom:12px;">
+          这是仅用于该协议的独立账号，与登录账号无关。密码泄露可随时来此更改；到期后该代理自动停用（可续期）。
+          <template v-if="editForm.account">改的是所有节点通用的那一个，保存后旧密码立即失效，记得同步更新已填在别处的地方。</template>
+        </div>
         <n-button type="primary" block :loading="savingProxy" @click="saveProxy">保存</n-button>
       </n-form>
     </n-modal>
@@ -357,7 +388,15 @@ const resettingCreds = ref(false)
 // 代理账号编辑
 const showEditProxy = ref(false)
 const savingProxy = ref(false)
-const editForm = ref<any>({ bucket_id: 0, tag: '', username: '', password: '', permanent: true, expireTs: null as number | null })
+const editForm = ref<any>({ account: false, bucket_id: 0, tag: '', username: '', password: '', permanent: true, expireTs: null as number | null })
+
+// 通用账号。单独取而不是从节点行里挑：过期后节点行会退回各自套餐的账号，
+// 从行里推就再也看不见它，也就没法续期了。
+const acct = ref<any | null>(null)
+async function loadProxies() {
+  proxies.value = await apiList('/api/user/proxies')
+  try { acct.value = await apiGet('/api/user/proxy-account') } catch { acct.value = null }
+}
 
 // 展开的代理（按 tag 记）。默认全收起——常用路径是复制整串 URL，逐字段只是备用。
 const expandedProxies = ref<string[]>([])
@@ -379,11 +418,15 @@ function proxyUrl(p: any, scheme: string) {
 
 function openEditProxy(p: any) {
   editForm.value = {
+    account: !!p.account,
     bucket_id: p.bucket_id,
     tag: p.tag,
     // 默认用登录账号名（仅作默认，是独立的代理账号）；已自设过则回填现有用户名。
     username: p.custom ? p.username : (auth.user?.username || ''),
-    password: '',
+    // 回填现有密码：只改有效期或用户名的人不该被迫换一次密码——密码一换，所有
+    // 已经填在 1Panel/Docker 里的地方就当场断了。页面上本来就显示着它，回填不多
+    // 暴露任何东西。
+    password: p.password || '',
     permanent: !p.expires_at,
     expireTs: p.expires_at ? p.expires_at * 1000 : null,
   }
@@ -404,14 +447,15 @@ async function saveProxy() {
   if (!f.permanent && !f.expireTs) { message.warning('请选择有效期，或切换为永久'); return }
   savingProxy.value = true
   try {
-    await apiPut('/api/user/proxies/' + f.bucket_id, {
+    const body = {
       username: f.username.trim(),
       password: f.password,
       expires_at: f.permanent ? 0 : Math.floor(f.expireTs / 1000),
-    })
+    }
+    await apiPut(f.account ? '/api/user/proxy-account' : '/api/user/proxies/' + f.bucket_id, body)
     message.success('已保存，代理账号已更新')
     showEditProxy.value = false
-    proxies.value = await apiList('/api/user/proxies')
+    await loadProxies()
   } catch (e: any) { message.error(e.message) } finally { savingProxy.value = false }
 }
 const showQr = ref(false)
@@ -619,7 +663,7 @@ function handleResetNodeCreds() {
         // 节点链接与代理账号都嵌了刚刚轮换掉的凭据，必须重新拉一次，
         // 否则页面上还挂着一份已经失效的旧链接。
         try { nodes.value = await apiList('/api/user/nodes') } catch {}
-        try { proxies.value = await apiList('/api/user/proxies') } catch {}
+        try { await loadProxies() } catch {}
         const secs = Number(r?.applies_in_seconds) || 60
         message.success(`节点凭据已重置，约 ${secs} 秒后在各节点生效，请重新导入订阅`)
       } catch (e: any) { message.error(e.message) }
@@ -649,7 +693,7 @@ watch(showQr, async (v) => {
 onMounted(async () => {
   try { sub.value = await apiGet('/api/user/subscription') || {} } catch (e: any) { message.error('订阅信息加载失败：' + (e?.message || '请稍后重试')) }
   try { plans.value = await apiList('/api/user/plans') } catch {}
-  try { proxies.value = await apiList('/api/user/proxies') } catch {}
+  try { await loadProxies() } catch {}
   loadingNodes.value = true
   try { nodes.value = await apiList('/api/user/nodes') } catch {} finally { loadingNodes.value = false }
 })
@@ -687,6 +731,9 @@ onMounted(async () => {
 .pl-use { font-size: 11px; color: var(--text-3); margin-top: 4px; }
 .pl-stripe { height: 6px; border-radius: 3px; background: repeating-linear-gradient(45deg, var(--border), var(--border) 4px, transparent 4px, transparent 8px); }
 .pl-more { margin: -2px 0 8px; color: var(--text-3); }
+/* 通用账号是这张卡片里唯一要抄走的东西，加一道左边线把它和下面的节点行分开 */
+.px-acct { margin-bottom: 10px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; border-left: 3px solid var(--primary, #63e2b7); }
+.px-acct .pxrow { margin-top: 8px; }
 .proxy-row { margin-bottom: 8px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; }
 .proxy-row:last-child { margin-bottom: 0; }
 /* 一行放不下时按钮整体换行，地址不被挤成省略号 */

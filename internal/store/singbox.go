@@ -906,7 +906,17 @@ type UserProxy struct {
 	TLS       bool   `json:"tls"`        // true → HTTPS proxy; false → plain HTTP/SOCKS5
 	ExpiresAt int64  `json:"expires_at"` // 0 = permanent
 	Expired   bool   `json:"expired"`    // credential past its expiry (won't authenticate)
-	Custom    bool   `json:"custom"`     // true → user has set a custom username/password
+	Custom    bool   `json:"custom"`     // true → a dedicated proxy account, not the node identity
+	// Account is true when this node authenticates with the user's account-level
+	// credential — the same login on every such node, edited in one place. False
+	// means the node still carries a bucket credential of its own (the free
+	// bucket, whose traffic must not be charged to a plan).
+	Account bool `json:"account"`
+	// MeterPlan names the份 this node's traffic is charged to, for the page to
+	// state rather than leave the user guessing. Account-level traffic all lands
+	// on one份 (see accountMeterBucket), which need not be the one that grants
+	// the node.
+	MeterPlan string `json:"meter_plan"`
 }
 
 // BuildUserProxies returns the mixed-inbound proxy credentials the user is
@@ -923,6 +933,13 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 	serverCache := make(map[int64]*Server)
 	now := time.Now().Unix()
 	owners, _ := s.UserOwnedInbounds(u.ID, now)
+	// The account-level credential, if usable, is what every non-free node shows.
+	// Resolved once: the charged份 is the same for all of them.
+	acct := proxyAcct{name: u.ProxyUsername, password: u.ProxyPassword, expiresAt: u.ProxyExpiresAt}
+	meterPlan := ""
+	if acct.active(now) {
+		meterPlan = s.AccountMeterPlanName(u.ID)
+	}
 	var out []UserProxy
 	for _, ib := range inbounds {
 		if !ib.Enabled || ib.Type != "mixed" {
@@ -947,7 +964,7 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 				serverCache[ib.ServerID] = nil // negative cache
 			}
 		}
-		out = append(out, UserProxy{
+		p := UserProxy{
 			Tag:       ib.Tag,
 			BucketID:  owner.ID,
 			Host:      nodeHost,
@@ -958,7 +975,19 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 			ExpiresAt: owner.ProxyExpiresAt,
 			Expired:   owner.ProxyExpiresAt != 0 && owner.ProxyExpiresAt <= now,
 			Custom:    owner.ProxyUsername != "",
-		})
+			MeterPlan: owner.Name,
+		}
+		// Mirror BuildUsersByTag: every node except a free-owned one authenticates
+		// with the account credential, so that is what the page must hand out. The
+		// bucket credential is still live in the config (already-saved logins keep
+		// working) — it is simply no longer the one we tell people to use.
+		if owner.Kind != KindFree && acct.active(now) {
+			p.Username, p.Password = acct.name, acct.password
+			p.ExpiresAt, p.Expired = acct.expiresAt, false
+			p.Custom, p.Account = true, true
+			p.MeterPlan = meterPlan
+		}
+		out = append(out, p)
 	}
 	return out
 }
@@ -1055,6 +1084,11 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 		return nil, err
 	}
 
+	accounts, err := s.proxyAccounts()
+	if err != nil {
+		return nil, err
+	}
+
 	planGroupsCache := map[int64][]int64{}
 	planGroups := func(pkgID int64) []int64 {
 		if g, ok := planGroupsCache[pkgID]; ok {
@@ -1098,6 +1132,27 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 			// sing-box may reject outright, and taking every user's nodes down is
 			// too expensive an outcome to leave to "should not arise".
 			if ib.Type == "mixed" {
+				// Two credentials authenticate a mixed inbound, and both are emitted.
+				//
+				// The account-level one is what the panel shows: one login per user,
+				// the same on every node they can reach, so a node changing groups no
+				// longer changes what they must paste into 1Panel/Docker/git. It is
+				// withheld from a free-owned inbound — free traffic is metered apart
+				// from paid quota, and this identity is charged to a paid bucket.
+				//
+				// The per-bucket one stays alongside it because it may already be
+				// saved in someone's tooling; dropping it would make the upgrade
+				// itself the thing that breaks their proxy. It keeps metering to its
+				// own bucket exactly as before.
+				if b.Kind != KindFree {
+					if a, ok := accounts[b.UserID]; ok && a.active(now) && b.Active(now) {
+						u := singbox.User{Name: a.name, Password: a.password}
+						if !seen[inboundUser{ib.Tag, u.Name}] {
+							seen[inboundUser{ib.Tag, u.Name}] = true
+							out[ib.Tag] = append(out[ib.Tag], u)
+						}
+					}
+				}
 				if !b.ProxyActive(now) {
 					continue
 				}

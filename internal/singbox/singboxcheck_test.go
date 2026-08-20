@@ -16,7 +16,14 @@ func serverFixture(t *testing.T) []byte {
 	// Users are not optional here: a mixed inbound with an empty users list is
 	// dropped outright (it would otherwise be an open proxy), and a fixture
 	// without them would generate a config that binds nothing.
-	user := []User{{Name: "tester", Password: "testpass"}}
+	//
+	// Two of them, because that is what a real mixed inbound now carries per
+	// subscriber: the account-level credential the panel hands out plus the
+	// per-bucket one kept alive for logins already saved elsewhere.
+	user := []User{
+		{Name: "tester", Password: "testpass"},
+		{Name: "px_0123456789abcdef", Password: "0123456789abcdef0123456789abcdef"},
+	}
 	ibs := []Inbound{
 		{Type: "mixed", Users: user, Base: map[string]interface{}{
 			"type": "mixed", "tag": "direct-in", "listen": "127.0.0.1", "listen_port": 18894}},

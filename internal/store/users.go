@@ -42,6 +42,12 @@ type User struct {
 	// CredsResetAt is when the user last rotated their node credentials, 0 if
 	// never. Backs the cooldown on that action (see RotateNodeCredentials).
 	CredsResetAt int64
+	// Account-level mixed (HTTP/SOCKS5) proxy credential — one login valid on
+	// every node the user is entitled to, stable across group moves and renewals.
+	// ProxyExpiresAt 0 = permanent. See proxyaccount.go.
+	ProxyUsername  string
+	ProxyPassword  string
+	ProxyExpiresAt int64
 	CreatedAt    int64
 	UpdatedAt    int64
 	// LastOnlineAt is bumped by the stats poll whenever this user shows a
@@ -53,7 +59,7 @@ type User struct {
 const userCols = `id, username, email, password_hash, role, status, email_verified, points,
 	client_id, client_name, client_uuid, client_secret, sub_token, current_plan_id,
 	traffic_limit, device_limit, used_up, used_down, expiry_at, created_at, updated_at,
-	last_online_at, creds_reset_at`
+	last_online_at, creds_reset_at, proxy_username, proxy_password, proxy_expires_at`
 
 type scanner interface{ Scan(...any) error }
 
@@ -63,7 +69,7 @@ func scanUser(sc scanner) (*User, error) {
 		&u.EmailVerified, &u.Points, &u.ClientID, &u.ClientName, &u.ClientUUID,
 		&u.ClientSecret, &u.SubToken, &u.CurrentPlanID, &u.TrafficLimit, &u.DeviceLimit,
 		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt, &u.LastOnlineAt,
-		&u.CredsResetAt)
+		&u.CredsResetAt, &u.ProxyUsername, &u.ProxyPassword, &u.ProxyExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

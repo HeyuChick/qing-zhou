@@ -37,10 +37,18 @@ CREATE TABLE IF NOT EXISTS users (
   -- that action: unlike swapping the subscription address (panel-only), it has
   -- to reach every node's config, so it is deliberately rate-limited. 0 = never.
   creds_reset_at  INTEGER NOT NULL DEFAULT 0,
+  -- Account-level mixed (HTTP/SOCKS5) proxy credential: ONE login that works on
+  -- every node the user is entitled to, and never changes when a node moves
+  -- between groups or a plan is renewed. Minted per user at provision time;
+  -- editable by the user. proxy_expires_at 0 = permanent. See proxyaccount.go.
+  proxy_username  TEXT    NOT NULL DEFAULT '',
+  proxy_password  TEXT    NOT NULL DEFAULT '',
+  proxy_expires_at INTEGER NOT NULL DEFAULT 0,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_proxy_username ON users(proxy_username) WHERE proxy_username <> '';
 
 CREATE TABLE IF NOT EXISTS packages (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -641,6 +649,19 @@ func (s *Store) Migrate() error {
 		// A proxy_username must be globally unique (it becomes a stats identity);
 		// partial index so the many empty defaults don't collide.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_proxy_username ON user_plans(proxy_username) WHERE proxy_username <> ''`,
+		// Account-level mixed-proxy credential: one HTTP/SOCKS5 login per USER,
+		// valid on every node they can reach. The per-bucket credential above ties
+		// the login to whichever套餐 happens to own a node, so moving a node between
+		// groups (or renewing) handed the user a different username/password and
+		// broke whatever they had pasted into 1Panel/Docker/git. This one never
+		// changes on its own. The per-bucket credential stays valid alongside it so
+		// already-copied logins keep working. Same identity namespace as
+		// user_plans.proxy_username — uniqueness across all three tables is enforced
+		// in Go (proxyNameTaken), the index below is the last line of defence.
+		`ALTER TABLE users ADD COLUMN proxy_username TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN proxy_password TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN proxy_expires_at INTEGER NOT NULL DEFAULT 0`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_proxy_username ON users(proxy_username) WHERE proxy_username <> ''`,
 		// TLS to the proxy egress itself ("HTTPS proxy"). We are the client on
 		// that hop, so tls_cert_id is a TRUST ANCHOR (verify the proxy against
 		// this managed cert) — the panel never presents a certificate here, and
@@ -733,6 +754,10 @@ func (s *Store) Migrate() error {
 	if err := s.backfillFreeBuckets(); err != nil {
 		return err
 	}
+	// Mint the account-level HTTP/SOCKS5 credential for existing users (idempotent).
+	if err := s.backfillProxyAccounts(); err != nil {
+		return err
+	}
 	// Seed traffic_daily from the samples still on disk (idempotent).
 	if err := s.backfillTrafficDaily(); err != nil {
 		return err
@@ -765,6 +790,34 @@ func (s *Store) backfillTrafficDaily() error {
 		         SELECT 1 FROM traffic_daily t
 		          WHERE t.day = d AND t.user_id = traffic_samples.user_id)`)
 	return err
+}
+
+// backfillProxyAccounts mints the account-level HTTP/SOCKS5 credential for users
+// provisioned before it existed. Same scope rule as backfillFreeBuckets: only
+// users who already have a bucket, because an account credential is an identity
+// in the sing-box config and an unprovisioned account has no business being
+// there — it gets one at provision time instead.
+//
+// Nothing breaks for these users on the upgrade: the per-bucket credential they
+// may already have pasted somewhere stays in the config and stays valid (see
+// BuildUsersByTag). The new credential is simply the one the panel shows from
+// now on.
+func (s *Store) backfillProxyAccounts() error {
+	ids, err := queryInts(s.db, `SELECT u.id FROM users u
+		WHERE u.proxy_username = ''
+		  AND EXISTS (SELECT 1 FROM user_plans p WHERE p.user_id = u.id)`)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := s.EnsureProxyAccount(id); err != nil {
+			return err
+		}
+	}
+	if len(ids) > 0 {
+		log.Printf("migrate: minted %d account-level proxy credentials", len(ids))
+	}
+	return nil
 }
 
 // backfillFreeBuckets creates the free-group bucket for users provisioned before

@@ -197,6 +197,11 @@ func (a *API) provisionClient(u *store.User) error {
 	if err := a.st.EnsureFreeBucket(u.ID, u.Username); err != nil {
 		return err
 	}
+	// One HTTP/SOCKS5 login for the whole account, minted here so it is already in
+	// the config the rebuild below writes.
+	if err := a.st.EnsureProxyAccount(u.ID); err != nil {
+		return err
+	}
 	// The signup grant has to live in a bucket too — enforcement never reads the
 	// users.* columns registration used to write it to.
 	traffic, _ := a.st.GetSettingInt64("default_traffic", 10<<30)
@@ -533,6 +538,47 @@ func (a *API) handleUpdateUserProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.st.SetBucketProxyCred(bucketID, u.ID, strings.TrimSpace(req.Username), req.Password, req.ExpiresAt); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	a.sbRebuildLog()
+	ok(w, nil)
+}
+
+// handleUserProxyAccount returns the caller's account-level mixed-proxy
+// credential (null if they have none). Separate from /api/user/proxies because
+// an expired credential still has to be shown so it can be renewed, while the
+// node list by then reports the bucket credential that actually authenticates.
+func (a *API) handleUserProxyAccount(w http.ResponseWriter, r *http.Request) {
+	u := a.currentUser(r)
+	if u == nil {
+		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	ok(w, a.st.ProxyAccountView(u))
+}
+
+// handleUpdateUserProxyAccount sets the caller's account-level mixed-proxy
+// credential: one username/password (unrelated to the login account, optional
+// expiry) that authenticates on every node they are entitled to and does not
+// change when a node moves between groups or a套餐 is renewed. Rotatable anytime
+// — the config is rebuilt so sing-box picks it up immediately.
+func (a *API) handleUpdateUserProxyAccount(w http.ResponseWriter, r *http.Request) {
+	u := a.currentUser(r)
+	if u == nil {
+		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	var req struct {
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+		ExpiresAt int64  `json:"expires_at"` // 0 = permanent
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := a.st.SetUserProxyCred(u.ID, strings.TrimSpace(req.Username), req.Password, req.ExpiresAt); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}

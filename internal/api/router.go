@@ -183,6 +183,8 @@ func (a *API) Router() http.Handler {
 		pr.Get("/api/user/plans", a.handleUserPlans)
 		pr.Get("/api/user/subscription", a.handleSubscription)
 		pr.Get("/api/user/proxies", a.handleUserProxies)
+		pr.Get("/api/user/proxy-account", a.handleUserProxyAccount)
+		pr.Put("/api/user/proxy-account", a.handleUpdateUserProxyAccount)
 		pr.Put("/api/user/proxies/{bucket}", a.handleUpdateUserProxy)
 		pr.Post("/api/user/reset-sub", a.handleResetSub)
 		pr.Post("/api/user/reset-node-creds", a.handleResetNodeCreds)
