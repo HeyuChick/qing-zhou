@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -495,5 +496,87 @@ func TestProxyAccount_PlanCredentialPresentWithoutAccountCred(t *testing.T) {
 	}
 	if p.Plan == nil || p.Plan.Username != p.Username || p.Plan.Password != p.Password {
 		t.Errorf("fallback node must still report its份 credential: %+v", p.Plan)
+	}
+}
+
+// A user with no usable paid份 — every plan expired, or they never had one — is
+// left holding a credential that is injected into nothing: BuildUsersByTag
+// withholds it from free-owned inbounds on purpose, and those are the only
+// inbounds they still have. The panel renders this block from the view rather
+// than from the node list, so without a flag it would print "所有节点通用" over a
+// login that opens none of them.
+func TestProxyAccount_IdleWhenNothingChargeable(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "bob")
+	if err := st.EnsureProxyAccount(uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureFreeBucket(uid, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	g, err := st.CreateGroup(NodeGroup{Name: "免费"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("free_group_id", strconv.FormatInt(g, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveSbInbound(&SbInbound{Type: "mixed", Tag: "free-mixed", Listen: "::",
+		ListenPort: 7899, Options: "{}", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	nid, err := st.CreateNode(Node{Type: "self_built", Name: "免费代理", InboundTag: "free-mixed", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetNodeGroups(nid, []int64{g}); err != nil {
+		t.Fatal(err)
+	}
+
+	u, _ := st.UserByID(uid)
+	v := st.ProxyAccountView(u)
+	if v == nil {
+		t.Fatal("the credential must stay visible and editable even when it opens nothing")
+	}
+	if v.Expired {
+		t.Error("the credential itself has not expired; saying so would send the user to renew the wrong thing")
+	}
+	if !v.Idle {
+		t.Error("credential reported as usable, but no bucket can be charged for it")
+	}
+
+	// The claim has to match the config: the account name is in no inbound.
+	byTag, err := st.BuildUsersByTag(time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tag, users := range byTag {
+		for _, x := range users {
+			if x.Name == v.Username {
+				t.Fatalf("account credential %q is live on %q — Idle is wrong", v.Username, tag)
+			}
+		}
+	}
+	// The free node still works, on the free bucket's own credential.
+	list := st.BuildUserProxies(u, "example.com")
+	if len(list) != 1 || list[0].Account {
+		t.Fatalf("free-owned node should present its own bucket credential, got %+v", list)
+	}
+	if list[0].Plan == nil || list[0].Plan.Username != list[0].Username {
+		t.Errorf("the credential that actually authenticates must be the one shown: %+v", list[0].Plan)
+	}
+}
+
+// The ordinary case, stated as the counterpart: with a usable paid份 the
+// credential is live and names the份 it spends.
+func TestProxyAccount_NotIdleWithPaidPlan(t *testing.T) {
+	sc := newProxyScene(t)
+	u, _ := sc.st.UserByID(sc.uid)
+	v := sc.st.ProxyAccountView(u)
+	if v.Idle {
+		t.Error("user holds two active plans; the credential is in the config")
+	}
+	if v.MeterPlan == "" {
+		t.Error("no份 named for the traffic, leaving the user to guess")
 	}
 }

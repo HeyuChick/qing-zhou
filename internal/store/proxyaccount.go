@@ -209,6 +209,17 @@ type UserProxyAccount struct {
 	// MeterPlan is the份 this credential's traffic is charged to, "" when the
 	// user has nothing chargeable (in which case it authenticates nowhere).
 	MeterPlan string `json:"meter_plan"`
+	// Idle is true when the credential is fine but currently opens nothing: the
+	// user has no usable paid份, so there is no bucket to charge it to and
+	// BuildUsersByTag withholds it from every inbound. Their remaining nodes are
+	// free-group ones, which keep authenticating with the free bucket's own
+	// credential — deliberately, so free bytes never land on a paid counter.
+	//
+	// Reported rather than left for the page to infer from an empty MeterPlan:
+	// "所有节点通用" printed over a login that works on none of them is the same
+	// class of lie as hiding a credential that works, and the two states differ
+	// by exactly one thing the user needs to be told.
+	Idle bool `json:"idle"`
 }
 
 // ProxyAccountView returns the user's account-level credential, or nil if they
@@ -231,7 +242,12 @@ func (s *Store) ProxyAccountView(u *User) *UserProxyAccount {
 		Expired:   !u.ProxyCredActive(now),
 	}
 	if !v.Expired {
-		v.MeterPlan = s.AccountMeterPlanName(u.ID)
+		b, err := s.accountMeterBucket(u.ID)
+		if err != nil || b == nil {
+			v.Idle = true
+		} else {
+			v.MeterPlan = s.bucketPlanName(b)
+		}
 	}
 	return v
 }
@@ -245,6 +261,12 @@ func (s *Store) AccountMeterPlanName(userID int64) string {
 	if err != nil || b == nil {
 		return ""
 	}
+	return s.bucketPlanName(b)
+}
+
+// bucketPlanName is a份's display name, live package name winning over the
+// bucket's stored snapshot to match how it is labelled everywhere else.
+func (s *Store) bucketPlanName(b *Bucket) string {
 	var name string
 	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(pk.name,''), p.name)
 		FROM user_plans p LEFT JOIN packages pk ON pk.id = p.package_id

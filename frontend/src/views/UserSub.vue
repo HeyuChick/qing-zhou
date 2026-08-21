@@ -130,6 +130,9 @@
         <div class="px-head">
           <span class="px-name">通用账号</span>
           <n-tag v-if="acct.expired" type="error" size="small" bordered>已过期</n-tag>
+          <!-- idle：凭据本身没问题，但眼下一个节点都开不了。仍标「所有节点通用」
+               等于当面说一句假话，和之前藏起一个能用的账号是同一类错误。 -->
+          <n-tag v-else-if="acct.idle" type="warning" size="small" bordered>暂不通用</n-tag>
           <n-tag v-else type="info" size="small" bordered>所有节点通用</n-tag>
           <span style="flex:1;"></span>
           <n-button size="tiny" @click="openEditProxy({ ...acct, account: true, custom: true })">编辑账号</n-button>
@@ -139,7 +142,8 @@
         <div class="pxrow"><span class="pxk">有效期</span><span style="font-size:12px;color:var(--text-2);flex:1;">{{ acct.expires_at ? fmtDate(acct.expires_at) : '永久' }}</span></div>
         <div class="px-hint">
           <template v-if="acct.expired">已过期，下面的节点暂时改用各自套餐的账号。点「编辑账号」续期即可恢复通用。</template>
-          <template v-else>与登录账号无关，可随时改。<template v-if="acct.meter_plan">这些节点的代理流量统一计入「{{ acct.meter_plan }}」。</template></template>
+          <template v-else-if="acct.idle">你名下暂时没有生效中的付费套餐，这个账号目前不会下发到任何节点，填哪儿都连不上。下面的节点请各自展开「详情」，用它自己的「套餐账号」。买一份或续上一份套餐后，它会自动恢复通用（免费分组的节点始终用各自的账号，免费流量不计入付费套餐）。</template>
+          <template v-else>与登录账号无关，可随时改。<template v-if="acct.meter_plan">这些节点的代理流量统一计入「{{ acct.meter_plan }}」——多份套餐并存时记的是最早到期的那一份，那份用完或到期后会自动换到下一份。</template></template>
         </div>
       </div>
       <!-- 默认只留一行：节点 + 地址:端口 + 复制链接。原先六行「标签 + 只读输入框 +
@@ -217,6 +221,25 @@
               <template v-if="p.account && p.meter_plan && p.meter_plan !== p.plan.name">想把这个节点的代理流量记在「{{ p.plan.name }}」而不是「{{ p.meter_plan }}」，就用这一套。</template>
             </div>
           </div>
+        </div>
+      </div>
+      <!-- 两套账号并排讲一次取舍。分开写在各自的提示句里时，每句单独看都对，但
+           「我到底该用哪个」从头到尾没有一个地方回答过。默认收起：已经知道的人不
+           必每次都看，困惑的人在这张卡片底部找得到。 -->
+      <div class="px-choose">
+        <n-button size="tiny" quaternary @click="showChoose = !showChoose">
+          {{ showChoose ? '收起说明' : '两套账号怎么选？' }}
+        </n-button>
+        <div v-if="showChoose" class="px-choose-body">
+          <div class="pc-row">
+            <span class="pc-k">通用账号</span>
+            <span class="pc-v">所有节点同一套，节点换分组、套餐续费都不会变它。流量汇总记在一份上——多份套餐并存时是<b>最早到期</b>的那份，那份用完或到期后自动换到下一份<template v-if="acct && acct.meter_plan">（目前是「{{ acct.meter_plan }}」）</template>。图省事、一处填遍所有节点就用它。</span>
+          </div>
+          <div class="pc-row">
+            <span class="pc-k">套餐账号</span>
+            <span class="pc-v">每份套餐各一套，只在这份套餐拥有的节点上有效。流量<b>精确</b>记在它自己那份上，不做任何推断。想让某个节点的流量算在指定套餐头上，就展开那个节点的「详情」用它。</span>
+          </div>
+          <div class="pc-note">两套都有效，可以混着用：同一个节点上你填哪套，流量就按哪套的规则记。</div>
         </div>
       </div>
       <div style="font-size:11px;color:var(--text-3);margin-top:10px;">命令行 / Docker / git 等直接点「复制 HTTP」「复制 SOCKS5」，拿到的是 <code>scheme://用户名:密码@地址:端口</code> 整串。1Panel 这类分字段的表单展开「详情」逐项复制：代理类型选 <b>HTTP</b> 或 <b>SOCKS5</b>（标着 <b>HTTPS</b> 的节点则选 HTTPS）。</div>
@@ -423,6 +446,9 @@ async function loadProxies() {
   proxies.value = await apiList('/api/user/proxies')
   try { acct.value = await apiGet('/api/user/proxy-account') } catch { acct.value = null }
 }
+
+// 「两套账号怎么选」的展开状态。
+const showChoose = ref(false)
 
 // 展开的代理（按 tag 记）。默认全收起——常用路径是复制整串 URL，逐字段只是备用。
 const expandedProxies = ref<string[]>([])
@@ -768,6 +794,17 @@ onMounted(async () => {
 .px-plan .pxrow { margin-top: 6px; }
 .px-plan .px-hint { margin-top: 8px; }
 .pxsub { font-size: 12px; color: var(--text-2); flex: 1; }
+.px-choose { margin-top: 10px; }
+/* 窄屏上标题和正文竖着堆，别把正文挤成一条 */
+.px-choose-body { margin-top: 8px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; }
+.pc-row { display: flex; gap: 10px; font-size: 12px; line-height: 1.7; margin-bottom: 6px; }
+.pc-k { flex: 0 0 72px; color: var(--text-2); font-weight: 650; }
+.pc-v { flex: 1; color: var(--text-2); }
+.pc-note { font-size: 11px; color: var(--text-3); margin-top: 4px; }
+@media (max-width: 520px) {
+  .pc-row { flex-direction: column; gap: 2px; }
+  .pc-k { flex: none; }
+}
 .proxy-row { margin-bottom: 8px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; }
 .proxy-row:last-child { margin-bottom: 0; }
 /* 一行放不下时按钮整体换行，地址不被挤成省略号 */
