@@ -82,7 +82,6 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	traffic, _ := a.st.GetSettingInt64("default_traffic", 10<<30)
-	deviceLimit, _ := a.st.GetSettingInt64("default_device_limit", 3)
 	expiryDays, _ := a.st.GetSettingInt64("default_expiry_days", 30)
 	bonus, _ := a.st.GetSettingInt64("signup_bonus_points", 0)
 	subToken, err := idgen.RandToken(24)
@@ -102,7 +101,6 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Points:       bonus,
 		SubToken:     subToken,
 		TrafficLimit: traffic,
-		DeviceLimit:  deviceLimit,
 		ExpiryAt:     expiryAt,
 	})
 	if err != nil {

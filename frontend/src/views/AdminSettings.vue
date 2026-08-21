@@ -233,6 +233,34 @@
         </n-form>
       </n-card>
 
+      <n-card title="在线更新" size="small" style="margin-bottom:16px;">
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
+          「在线更新」页查版本走的是 GitHub 公开接口，匿名调用<b>按出口 IP</b> 限额（每小时 60 次）。
+          与别人共用一个出口 IP（NAT / 机房 / 公司网络）时很容易撞到额度，表现为检查更新报「速率受限」。
+          填一个 GitHub Token 后额度提到每小时 5000 次。<b>只是提额度，不是权限</b>——
+          仓库是公开的，令牌<b>不需要勾任何权限范围（scope）</b>，建一个空权限的即可。
+        </p>
+        <n-form label-placement="left" label-width="160">
+          <n-form-item label="GitHub Token">
+            <div style="width:100%;">
+              <n-input v-model:value="form.update_github_token" type="password" show-password-on="click"
+                       :disabled="envLocked('update_github_token')"
+                       placeholder="可选；显示 *** 表示已设置，清空并保存即移除" />
+              <div class="form-hint">
+                <template v-if="envLocked('update_github_token')">
+                  当前由环境变量 <code>QZ_UPDATE_GITHUB_TOKEN</code> 指定，面板改不动。
+                </template>
+                <template v-else>
+                  在 <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">GitHub → Settings → Developer settings → Personal access tokens</a>
+                  生成，不勾任何 scope。加密存储，保存后显示为 <code>***</code>；
+                  填错了就把这一栏清空再保存，即可退回匿名调用。
+                </template>
+              </div>
+            </div>
+          </n-form-item>
+        </n-form>
+      </n-card>
+
       <n-card title="数据备份" size="small" style="margin-bottom:16px;">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           在线导出整库快照（单个 <code>.db</code> 文件，含用户 / 订单 / 节点 / 证书）。数据库跑在 WAL 模式下，
@@ -426,6 +454,8 @@ onMounted(async () => {
 
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 4px; }
+.form-hint { margin-top: 4px; font-size: 12px; color: var(--text-3); line-height: 1.5; }
+.form-hint a { color: var(--accent-strong); }
 .page-sub { color: var(--text-2); margin-bottom: 22px; }
 .cf-guide { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
 .cf-guide-t { font-size: 12.5px; font-weight: 650; color: var(--text); margin-bottom: 8px; }

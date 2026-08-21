@@ -228,6 +228,15 @@
     <n-modal v-model:show="showEdit" preset="card" title="编辑用户" style="max-width:500px;">
       <n-form v-if="editUser" label-placement="left" label-width="80">
         <n-form-item label="用户名"><n-input :value="editUser.username" disabled /></n-form-item>
+        <n-form-item label="邮箱">
+          <div style="width:100%;">
+            <n-input v-model:value="editEmail" placeholder="留空 = 解除绑定" />
+            <div class="form-hint">
+              管理员改邮箱直接生效、直接算已验证，不给对方发验证信 ——
+              用户自己换绑要点新邮箱里的链接，收不到信的人正是来找你改的那个。留空则解除绑定。
+            </div>
+          </div>
+        </n-form-item>
         <n-form-item label="备注">
           <div style="width:100%;">
             <n-input v-model:value="editRemark" type="textarea" :autosize="{ minRows: 1, maxRows: 3 }"
@@ -695,10 +704,12 @@ const resetPw = ref('')
 const resetTraffic = ref(false)
 const editGroupIDs = ref<number[]>([])
 const editRemark = ref('')
+const editEmail = ref('')
 async function openEdit(u: any) {
   editUser.value = { ...u }
   editBanned.value = u.status === 'banned'
   editRemark.value = u.remark || ''
+  editEmail.value = u.email || ''
   resetPw.value = ''; resetTraffic.value = false
   editGroupIDs.value = [...(u.group_ids || [])]
   // Prefill the manual-grant fields from the user's admin-grant bucket itself (not
@@ -735,6 +746,10 @@ async function handleSave() {
     body.group_ids = editGroupIDs.value
     // 总是发：'' 是「清除备注」这个明确意图，不是「没填」。
     body.remark = editRemark.value
+    // 邮箱只在真的改了才发。后端每次真写入都会作废用户手上未用的验证令牌，
+    // 没必要为一次「只改了封禁开关」的保存把它顺手废掉。
+    const curEmail = editUser.value.email || ''
+    if (editEmail.value.trim() !== curEmail) body.email = editEmail.value.trim()
     await apiPut(`/api/admin/users/${editUser.value.id}`, body)
     message.success('保存成功'); showEdit.value = false; await load(); syncPlansUser()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }

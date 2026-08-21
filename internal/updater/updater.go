@@ -170,7 +170,10 @@ func releaseHTTPError(resp *http.Response) error {
 	case http.StatusNotFound:
 		return errors.New("未找到该发布版本（仓库无 release、版本号有误，或名称配置有误）")
 	case http.StatusForbidden, http.StatusTooManyRequests:
-		return errors.New("GitHub API 速率受限，请稍后再试（或配置 update_github_token）")
+		// Name where the token is configured, not just its setting key: the key
+		// was only reachable by hand-editing the DB until it got a field, and an
+		// error that names a key with no visible home reads as a dead end.
+		return errors.New("GitHub API 速率受限，请稍后再试（或在「系统设置 → 在线更新」填一个 GitHub Token 提高额度）")
 	default:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("GitHub 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))

@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS users (
   sub_token       TEXT    UNIQUE,
   current_plan_id INTEGER,
   traffic_limit   INTEGER NOT NULL DEFAULT 0,
-  device_limit    INTEGER NOT NULL DEFAULT 3,
+  device_limit    INTEGER NOT NULL DEFAULT 3, -- unused; see device_addons below
   used_up         INTEGER NOT NULL DEFAULT 0,
   used_down       INTEGER NOT NULL DEFAULT 0,
   expiry_at       INTEGER NOT NULL DEFAULT 0,
@@ -54,13 +54,13 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS packages (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  type          TEXT    NOT NULL,            -- traffic | plan | device
+  type          TEXT    NOT NULL,            -- traffic | plan
   name          TEXT    NOT NULL,
   description   TEXT    NOT NULL DEFAULT '',
   highlights    TEXT    NOT NULL DEFAULT '',   -- JSON array of selling-point bullets
   price_points  INTEGER NOT NULL DEFAULT 0,
   traffic_bytes INTEGER NOT NULL DEFAULT 0,
-  device_add    INTEGER NOT NULL DEFAULT 0,
+  device_add    INTEGER NOT NULL DEFAULT 0, -- unused; see device_addons below
   duration_days INTEGER NOT NULL DEFAULT 0,
   duration_options TEXT NOT NULL DEFAULT '', -- JSON array of selectable durations; '' = single duration
   stock         INTEGER NOT NULL DEFAULT -1, -- -1 = unlimited
@@ -91,6 +91,13 @@ CREATE TABLE IF NOT EXISTS point_transactions (
   created_at    INTEGER NOT NULL
 );
 
+-- Legacy scaffolding for a per-account device cap that was never wired up: no
+-- code reads this table, users.device_limit, or packages.device_add, and the
+-- package API has rejected type='device' since the first release, so no row can
+-- exist here outside a hand-edited DB. Kept (not dropped) because dropping a
+-- column/table on SQLite means a table rebuild inside Migrate, and a mistake
+-- there is a boot loop on a deployment whose only update path is the panel it
+-- just killed — see the comment on the indexes const. Cost of keeping it: zero rows.
 CREATE TABLE IF NOT EXISTS device_addons (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id      INTEGER NOT NULL,
@@ -237,7 +244,11 @@ CREATE TABLE IF NOT EXISTS node_sources (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   name         TEXT    NOT NULL,
   url          TEXT    NOT NULL,
-  type         TEXT    NOT NULL DEFAULT 'base64', -- base64 | clash
+  -- Unused: the fetcher never reads it. subconv.ParseList sniffs the payload
+  -- itself (base64 list / plain links / clash YAML), which is what a real
+  -- airport subscription needs anyway — the same URL can switch format on the
+  -- provider's side. Kept as an inert column for the reason device_addons is.
+  type         TEXT    NOT NULL DEFAULT 'base64',
   enabled      INTEGER NOT NULL DEFAULT 1,
   last_fetched INTEGER NOT NULL DEFAULT 0,
   last_count   INTEGER NOT NULL DEFAULT 0,

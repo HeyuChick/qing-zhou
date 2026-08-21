@@ -28,14 +28,13 @@ type User struct {
 	Status        string
 	EmailVerified bool
 	Points        int64
-	ClientID     sql.NullInt64
-	ClientName   sql.NullString
-	ClientUUID   sql.NullString
-	ClientSecret sql.NullString
-	SubToken        sql.NullString
+	ClientID      sql.NullInt64
+	ClientName    sql.NullString
+	ClientUUID    sql.NullString
+	ClientSecret  sql.NullString
+	SubToken      sql.NullString
 	CurrentPlanID sql.NullInt64
 	TrafficLimit  int64
-	DeviceLimit   int64
 	UsedUp        int64
 	UsedDown      int64
 	ExpiryAt      int64
@@ -50,9 +49,9 @@ type User struct {
 	ProxyExpiresAt int64
 	// Remark is the admin's free-form note on this account. Panel-side only:
 	// it never reaches sing-box config, a subscription, or the user's own pages.
-	Remark       string
-	CreatedAt    int64
-	UpdatedAt    int64
+	Remark    string
+	CreatedAt int64
+	UpdatedAt int64
 	// LastOnlineAt is bumped by the stats poll whenever this user shows a
 	// non-zero traffic delta, so it doubles as the proxy-side liveness signal.
 	// Panel logins do not touch it — see sessions for that.
@@ -61,7 +60,7 @@ type User struct {
 
 const userCols = `id, username, email, password_hash, role, status, email_verified, points,
 	client_id, client_name, client_uuid, client_secret, sub_token, current_plan_id,
-	traffic_limit, device_limit, used_up, used_down, expiry_at, created_at, updated_at,
+	traffic_limit, used_up, used_down, expiry_at, created_at, updated_at,
 	last_online_at, creds_reset_at, proxy_username, proxy_password, proxy_expires_at, remark`
 
 type scanner interface{ Scan(...any) error }
@@ -70,7 +69,7 @@ func scanUser(sc scanner) (*User, error) {
 	var u User
 	err := sc.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Status,
 		&u.EmailVerified, &u.Points, &u.ClientID, &u.ClientName, &u.ClientUUID,
-		&u.ClientSecret, &u.SubToken, &u.CurrentPlanID, &u.TrafficLimit, &u.DeviceLimit,
+		&u.ClientSecret, &u.SubToken, &u.CurrentPlanID, &u.TrafficLimit,
 		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt, &u.LastOnlineAt,
 		&u.CredsResetAt, &u.ProxyUsername, &u.ProxyPassword, &u.ProxyExpiresAt, &u.Remark)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -107,7 +106,6 @@ type NewUser struct {
 	Points       int64
 	SubToken     string
 	TrafficLimit int64
-	DeviceLimit  int64
 	ExpiryAt     int64
 	Remark       string
 }
@@ -120,10 +118,10 @@ func (s *Store) CreateUser(nu NewUser) (int64, error) {
 	now := time.Now().Unix()
 	res, err := s.db.Exec(`INSERT INTO users
 		(username, email, password_hash, role, status, email_verified, points,
-		 sub_token, traffic_limit, device_limit, expiry_at, remark, created_at, updated_at)
-		VALUES (?,?,?,?,'active',0,?,?,?,?,?,?,?,?)`,
+		 sub_token, traffic_limit, expiry_at, remark, created_at, updated_at)
+		VALUES (?,?,?,?,'active',0,?,?,?,?,?,?,?)`,
 		nu.Username, nullStr(nu.Email), nu.PasswordHash, role, nu.Points,
-		nullStr(nu.SubToken), nu.TrafficLimit, nu.DeviceLimit, nu.ExpiryAt, nu.Remark, now, now)
+		nullStr(nu.SubToken), nu.TrafficLimit, nu.ExpiryAt, nu.Remark, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -328,6 +326,42 @@ func (s *Store) SetUserEmail(userID int64, email string) error {
 
 	if _, err := tx.Exec(`UPDATE users SET email=?, email_verified=0, updated_at=? WHERE id=?`,
 		nullStr(email), time.Now().Unix(), userID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM email_tokens WHERE user_id=? AND purpose='verify' AND used=0`,
+		userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AdminSetUserEmail rebinds an address on an admin's authority: no verification
+// round-trip, the same way an admin-created account is pre-verified at creation.
+// An empty address unbinds (NULL, and unverified — there is nothing to verify).
+//
+// It is separate from SetUserEmail because the two differ on exactly the field
+// that matters: SetUserEmail is the *user* claiming an address they must then
+// prove they own, so it lands unverified. Here the admin is asserting it, and
+// the user typically cannot receive mail at the old address — which is the
+// situation that brought the admin here. Leaving it unverified would show the
+// user a "邮箱未验证" prompt for an address they never chose and cannot confirm.
+//
+// Outstanding verify tokens are dropped for the same reason SetUserEmail drops
+// them: a token carries only user_id, so one minted for the previous address
+// would otherwise still redeem against this one. See SetUserEmail.
+func (s *Store) AdminSetUserEmail(userID int64, email string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	verified := 0
+	if email != "" {
+		verified = 1
+	}
+	if _, err := tx.Exec(`UPDATE users SET email=?, email_verified=?, updated_at=? WHERE id=?`,
+		nullStr(email), verified, time.Now().Unix(), userID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM email_tokens WHERE user_id=? AND purpose='verify' AND used=0`,

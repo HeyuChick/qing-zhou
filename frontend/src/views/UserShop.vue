@@ -83,7 +83,9 @@ function willQueue(pkg: any): boolean { return pkg.type === 'plan' && heldActive
 function typeMeta(type: string) {
   if (type === 'traffic') return { label: '流量包', cls: 't-traffic' }
   if (type === 'plan') return { label: '订阅计划', cls: 't-plan' }
-  return { label: '设备扩展', cls: 't-device' }
+  // 后端只认 traffic / plan（validPkgTypes）。留个中性兜底而不是硬套一个标签：
+  // 真出现别的类型时，宁可原样显示，也不要谎报成某个具体品类。
+  return { label: type || '套餐', cls: 't-other' }
 }
 
 // 一个套餐可以有多档时长（30/90/365 天…）。chosenDays 记住每张卡片当前选中的
@@ -117,7 +119,6 @@ function specsOf(pkg: any) {
     s.push({ label: '流量', value: opt.traffic_bytes ? fmtTotal(opt.traffic_bytes) : '不限' })
   }
   s.push({ label: '有效期', value: opt.days ? `${opt.days} 天` : '永久' })
-  if (pkg.device_add) s.push({ label: '设备', value: `+${pkg.device_add} 台` })
   return s
 }
 
@@ -201,7 +202,7 @@ onMounted(async () => {
 }
 .t-traffic { color: var(--info); background: #eef2f6; border-color: #dde6ef; }
 .t-plan { color: #4b7a5c; background: #edf4ef; border-color: #d9e8df; }
-.t-device { color: var(--warn); background: #f7f1e2; border-color: #ece0c6; }
+.t-other { color: var(--warn); background: #f7f1e2; border-color: #ece0c6; }
 
 .sc-desc {
   margin-top: 10px;

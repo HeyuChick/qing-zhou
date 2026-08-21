@@ -215,7 +215,6 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	traffic, _ := a.st.GetSettingInt64("default_traffic", 10<<30)
-	deviceLimit, _ := a.st.GetSettingInt64("default_device_limit", 3)
 	expiryDays, _ := a.st.GetSettingInt64("default_expiry_days", 30)
 	subToken, _ := idgen.RandToken(24)
 	expiryAt := int64(0)
@@ -225,7 +224,7 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	id, err := a.st.CreateUser(store.NewUser{
 		Username: req.Username, Email: req.Email, PasswordHash: hash,
-		SubToken: subToken, TrafficLimit: traffic, DeviceLimit: deviceLimit, ExpiryAt: expiryAt,
+		SubToken: subToken, TrafficLimit: traffic, ExpiryAt: expiryAt,
 		Remark: req.Remark,
 	})
 	if err != nil {
@@ -280,6 +279,19 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		// Admin note. Pointer so an older client that omits the field keeps the
 		// existing note instead of clearing it; "" from a new client clears it.
 		Remark *string `json:"remark"`
+		// Address rebind on the admin's authority (see AdminSetUserEmail). Pointer
+		// for the same reason as Remark; "" unbinds. This exists because the user's
+		// own rebind (handleBindEmail) mails a confirmation link to the NEW address
+		// — useless to someone who mistyped their address or lost the mailbox, which
+		// is the only reason anyone asks an admin to change it.
+		Email *string `json:"email"`
+		// `role` is deliberately absent, and this is not an oversight: nothing in
+		// the panel can grant admin. An admin session is the panel's highest
+		// authority, so a writable role field turns any stolen admin token (or an
+		// XSS in an admin page) into a permanent second admin account that survives
+		// the original being locked down. Promotions go through QZ_ADMIN_USER at
+		// boot, which needs host access. Same reasoning as immutableSettings'
+		// update_repo — see admin.go.
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -301,6 +313,35 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = a.st.DeleteUserSessions(id)
+	}
+
+	if req.Email != nil {
+		email := strings.TrimSpace(strings.ToLower(*req.Email))
+		if email != "" {
+			if !validEmail(email) {
+				fail(w, http.StatusBadRequest, "邮箱格式不正确")
+				return
+			}
+			// Same uniqueness rule registration and self-rebind enforce; without it
+			// an admin could park an address on two accounts and break login-by-email
+			// and password reset for both.
+			if other, _ := a.st.UserByEmail(email); other != nil && other.ID != id {
+				fail(w, http.StatusConflict, "该邮箱已被其他账号绑定")
+				return
+			}
+		}
+		cur := ""
+		if u.Email.Valid {
+			cur = u.Email.String
+		}
+		// Skip the no-op: rewriting the same address would still drop the user's
+		// outstanding verify token for no reason.
+		if email != cur {
+			if err := a.st.AdminSetUserEmail(id, email); err != nil {
+				fail(w, http.StatusInternalServerError, "保存邮箱失败")
+				return
+			}
+		}
 	}
 
 	if req.Remark != nil {

@@ -406,7 +406,6 @@ type NodeSource struct {
 	ID          int64   `json:"id"`
 	Name        string  `json:"name"`
 	URL         string  `json:"url"`
-	Type        string  `json:"type"`
 	Enabled     bool    `json:"enabled"`
 	LastFetched int64   `json:"last_fetched"`
 	LastCount   int64   `json:"last_count"`
@@ -435,7 +434,7 @@ func unmarshalGroupIDs(s string) []int64 {
 }
 
 func (s *Store) ListSources() ([]*NodeSource, error) {
-	rows, err := s.db.Query(`SELECT id, name, url, type, enabled, last_fetched, last_count, last_error, group_ids, created_at FROM node_sources ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, name, url, enabled, last_fetched, last_count, last_error, group_ids, created_at FROM node_sources ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +443,7 @@ func (s *Store) ListSources() ([]*NodeSource, error) {
 	for rows.Next() {
 		var n NodeSource
 		var gids string
-		if err := rows.Scan(&n.ID, &n.Name, &n.URL, &n.Type, &n.Enabled, &n.LastFetched, &n.LastCount, &n.LastError, &gids, &n.CreatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &n.URL, &n.Enabled, &n.LastFetched, &n.LastCount, &n.LastError, &gids, &n.CreatedAt); err != nil {
 			return nil, err
 		}
 		n.GroupIDs = unmarshalGroupIDs(gids)
@@ -456,8 +455,8 @@ func (s *Store) ListSources() ([]*NodeSource, error) {
 func (s *Store) GetSource(id int64) (*NodeSource, error) {
 	var n NodeSource
 	var gids string
-	err := s.db.QueryRow(`SELECT id, name, url, type, enabled, last_fetched, last_count, last_error, group_ids, created_at FROM node_sources WHERE id=?`, id).
-		Scan(&n.ID, &n.Name, &n.URL, &n.Type, &n.Enabled, &n.LastFetched, &n.LastCount, &n.LastError, &gids, &n.CreatedAt)
+	err := s.db.QueryRow(`SELECT id, name, url, enabled, last_fetched, last_count, last_error, group_ids, created_at FROM node_sources WHERE id=?`, id).
+		Scan(&n.ID, &n.Name, &n.URL, &n.Enabled, &n.LastFetched, &n.LastCount, &n.LastError, &gids, &n.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -469,8 +468,8 @@ func (s *Store) GetSource(id int64) (*NodeSource, error) {
 }
 
 func (s *Store) CreateSource(n NodeSource) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO node_sources (name, url, type, enabled, group_ids, created_at) VALUES (?,?,?,?,?,?)`,
-		n.Name, n.URL, n.Type, boolToInt(n.Enabled), marshalGroupIDs(n.GroupIDs), time.Now().Unix())
+	res, err := s.db.Exec(`INSERT INTO node_sources (name, url, enabled, group_ids, created_at) VALUES (?,?,?,?,?)`,
+		n.Name, n.URL, boolToInt(n.Enabled), marshalGroupIDs(n.GroupIDs), time.Now().Unix())
 	if err != nil {
 		return 0, err
 	}
@@ -478,8 +477,8 @@ func (s *Store) CreateSource(n NodeSource) (int64, error) {
 }
 
 func (s *Store) UpdateSource(n NodeSource) error {
-	_, err := s.db.Exec(`UPDATE node_sources SET name=?, url=?, type=?, enabled=?, group_ids=? WHERE id=?`,
-		n.Name, n.URL, n.Type, boolToInt(n.Enabled), marshalGroupIDs(n.GroupIDs), n.ID)
+	_, err := s.db.Exec(`UPDATE node_sources SET name=?, url=?, enabled=?, group_ids=? WHERE id=?`,
+		n.Name, n.URL, boolToInt(n.Enabled), marshalGroupIDs(n.GroupIDs), n.ID)
 	return err
 }
 

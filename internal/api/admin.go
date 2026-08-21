@@ -15,6 +15,25 @@ var secretSettings = map[string]bool{
 	"jwt_secret":   true,
 	"smtp_pass":    true,
 	"cf_api_token": true,
+	// A GitHub PAT. It only lifts the unauthenticated rate limit on release
+	// lookups, but it is still a bearer credential for the admin's account —
+	// it must not come back out of the settings API the way a hostname does.
+	"update_github_token": true,
+}
+
+// clearableSecrets are secretSettings that an empty submission *clears* rather
+// than leaves alone.
+//
+// The blanket rule below treats "" as "left blank, keep the current secret",
+// which protects a required credential from being wiped by a half-filled form.
+// That is wrong for an optional one: the GitHub token is a pure opt-in (without
+// it release lookups just run anonymously), so an admin who pastes a bad token
+// would otherwise be stuck — every update check fails 401 and there is no way
+// back to the working anonymous path short of editing the DB. The form always
+// loads "***" for a secret that is set, so "" here can only be a deliberate
+// select-all-delete, never an omission.
+var clearableSecrets = map[string]bool{
+	"update_github_token": true,
 }
 
 // immutableSettings cannot be written through the settings API at all.
@@ -42,6 +61,10 @@ var settingEnv = map[string]string{
 	"smtp_from":      "QZ_SMTP_FROM",
 	"smtp_from_name": "QZ_SMTP_FROM_NAME",
 	"smtp_security":  "QZ_SMTP_SECURITY",
+	// Same precedence the updater itself applies (see New in router.go): env
+	// wins over the DB value, so the panel has to show the env one as effective
+	// or a host-configured token reads as "not set".
+	"update_github_token": "QZ_UPDATE_GITHUB_TOKEN",
 }
 
 func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +112,7 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		if immutableSettings[k] {
 			continue // host-only settings; see immutableSettings
 		}
-		if secretSettings[k] && (v == "***" || v == "") {
+		if secretSettings[k] && (v == "***" || (v == "" && !clearableSecrets[k])) {
 			continue // keep current secret: masked sentinel or left blank
 		}
 		// If the submitted template equals the built-in default, store empty

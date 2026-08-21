@@ -22,13 +22,12 @@ type PlanOption struct {
 
 type Package struct {
 	ID           int64        `json:"id"`
-	Type         string       `json:"type"` // traffic | plan | device
+	Type         string       `json:"type"` // traffic | plan
 	Name         string       `json:"name"`
 	Description  string       `json:"description"`
 	Highlights   []string     `json:"highlights"` // selling-point bullets shown in the shop
 	PricePoints  int64        `json:"price_points"`
 	TrafficBytes int64        `json:"traffic_bytes"`
-	DeviceAdd    int64        `json:"device_add"`
 	DurationDays int64        `json:"duration_days"`
 	Options      []PlanOption `json:"options"` // selectable durations; empty = single-duration package
 	Stock        int64        `json:"stock"`   // -1 = unlimited
@@ -40,14 +39,14 @@ type Package struct {
 	Subscribers  int64        `json:"subscribers,omitempty"`    // users currently on this plan (not a column)
 }
 
-const pkgCols = `id, type, name, description, highlights, price_points, traffic_bytes, device_add,
+const pkgCols = `id, type, name, description, highlights, price_points, traffic_bytes,
 	duration_days, duration_options, stock, enabled, sort_order, created_at`
 
 func scanPackage(sc scanner) (*Package, error) {
 	var p Package
 	var highlights, options string
 	err := sc.Scan(&p.ID, &p.Type, &p.Name, &p.Description, &highlights, &p.PricePoints, &p.TrafficBytes,
-		&p.DeviceAdd, &p.DurationDays, &options, &p.Stock, &p.Enabled, &p.SortOrder, &p.CreatedAt)
+		&p.DurationDays, &options, &p.Stock, &p.Enabled, &p.SortOrder, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -223,7 +222,7 @@ func (s *Store) PackageNames() (map[int64]string, error) {
 // transaction, so hiding a package here is not what makes it unbuyable.
 func (s *Store) ListPackagesForUser(userID int64) ([]*Package, error) {
 	rows, err := s.db.Query(`SELECT `+pkgCols+` FROM packages p
-		WHERE p.enabled=1 AND p.type!='device' AND (p.stock<0 OR p.stock>0)
+		WHERE p.enabled=1 AND (p.stock<0 OR p.stock>0)
 		  AND (NOT EXISTS (SELECT 1 FROM package_user_groups g WHERE g.package_id=p.id)
 		       OR EXISTS (SELECT 1 FROM package_user_groups g
 		                  JOIN user_group_members m ON m.group_id=g.group_id
@@ -247,9 +246,9 @@ func (s *Store) ListPackagesForUser(userID int64) ([]*Package, error) {
 func (s *Store) CreatePackage(p Package) (int64, error) {
 	p.applyDefaultOption()
 	res, err := s.db.Exec(`INSERT INTO packages
-		(type, name, description, highlights, price_points, traffic_bytes, device_add, duration_days, duration_options, stock, enabled, sort_order, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes, p.DeviceAdd,
+		(type, name, description, highlights, price_points, traffic_bytes, duration_days, duration_options, stock, enabled, sort_order, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes,
 		p.DurationDays, encodeOptions(p.Options), p.Stock, boolToInt(p.Enabled), p.SortOrder, time.Now().Unix())
 	if err != nil {
 		return 0, err
@@ -260,9 +259,9 @@ func (s *Store) CreatePackage(p Package) (int64, error) {
 func (s *Store) UpdatePackage(p Package) error {
 	p.applyDefaultOption()
 	_, err := s.db.Exec(`UPDATE packages SET
-		type=?, name=?, description=?, highlights=?, price_points=?, traffic_bytes=?, device_add=?,
+		type=?, name=?, description=?, highlights=?, price_points=?, traffic_bytes=?,
 		duration_days=?, duration_options=?, stock=?, enabled=?, sort_order=? WHERE id=?`,
-		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes, p.DeviceAdd,
+		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes,
 		p.DurationDays, encodeOptions(p.Options), p.Stock, boolToInt(p.Enabled), p.SortOrder, p.ID)
 	return err
 }

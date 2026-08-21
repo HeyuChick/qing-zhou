@@ -16,7 +16,7 @@
             <n-tag :type="p.enabled !== false ? 'success' : 'default'" size="tiny" bordered="false">{{ p.enabled !== false ? '上架' : '下架' }}</n-tag>
           </div>
           <div class="lc-meta">
-            <span class="kv"><n-tag :type="p.type === 'traffic' ? 'info' : p.type === 'plan' ? 'success' : 'warning'" size="tiny" bordered="false">{{ p.type === 'traffic' ? '流量' : p.type === 'plan' ? '计划' : '设备' }}</n-tag></span>
+            <span class="kv"><n-tag :type="p.type === 'traffic' ? 'info' : 'success'" size="tiny" bordered="false">{{ p.type === 'traffic' ? '流量' : '计划' }}</n-tag></span>
             <span class="kv">积分 <b>{{ p.price_points }}</b></span>
             <span class="kv">库存 <b>{{ p.stock < 0 ? '不限' : p.stock }}</b></span>
             <span class="kv">订阅 <b>{{ p.subscribers || 0 }}</b></span>
@@ -24,7 +24,6 @@
           <div class="lc-meta" style="color:var(--text-2);">
             <span v-if="p.traffic_bytes" class="kv">{{ fmtTotal(p.traffic_bytes) }}</span>
             <span v-if="p.duration_days" class="kv">{{ p.duration_days }}天</span>
-            <span v-if="p.device_add" class="kv">+{{ p.device_add }}设备</span>
           </div>
           <!-- 多时长套餐：把每档时长的价格摊开，免得只看到默认那档 -->
           <div v-if="p.options?.length > 1" class="lc-opts">
@@ -100,7 +99,6 @@
           <n-form-item label="天数"><n-input-number v-model:value="form.days" :min="0" style="width:100%;" /></n-form-item>
           <n-form-item label="积分"><n-input-number v-model:value="form.price" :min="0" style="width:100%;" /></n-form-item>
         </template>
-        <n-form-item v-if="form.type==='device'" label="设备数"><n-input-number v-model:value="form.device_add" :min="1" style="width:100%;" /></n-form-item>
         <n-form-item label="库存（-1不限）"><n-input-number v-model:value="form.stock" :min="-1" style="width:100%;" /></n-form-item>
         <n-form-item v-if="form.type==='plan'" label="节点分组">
           <n-select v-model:value="form.group_ids" :options="groupOptions" multiple placeholder="买了这个套餐，能用哪些节点" />
@@ -147,7 +145,7 @@ const reordering = ref(false)
 const showForm = ref(false)
 const editing = ref<any>(null)
 type OptRow = { days: number | null; traffic_gb: number | null; price: number | null }
-const form = reactive({ name: '', type: 'traffic', description: '', highlights: [] as string[], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, options: [] as OptRow[], group_ids: [] as number[], user_group_ids: [] as number[] })
+const form = reactive({ name: '', type: 'traffic', description: '', highlights: [] as string[], traffic_gb: 0, days: 30, price: 100, stock: -1, options: [] as OptRow[], group_ids: [] as number[], user_group_ids: [] as number[] })
 
 const GB = 1024 * 1024 * 1024
 
@@ -197,12 +195,12 @@ function openForm(pkg?: any) {
       name: pkg.name, type: pkg.type, description: pkg.description || '',
       highlights: Array.isArray(pkg.highlights) ? [...pkg.highlights] : [],
       traffic_gb: (pkg.traffic_bytes || 0) / GB, days: pkg.duration_days || 0,
-      device_add: pkg.device_add || 1, price: pkg.price_points || 0, stock: pkg.stock ?? -1,
+      price: pkg.price_points || 0, stock: pkg.stock ?? -1,
       options: optRowsOf(pkg),
       group_ids: pkg.group_ids || [], user_group_ids: pkg.user_group_ids || [],
     })
   } else {
-    Object.assign(form, { name: '', type: 'traffic', description: '', highlights: [], traffic_gb: 0, days: 30, device_add: 1, price: 100, stock: -1, options: optRowsOf(), group_ids: [], user_group_ids: [] })
+    Object.assign(form, { name: '', type: 'traffic', description: '', highlights: [], traffic_gb: 0, days: 30, price: 100, stock: -1, options: optRowsOf(), group_ids: [], user_group_ids: [] })
   }
   showForm.value = true
 }

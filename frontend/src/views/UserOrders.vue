@@ -130,7 +130,6 @@ const kw = ref('')
 const typeMeta: Record<string, { label: string; cls: string; ch: string }> = {
   plan: { label: '订阅计划', cls: 'plan', ch: '计' },
   traffic: { label: '流量包', cls: 'traffic', ch: '流' },
-  device: { label: '设备扩展', cls: 'device', ch: '端' },
 }
 function typeLabel(t: string) { return typeMeta[t]?.label || t || '—' }
 function typeCls(t: string) { return typeMeta[t]?.cls || 'other' }
@@ -394,7 +393,7 @@ onUnmounted(() => {
 }
 .oi-ic.plan { background: #eef4ef; color: #4d7256; }
 .oi-ic.traffic { background: #eef1f5; color: #4a6a88; }
-.oi-ic.device { background: #f6f1e7; color: #a17a2e; }
+.oi-ic.other { background: #f6f1e7; color: #a17a2e; }
 .oi-ic.other { background: #f2f2f2; color: var(--text-2); }
 
 .oi-main { flex: 1; min-width: 0; }

@@ -227,9 +227,6 @@ func (a *API) handleAdminCreateSource(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "订阅地址不能为空")
 		return
 	}
-	if s.Type == "" {
-		s.Type = "base64"
-	}
 	id, err := a.st.CreateSource(s)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "创建订阅源失败")
@@ -251,9 +248,6 @@ func (a *API) handleAdminUpdateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	src.ID = int64(id)
-	if src.Type == "" {
-		src.Type = "base64"
-	}
 	if err := a.st.UpdateSource(*src); err != nil {
 		fail(w, http.StatusInternalServerError, "更新订阅源失败")
 		return

@@ -29,13 +29,12 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		"email_verify_required": "true",
 		"default_traffic":       "10737418240", // 10 GiB
 		"default_expiry_days":   "30",
-		"default_device_limit":  "3",
 		"points_per_cny":        "10",
 		"signup_bonus_points":   "0",
 		// Monitor alert thresholds (percentages). CheckProbeAlerts reads these.
-		"alert_cpu_threshold":   "90",
-		"alert_mem_threshold":   "90",
-		"alert_disk_threshold":  "85",
+		"alert_cpu_threshold":  "90",
+		"alert_mem_threshold":  "90",
+		"alert_disk_threshold": "85",
 		// Refund policy. mode: prorated|full (default refund amount rule);
 		// basis: min|traffic|time (for plans — how the prorated fraction is derived,
 		// pool packages are always traffic-based); fee_percent: handling fee deducted
