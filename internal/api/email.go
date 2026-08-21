@@ -45,16 +45,44 @@ func (a *API) currentMailer() *mailer.Mailer {
 	}
 }
 
+// mailerConfigured reports whether this panel can send mail at all. It checks
+// the one field currentMailer treats as decisive (the host) instead of building
+// a Mailer, because it is called from the unauthenticated /api/config that every
+// page load hits — and building one decrypts smtp_pass.
+//
+// Callers use it to stop promising things the panel cannot do: with no SMTP,
+// 找回密码 has no way to reach the user, and saying "邮件已发送" is simply false.
+func (a *API) mailerConfigured() bool {
+	if os.Getenv("QZ_SMTP_HOST") != "" {
+		return true
+	}
+	host, _ := a.st.GetSetting("smtp_host")
+	return host != ""
+}
+
 // deliver sends an email, or (when SMTP is unconfigured) logs the link so the
 // flow still works in development. Never blocks the request on a send failure.
 func (a *API) deliver(to, subject, html, devLink string) {
-	if m := a.currentMailer(); m != nil {
+	m := a.currentMailer()
+	if m == nil {
+		log.Printf("[email:dev] SMTP not configured; would send %q to %s; link: %s", subject, to, devLink)
+		return
+	}
+	// Sent off the request goroutine. mailer bounds a send at smtpTimeout (20s),
+	// and the server's WriteTimeout is 30s — so against an SMTP host that
+	// blackholes packets (a typo'd hostname, a blocked port 587) the caller sat
+	// through the full 20s before getting an answer. On 忘记密码 that is a public,
+	// unauthenticated endpoint hanging for twenty seconds per request.
+	//
+	// Nothing is lost by not waiting: every caller is fire-and-forget already —
+	// the result was only ever logged, because telling the requester "delivery
+	// failed" would confirm the address exists. The 发送测试 button is the path
+	// that reports a real error, and it calls Mailer.Send directly.
+	go func() {
 		if err := m.Send([]string{to}, subject, html); err != nil {
 			log.Printf("email send to %s failed: %v", to, err)
 		}
-		return
-	}
-	log.Printf("[email:dev] SMTP not configured; would send %q to %s; link: %s", subject, to, devLink)
+	}()
 }
 
 // GET /api/auth/verify?token=...  (clicked from an email, renders HTML)
@@ -101,6 +129,31 @@ func (a *API) handleForgot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := strings.TrimSpace(strings.ToLower(req.Email))
+
+	// With no SMTP there is no way to deliver the link, and the old "邮件已发送"
+	// was a flat lie: the user waits for mail that was only ever written to the
+	// server log. Say so instead. This leaks nothing about the address — whether
+	// the panel has a mailer is global state, identical for every input.
+	if !a.mailerConfigured() {
+		fail(w, http.StatusServiceUnavailable,
+			"本站未配置邮件服务，无法自助重置密码，请联系管理员帮你重置")
+		return
+	}
+
+	// Per-ADDRESS throttle. The IP limiter on this route (authRL, 20/min) does
+	// not protect the person being mailed: the victim is the address, and an
+	// attacker with a handful of IPs multiplies the per-IP budget freely. Left
+	// as it was, one target could be mailed ~1200 reset links an hour from the
+	// panel's own SMTP — which is how a sending domain gets blacklisted.
+	//
+	// Applied BEFORE the lookup, and answered with the same 429 for any address:
+	// limiting only registered ones would turn this into the enumeration oracle
+	// the uniform success message below exists to prevent.
+	if a.resendRL != nil && !a.resendRL.allow("f:"+email) {
+		fail(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
 	if u, _ := a.st.UserByEmail(email); u != nil && u.Email.Valid {
 		token, _ := idgen.RandToken(24)
 		if err := a.st.CreateEmailToken(u.ID, token, "reset", time.Hour); err == nil {

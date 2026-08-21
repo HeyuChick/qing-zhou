@@ -26,6 +26,13 @@ type API struct {
 	resendRL *rateLimiter
 	probeRL  *rateLimiter // rate limit for agent report endpoint
 	subRL    *rateLimiter // subscription-address swaps, per user
+	// Old-password attempts on 修改密码, per user. That check is the
+	// re-authentication gate in front of a takeover: a stolen session already
+	// authenticates the request, so whoever holds it only needs the old password
+	// to seize the account permanently — the change kicks every other session,
+	// including the real owner's. Unthrottled it was an online brute force with
+	// no cost and no trace. See handleChangePassword.
+	pwRL *rateLimiter
 
 	sbctl   *sbctl.Controller // native sing-box orchestrator; nil if not enabled
 	updater *updater.Manager  // GitHub-release self-updater
@@ -97,6 +104,7 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		authRL:   newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
 		resendRL: newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
 		probeRL:  newRateLimiter(60, time.Minute),   // 60 probe reports / IP / min
+		pwRL:     newRateLimiter(5, 10*time.Minute), // 5 修改密码 attempts / user / 10min
 		// Each address swap revokes the previous one, so a loop of them — a stuck
 		// retry, a double-click, a misbehaving script — leaves the user with a
 		// subscription that never stays valid long enough to import. Generous

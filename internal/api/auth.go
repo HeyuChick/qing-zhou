@@ -100,7 +100,12 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"register_mode":         mode,
 		"registration_open":     mode != "closed",
 		"email_verify_required": verify,
-		"points_per_cny":        rate,
+		// Whether this panel can send mail at all. The login dialog needs it to
+		// decide whether 找回密码 is a real offer or a dead end — with no SMTP
+		// there is no way to deliver the link. Not a secret: anyone can observe
+		// it by trying the flow once.
+		"email_enabled":  a.mailerConfigured(),
+		"points_per_cny": rate,
 		"site_name":             siteName,
 		"site_description":      siteDesc,
 		"homepage_mode":         homeMode,

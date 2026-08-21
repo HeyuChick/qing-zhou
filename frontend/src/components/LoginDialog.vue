@@ -39,9 +39,15 @@
       </n-tab-pane>
 
       <n-tab-pane name="forgot" tab="找回密码">
-        <n-form label-placement="left">
+        <!-- 没配 SMTP 就发不出信，重置链接只会写进服务端日志。与其让人填完邮箱
+             干等一封永远不来的邮件，不如直接说清楚该找谁。 -->
+        <div v-if="!config.config.email_enabled" class="forgot-off">
+          本站未配置邮件服务，无法自助重置密码。<br>
+          请联系管理员帮你重置。
+        </div>
+        <n-form v-else label-placement="left">
           <n-form-item label="邮箱">
-            <n-input v-model:value="forgotEmail" placeholder="请输入注册邮箱" />
+            <n-input v-model:value="forgotEmail" placeholder="请输入注册邮箱" @keyup.enter="handleForgot" />
           </n-form-item>
           <n-button type="primary" block :loading="loading" @click="handleForgot">发送重置邮件</n-button>
         </n-form>
@@ -126,8 +132,11 @@ async function handleForgot() {
   if (!forgotEmail.value) { message.warning('请输入邮箱'); return }
   loading.value = true
   try {
-    await apiPost('/api/auth/forgot', { email: forgotEmail.value })
-    message.success('重置邮件已发送，请查收')
+    // 用后端那句「若该邮箱已注册…」，别改写成「已发送，请查收」——后端刻意
+    // 不确认这个邮箱存不存在，前端替它确认就把这层保护抵消了，而且对没注册过
+    // 的邮箱来说那句话本身就是假的。
+    const r = await apiPost<any>('/api/auth/forgot', { email: forgotEmail.value })
+    message.success(r?.message || '若该邮箱已注册，我们已发送密码重置邮件')
   } catch (e: any) {
     message.error(e.message || '发送失败')
   } finally {
@@ -139,3 +148,11 @@ watch(() => props.show, (v) => {
   if (v) { tab.value = 'login' }
 })
 </script>
+
+<style scoped>
+.forgot-off {
+  padding: 18px 14px; text-align: center; line-height: 1.8;
+  font-size: 13px; color: var(--text-2);
+  background: var(--bg-soft); border-radius: 8px;
+}
+</style>

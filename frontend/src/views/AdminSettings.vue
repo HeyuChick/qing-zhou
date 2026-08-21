@@ -131,6 +131,16 @@
       </n-card>
 
       <n-card title="SMTP 邮件" size="small" style="margin-bottom:16px;">
+        <!-- 没配 SMTP 时，依赖邮件的功能会安静地失效：面板日志里有链接，用户那边
+             什么都收不到。把后果写出来，而不是留一组空输入框让人以为「可选」。 -->
+        <div v-if="!smtpConfigured" class="warn-box">
+          <b>当前未配置邮件服务</b>，以下功能不可用：
+          <ul>
+            <li>用户「找回密码」——登录框里会直接提示去找管理员，重置只能你在「用户管理 → 编辑 → 重置密码」里做。</li>
+            <li v-if="emailVerify">新用户注册后的邮箱验证——<b>「基本设置」里的「强制邮箱验证」是开着的，注册后没人能激活账号</b>，请配好 SMTP 或关掉它。</li>
+            <li v-else>新用户注册后的邮箱验证（当前「强制邮箱验证」是关的，不影响注册）。</li>
+          </ul>
+        </div>
         <n-form label-placement="left" label-width="120">
           <n-form-item label="SMTP 主机"><n-input v-model:value="form.smtp_host" /></n-form-item>
           <n-form-item label="SMTP 端口"><n-input v-model:value="form.smtp_port" /></n-form-item>
@@ -323,6 +333,10 @@ function normalizeBase(v: string): string {
 const effectiveBase = computed(() => normalizeBase(form.public_base) || window.location.origin)
 const installCmd = computed(() => `curl -fsSL ${effectiveBase.value}/install-singbox.sh | bash`)
 
+// 只看 smtp_host：后端 currentMailer/mailerConfigured 也是拿这一个字段判定的。
+// 被环境变量顶掉时 GET /settings 已经回填了有效值，所以这里读到的就是实际生效的。
+const smtpConfigured = computed(() => !!(form.smtp_host || '').trim())
+
 function envLocked(key: string): boolean {
   return (form._env_keys || '').split(',').includes(key)
 }
@@ -456,6 +470,12 @@ onMounted(async () => {
 .page-title { font-size: 21px; margin-bottom: 4px; }
 .form-hint { margin-top: 4px; font-size: 12px; color: var(--text-3); line-height: 1.5; }
 .form-hint a { color: var(--accent-strong); }
+.warn-box {
+  margin-bottom: 14px; padding: 10px 12px; border-radius: 8px;
+  background: #fbf3e3; border: 1px solid var(--border); border-left: 3px solid var(--warn);
+  font-size: 12.5px; color: var(--text-2); line-height: 1.7;
+}
+.warn-box ul { margin: 6px 0 0; padding-left: 20px; }
 .page-sub { color: var(--text-2); margin-bottom: 22px; }
 .cf-guide { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
 .cf-guide-t { font-size: 12.5px; font-weight: 650; color: var(--text); margin-bottom: 8px; }

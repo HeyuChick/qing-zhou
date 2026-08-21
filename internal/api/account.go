@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -29,6 +30,19 @@ func (a *API) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	u, err := a.st.UserByID(uid)
 	if err != nil || u == nil {
 		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	// Throttle the old-password check. It is the re-authentication gate in front
+	// of an account takeover — a stolen session already passes authMiddleware, so
+	// its holder only needs this one secret, and succeeding logs every other
+	// session out (the real owner's included). Unthrottled, guessing it was free.
+	//
+	// Keyed per user, not per IP: the attacker picks the IP, the victim does not.
+	// Counted on every attempt rather than only on failure — nobody legitimately
+	// changes their password five times in ten minutes, and counting failures
+	// alone lets an attacker reset the window with a known-good password.
+	if a.pwRL != nil && !a.pwRL.allow(fmt.Sprintf("p%d", uid)) {
+		fail(w, http.StatusTooManyRequests, "尝试过于频繁，请 10 分钟后再试")
 		return
 	}
 	if !auth.CheckPassword(u.PasswordHash, req.OldPassword) {
@@ -75,7 +89,7 @@ func (a *API) maintain() {
 	a.st.CleanupEmailTokens()
 	// Sweep every limiter — otherwise resendRL/probeRL entries accumulate for the
 	// process lifetime (unbounded memory; the probe endpoint is IP-keyed).
-	for _, rl := range []*rateLimiter{a.authRL, a.resendRL, a.probeRL, a.subRL} {
+	for _, rl := range []*rateLimiter{a.authRL, a.resendRL, a.probeRL, a.subRL, a.pwRL} {
 		if rl != nil {
 			rl.sweep()
 		}
