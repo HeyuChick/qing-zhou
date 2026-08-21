@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"qingzhou/internal/auth"
 	"qingzhou/internal/store"
 )
 
@@ -209,5 +210,52 @@ func TestSettings_SavingTheMaskKeepsTheGitHubToken(t *testing.T) {
 	}
 	if got, _ := st.GetSetting("update_github_token"); got != "ghp_realtoken" {
 		t.Errorf("token = %q — round-tripping the masked form clobbered it", got)
+	}
+}
+
+// A rejection found halfway through must not leave earlier writes committed.
+// The concrete case: a password reset submitted together with a mistyped
+// address changed the password and killed every session that user had, then
+// answered 400 — the admin reads "failed" and never learns otherwise.
+func TestAdminUpdateUser_RejectsBeforeAnyWrite(t *testing.T) {
+	a, st := newUserEditAPI(t)
+	hash, err := auth.HashPassword("original-pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.CreateUser(store.NewUser{Username: "u1", Email: "ok@example.com", PasswordHash: hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := putUser(a, id, `{"status":"active","password":"newsecret1","email":"not-an-address","remark":"note"}`)
+	if w.Code != 400 {
+		t.Fatalf("status %d, want 400: %s", w.Code, w.Body.String())
+	}
+
+	u, _ := st.UserByID(id)
+	if !auth.CheckPassword(u.PasswordHash, "original-pw") {
+		t.Error("the password was changed even though the request was rejected")
+	}
+	if u.Remark != "" {
+		t.Errorf("remark = %q — written despite the rejection", u.Remark)
+	}
+	if u.Email.String != "ok@example.com" {
+		t.Errorf("email = %q — changed despite the rejection", u.Email.String)
+	}
+}
+
+// Same shape, one step later: an invalid status must not let the email through.
+func TestAdminUpdateUser_BadStatusRejectsBeforeTheEmailWrite(t *testing.T) {
+	a, st := newUserEditAPI(t)
+	id, _ := st.CreateUser(store.NewUser{Username: "u1", Email: "ok@example.com", PasswordHash: "h"})
+
+	w := putUser(a, id, `{"status":"nonsense","email":"new@example.com"}`)
+	if w.Code != 400 {
+		t.Fatalf("status %d, want 400: %s", w.Code, w.Body.String())
+	}
+	u, _ := st.UserByID(id)
+	if u.Email.String != "ok@example.com" {
+		t.Errorf("email = %q — an invalid status still let the address change through", u.Email.String)
 	}
 }

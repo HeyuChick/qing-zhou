@@ -235,3 +235,24 @@ func TestForgot_DoesNotBlockOnAnUnreachableSMTPHost(t *testing.T) {
 		t.Fatalf("handler took %s — it is waiting on the SMTP send instead of handing it off", elapsed)
 	}
 }
+
+// The address reaches a rate-limiter key and a log line, both from an
+// unauthenticated request. CR/LF in it would forge log entries.
+func TestForgot_RejectsMalformedAddresses(t *testing.T) {
+	a, st := newUserEditAPI(t)
+	if err := st.SetSetting("smtp_host", "smtp.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{
+		`not-an-address`,
+		`a@b.com\n2026/01/01 12:00:00 forged log line`,
+		`"a@b.com` + "\r\n" + `injected"`,
+	} {
+		w := httptest.NewRecorder()
+		body, _ := json.Marshal(map[string]string{"email": bad})
+		a.handleForgot(w, httptest.NewRequest("POST", "/api/auth/forgot", strings.NewReader(string(body))))
+		if w.Code != 400 {
+			t.Errorf("email %q got status %d, want 400", bad, w.Code)
+		}
+	}
+}

@@ -297,12 +297,69 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	// Optional password reset (logs the user out everywhere).
-	if req.Password != nil && *req.Password != "" {
-		if len(*req.Password) < 6 {
-			fail(w, http.StatusBadRequest, "密码至少 6 位")
+	// ---- validate everything first ----
+	//
+	// This handler applies a sequence of independent writes, so a rejection
+	// discovered halfway through leaves the earlier ones committed while the
+	// admin is told the save failed. The concrete case: submitting a password
+	// reset together with a mistyped address used to change the password and log
+	// every one of that user's sessions out, then answer 400 邮箱格式不正确 — the
+	// admin reads "failed", the user is locked out of a session they were using,
+	// and nothing on screen says so. Nothing below this block touches the DB.
+
+	if req.Password != nil && *req.Password != "" && len(*req.Password) < 6 {
+		fail(w, http.StatusBadRequest, "密码至少 6 位")
+		return
+	}
+
+	var newEmail string
+	changeEmail := false
+	if req.Email != nil {
+		newEmail = strings.TrimSpace(strings.ToLower(*req.Email))
+		if newEmail != "" {
+			if !validEmail(newEmail) {
+				fail(w, http.StatusBadRequest, "邮箱格式不正确")
+				return
+			}
+			// Same uniqueness rule registration and self-rebind enforce; without it
+			// an admin could park an address on two accounts and break login-by-email
+			// and password reset for both.
+			if other, _ := a.st.UserByEmail(newEmail); other != nil && other.ID != id {
+				fail(w, http.StatusConflict, "该邮箱已被其他账号绑定")
+				return
+			}
+		}
+		cur := ""
+		if u.Email.Valid {
+			cur = u.Email.String
+		}
+		// Skip the no-op: rewriting the same address would still drop the user's
+		// outstanding verify token for no reason.
+		changeEmail = newEmail != cur
+	}
+
+	var newRemark string
+	if req.Remark != nil {
+		newRemark = strings.TrimSpace(*req.Remark)
+		if len([]rune(newRemark)) > maxRemarkRunes {
+			fail(w, http.StatusBadRequest, "备注最多 200 字")
 			return
 		}
+	}
+
+	status := u.Status
+	if req.Status != nil {
+		if *req.Status != "active" && *req.Status != "banned" {
+			fail(w, http.StatusBadRequest, "状态只能是 active / banned")
+			return
+		}
+		status = *req.Status
+	}
+
+	// ---- writes ----
+
+	// Optional password reset (logs the user out everywhere).
+	if req.Password != nil && *req.Password != "" {
 		hash, herr := auth.HashPassword(*req.Password)
 		if herr != nil {
 			fail(w, http.StatusInternalServerError, "服务器错误")
@@ -315,54 +372,18 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		_ = a.st.DeleteUserSessions(id)
 	}
 
-	if req.Email != nil {
-		email := strings.TrimSpace(strings.ToLower(*req.Email))
-		if email != "" {
-			if !validEmail(email) {
-				fail(w, http.StatusBadRequest, "邮箱格式不正确")
-				return
-			}
-			// Same uniqueness rule registration and self-rebind enforce; without it
-			// an admin could park an address on two accounts and break login-by-email
-			// and password reset for both.
-			if other, _ := a.st.UserByEmail(email); other != nil && other.ID != id {
-				fail(w, http.StatusConflict, "该邮箱已被其他账号绑定")
-				return
-			}
-		}
-		cur := ""
-		if u.Email.Valid {
-			cur = u.Email.String
-		}
-		// Skip the no-op: rewriting the same address would still drop the user's
-		// outstanding verify token for no reason.
-		if email != cur {
-			if err := a.st.AdminSetUserEmail(id, email); err != nil {
-				fail(w, http.StatusInternalServerError, "保存邮箱失败")
-				return
-			}
+	if changeEmail {
+		if err := a.st.AdminSetUserEmail(id, newEmail); err != nil {
+			fail(w, http.StatusInternalServerError, "保存邮箱失败")
+			return
 		}
 	}
 
 	if req.Remark != nil {
-		remark := strings.TrimSpace(*req.Remark)
-		if len([]rune(remark)) > maxRemarkRunes {
-			fail(w, http.StatusBadRequest, "备注最多 200 字")
-			return
-		}
-		if err := a.st.SetUserRemark(id, remark); err != nil {
+		if err := a.st.SetUserRemark(id, newRemark); err != nil {
 			fail(w, http.StatusInternalServerError, "保存备注失败")
 			return
 		}
-	}
-
-	status := u.Status
-	if req.Status != nil {
-		if *req.Status != "active" && *req.Status != "banned" {
-			fail(w, http.StatusBadRequest, "状态只能是 active / banned")
-			return
-		}
-		status = *req.Status
 	}
 
 	// Resolve the manual allowance grant. New clients send manual_enabled explicitly;

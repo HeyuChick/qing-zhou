@@ -129,12 +129,29 @@ func (a *API) handleForgot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := strings.TrimSpace(strings.ToLower(req.Email))
+	// Reject a malformed address before it becomes a rate-limiter key or a log
+	// line. This says nothing about who is registered — it is a statement about
+	// the input — so the uniform answer below still holds for anything that
+	// could actually be an address. validEmail also rejects CR/LF, which is what
+	// keeps arbitrary text out of the log line in the branch below.
+	if !validEmail(email) {
+		fail(w, http.StatusBadRequest, "邮箱格式不正确")
+		return
+	}
 
 	// With no SMTP there is no way to deliver the link, and the old "邮件已发送"
 	// was a flat lie: the user waits for mail that was only ever written to the
 	// server log. Say so instead. This leaks nothing about the address — whether
 	// the panel has a mailer is global state, identical for every input.
 	if !a.mailerConfigured() {
+		// Say it in the log too. The user has just been told to go find the
+		// admin; this is the line that tells the admin someone is waiting, and
+		// that the panel is turning these away. No token is minted — there is
+		// nothing that could deliver it, and the admin's actual recovery path
+		// (用户管理 → 编辑 → 重置密码) does not need one.
+		// %q, not %s: this is unauthenticated input reaching a log line.
+		log.Printf("[email] password reset requested for %q but SMTP is not configured — "+
+			"reset it from 用户管理 → 编辑 → 重置密码, or configure SMTP", email)
 		fail(w, http.StatusServiceUnavailable,
 			"本站未配置邮件服务，无法自助重置密码，请联系管理员帮你重置")
 		return

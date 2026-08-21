@@ -104,13 +104,13 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// decide whether 找回密码 is a real offer or a dead end — with no SMTP
 		// there is no way to deliver the link. Not a secret: anyone can observe
 		// it by trying the flow once.
-		"email_enabled":  a.mailerConfigured(),
-		"points_per_cny": rate,
-		"site_name":             siteName,
-		"site_description":      siteDesc,
-		"homepage_mode":         homeMode,
-		"homepage_url":          homeURL,
-		"app_version":           version.Current(),
+		"email_enabled":    a.mailerConfigured(),
+		"points_per_cny":   rate,
+		"site_name":        siteName,
+		"site_description": siteDesc,
+		"homepage_mode":    homeMode,
+		"homepage_url":     homeURL,
+		"app_version":      version.Current(),
 	})
 }
 
