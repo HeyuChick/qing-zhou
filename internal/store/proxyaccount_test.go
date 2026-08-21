@@ -423,3 +423,77 @@ func TestProxyAccount_EnsureIsIdempotent(t *testing.T) {
 		t.Error("second EnsureProxyAccount rotated a live credential")
 	}
 }
+
+// The份 credential authenticates the node just as the account one does (both are
+// emitted into the inbound), so the panel has to keep handing it out. Hiding it
+// left users with a working login they could not read anywhere — including the
+// one they had already pasted into 1Panel/Docker before the upgrade.
+func TestProxyAccount_PlanCredentialStaysVisible(t *testing.T) {
+	sc := newProxyScene(t)
+	p := sc.proxy(t)
+	if !p.Account {
+		t.Fatalf("scene should be presenting the account credential, got %+v", p)
+	}
+	if p.Plan == nil {
+		t.Fatal("the owning份's own credential was dropped from the panel payload")
+	}
+
+	var owner *Bucket
+	all, _ := sc.st.ListBuckets(sc.uid)
+	for _, b := range all {
+		if b.ID == p.BucketID {
+			owner = b
+		}
+	}
+	if owner == nil {
+		t.Fatalf("owner bucket %d not found", p.BucketID)
+	}
+	if p.Plan.Username != owner.ProxyName() || p.Plan.Password != owner.ProxySecret() {
+		t.Errorf("plan credential = %q/%q, want the owning bucket's %q/%q",
+			p.Plan.Username, p.Plan.Password, owner.ProxyName(), owner.ProxySecret())
+	}
+	if p.Plan.BucketID != owner.ID {
+		t.Errorf("plan credential points at bucket %d, want %d — the edit would hit the wrong份",
+			p.Plan.BucketID, owner.ID)
+	}
+	if p.Plan.Name == "" {
+		t.Error("plan credential has no份 name; the page cannot say which套餐 it belongs to")
+	}
+	// It must be the份's own credential, not a second copy of the account one.
+	if p.Plan.Username == p.Username {
+		t.Errorf("plan credential is the account credential %q, not the份's own", p.Username)
+	}
+
+	// The credential shown must be one sing-box actually accepts on this inbound.
+	usersByTag, err := sc.st.BuildUsersByTag(time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, u := range usersByTag[p.Tag] {
+		if u.Name == p.Plan.Username && u.Password == p.Plan.Password {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("panel shows plan credential %q but the inbound does not accept it: %+v",
+			p.Plan.Username, usersByTag[p.Tag])
+	}
+}
+
+// A free-owned node has no account credential (free bytes stay off a paid
+// counter), so its份 credential is both what the page recommends and what the
+// 套餐账号 block renders — it must still be there, or the block goes blank.
+func TestProxyAccount_PlanCredentialPresentWithoutAccountCred(t *testing.T) {
+	sc := newProxyScene(t)
+	if err := sc.st.SetUserProxyCred(sc.uid, "ann_px", "s3cret!", time.Now().Unix()-1); err != nil {
+		t.Fatal(err)
+	}
+	p := sc.proxy(t)
+	if p.Account {
+		t.Fatal("an expired account credential must not be presented as usable")
+	}
+	if p.Plan == nil || p.Plan.Username != p.Username || p.Plan.Password != p.Password {
+		t.Errorf("fallback node must still report its份 credential: %+v", p.Plan)
+	}
+}

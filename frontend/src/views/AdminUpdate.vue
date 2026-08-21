@@ -186,10 +186,22 @@ const progress = reactive({
   percent: 0,
   target_version: '',
   current: '',
+  // offline: 面板此刻连不上。和 status 分开存，因为 status 只能记到最后一次真正
+  // 问到的阶段——重启往往发生在两次轮询之间，界面就会停在「下载中 75%」却写着
+  // 「服务重启中」，自相矛盾。
+  offline: false,
 })
 
 let pollTimer: number | undefined
 let pollStart = 0
+// 最近一次真的连上面板的时刻。放弃的期限从它算起，不从更新开始算：慢链路上光下
+// 载就可能超过几分钟，按总耗时封顶会把「一切正常、只是慢」误判成失败。
+let lastOkAt = 0
+// 连不上多久就不再等。装上去的新版本起不来时会一直 502，等到这里就该告诉管理员
+// 去看服务状态，而不是继续转圈。
+const OFFLINE_GIVE_UP_MS = 300_000
+// 兜底：面板一直有应答但状态卡着不动，也不能永远轮询下去。
+const TOTAL_GIVE_UP_MS = 900_000
 
 const notesHtml = computed(() => (info.value?.notes ? mdToHtml(info.value.notes) : ''))
 const publishedText = computed(() => {
@@ -207,7 +219,8 @@ const phaseLabels: Record<string, string> = {
   restarting: '重启中',
   failed: '更新失败',
 }
-const phaseLabel = computed(() => phaseLabels[progress.status] || progress.status)
+const phaseLabel = computed(() =>
+  progress.offline ? '等待服务恢复' : (phaseLabels[progress.status] || progress.status))
 
 const rollback = ref<RollbackState | null>(null)
 const releases = ref<ReleaseInfo[]>([])
@@ -330,13 +343,17 @@ function beginProgress(msg: string, target: string, phase = 'downloading') {
   progress.percent = 0
   progress.message = msg
   progress.target_version = target
+  progress.offline = false
   pollStart = Date.now()
+  lastOkAt = pollStart
   poll()
 }
 
 async function poll() {
   try {
     const st = await apiGet<any>('/api/admin/update/status')
+    lastOkAt = Date.now()
+    progress.offline = false
     // apply() 会在返回前把状态置为非 idle，因此更新期间再见到 idle
     // 说明进程已完成 re-exec 并以新版本重启 —— 视为成功。
     if (updating.value && st.status === 'idle') {
@@ -353,12 +370,23 @@ async function poll() {
       return
     }
   } catch {
-    // 重启期间连接会中断，属正常，继续轮询等待服务回来。
-    if (progress.status !== 'restarting') {
-      progress.message = '服务重启中，等待恢复…'
-    }
+    // 重启期间连接会中断，属正常，继续轮询等待服务回来。写明已经等了多久：新版本
+    // 起不来和「正在重启」在这里长得一模一样，唯一分得开的线索就是等了多久。
+    progress.offline = true
+    const secs = Math.round((Date.now() - lastOkAt) / 1000)
+    progress.message = `服务重启中，等待恢复…（已等待 ${secs} 秒）`
   }
-  if (Date.now() - pollStart > 180_000) {
+  if (progress.offline && Date.now() - lastOkAt > OFFLINE_GIVE_UP_MS) {
+    updating.value = false
+    progress.status = 'failed'
+    progress.message = `面板已有 ${Math.round(OFFLINE_GIVE_UP_MS / 60000)} 分钟连不上，新版本可能没能启动。`
+      + '请到服务器执行 journalctl -u qingzhou -n 200 查看原因；'
+      + '需要立刻恢复，就用更新前留下的 .prev 顶回去（默认装在 /opt/qingzhou）：'
+      + 'cp -f qingzhou.prev qingzhou && systemctl restart qingzhou'
+    message.error('新版本可能启动失败，详见下方提示')
+    return
+  }
+  if (Date.now() - pollStart > TOTAL_GIVE_UP_MS) {
     updating.value = false
     message.warning('更新耗时过长，请手动刷新页面确认结果')
     return
@@ -368,6 +396,7 @@ async function poll() {
 
 function onSuccess(newVer: string) {
   updating.value = false
+  progress.offline = false
   progress.status = 'idle'
   progress.percent = 100
   message.success(`已更新到 ${newVer || '最新版本'}，即将刷新页面`)

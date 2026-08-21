@@ -172,26 +172,51 @@
             </n-button>
           </div>
         </div>
-        <!-- 默认账号是个待办事项，不该只在展开后才看得见 -->
+        <!-- 默认账号是个待办事项，不该只在展开后才看得见。看的是这个节点实际递出去
+             的那一套：用通用账号时它一定是自设过的，只有回落到套餐账号才需要催。 -->
         <div v-if="!p.custom" class="px-hint">系统默认账号，建议点「详情 → 编辑账号」自设</div>
         <div v-if="expandedProxies.includes(p.tag)" class="px-detail">
           <div class="pxrow"><span class="pxk">类型</span><span style="font-size:13px;">{{ p.tls ? 'HTTPS' : 'HTTP / SOCKS5' }}</span></div>
           <div class="pxrow"><span class="pxk">地址</span><div class="pxv"><n-input-group><n-input :value="p.host" readonly size="small" /><n-button size="small" @click="copy(p.host)">复制</n-button></n-input-group></div></div>
           <div class="pxrow"><span class="pxk">端口</span><div class="pxv"><n-input-group><n-input :value="String(p.port)" readonly size="small" /><n-button size="small" @click="copy(String(p.port))">复制</n-button></n-input-group></div></div>
-          <!-- 用通用账号的节点不再各自列一遍账号：重复列会让人以为每个节点一套，
-               而「换个节点就得换密码」正是通用账号要消掉的事。 -->
-          <template v-if="p.account">
-            <div class="pxrow"><span class="pxk">账号</span><span style="font-size:12px;color:var(--text-2);flex:1;">用上方「通用账号」，所有节点相同</span></div>
-          </template>
-          <template v-else>
-            <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="p.username" readonly size="small" /><n-button size="small" @click="copy(p.username)">复制</n-button></n-input-group></div></div>
-            <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="p.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(p.password)">复制</n-button></n-input-group></div></div>
+          <!-- 两套账号在这个节点上都能登录，所以两套都列出来。通用账号只用一行指
+               回上面——它每个节点都一样，逐个节点再抄一遍反而像「一节点一套」；套
+               餐账号则必须逐项列全，它是这个节点独有的，不列就等于没有。 -->
+          <div v-if="p.account" class="pxrow">
+            <span class="pxk">通用账号</span>
+            <span class="pxsub">上方那一个，所有节点相同；「复制 HTTP / SOCKS5」拿到的就是它</span>
+          </div>
+          <div v-if="p.plan" class="px-plan">
+            <div class="px-head">
+              <span class="px-name">套餐账号<template v-if="p.plan.name"> · {{ p.plan.name }}</template></span>
+              <n-tag v-if="p.plan.expired" type="error" size="small" bordered>已过期</n-tag>
+              <span style="flex:1;"></span>
+              <n-button size="tiny" @click="openEditProxy(p.plan)">编辑账号</n-button>
+            </div>
+            <div class="pxrow"><span class="pxk">用户名</span><div class="pxv"><n-input-group><n-input :value="p.plan.username" readonly size="small" /><n-button size="small" @click="copy(p.plan.username)">复制</n-button></n-input-group></div></div>
+            <div class="pxrow"><span class="pxk">密码</span><div class="pxv"><n-input-group><n-input :value="p.plan.password" type="password" show-password-on="click" readonly size="small" /><n-button size="small" @click="copy(p.plan.password)">复制</n-button></n-input-group></div></div>
             <div class="pxrow">
               <span class="pxk">有效期</span>
-              <span style="font-size:12px;color:var(--text-2);flex:1;">{{ p.expires_at ? fmtDate(p.expires_at) : '永久' }}</span>
-              <n-button size="tiny" @click="openEditProxy(p)">编辑账号</n-button>
+              <span class="pxsub">{{ p.plan.expires_at ? fmtDate(p.plan.expires_at) : '永久' }}</span>
             </div>
-          </template>
+            <div class="pxrow" v-if="p.account">
+              <span class="pxk">整串</span>
+              <div class="pxv px-actions">
+                <template v-if="p.tls">
+                  <n-button size="tiny" secondary @click="copy(proxyUrl({ ...p, ...p.plan }, 'https'))">复制 HTTPS</n-button>
+                </template>
+                <template v-else>
+                  <n-button size="tiny" secondary @click="copy(proxyUrl({ ...p, ...p.plan }, 'http'))">复制 HTTP</n-button>
+                  <n-button size="tiny" secondary @click="copy(proxyUrl({ ...p, ...p.plan }, 'socks5'))">复制 SOCKS5</n-button>
+                </template>
+              </div>
+            </div>
+            <div class="px-hint">
+              <template v-if="!p.plan.custom">系统默认账号，点「编辑账号」可自设。</template>
+              只在这个节点所属的「{{ p.plan.name || '本份套餐' }}」上有效，流量也记在它名下。
+              <template v-if="p.account && p.meter_plan && p.meter_plan !== p.plan.name">想把这个节点的代理流量记在「{{ p.plan.name }}」而不是「{{ p.meter_plan }}」，就用这一套。</template>
+            </div>
+          </div>
         </div>
       </div>
       <div style="font-size:11px;color:var(--text-3);margin-top:10px;">命令行 / Docker / git 等直接点「复制 HTTP」「复制 SOCKS5」，拿到的是 <code>scheme://用户名:密码@地址:端口</code> 整串。1Panel 这类分字段的表单展开「详情」逐项复制：代理类型选 <b>HTTP</b> 或 <b>SOCKS5</b>（标着 <b>HTTPS</b> 的节点则选 HTTPS）。</div>
@@ -201,7 +226,7 @@
     <n-modal v-model:show="showEditProxy" preset="card" title="编辑代理账号" style="max-width:440px;">
       <n-form label-placement="left" label-width="72">
         <n-form-item label="适用范围">
-          <n-input :value="editForm.account ? '所有节点（通用账号）' : editForm.tag" readonly />
+          <n-input :value="editForm.scope" readonly />
         </n-form-item>
         <n-form-item label="用户名">
           <n-input v-model:value="editForm.username" placeholder="仅字母/数字/ _.@- ，不能以 qz_ 开头" />
@@ -221,6 +246,7 @@
         <div style="font-size:11px;color:var(--text-3);margin-bottom:12px;">
           这是仅用于该协议的独立账号，与登录账号无关。密码泄露可随时来此更改；到期后该代理自动停用（可续期）。
           <template v-if="editForm.account">改的是所有节点通用的那一个，保存后旧密码立即失效，记得同步更新已填在别处的地方。</template>
+          <template v-else>改的是这一份套餐自己的那一个，通用账号不受影响。</template>
         </div>
         <n-button type="primary" block :loading="savingProxy" @click="saveProxy">保存</n-button>
       </n-form>
@@ -388,7 +414,7 @@ const resettingCreds = ref(false)
 // 代理账号编辑
 const showEditProxy = ref(false)
 const savingProxy = ref(false)
-const editForm = ref<any>({ account: false, bucket_id: 0, tag: '', username: '', password: '', permanent: true, expireTs: null as number | null })
+const editForm = ref<any>({ account: false, bucket_id: 0, scope: '', username: '', password: '', permanent: true, expireTs: null as number | null })
 
 // 通用账号。单独取而不是从节点行里挑：过期后节点行会退回各自套餐的账号，
 // 从行里推就再也看不见它，也就没法续期了。
@@ -420,7 +446,9 @@ function openEditProxy(p: any) {
   editForm.value = {
     account: !!p.account,
     bucket_id: p.bucket_id,
-    tag: p.tag,
+    // 「适用范围」不写节点名：按份的凭据在这份套餐拥有的每个节点上都认，只写当前
+    // 这个节点会让人以为改它只影响这一个。
+    scope: p.account ? '所有节点（通用账号）' : `「${p.name || '本份套餐'}」拥有的所有节点`,
     // 默认用登录账号名（仅作默认，是独立的代理账号）；已自设过则回填现有用户名。
     username: p.custom ? p.username : (auth.user?.username || ''),
     // 回填现有密码：只改有效期或用户名的人不该被迫换一次密码——密码一换，所有
@@ -734,6 +762,12 @@ onMounted(async () => {
 /* 通用账号是这张卡片里唯一要抄走的东西，加一道左边线把它和下面的节点行分开 */
 .px-acct { margin-bottom: 10px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; border-left: 3px solid var(--primary, #63e2b7); }
 .px-acct .pxrow { margin-top: 8px; }
+/* 节点详情里的套餐账号：缩进一块，读起来是「这个节点还有另一套账号」而不是又一
+   组并列字段 */
+.px-plan { margin-top: 10px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 8px; }
+.px-plan .pxrow { margin-top: 6px; }
+.px-plan .px-hint { margin-top: 8px; }
+.pxsub { font-size: 12px; color: var(--text-2); flex: 1; }
 .proxy-row { margin-bottom: 8px; padding: 10px 12px; background: var(--bg-soft); border-radius: 10px; }
 .proxy-row:last-child { margin-bottom: 0; }
 /* 一行放不下时按钮整体换行，地址不被挤成省略号 */

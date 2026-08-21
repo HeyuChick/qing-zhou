@@ -917,6 +917,29 @@ type UserProxy struct {
 	// on one份 (see accountMeterBucket), which need not be the one that grants
 	// the node.
 	MeterPlan string `json:"meter_plan"`
+	// Plan is the owning份's own credential, always reported. It authenticates
+	// this node whether or not the account credential does (BuildUsersByTag emits
+	// both), and a login that works but appears nowhere on the page is a login
+	// nobody can use — the ones already pasted into 1Panel/Docker are exactly
+	// these. It is also the only way to charge this node's proxy traffic to THIS
+	// 份 rather than to whichever份 the account credential meters.
+	Plan *ProxyPlanCred `json:"plan"`
+}
+
+// ProxyPlanCred is one份's own mixed-proxy credential, as the panel presents it.
+// Separate from the UserProxy fields above because those carry whichever
+// credential the page recommends for the node — the account-level one when it is
+// usable — while this one always describes the份 that grants the node.
+type ProxyPlanCred struct {
+	BucketID int64 `json:"bucket_id"` // target of a credential edit
+	// Name is the份's display name. Two nodes can be granted by different份, so
+	// without it "套餐账号" would not say which套餐.
+	Name      string `json:"name"`
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	ExpiresAt int64  `json:"expires_at"` // 0 = permanent
+	Expired   bool   `json:"expired"`
+	Custom    bool   `json:"custom"` // false → still the system-minted node identity
 }
 
 // BuildUserProxies returns the mixed-inbound proxy credentials the user is
@@ -964,23 +987,34 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 				serverCache[ib.ServerID] = nil // negative cache
 			}
 		}
+		plan := &ProxyPlanCred{
+			BucketID:  owner.ID,
+			Name:      owner.Name,
+			Username:  owner.ProxyName(),
+			Password:  owner.ProxySecret(),
+			ExpiresAt: owner.ProxyExpiresAt,
+			Expired:   owner.ProxyExpiresAt != 0 && owner.ProxyExpiresAt <= now,
+			Custom:    owner.ProxyUsername != "",
+		}
 		p := UserProxy{
 			Tag:       ib.Tag,
 			BucketID:  owner.ID,
 			Host:      nodeHost,
 			Port:      ib.ListenPort,
-			Username:  owner.ProxyName(),
-			Password:  owner.ProxySecret(),
+			Username:  plan.Username,
+			Password:  plan.Password,
 			TLS:       ib.TlsID != 0,
-			ExpiresAt: owner.ProxyExpiresAt,
-			Expired:   owner.ProxyExpiresAt != 0 && owner.ProxyExpiresAt <= now,
-			Custom:    owner.ProxyUsername != "",
+			ExpiresAt: plan.ExpiresAt,
+			Expired:   plan.Expired,
+			Custom:    plan.Custom,
 			MeterPlan: owner.Name,
+			Plan:      plan,
 		}
-		// Mirror BuildUsersByTag: every node except a free-owned one authenticates
-		// with the account credential, so that is what the page must hand out. The
-		// bucket credential is still live in the config (already-saved logins keep
-		// working) — it is simply no longer the one we tell people to use.
+		// Mirror BuildUsersByTag: every node except a free-owned one also
+		// authenticates with the account credential, so that is the one the ready-made
+		// proxy URL carries — it survives group moves and renewals, which is the whole
+		// point. p.Plan still reports the份 credential beside it: both are live in the
+		// config, and hiding one would strand whoever already pasted it somewhere.
 		if owner.Kind != KindFree && acct.active(now) {
 			p.Username, p.Password = acct.name, acct.password
 			p.ExpiresAt, p.Expired = acct.expiresAt, false
