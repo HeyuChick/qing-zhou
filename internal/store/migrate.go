@@ -47,8 +47,6 @@ CREATE TABLE IF NOT EXISTS users (
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_proxy_username ON users(proxy_username) WHERE proxy_username <> '';
 
 CREATE TABLE IF NOT EXISTS packages (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +74,6 @@ CREATE TABLE IF NOT EXISTS orders (
   status           TEXT    NOT NULL,
   created_at       INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
 
 CREATE TABLE IF NOT EXISTS point_transactions (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +86,6 @@ CREATE TABLE IF NOT EXISTS point_transactions (
   operator_id   INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_ptx_user ON point_transactions(user_id);
 
 CREATE TABLE IF NOT EXISTS device_addons (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,7 +95,6 @@ CREATE TABLE IF NOT EXISTS device_addons (
   purchased_at INTEGER NOT NULL,
   expires_at   INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_device_addons_user ON device_addons(user_id, expires_at);
 
 CREATE TABLE IF NOT EXISTS email_tokens (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +105,6 @@ CREATE TABLE IF NOT EXISTS email_tokens (
   used       INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_email_tokens_token ON email_tokens(token);
 
 CREATE TABLE IF NOT EXISTS nodes (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,7 +118,6 @@ CREATE TABLE IF NOT EXISTS nodes (
   sort_order      INTEGER NOT NULL DEFAULT 0,
   created_at      INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
 
 CREATE TABLE IF NOT EXISTS node_groups (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,15 +132,12 @@ CREATE TABLE IF NOT EXISTS node_group_members (
   group_id INTEGER NOT NULL,
   PRIMARY KEY (node_id, group_id)
 );
-CREATE INDEX IF NOT EXISTS idx_ngm_group ON node_group_members(group_id);
-CREATE INDEX IF NOT EXISTS idx_ngm_node  ON node_group_members(node_id);
 
 CREATE TABLE IF NOT EXISTS plan_groups (
   package_id INTEGER NOT NULL,
   group_id   INTEGER NOT NULL,
   PRIMARY KEY (package_id, group_id)
 );
-CREATE INDEX IF NOT EXISTS idx_plan_groups_pkg ON plan_groups(package_id);
 
 -- User groups gate WHO MAY BUY a package. Do not confuse with node_groups,
 -- which gate WHICH NODES a bought package grants (users → packages here vs
@@ -165,8 +155,6 @@ CREATE TABLE IF NOT EXISTS user_group_members (
   group_id INTEGER NOT NULL,
   PRIMARY KEY (user_id, group_id)
 );
-CREATE INDEX IF NOT EXISTS idx_ugm_group ON user_group_members(group_id);
-CREATE INDEX IF NOT EXISTS idx_ugm_user  ON user_group_members(user_id);
 
 -- package_user_groups restricts a package to the listed user groups. NO ROWS
 -- for a package means "public": anyone may buy it. That keeps every package
@@ -176,8 +164,6 @@ CREATE TABLE IF NOT EXISTS package_user_groups (
   group_id   INTEGER NOT NULL,
   PRIMARY KEY (package_id, group_id)
 );
-CREATE INDEX IF NOT EXISTS idx_pug_pkg   ON package_user_groups(package_id);
-CREATE INDEX IF NOT EXISTS idx_pug_group ON package_user_groups(group_id);
 
 -- Registration codes may auto-join their redeemer into user groups.
 CREATE TABLE IF NOT EXISTS reg_code_user_groups (
@@ -185,7 +171,6 @@ CREATE TABLE IF NOT EXISTS reg_code_user_groups (
   group_id INTEGER NOT NULL,
   PRIMARY KEY (code_id, group_id)
 );
-CREATE INDEX IF NOT EXISTS idx_rcug_code ON reg_code_user_groups(code_id);
 
 CREATE TABLE IF NOT EXISTS reg_codes (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,7 +191,6 @@ CREATE TABLE IF NOT EXISTS reg_code_uses (
   email    TEXT    NOT NULL DEFAULT '',
   used_at  INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_rcu_code ON reg_code_uses(code_id);
 
 -- per-user node blocklist: a node_key present here is hidden from that user's
 -- subscription output (only affects the owning user). node_key = subconv.NodeKey.
@@ -225,8 +209,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER NOT NULL,
   last_seen  INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_jti  ON sessions(jti);
 
 CREATE TABLE IF NOT EXISTS announcements (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -376,7 +358,6 @@ CREATE TABLE IF NOT EXISTS user_plans (
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_client ON user_plans(client_name);
 
 -- The credentials a user's client authenticates with, per subscription line —
 -- one row per (user, package), NOT per purchase.
@@ -404,9 +385,6 @@ CREATE TABLE IF NOT EXISTS plan_identities (
   updated_at       INTEGER NOT NULL,
   PRIMARY KEY (user_id, package_id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_identities_client ON plan_identities(client_name);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_identities_proxy ON plan_identities(proxy_username) WHERE proxy_username <> '';
-CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id);
 
 -- Per-user traffic time-series, one row per stats poll that saw traffic. Feeds
 -- the daily charts in the native sing-box era (sing-box kept its own stat table);
@@ -417,8 +395,6 @@ CREATE TABLE IF NOT EXISTS traffic_samples (
   up      INTEGER NOT NULL DEFAULT 0,
   down    INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_traffic_samples_user_ts ON traffic_samples(user_id, ts);
-CREATE INDEX IF NOT EXISTS idx_traffic_samples_ts ON traffic_samples(ts);
 
 -- Per-day, per-bucket traffic rollup. Exists because traffic_samples answers
 -- neither question the usage report asks: it carries no bucket, so "which
@@ -449,8 +425,6 @@ CREATE TABLE IF NOT EXISTS traffic_daily (
   down       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (day, user_id, bucket_id)
 );
-CREATE INDEX IF NOT EXISTS idx_traffic_daily_user_day ON traffic_daily(user_id, day);
-CREATE INDEX IF NOT EXISTS idx_traffic_daily_day ON traffic_daily(day);
 
 CREATE TABLE IF NOT EXISTS servers (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -498,12 +472,6 @@ CREATE TABLE IF NOT EXISTS server_metrics (
   kernel          TEXT    NOT NULL DEFAULT '',
   arch            TEXT    NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON server_metrics(server_id, ts);
--- Standalone ts index: the composite (server_id, ts) can't serve queries that
--- filter on ts alone — the hourly PruneMetrics (WHERE ts<?) and the unauthenticated
--- heatmap/sparkline endpoints (ListAllMetricsSince, WHERE ts>=?) would otherwise
--- full-scan this, the fastest-growing table.
-CREATE INDEX IF NOT EXISTS idx_metrics_ts ON server_metrics(ts);
 
 -- What sing-box each node is actually running. A separate table rather than
 -- extra columns on the servers table, for two reasons: the panel's own machine
@@ -533,10 +501,59 @@ CREATE TABLE IF NOT EXISTS server_alerts (
   read      INTEGER NOT NULL DEFAULT 0,
   resolved  INTEGER NOT NULL DEFAULT 0
 );
+`
+
+// indexes is the index DDL, kept OUT of schema above and applied AFTER the
+// additive ALTER TABLE block in Migrate — never before it.
+//
+// An index on a column that a later ALTER adds is the shape that took the panel
+// down in v0.2.48: on an existing DB `CREATE TABLE IF NOT EXISTS users` is a
+// no-op, so the column the new index named did not exist yet, the whole schema
+// Exec failed on it, Migrate returned that error, and main log.Fatal'd — a boot
+// loop on a deployment whose only update path is the panel it had just killed.
+// Ordering the phases this way makes that shape unrepresentable: by the time
+// anything here runs, every column the migration knows about is on its table.
+const indexes = `
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_proxy_username ON users(proxy_username) WHERE proxy_username <> '';
+CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
+CREATE INDEX IF NOT EXISTS idx_ptx_user ON point_transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_device_addons_user ON device_addons(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_email_tokens_token ON email_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
+CREATE INDEX IF NOT EXISTS idx_ngm_group ON node_group_members(group_id);
+CREATE INDEX IF NOT EXISTS idx_ngm_node  ON node_group_members(node_id);
+CREATE INDEX IF NOT EXISTS idx_plan_groups_pkg ON plan_groups(package_id);
+CREATE INDEX IF NOT EXISTS idx_ugm_group ON user_group_members(group_id);
+CREATE INDEX IF NOT EXISTS idx_ugm_user  ON user_group_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_pug_pkg   ON package_user_groups(package_id);
+CREATE INDEX IF NOT EXISTS idx_pug_group ON package_user_groups(group_id);
+CREATE INDEX IF NOT EXISTS idx_rcug_code ON reg_code_user_groups(code_id);
+CREATE INDEX IF NOT EXISTS idx_rcu_code ON reg_code_uses(code_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_jti  ON sessions(jti);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_client ON user_plans(client_name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_identities_client ON plan_identities(client_name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_identities_proxy ON plan_identities(proxy_username) WHERE proxy_username <> '';
+CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id);
+CREATE INDEX IF NOT EXISTS idx_traffic_samples_user_ts ON traffic_samples(user_id, ts);
+CREATE INDEX IF NOT EXISTS idx_traffic_samples_ts ON traffic_samples(ts);
+CREATE INDEX IF NOT EXISTS idx_traffic_daily_user_day ON traffic_daily(user_id, day);
+CREATE INDEX IF NOT EXISTS idx_traffic_daily_day ON traffic_daily(day);
+CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON server_metrics(server_id, ts);
+-- Standalone ts index: the composite (server_id, ts) can't serve queries that
+-- filter on ts alone — the hourly PruneMetrics (WHERE ts<?) and the unauthenticated
+-- heatmap/sparkline endpoints (ListAllMetricsSince, WHERE ts>=?) would otherwise
+-- full-scan this, the fastest-growing table.
+CREATE INDEX IF NOT EXISTS idx_metrics_ts ON server_metrics(ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_server ON server_alerts(server_id, ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_open ON server_alerts(server_id, type, read);
 `
 
+// Migrate brings the schema up to date in three ordered phases: tables, then
+// additive columns, then indexes. The order is load-bearing — see the comment on
+// indexes for the outage that fixed it in place — and nothing that references a
+// column may run before the phase that adds it.
 func (s *Store) Migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -722,6 +739,19 @@ func (s *Store) Migrate() error {
 				continue
 			}
 			log.Printf("migrate: statement failed (continuing): %q: %v", stmt, err)
+		}
+	}
+	// Indexes last, now that every column they can name exists. Statement by
+	// statement, and a failure is logged rather than returned: an index is a
+	// lookup aid (uniqueness here is enforced in Go first — see proxyNameTaken),
+	// and refusing to boot over one strands a panel whose only way to receive the
+	// fix is the panel itself. A missing index is slow; a boot loop is offline.
+	for _, stmt := range strings.Split(indexes, ";") {
+		if strings.TrimSpace(stmt) == "" {
+			continue
+		}
+		if _, err := s.db.Exec(stmt); err != nil {
+			log.Printf("migrate: index failed (continuing): %q: %v", strings.TrimSpace(stmt), err)
 		}
 	}
 	// Backfill probe_token_hash for existing (plaintext) tokens so hash-based
