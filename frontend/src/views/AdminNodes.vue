@@ -147,9 +147,21 @@
             <div v-for="r in sources" :key="r.id" class="list-card">
               <div class="lc-head">
                 <span class="lc-title">{{ r.name || '—' }}</span>
-                <n-tag size="tiny" bordered="false">{{ r.last_count || 0 }} 节点</n-tag>
+                <span style="display:flex;gap:4px;flex-shrink:0;">
+                  <!-- 停用的源后台不会去拉，节点数会一直停在上次的值。不标出来的话，
+                       它和「拉到 0 个」长得一模一样。 -->
+                  <n-tag v-if="!r.enabled" size="tiny" type="warning" bordered="false">已停用</n-tag>
+                  <n-tag size="tiny" :type="r.last_error ? 'error' : 'default'" bordered="false">{{ r.last_count || 0 }} 节点</n-tag>
+                </span>
               </div>
               <div class="lc-meta" style="word-break:break-all;"><span class="kv">{{ r.url }}</span></div>
+              <div class="lc-meta">
+                <span class="kv">上次拉取 <b>{{ r.last_fetched ? timeAgo(r.last_fetched) : '从未' }}</b></span>
+                <span v-if="r.last_fetched" class="kv" style="color:var(--text-3);">{{ fmtDateTime(r.last_fetched) }}</span>
+              </div>
+              <!-- 后台每隔一段自动拉一次，失败时节点会被清成 0，订阅里也就没了。
+                   错误只进了 last_error 和服务端日志，面板上必须说出来。 -->
+              <div v-if="r.last_error" class="src-err" :title="r.last_error">拉取失败：{{ r.last_error }}</div>
               <div class="lc-foot">
                 <n-button size="tiny" type="primary" @click="handleFetchSource(r.id)">拉取</n-button>
                 <n-button size="tiny" @click="openSource(r)">编辑</n-button>
@@ -239,6 +251,7 @@ import {
   NSelect, NSwitch, NRadioGroup, NRadio, NTag, NSpin, NEmpty, NCard, useMessage
 } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete } from '@/api'
+import { timeAgo, fmtDateTime } from '@/utils/format'
 
 const message = useMessage()
 const tab = ref('nodes')
@@ -557,6 +570,13 @@ async function load() {
 </script>
 
 <style scoped>
+/* 拉取失败要能一眼看到：这条源现在等于没有节点，用户订阅里也少了这一批 */
+.src-err {
+  font-size: 12px; color: var(--danger); background: var(--danger-soft, #fdf2f2);
+  border-radius: 6px; padding: 6px 8px; line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
 .page-title { font-size: 21px; margin-bottom: 16px; }
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
 .group-card { margin-bottom: 14px; }

@@ -355,7 +355,6 @@ func (a *API) Router() http.Handler {
 		ar.Put("/api/admin/user-groups/{id}/members", a.handleAdminSetUserGroupMembers)
 		ar.Get("/api/admin/stats/overview", a.handleAdminOverview)
 		ar.Get("/api/admin/stats/traffic", a.handleAdminTrafficStats)
-		ar.Get("/api/admin/stats/top", a.handleAdminTopStats)
 		ar.Get("/api/admin/stats/distribution", a.handleAdminDistribution)
 		ar.Get("/api/admin/stats/packages", a.handleAdminPackageStats)
 		ar.Get("/api/admin/stats/users", a.handleAdminUserStats)
@@ -381,6 +380,12 @@ func (a *API) Router() http.Handler {
 	// fall through and pipe index.html into a shell. It is embedded separately
 	// from the SPA (internal/assets) so a frontend rebuild can't drop it.
 	r.Get("/install-singbox.sh", serveInstallScript)
+
+	// The password-reset link from the email. Registered here for the same
+	// reason as the install script: the SPA catch-all below would otherwise
+	// swallow it — and did, silently, which is what made 找回密码 a dead end.
+	// See handleResetPage.
+	r.Get("/reset", a.handleResetPage)
 
 	// Embedded SPA (must be last; specific routes above take precedence).
 	r.Handle("/*", frontend.Handler())

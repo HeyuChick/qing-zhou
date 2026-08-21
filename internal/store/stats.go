@@ -104,25 +104,22 @@ type NameValue struct {
 	Value int64  `json:"value"`
 }
 
-// TopByTraffic returns users with the most used traffic.
-func (s *Store) TopByTraffic(limit int) ([]NameValue, error) {
-	return s.nameValues(`SELECT username, used_up+used_down AS v FROM users
-		WHERE role='user' ORDER BY v DESC LIMIT ?`, limit)
-}
-
-// TopBySpend returns users who spent the most points.
-func (s *Store) TopBySpend(limit int) ([]NameValue, error) {
-	return s.nameValues(`SELECT u.username, COALESCE(-SUM(t.amount),0) AS v
-		FROM point_transactions t JOIN users u ON u.id=t.user_id
-		WHERE t.type='purchase' GROUP BY t.user_id ORDER BY v DESC LIMIT ?`, limit)
-}
-
-// PackageSales counts successful orders per package name (from snapshot id).
-func (s *Store) PackageSales(limit int) ([]NameValue, error) {
-	return s.nameValues(`SELECT COALESCE(p.name, 'pkg#'||o.package_id) AS name, COUNT(*) AS v
-		FROM orders o LEFT JOIN packages p ON p.id=o.package_id
-		WHERE o.status='success' GROUP BY o.package_id ORDER BY v DESC LIMIT ?`, limit)
-}
+// The former TopByTraffic / TopBySpend / PackageSales trio lived here and was
+// removed with the /api/admin/stats/top endpoint that was their only caller.
+// Nothing in the panel ever called it, and each was superseded by a query that
+// answers the same question correctly:
+//
+//   - top-by-traffic summed users.used_up+used_down — the legacy aggregate
+//     mirror, which folds in queued份 the user cannot spend and expired份 that
+//     hand out nothing. UserStats(Sort:"traffic") reads the buckets.
+//   - top-by-spend summed point_transactions type='purchase' without netting
+//     refunds, so a bought-and-refunded order still counted as spend.
+//     UserStats(Sort:"spend") matches the 净支出 the orders pages report.
+//   - package-sales was a strict subset of PackageStats, which the 概览 already
+//     loads.
+//
+// Restoring any of them means restoring a second set of numbers that disagrees
+// with the ones on screen. Use UserStats / PackageStats instead.
 
 func (s *Store) nameValues(q string, args ...any) ([]NameValue, error) {
 	rows, err := s.db.Query(q, args...)

@@ -171,14 +171,6 @@ func (a *API) handleAdminTrafficStats(w http.ResponseWriter, r *http.Request) {
 	ok(w, fillDays(rows, days))
 }
 
-// GET /api/admin/stats/top
-func (a *API) handleAdminTopStats(w http.ResponseWriter, r *http.Request) {
-	traffic, _ := a.st.TopByTraffic(10)
-	spend, _ := a.st.TopBySpend(10)
-	sales, _ := a.st.PackageSales(10)
-	ok(w, J{"traffic": traffic, "spend": spend, "package_sales": sales})
-}
-
 // GET /api/admin/stats/distribution?range=
 //
 // The two trends honor the same range as every other chart and come back as a
