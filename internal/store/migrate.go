@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS users (
   proxy_username  TEXT    NOT NULL DEFAULT '',
   proxy_password  TEXT    NOT NULL DEFAULT '',
   proxy_expires_at INTEGER NOT NULL DEFAULT 0,
+  -- Free-form admin note about this account (who it belongs to, why it was
+  -- comped, ...). Panel-side only: never rendered into sing-box config, never
+  -- shown to the user themselves.
+  remark          TEXT    NOT NULL DEFAULT '',
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -596,6 +600,9 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE sb_tls ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN creds_reset_at INTEGER NOT NULL DEFAULT 0`,
+		// Admin-only note on an account. Panel-side metadata; nothing downstream
+		// (sing-box config, subscriptions, the user's own pages) reads it.
+		`ALTER TABLE users ADD COLUMN remark TEXT NOT NULL DEFAULT ''`,
 		// Rename legacy columns to neutral names on DBs created before the
 		// rename. Errors ("no such column") are expected on fresh/up-to-date DBs
 		// where CREATE TABLE already used the new names.

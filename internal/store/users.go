@@ -48,6 +48,9 @@ type User struct {
 	ProxyUsername  string
 	ProxyPassword  string
 	ProxyExpiresAt int64
+	// Remark is the admin's free-form note on this account. Panel-side only:
+	// it never reaches sing-box config, a subscription, or the user's own pages.
+	Remark       string
 	CreatedAt    int64
 	UpdatedAt    int64
 	// LastOnlineAt is bumped by the stats poll whenever this user shows a
@@ -59,7 +62,7 @@ type User struct {
 const userCols = `id, username, email, password_hash, role, status, email_verified, points,
 	client_id, client_name, client_uuid, client_secret, sub_token, current_plan_id,
 	traffic_limit, device_limit, used_up, used_down, expiry_at, created_at, updated_at,
-	last_online_at, creds_reset_at, proxy_username, proxy_password, proxy_expires_at`
+	last_online_at, creds_reset_at, proxy_username, proxy_password, proxy_expires_at, remark`
 
 type scanner interface{ Scan(...any) error }
 
@@ -69,7 +72,7 @@ func scanUser(sc scanner) (*User, error) {
 		&u.EmailVerified, &u.Points, &u.ClientID, &u.ClientName, &u.ClientUUID,
 		&u.ClientSecret, &u.SubToken, &u.CurrentPlanID, &u.TrafficLimit, &u.DeviceLimit,
 		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt, &u.LastOnlineAt,
-		&u.CredsResetAt, &u.ProxyUsername, &u.ProxyPassword, &u.ProxyExpiresAt)
+		&u.CredsResetAt, &u.ProxyUsername, &u.ProxyPassword, &u.ProxyExpiresAt, &u.Remark)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -106,6 +109,7 @@ type NewUser struct {
 	TrafficLimit int64
 	DeviceLimit  int64
 	ExpiryAt     int64
+	Remark       string
 }
 
 func (s *Store) CreateUser(nu NewUser) (int64, error) {
@@ -116,10 +120,10 @@ func (s *Store) CreateUser(nu NewUser) (int64, error) {
 	now := time.Now().Unix()
 	res, err := s.db.Exec(`INSERT INTO users
 		(username, email, password_hash, role, status, email_verified, points,
-		 sub_token, traffic_limit, device_limit, expiry_at, created_at, updated_at)
-		VALUES (?,?,?,?,'active',0,?,?,?,?,?,?,?)`,
+		 sub_token, traffic_limit, device_limit, expiry_at, remark, created_at, updated_at)
+		VALUES (?,?,?,?,'active',0,?,?,?,?,?,?,?,?)`,
 		nu.Username, nullStr(nu.Email), nu.PasswordHash, role, nu.Points,
-		nullStr(nu.SubToken), nu.TrafficLimit, nu.DeviceLimit, nu.ExpiryAt, now, now)
+		nullStr(nu.SubToken), nu.TrafficLimit, nu.DeviceLimit, nu.ExpiryAt, nu.Remark, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -385,6 +389,16 @@ func (s *Store) DeleteUser(id int64) error {
 	return tx.Commit()
 }
 
+// SetUserRemark stores the admin's note on an account. It is deliberately its
+// own statement rather than a field on AdminUpdateUser: the note is pure panel
+// metadata, so it must not be able to fail (or roll back) an edit that also
+// moves quota, and it is written from the create path too.
+func (s *Store) SetUserRemark(id int64, remark string) error {
+	_, err := s.db.Exec(`UPDATE users SET remark=?, updated_at=? WHERE id=?`,
+		remark, time.Now().Unix(), id)
+	return err
+}
+
 // ManualGrant describes an admin's manual "general allowance" for a user. Enabled
 // false removes any existing grant; Traffic 0 = unlimited (plan-bucket semantics);
 // Expiry 0 = never. A nil *ManualGrant passed to AdminUpdateUser leaves the grant
@@ -489,8 +503,10 @@ func (s *Store) ListUsers(search string, limit int) ([]*User, error) {
 	q := `SELECT ` + userCols + ` FROM users`
 	args := []any{}
 	if search != "" {
-		q += ` WHERE username LIKE ? OR email LIKE ?`
-		args = append(args, "%"+search+"%", "%"+search+"%")
+		// The remark is searchable too: an admin who writes "公司同事张三" on an
+		// account expects to find it by that, not only by the login name.
+		q += ` WHERE username LIKE ? OR email LIKE ? OR remark LIKE ?`
+		args = append(args, "%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 	q += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)

@@ -41,6 +41,10 @@ func (a *API) handleAdminRebuild(w http.ResponseWriter, r *http.Request) {
 	ok(w, J{"total": len(users), "synced": len(users), "disabled_no_access": disabled})
 }
 
+// maxRemarkRunes caps the admin note. Counted in runes, not bytes, so a CJK note
+// gets the same 200 characters an ASCII one does.
+const maxRemarkRunes = 200
+
 // adminPlanRollup is the per-user plan/traffic summary the user list shows, so an
 // admin can read a row's real entitlement without opening the detail panel.
 type adminPlanRollup struct {
@@ -124,6 +128,9 @@ func adminUserView(u *store.User, groupIDs []int64, buckets []*store.Bucket) J {
 		"last_online_at": u.LastOnlineAt,
 		"online":         u.LastOnlineAt > 0 && time.Now().Unix()-u.LastOnlineAt <= onlineWindow,
 		"group_ids":      groupIDs,
+		// Admin-only note. Present on this view only — the user-facing account
+		// endpoints must not echo what an admin wrote about them.
+		"remark": u.Remark,
 	}
 	if buckets != nil {
 		// Same roll-up the user's own dashboard shows, so the admin and the user
@@ -170,6 +177,7 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		Password string  `json:"password"`
 		Points   int64   `json:"points"`
 		GroupIDs []int64 `json:"group_ids"`
+		Remark   string  `json:"remark"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -177,6 +185,11 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Username = strings.TrimSpace(req.Username)
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	req.Remark = strings.TrimSpace(req.Remark)
+	if len([]rune(req.Remark)) > maxRemarkRunes {
+		fail(w, http.StatusBadRequest, "备注最多 200 字")
+		return
+	}
 	if !usernameRe.MatchString(req.Username) {
 		fail(w, http.StatusBadRequest, "用户名需为 3-32 位字母、数字或下划线")
 		return
@@ -213,6 +226,7 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	id, err := a.st.CreateUser(store.NewUser{
 		Username: req.Username, Email: req.Email, PasswordHash: hash,
 		SubToken: subToken, TrafficLimit: traffic, DeviceLimit: deviceLimit, ExpiryAt: expiryAt,
+		Remark: req.Remark,
 	})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "创建用户失败")
@@ -263,6 +277,9 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		Password      *string  `json:"password"`
 		ResetTraffic  bool     `json:"reset_traffic"`
 		GroupIDs      *[]int64 `json:"group_ids"`
+		// Admin note. Pointer so an older client that omits the field keeps the
+		// existing note instead of clearing it; "" from a new client clears it.
+		Remark *string `json:"remark"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -284,6 +301,18 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = a.st.DeleteUserSessions(id)
+	}
+
+	if req.Remark != nil {
+		remark := strings.TrimSpace(*req.Remark)
+		if len([]rune(remark)) > maxRemarkRunes {
+			fail(w, http.StatusBadRequest, "备注最多 200 字")
+			return
+		}
+		if err := a.st.SetUserRemark(id, remark); err != nil {
+			fail(w, http.StatusInternalServerError, "保存备注失败")
+			return
+		}
 	}
 
 	status := u.Status

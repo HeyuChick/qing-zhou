@@ -27,7 +27,7 @@
     </div>
 
     <div class="page-toolbar">
-      <n-input v-model:value="search" placeholder="搜索用户名 / 邮箱" style="width:240px;max-width:60%;" clearable>
+      <n-input v-model:value="search" placeholder="搜索用户名 / 邮箱 / 备注" style="width:240px;max-width:60%;" clearable>
         <template #prefix><n-icon><SearchOutline /></n-icon></template>
       </n-input>
       <n-select v-model:value="sortBy" :options="sortOptions" size="small" style="width:132px;" />
@@ -51,6 +51,8 @@
               <div class="uc-sub" :title="u.email || ''">
                 {{ u.email || '未绑定邮箱' }} · {{ u.online ? '在线' : timeAgo(u.last_online_at) }}
               </div>
+              <!-- 管理员备注：一眼看出这号是谁的。空备注不占位，卡片高度不变 -->
+              <div v-if="u.remark" class="uc-remark" :title="u.remark">{{ u.remark }}</div>
             </div>
           </div>
 
@@ -211,6 +213,13 @@
         <n-form-item label="用户组">
           <n-select v-model:value="newUser.group_ids" :options="userGroupOptions" multiple clearable placeholder="留空 = 只能买公开套餐" />
         </n-form-item>
+        <n-form-item label="备注">
+          <div style="width:100%;">
+            <n-input v-model:value="newUser.remark" type="textarea" :autosize="{ minRows: 1, maxRows: 3 }"
+                     maxlength="200" show-count placeholder="仅管理员可见，如「张三 · 公司账号」" />
+            <div class="form-hint">只在管理后台显示，用户本人看不到，也不会写进订阅或节点配置。</div>
+          </div>
+        </n-form-item>
       </n-form>
       <n-button type="primary" block :loading="saving" @click="handleCreate">创建</n-button>
     </n-modal>
@@ -219,6 +228,13 @@
     <n-modal v-model:show="showEdit" preset="card" title="编辑用户" style="max-width:500px;">
       <n-form v-if="editUser" label-placement="left" label-width="80">
         <n-form-item label="用户名"><n-input :value="editUser.username" disabled /></n-form-item>
+        <n-form-item label="备注">
+          <div style="width:100%;">
+            <n-input v-model:value="editRemark" type="textarea" :autosize="{ minRows: 1, maxRows: 3 }"
+                     maxlength="200" show-count placeholder="仅管理员可见，如「张三 · 公司账号」" />
+            <div class="form-hint">只在管理后台显示，用户本人看不到，也不会写进订阅或节点配置。留空即清除备注。</div>
+          </div>
+        </n-form-item>
         <n-form-item label="手动额度">
           <div style="width:100%;">
             <n-switch v-model:value="manualEnabled" />
@@ -419,7 +435,8 @@ const filtered = computed(() => {
   }
   if (search.value) {
     const q = search.value.toLowerCase()
-    list = list.filter((u: any) => u.username?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q))
+    list = list.filter((u: any) => u.username?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q)
+      || u.remark?.toLowerCase().includes(q))
   }
   if (sortBy.value === 'default') return list
   const sorted = [...list]
@@ -659,8 +676,8 @@ async function handleAssign() {
 
 // --- Create ---
 const showCreate = ref(false)
-const newUser = reactive({ username: '', email: '', password: '', points: 0, group_ids: [] as number[] })
-function openCreate() { Object.assign(newUser, { username: '', email: '', password: '', points: 0, group_ids: [] }); showCreate.value = true }
+const newUser = reactive({ username: '', email: '', password: '', points: 0, group_ids: [] as number[], remark: '' })
+function openCreate() { Object.assign(newUser, { username: '', email: '', password: '', points: 0, group_ids: [], remark: '' }); showCreate.value = true }
 async function handleCreate() {
   saving.value = true
   try { await apiPost('/api/admin/users', newUser); message.success('创建成功'); showCreate.value = false; await load() } catch (e: any) { message.error(e.message) } finally { saving.value = false }
@@ -677,9 +694,11 @@ const editBanned = ref(false)
 const resetPw = ref('')
 const resetTraffic = ref(false)
 const editGroupIDs = ref<number[]>([])
+const editRemark = ref('')
 async function openEdit(u: any) {
   editUser.value = { ...u }
   editBanned.value = u.status === 'banned'
+  editRemark.value = u.remark || ''
   resetPw.value = ''; resetTraffic.value = false
   editGroupIDs.value = [...(u.group_ids || [])]
   // Prefill the manual-grant fields from the user's admin-grant bucket itself (not
@@ -714,6 +733,8 @@ async function handleSave() {
     if (resetPw.value) body.password = resetPw.value
     if (resetTraffic.value) body.reset_traffic = true
     body.group_ids = editGroupIDs.value
+    // 总是发：'' 是「清除备注」这个明确意图，不是「没填」。
+    body.remark = editRemark.value
     await apiPut(`/api/admin/users/${editUser.value.id}`, body)
     message.success('保存成功'); showEdit.value = false; await load(); syncPlansUser()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
@@ -859,6 +880,11 @@ onMounted(load)
 .uc-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .uc-name { font-weight: 650; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .uc-sub { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 备注和邮箱行区分开：略深一点、单行截断，长备注靠 title 看全 */
+.uc-remark {
+  margin-top: 2px; font-size: 11.5px; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .dot-live { width: 7px; height: 7px; border-radius: 50%; background: #6f8f76; flex-shrink: 0; animation: pulse 2s ease-in-out infinite; }
 
 .uc-block {
