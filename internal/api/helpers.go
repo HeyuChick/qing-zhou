@@ -64,6 +64,21 @@ func normalizeBase(v string) string {
 	return v
 }
 
+// siteBase is the configured public origin with no request in hand: env, then
+// the 访问地址 setting. Empty when neither is set. Bot commands and notify
+// messages have no incoming HTTP request, so they cannot fall back to r.Host.
+func (a *API) siteBase() string {
+	if b := os.Getenv("QZ_PUBLIC_BASE"); b != "" {
+		return normalizeBase(b)
+	}
+	if a != nil && a.st != nil {
+		if b, _ := a.st.GetSetting("public_base"); b != "" {
+			return normalizeBase(b)
+		}
+	}
+	return ""
+}
+
 // publicBase returns the externally-visible base URL (scheme://host). Precedence:
 //  1. QZ_PUBLIC_BASE env — ops pin, always wins.
 //  2. the panel's configured 访问地址 (public_base setting, set in 系统设置).
@@ -73,13 +88,11 @@ func normalizeBase(v string) string {
 // subscription links, the probe installer, verify/reset email links, and the
 // copyable sing-box install command) without editing env + restarting.
 func (a *API) publicBase(r *http.Request) string {
-	if b := os.Getenv("QZ_PUBLIC_BASE"); b != "" {
-		return normalizeBase(b)
+	if b := a.siteBase(); b != "" {
+		return b
 	}
-	if a != nil && a.st != nil {
-		if b, _ := a.st.GetSetting("public_base"); b != "" {
-			return normalizeBase(b)
-		}
+	if r == nil {
+		return ""
 	}
 	scheme := "http"
 	if r.TLS != nil {

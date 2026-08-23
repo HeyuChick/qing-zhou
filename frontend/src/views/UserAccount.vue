@@ -35,6 +35,38 @@
       </p>
     </n-card>
 
+    <!-- Telegram -->
+    <n-card title="Telegram 绑定" size="small" style="margin-bottom:16px;">
+      <template v-if="!tg.enabled">
+        <p class="hint">管理员尚未配置 Telegram Bot，绑定后可在聊天里查询订阅、套餐和流量，并接收到期 / 流量不足提醒。</p>
+      </template>
+      <template v-else-if="tg.bound">
+        <n-descriptions :column="2" bordered size="small" style="margin-bottom:12px;">
+          <n-descriptions-item label="Telegram">
+            {{ tg.username ? '@' + tg.username : ('ID ' + tg.telegram_id) }}
+            <n-tag type="success" size="tiny" bordered style="margin-left:6px;">已绑定</n-tag>
+          </n-descriptions-item>
+          <n-descriptions-item label="绑定时间">{{ fmtDateTime(tg.bound_at) }}</n-descriptions-item>
+        </n-descriptions>
+        <n-space align="center" style="margin-bottom:12px;">
+          <span class="hint" style="margin:0;">到期提醒</span>
+          <n-switch size="small" :value="tg.notify_expiry" @update:value="v => saveNotify({ notify_expiry: v })" />
+          <span class="hint" style="margin:0 0 0 12px;">流量不足提醒</span>
+          <n-switch size="small" :value="tg.notify_traffic" @update:value="v => saveNotify({ notify_traffic: v })" />
+        </n-space>
+        <n-button size="small" @click="handleUnbindTg">解除绑定</n-button>
+      </template>
+      <template v-else>
+        <p class="hint">绑定后可在 Telegram 里发送 /sub、/plan、/traffic 查询，并接收到期和流量不足通知。订阅地址请当作密码保管。</p>
+        <n-space>
+          <n-button type="primary" :loading="bindingTg" @click="handleBindTg">生成绑定链接</n-button>
+          <n-button v-if="tgLink" tag="a" :href="tgLink" target="_blank" rel="noopener">打开 Telegram</n-button>
+          <n-button v-if="tgLink" quaternary @click="copyTgLink">复制链接</n-button>
+        </n-space>
+        <p v-if="tgLink" class="hint" style="margin-top:8px;">链接 15 分钟内有效，打开后点「开始」即可完成绑定。</p>
+      </template>
+    </n-card>
+
     <!-- 修改密码 -->
     <n-card title="修改密码" size="small" style="margin-bottom:16px;">
       <n-form label-placement="left" label-width="80" style="max-width:400px;">
@@ -56,14 +88,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, h } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, h } from 'vue'
 import {
   NCard, NForm, NFormItem, NInput, NButton, NDescriptions, NDescriptionsItem,
-  NDataTable, NTag, NSpace, useMessage
+  NDataTable, NTag, NSpace, NSwitch, useMessage
 } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
-import { apiGet, apiList, apiPost } from '@/api'
+import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { fmtDateTime, yuan } from '@/utils/format'
+import { copyText } from '@/utils/clipboard'
 
 const auth = useAuthStore()
 const message = useMessage()
@@ -75,6 +108,69 @@ const bindingEmail = ref(false)
 const resending = ref(false)
 const sessions = ref<any[]>([])
 const loadingSessions = ref(false)
+const tg = reactive({
+  enabled: false,
+  bound: false,
+  username: '',
+  telegram_id: 0,
+  notify_expiry: true,
+  notify_traffic: true,
+  bound_at: 0,
+})
+const tgLink = ref('')
+const bindingTg = ref(false)
+let tgPoll: ReturnType<typeof setInterval> | null = null
+
+function stopTgPoll() {
+  if (tgPoll) { clearInterval(tgPoll); tgPoll = null }
+}
+
+async function loadTelegram() {
+  try {
+    const data = await apiGet<any>('/api/user/telegram')
+    if (data) Object.assign(tg, data)
+    if (tg.bound) { tgLink.value = ''; stopTgPoll() }
+  } catch {}
+}
+
+async function handleBindTg() {
+  bindingTg.value = true
+  try {
+    const data = await apiPost<{ url: string }>('/api/user/telegram/bind-token')
+    tgLink.value = data?.url || ''
+    if (tgLink.value) {
+      message.success('绑定链接已生成')
+      stopTgPoll()
+      tgPoll = setInterval(loadTelegram, 2500)
+    }
+  } catch (e: any) { message.error(e.message) } finally { bindingTg.value = false }
+}
+
+async function copyTgLink() {
+  if (!tgLink.value) return
+  if (await copyText(tgLink.value)) message.success('已复制')
+  else message.error('复制失败，请手动复制')
+}
+
+async function handleUnbindTg() {
+  try {
+    await apiPost('/api/user/telegram/unbind')
+    tg.bound = false
+    tg.username = ''
+    tgLink.value = ''
+    message.success('已解绑')
+  } catch (e: any) { message.error(e.message) }
+}
+
+async function saveNotify(patch: { notify_expiry?: boolean; notify_traffic?: boolean }) {
+  try {
+    const data = await apiPut<any>('/api/user/telegram/notify', patch)
+    if (data) {
+      if (typeof data.notify_expiry === 'boolean') tg.notify_expiry = data.notify_expiry
+      if (typeof data.notify_traffic === 'boolean') tg.notify_traffic = data.notify_traffic
+    }
+  } catch (e: any) { message.error(e.message); await loadTelegram() }
+}
 
 /** 解析 UA 为可读描述 */
 function parseUA(ua: string): string {
@@ -144,10 +240,13 @@ onMounted(async () => {
   emailForm.email = auth.user?.email || ''
   loadingSessions.value = true
   try { sessions.value = await apiList('/api/user/sessions') } catch {} finally { loadingSessions.value = false }
+  await loadTelegram()
 })
+onUnmounted(stopTgPoll)
 </script>
 
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 4px; }
 .page-sub { color: var(--text-2); margin-bottom: 22px; }
+.hint { font-size: 12px; color: var(--text-3); margin: 0 0 12px; line-height: 1.7; }
 </style>

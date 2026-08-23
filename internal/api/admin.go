@@ -19,6 +19,7 @@ var secretSettings = map[string]bool{
 	// lookups, but it is still a bearer credential for the admin's account —
 	// it must not come back out of the settings API the way a hostname does.
 	"update_github_token": true,
+	"telegram_bot_token":  true,
 }
 
 // clearableSecrets are secretSettings that an empty submission *clears* rather
@@ -34,6 +35,8 @@ var secretSettings = map[string]bool{
 // select-all-delete, never an omission.
 var clearableSecrets = map[string]bool{
 	"update_github_token": true,
+	// Optional: emptying the token is how the admin turns the bot off.
+	"telegram_bot_token": true,
 }
 
 // immutableSettings cannot be written through the settings API at all.
@@ -64,7 +67,9 @@ var settingEnv = map[string]string{
 	// Same precedence the updater itself applies (see New in router.go): env
 	// wins over the DB value, so the panel has to show the env one as effective
 	// or a host-configured token reads as "not set".
-	"update_github_token": "QZ_UPDATE_GITHUB_TOKEN",
+	"update_github_token":   "QZ_UPDATE_GITHUB_TOKEN",
+	"telegram_bot_token":    "QZ_TELEGRAM_BOT_TOKEN",
+	"telegram_bot_username": "QZ_TELEGRAM_BOT_USERNAME",
 }
 
 func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +100,12 @@ func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if all["sub_singbox_template"] == "" {
 		all["sub_singbox_template"] = subconv.DefaultSingboxTemplate
 	}
+	for _, spec := range tgTplSpecs {
+		k := tgTplSettingKey(spec.Key)
+		if all[k] == "" {
+			all[k] = defaultTGTemplates[spec.Key]
+		}
+	}
 	all["_env_keys"] = strings.Join(envKeys, ",") // which fields are env-controlled
 	ok(w, all)
 }
@@ -124,6 +135,7 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		if k == "sub_singbox_template" && v == subconv.DefaultSingboxTemplate {
 			v = ""
 		}
+		v = normalizeTGTplSetting(k, v)
 		if err := a.st.SetSetting(k, v); err != nil {
 			fail(w, http.StatusInternalServerError, "保存配置失败")
 			return
@@ -150,7 +162,8 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 // live and future updates take effect.
 func (a *API) handleGetDefaultTemplates(w http.ResponseWriter, r *http.Request) {
 	ok(w, J{
-		"clash":   subconv.DefaultClashTemplate,
-		"singbox": subconv.DefaultSingboxTemplate,
+		"clash":    subconv.DefaultClashTemplate,
+		"singbox":  subconv.DefaultSingboxTemplate,
+		"telegram": defaultTGTemplateViews(),
 	})
 }

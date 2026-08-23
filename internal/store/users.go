@@ -414,6 +414,9 @@ func (s *Store) DeleteUser(id int64) error {
 		// bytes in every site-wide usage total forever, and hand them to whoever
 		// is next assigned that id.
 		`DELETE FROM traffic_daily WHERE user_id=?`,
+		`DELETE FROM telegram_binds WHERE user_id=?`,
+		`DELETE FROM telegram_bind_tokens WHERE user_id=?`,
+		`DELETE FROM user_notify_log WHERE user_id=?`,
 		`DELETE FROM users WHERE id=?`,
 	} {
 		if _, err := tx.Exec(q, id); err != nil {

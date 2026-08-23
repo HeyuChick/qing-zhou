@@ -516,6 +516,40 @@ CREATE TABLE IF NOT EXISTS server_alerts (
   read      INTEGER NOT NULL DEFAULT 0,
   resolved  INTEGER NOT NULL DEFAULT 0
 );
+
+-- One Telegram account per panel user. telegram_id is unique so a single chat
+-- cannot be bound to two accounts (and then pull the other user's subscription).
+CREATE TABLE IF NOT EXISTS telegram_binds (
+  user_id        INTEGER PRIMARY KEY,
+  telegram_id    INTEGER NOT NULL UNIQUE,
+  chat_id        INTEGER NOT NULL,
+  username       TEXT    NOT NULL DEFAULT '',
+  first_name     TEXT    NOT NULL DEFAULT '',
+  notify_expiry  INTEGER NOT NULL DEFAULT 1,
+  notify_traffic INTEGER NOT NULL DEFAULT 1,
+  bound_at       INTEGER NOT NULL,
+  last_chat_at   INTEGER NOT NULL DEFAULT 0
+);
+
+-- Short-lived one-time tokens for the panel → t.me/bot?start=TOKEN bind flow.
+CREATE TABLE IF NOT EXISTS telegram_bind_tokens (
+  token      TEXT    PRIMARY KEY,
+  user_id    INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used       INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+
+-- Dedup log for user-facing notifications (Telegram today, email later).
+-- (user, kind, subject) is claimed once; ClearNotify deletes the row so the
+-- same condition can fire again after it recovers (traffic topped up, etc.).
+CREATE TABLE IF NOT EXISTS user_notify_log (
+  user_id  INTEGER NOT NULL,
+  kind     TEXT    NOT NULL,
+  subject  TEXT    NOT NULL,
+  sent_at  INTEGER NOT NULL,
+  PRIMARY KEY (user_id, kind, subject)
+);
 `
 
 // indexes is the index DDL, kept OUT of schema above and applied AFTER the
@@ -563,6 +597,9 @@ CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON server_metrics(server_id, ts
 CREATE INDEX IF NOT EXISTS idx_metrics_ts ON server_metrics(ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_server ON server_alerts(server_id, ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_open ON server_alerts(server_id, type, read);
+CREATE INDEX IF NOT EXISTS idx_tg_bind_tokens_user ON telegram_bind_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_tg_bind_tokens_exp ON telegram_bind_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_notify_log_user ON user_notify_log(user_id);
 `
 
 // Migrate brings the schema up to date in three ordered phases: tables, then

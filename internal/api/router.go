@@ -43,6 +43,12 @@ type API struct {
 	// In-flight per-node sing-box reinstalls; see nodever_admin.go.
 	upgradeMu   sync.Mutex
 	upgradeJobs map[int64]*nodeUpgradeJob
+
+	// Per-Telegram-user command limiter. The bind token is already gated by
+	// resendRL; this one stops a bound chat from hammering /sub.
+	tgRL *rateLimiter
+	// Tests replace send; production leaves this nil and tgSend talks to Telegram.
+	tgSendFn func(chatID int64, html string)
 }
 
 // SetSbController attaches the native sing-box controller so admin changes to
@@ -110,6 +116,7 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		// subscription that never stays valid long enough to import. Generous
 		// enough that nobody swapping addresses on purpose will notice.
 		subRL:     newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
+		tgRL:      newRateLimiter(20, time.Minute),   // 20 bot commands / telegram user / min
 		linkCache: make(map[int64]linkCacheEntry),
 	}
 	// Self-updater: repo + optional GitHub token come from env or DB settings,
@@ -204,6 +211,10 @@ func (a *API) Router() http.Handler {
 		pr.Post("/api/user/password", a.handleChangePassword)
 		pr.Post("/api/user/resend-verify", a.handleResendVerify)
 		pr.Post("/api/user/email", a.handleBindEmail)
+		pr.Get("/api/user/telegram", a.handleUserTelegram)
+		pr.Post("/api/user/telegram/bind-token", a.handleTelegramBindToken)
+		pr.Post("/api/user/telegram/unbind", a.handleTelegramUnbind)
+		pr.Put("/api/user/telegram/notify", a.handleTelegramNotifyPrefs)
 		pr.Get("/api/user/announcements", a.handleUserAnnouncements)
 		pr.Post("/api/user/announcements/read", a.handleUserMarkAnnouncementsRead)
 		pr.Get("/api/help", a.handleHelpDocs)
@@ -225,6 +236,7 @@ func (a *API) Router() http.Handler {
 		ar.Put("/api/admin/settings", a.handlePutSettings)
 		ar.Get("/api/admin/settings/default-templates", a.handleGetDefaultTemplates)
 		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
+		ar.Post("/api/admin/settings/test-telegram", a.handleTestTelegram)
 		ar.Get("/api/admin/settings/detect-node-host", a.handleDetectNodeHost)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
 		ar.Get("/api/admin/backup", a.handleAdminBackup)

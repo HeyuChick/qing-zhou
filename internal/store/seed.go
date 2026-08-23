@@ -42,6 +42,10 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		"refund_mode":        "prorated",
 		"refund_basis":       "min",
 		"refund_fee_percent": "0",
+		// Telegram user notifications. The bot itself is off until a token is set;
+		// these only decide when a bound user is nudged.
+		"notify_expiry_days":     "3",
+		"notify_traffic_percent": "20",
 	}
 	for k, v := range defaults {
 		if err := s.setSettingIfAbsent(k, v); err != nil {

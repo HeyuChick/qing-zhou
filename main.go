@@ -104,6 +104,7 @@ func main() {
 	// transactions, so shutdown must let an in-flight sweep finish before the
 	// deferred st.Close() runs.
 	app.StartQueueAdvance(ctx, 2*time.Minute, &bgWG)
+	app.StartTelegram(ctx)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

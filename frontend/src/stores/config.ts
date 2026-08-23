@@ -11,6 +11,7 @@ export interface SiteConfig {
   // 面板到底能不能发信。发不了的话，「找回密码」是条死路——链接只会写进
   // 服务端日志，用户永远等不到那封邮件。
   email_enabled: boolean
+  telegram_enabled: boolean
   points_per_cny: number
   homepage_mode: string
   homepage_url: string
@@ -26,6 +27,7 @@ export const useConfigStore = defineStore('config', () => {
     // 默认 true：拿不到 /api/config 时维持原样（显示找回密码入口），
     // 而不是因为一次网络抖动就把功能藏起来。
     email_enabled: true,
+    telegram_enabled: false,
     points_per_cny: 10,
     homepage_mode: 'monitor',
     homepage_url: '',

@@ -158,6 +158,69 @@
         </n-form>
       </n-card>
 
+      <n-card title="Telegram Bot" size="small" style="margin-bottom:16px;">
+        <div v-if="!telegramConfigured" class="warn-box">
+          <b>当前未配置 Telegram Bot</b>。配好后，用户可在「账户设置」里绑定，用聊天查询订阅 / 套餐 / 流量，并接收到期和流量不足通知。
+        </div>
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;line-height:1.7;">
+          在 <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> 创建机器人，把 Token 贴到下面。
+          面板用长轮询收消息，不需要公网 Webhook。Token 加密存储；清空并保存即关闭 Bot。
+          订阅地址会发到 Telegram，请提醒用户不要把聊天记录转发出去。
+        </p>
+        <n-form label-placement="left" label-width="140">
+          <n-form-item label="Bot Token">
+            <n-input v-model:value="form.telegram_bot_token" type="password" show-password-on="click"
+                     :disabled="envLocked('telegram_bot_token')"
+                     placeholder="123456:ABC…；显示 *** 表示已设置，清空并保存即关闭" />
+          </n-form-item>
+          <n-form-item v-if="form.telegram_bot_username" label="Bot 用户名">
+            <span>@{{ form.telegram_bot_username }}</span>
+          </n-form-item>
+          <n-form-item label="到期提前提醒">
+            <n-input-number v-model:value="notifyExpiryDays" :min="1" :max="30" style="width:160px;" />
+            <span class="form-hint" style="margin-left:8px;">天（1–30）</span>
+          </n-form-item>
+          <n-form-item label="流量不足阈值">
+            <n-input-number v-model:value="notifyTrafficPct" :min="1" :max="50" style="width:160px;" />
+            <span class="form-hint" style="margin-left:8px;">% 剩余（1–50）</span>
+          </n-form-item>
+          <n-form-item label=" ">
+            <n-button :loading="testingTg" :disabled="!telegramConfigured && !(form.telegram_bot_token || '').trim()"
+                      @click="handleTestTelegram">测试连接</n-button>
+            <span class="form-hint" style="margin-left:8px;">会调用 getMe；若你自己已绑定，还会往你的聊天发一条测试消息。</span>
+          </n-form-item>
+        </n-form>
+
+        <div class="tg-tpl">
+          <div class="tg-tpl-h">消息排版</div>
+          <p class="form-hint" style="margin:0 0 10px;">
+            发给用户的查询结果和通知都走模板。支持 Telegram HTML（<code>&lt;b&gt;</code> <code>&lt;i&gt;</code> <code>&lt;code&gt;</code> <code>&lt;a href&gt;</code>）和占位符 <code v-pre>{{name}}</code>。
+            留空 / 与内置一致时跟随内置（升级会拿到新排版）；改过之后一直用你的版本。
+          </p>
+          <n-space align="center" style="margin-bottom:8px;">
+            <n-select v-model:value="tgTplKey" :options="tgTplOptions" style="width:220px;" />
+            <n-button size="tiny" @click="loadTgTplDefault">载入内置默认</n-button>
+            <n-button size="tiny" @click="resetTgTpl">恢复内置默认</n-button>
+          </n-space>
+          <div class="tg-vars">
+            <div class="tg-vars-h">本模板可用占位符 <span>（点击插入）</span></div>
+            <div v-if="currentTgVars.length" class="tg-vars-list">
+              <button v-for="v in currentTgVars" :key="v.key" type="button" class="tg-var" @click="insertTgVar(v.key)">
+                <code>{{ tgToken(v.key) }}</code>
+                <span>{{ v.desc }}</span>
+              </button>
+            </div>
+            <p v-else class="form-hint" style="margin:0;">加载模板说明后会显示占位符。</p>
+          </div>
+          <n-input ref="tgTplInput" v-model:value="currentTgTplBody" type="textarea" :rows="12"
+                   placeholder="留空用内置模板" style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.55;" />
+          <div class="tg-preview">
+            <div class="tg-preview-h">预览（示例数据）</div>
+            <pre class="tg-preview-body">{{ tgTplPreview }}</pre>
+          </div>
+        </div>
+      </n-card>
+
       <n-card title="证书 / ACME（Cloudflare 自动证书）" size="small" style="margin-bottom:16px;">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           填写 Cloudflare API Token 后，「证书管理」页即可用 Cloudflare DNS 方式在面板本机一键申请 / 自动续期真实证书（DNS 验证无需节点参与，远程节点也能用）。
@@ -298,6 +361,69 @@ const message = useMessage()
 const loading = ref(false)
 const saving = ref(false)
 const testingSmtp = ref(false)
+const testingTg = ref(false)
+const notifyExpiryDays = ref(3)
+const notifyTrafficPct = ref(20)
+type TgTplVar = { key: string; desc: string }
+type TgTplMeta = { key: string; name: string; body: string; vars?: TgTplVar[] }
+const tgTplMeta = ref<TgTplMeta[]>([])
+const tgTplKey = ref('sub')
+const tgTplInput = ref<any>(null)
+const tgTplOptions = computed(() => tgTplMeta.value.map(t => ({ label: t.name, value: t.key })))
+const currentTgTpl = computed(() => tgTplMeta.value.find(t => t.key === tgTplKey.value))
+const currentTgVars = computed(() => currentTgTpl.value?.vars || [])
+const currentTgTplField = computed(() => 'tg_tpl_' + tgTplKey.value)
+const currentTgTplBody = computed({
+  get: () => form[currentTgTplField.value] ?? '',
+  set: (v: string) => { form[currentTgTplField.value] = v },
+})
+const tgSample: Record<string, string> = {
+  site: '轻舟', username: 'alice',
+  panel: 'https://panel.example', panel_link: '打开面板',
+  url: 'https://panel.example/sub/xxxx',
+  url_clash: 'https://panel.example/sub/xxxx?format=clash',
+  url_singbox: 'https://panel.example/sub/xxxx?format=singbox',
+  url_surge: 'https://panel.example/sub/xxxx?format=surge',
+  url_base64: 'https://panel.example/sub/xxxx?format=base64',
+  bar: '▓▓▓▓▓▓▓▓░░  82%', used: '82.10 GiB', total: '100.00 GiB',
+  remaining: '17.90 GiB', remain_pct: '18', unmetered: '',
+  summary: '已用 82.10 GiB / 100.00 GiB，剩余 17.90 GiB',
+  items: '月付 100G　生效中 · 30 天\n流量　已用 12.00 GiB / 100.00 GiB，剩余 88.00 GiB\n到期　2026-04-20 23:59',
+  name: '月付 100G', status: '生效中', duration: ' · 30 天',
+  traffic: '已用 12.00 GiB / 100.00 GiB，剩余 88.00 GiB',
+  expiry: '2026-04-20 23:59', plan: '月付 100G', left: '3 天',
+  footer: '打开面板续费', help: '/sub　订阅地址\n/plan　我的套餐',
+}
+const tgTplPreview = computed(() => {
+  const src = (currentTgTplBody.value || currentTgTpl.value?.body || '').trim() || (currentTgTpl.value?.body || '')
+  return src.replace(/\{\{([a-z0-9_]+)\}\}/g, (_, k) => tgSample[k] ?? `{{${k}}}`)
+})
+function loadTgTplDefault() {
+  const body = currentTgTpl.value?.body
+  if (body != null) currentTgTplBody.value = body
+}
+function resetTgTpl() { currentTgTplBody.value = '' }
+
+function tgToken(key: string) { return '{{' + key + '}}' }
+
+function insertTgVar(key: string) {
+  const token = tgToken(key)
+  const el: HTMLTextAreaElement | undefined = tgTplInput.value?.textareaEl
+    || tgTplInput.value?.$el?.querySelector?.('textarea')
+  const cur = currentTgTplBody.value || ''
+  if (!el) {
+    currentTgTplBody.value = cur + token
+    return
+  }
+  const start = el.selectionStart ?? cur.length
+  const end = el.selectionEnd ?? cur.length
+  currentTgTplBody.value = cur.slice(0, start) + token + cur.slice(end)
+  requestAnimationFrame(() => {
+    el.focus()
+    const pos = start + token.length
+    el.setSelectionRange(pos, pos)
+  })
+}
 const rebuilding = ref(false)
 const form = reactive<Record<string, any>>({})
 const emailVerify = ref(true)
@@ -336,6 +462,7 @@ const installCmd = computed(() => `curl -fsSL ${effectiveBase.value}/install-sin
 // 只看 smtp_host：后端 currentMailer/mailerConfigured 也是拿这一个字段判定的。
 // 被环境变量顶掉时 GET /settings 已经回填了有效值，所以这里读到的就是实际生效的。
 const smtpConfigured = computed(() => !!(form.smtp_host || '').trim())
+const telegramConfigured = computed(() => !!(form.telegram_bot_token || '').trim())
 
 function envLocked(key: string): boolean {
   return (form._env_keys || '').split(',').includes(key)
@@ -395,6 +522,8 @@ async function handleSave() {
       refund_mode: refundMode.value,
       refund_basis: refundBasis.value,
       refund_fee_percent: String(refundFee.value),
+      notify_expiry_days: String(notifyExpiryDays.value),
+      notify_traffic_percent: String(notifyTrafficPct.value),
     }
     await apiPut('/api/admin/settings', body)
     message.success('保存成功')
@@ -407,6 +536,9 @@ let defaultTemplates: { clash?: string; singbox?: string } | null = null
 async function loadDefaultTemplate(which: 'clash' | 'singbox') {
   try {
     if (!defaultTemplates) defaultTemplates = await apiGet('/api/admin/settings/default-templates')
+    if (Array.isArray((defaultTemplates as any)?.telegram) && !tgTplMeta.value.length) {
+      tgTplMeta.value = (defaultTemplates as any).telegram
+    }
     if (which === 'clash') form.sub_clash_template = defaultTemplates?.clash || ''
     else form.sub_singbox_template = defaultTemplates?.singbox || ''
     message.success('已载入内置默认，可编辑后保存')
@@ -417,6 +549,15 @@ async function handleTestSMTP() {
   if (!testEmail.value) { message.warning('请输入测试收件人'); return }
   testingSmtp.value = true
   try { await apiPost('/api/admin/settings/test-smtp', { to: testEmail.value }); message.success('测试邮件已发送') } catch (e: any) { message.error(e.message) } finally { testingSmtp.value = false }
+}
+
+async function handleTestTelegram() {
+  testingTg.value = true
+  try {
+    const data = await apiPost<{ username?: string; sent?: boolean }>('/api/admin/settings/test-telegram')
+    if (data?.username) form.telegram_bot_username = data.username
+    message.success(data?.sent ? `Bot @${data.username || ''} 正常，测试消息已发送` : `Bot @${data?.username || ''} 连接正常`)
+  } catch (e: any) { message.error(e.message) } finally { testingTg.value = false }
 }
 
 const backingUp = ref(false)
@@ -436,10 +577,13 @@ async function handleRebuild() {
 onMounted(async () => {
   loading.value = true
   try {
-    const [data, groups] = await Promise.all([
+    const [data, groups, defaults] = await Promise.all([
       apiGet<Record<string, string>>('/api/admin/settings'),
       apiList<any>('/api/admin/node-groups').catch(() => []),
+      apiGet<any>('/api/admin/settings/default-templates').catch(() => null),
     ])
+    if (Array.isArray(defaults?.telegram)) tgTplMeta.value = defaults.telegram
+    defaultTemplates = defaults
     if (data) {
       Object.assign(form, data)
       // 从未设置过的键不会出现在响应里，而 n-input 需要一个受控的空串而不是
@@ -460,6 +604,11 @@ onMounted(async () => {
       refundMode.value = data.refund_mode === 'full' ? 'full' : 'prorated'
       refundBasis.value = ['traffic', 'time', 'min'].includes(data.refund_basis) ? data.refund_basis : 'min'
       refundFee.value = parseFloat(data.refund_fee_percent) || 0
+      notifyExpiryDays.value = parseInt(data.notify_expiry_days) || 3
+      notifyTrafficPct.value = parseInt(data.notify_traffic_percent) || 20
+      form.telegram_bot_token ??= ''
+      form.telegram_bot_username ??= ''
+      for (const t of tgTplMeta.value) form['tg_tpl_' + t.key] ??= ''
     }
     groupOptions.value = (groups || []).map((g: any) => ({ label: g.name, value: g.id }))
   } catch {} finally { loading.value = false }
@@ -493,4 +642,32 @@ onMounted(async () => {
 .host-cand-n { grid-column: 1 / -1; font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
 .cf-guide-n { margin-top: 10px; font-size: 12px; color: var(--text-3); line-height: 1.55; }
 .cf-guide code { background: var(--border); padding: 0 4px; border-radius: 4px; }
+.tg-tpl { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.tg-tpl-h { font-size: 13px; font-weight: 650; margin-bottom: 6px; }
+.tg-preview {
+  margin-top: 10px; background: #1b2838; color: #e8eef6; border-radius: 10px;
+  padding: 10px 12px; max-width: 420px;
+}
+.tg-preview-h { font-size: 11px; color: #93a4b8; margin-bottom: 6px; }
+.tg-preview-body {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", sans-serif;
+  font-size: 13.5px; line-height: 1.55;
+}
+.tg-vars { margin: 0 0 10px; }
+.tg-vars-h { font-size: 12px; font-weight: 650; margin-bottom: 6px; }
+.tg-vars-h span { font-weight: 400; color: var(--text-3); }
+.tg-vars-list { display: flex; flex-direction: column; gap: 4px; max-width: 560px; }
+.tg-var {
+  display: grid; grid-template-columns: minmax(140px, auto) 1fr; gap: 8px 12px;
+  align-items: baseline; text-align: left; width: 100%;
+  background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 10px; cursor: pointer; font: inherit; color: inherit;
+}
+.tg-var:hover { border-color: var(--accent-strong); }
+.tg-var code {
+  font-size: 12px; background: var(--border); padding: 1px 5px; border-radius: 4px;
+  white-space: nowrap;
+}
+.tg-var span { font-size: 12.5px; color: var(--text-2); line-height: 1.45; }
 </style>
