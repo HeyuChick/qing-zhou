@@ -165,6 +165,7 @@ type NodeGroup struct {
 	ID          int64  `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	IsAI        bool   `json:"is_ai"`
 	SortOrder   int64  `json:"sort_order"`
 	CreatedAt   int64  `json:"created_at"`
 }
@@ -178,7 +179,7 @@ func (s *Store) GroupCount() (int, error) {
 }
 
 func (s *Store) ListGroups() ([]*NodeGroup, error) {
-	rows, err := s.db.Query(`SELECT id, name, description, sort_order, created_at FROM node_groups ORDER BY sort_order, id`)
+	rows, err := s.db.Query(`SELECT id, name, description, is_ai, sort_order, created_at FROM node_groups ORDER BY sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +187,7 @@ func (s *Store) ListGroups() ([]*NodeGroup, error) {
 	var out []*NodeGroup
 	for rows.Next() {
 		var g NodeGroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.SortOrder, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.IsAI, &g.SortOrder, &g.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &g)
@@ -195,8 +196,8 @@ func (s *Store) ListGroups() ([]*NodeGroup, error) {
 }
 
 func (s *Store) CreateGroup(g NodeGroup) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO node_groups (name, description, sort_order, created_at) VALUES (?,?,?,?)`,
-		g.Name, g.Description, g.SortOrder, time.Now().Unix())
+	res, err := s.db.Exec(`INSERT INTO node_groups (name, description, is_ai, sort_order, created_at) VALUES (?,?,?,?,?)`,
+		g.Name, g.Description, g.IsAI, g.SortOrder, time.Now().Unix())
 	if err != nil {
 		return 0, err
 	}
@@ -204,8 +205,8 @@ func (s *Store) CreateGroup(g NodeGroup) (int64, error) {
 }
 
 func (s *Store) UpdateGroup(g NodeGroup) error {
-	_, err := s.db.Exec(`UPDATE node_groups SET name=?, description=?, sort_order=? WHERE id=?`,
-		g.Name, g.Description, g.SortOrder, g.ID)
+	_, err := s.db.Exec(`UPDATE node_groups SET name=?, description=?, is_ai=?, sort_order=? WHERE id=?`,
+		g.Name, g.Description, g.IsAI, g.SortOrder, g.ID)
 	return err
 }
 
@@ -330,10 +331,12 @@ func (s *Store) AccessibleGroupIDs(u *User) ([]int64, error) {
 type GroupedNode struct {
 	*Node
 	GroupID int64 `json:"group_id"`
+	IsAI    bool  `json:"is_ai"`
 }
 
 // NodesInGroupsTagged returns enabled nodes in any of groupIDs, each tagged with
-// the smallest matching group id (one row per node, deduped).
+// the smallest matching group id and whether any matching group is AI-marked
+// (one row per node, deduped).
 func (s *Store) NodesInGroupsTagged(groupIDs []int64) ([]GroupedNode, error) {
 	if len(groupIDs) == 0 {
 		return nil, nil
@@ -345,8 +348,9 @@ func (s *Store) NodesInGroupsTagged(groupIDs []int64) ([]GroupedNode, error) {
 		args[i] = g
 	}
 	in := strings.Join(ph, ",")
-	q := `SELECT ` + nodeColsPrefixed("n") + `, MIN(m.group_id) FROM nodes n
+	q := `SELECT ` + nodeColsPrefixed("n") + `, MIN(m.group_id), MAX(g.is_ai) FROM nodes n
 		JOIN node_group_members m ON m.node_id = n.id
+		JOIN node_groups g ON g.id = m.group_id
 		WHERE n.enabled = 1 AND m.group_id IN (` + in + `)
 		GROUP BY n.id
 		ORDER BY n.sort_order, n.id`
@@ -359,12 +363,13 @@ func (s *Store) NodesInGroupsTagged(groupIDs []int64) ([]GroupedNode, error) {
 	for rows.Next() {
 		var n Node
 		var gid int64
+		var isAI bool
 		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.Protocol, &n.InboundTag, &n.ShareLink,
-			&n.SourceID, &n.Enabled, &n.SortOrder, &n.CreatedAt, &gid); err != nil {
+			&n.SourceID, &n.Enabled, &n.SortOrder, &n.CreatedAt, &gid, &isAI); err != nil {
 			return nil, err
 		}
 		nn := n
-		out = append(out, GroupedNode{Node: &nn, GroupID: gid})
+		out = append(out, GroupedNode{Node: &nn, GroupID: gid, IsAI: isAI})
 	}
 	return out, rows.Err()
 }

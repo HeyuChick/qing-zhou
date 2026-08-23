@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS node_groups (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   name        TEXT    NOT NULL,
   description TEXT    NOT NULL DEFAULT '',
+  is_ai       INTEGER NOT NULL DEFAULT 0,
   sort_order  INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL
 );
@@ -684,6 +685,9 @@ func (s *Store) Migrate() error {
 	for _, stmt := range []string{
 		`ALTER TABLE announcements ADD COLUMN start_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE announcements ADD COLUMN end_at INTEGER NOT NULL DEFAULT 0`,
+		// AI groups feed the subscription's guarded AI route. Existing groups stay
+		// ordinary, so upgrading cannot reroute any user's traffic by surprise.
+		`ALTER TABLE node_groups ADD COLUMN is_ai INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE node_sources ADD COLUMN group_ids TEXT NOT NULL DEFAULT ''`,
 		// Shop selling-point bullets, stored as a JSON array of strings.
 		`ALTER TABLE packages ADD COLUMN highlights TEXT NOT NULL DEFAULT ''`,

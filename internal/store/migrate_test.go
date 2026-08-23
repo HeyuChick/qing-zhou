@@ -74,6 +74,27 @@ func TestMigrate_Idempotent(t *testing.T) {
 	}
 }
 
+func TestMigrate_AddsNodeGroupAIFlagWithoutChangingExistingGroups(t *testing.T) {
+	st := openMigrated(t)
+	if _, err := st.db.Exec(`INSERT INTO node_groups (name, description, is_ai, sort_order, created_at)
+		VALUES ('旧分组', '', 0, 0, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`ALTER TABLE node_groups DROP COLUMN is_ai`); err != nil {
+		t.Fatalf("rewind node_groups schema: %v", err)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("migrate old node_groups: %v", err)
+	}
+	groups, err := st.ListGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].IsAI {
+		t.Fatalf("legacy group was unexpectedly marked AI: %+v", groups)
+	}
+}
+
 func TestMigrate_FreshDBDoesNotBackfillEmailGateExemption(t *testing.T) {
 	st := openMigrated(t)
 	uid, err := st.CreateUser(NewUser{Username: "freshdb", PasswordHash: "x"})

@@ -155,6 +155,7 @@ func (a *API) handleAdminListGroups(w http.ResponseWriter, r *http.Request) {
 			"id":          g.ID,
 			"name":        g.Name,
 			"description": g.Description,
+			"is_ai":       g.IsAI,
 			"sort_order":  g.SortOrder,
 			"created_at":  g.CreatedAt,
 			"node_count":  counts[g.ID],

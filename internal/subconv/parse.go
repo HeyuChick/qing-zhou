@@ -29,7 +29,7 @@ type Proxy struct {
 	AlterID  int    // vmess
 	Params   url.Values
 	VMess    map[string]any
-	Group    string // panel node-group name (for the per-group auto-select group)
+	AI       bool // belongs to at least one accessible admin-marked AI group
 }
 
 func b64decode(s string) ([]byte, error) {
@@ -72,7 +72,7 @@ var ssMethods = map[string]bool{
 	"chacha20-ietf": true, "chacha20": true, "rc4-md5": true,
 	"2022-blake3-aes-128-gcm": true, "2022-blake3-aes-256-gcm": true,
 	"2022-blake3-chacha20-poly1305": true,
-	"none": true, "plain": true,
+	"none":                          true, "plain": true,
 }
 
 // validate drops a parsed node that cannot produce a usable client config.

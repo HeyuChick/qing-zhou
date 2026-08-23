@@ -30,27 +30,32 @@ func Surge(proxies []*Proxy, subURL string) string {
 		b.WriteString(p.Name + " = " + surgeProxy(p) + "\n")
 	}
 
-	ag := buildAutoGroups(kept)
+	sg := buildStrategyGroups(kept)
 	b.WriteString("\n[Proxy Group]\n")
-	if len(ag.all) == 0 {
+	if len(sg.all) == 0 {
 		b.WriteString(grpSelectClash + " = select, DIRECT\n")
 	} else {
-		sel := []string{grpAutoClash}
-		for _, g := range ag.byGroup {
-			sel = append(sel, g.name)
+		sel := []string{grpFixedClash}
+		if len(sg.all) > 1 {
+			sel = append(sel, grpFallbackClash)
 		}
-		sel = append(sel, ag.all...)
 		sel = append(sel, "DIRECT")
 		b.WriteString(grpSelectClash + " = select, " + strings.Join(sel, ", ") + "\n")
-		b.WriteString(grpAutoClash + " = url-test, " + strings.Join(ag.all, ", ") +
-			", url = http://www.gstatic.com/generate_204, interval = 300\n")
-		for _, g := range ag.byGroup {
-			b.WriteString(g.name + " = url-test, " + strings.Join(g.names, ", ") +
+		b.WriteString(grpFixedClash + " = select, " + strings.Join(sg.all, ", ") + "\n")
+		if len(sg.all) > 1 {
+			b.WriteString(grpFallbackClash + " = fallback, " + strings.Join(sg.all, ", ") +
+				", url = http://www.gstatic.com/generate_204, interval = 300\n")
+		}
+		if len(sg.ai) > 0 {
+			b.WriteString(grpAIClash + " = fallback, " + strings.Join(sg.aiFallbackOrder(), ", ") +
 				", url = http://www.gstatic.com/generate_204, interval = 300\n")
 		}
 	}
 
 	b.WriteString("\n[Rule]\n")
+	if len(sg.ai) > 0 {
+		b.WriteString("RULE-SET," + surgeAIRuleURL + "," + grpAIClash + ",update-interval=86400\n")
+	}
 	b.WriteString("DOMAIN-SET,https://raw.githubusercontent.com/Loyalsoldier/surge-rules/release/reject.txt,REJECT\n")
 	b.WriteString("GEOIP,CN,DIRECT\n")
 	b.WriteString("FINAL," + grpSelectClash + ",dns-failed\n")

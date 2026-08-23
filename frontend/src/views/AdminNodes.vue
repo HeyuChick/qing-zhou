@@ -15,6 +15,7 @@
             <n-card v-for="gv in groupedView" :key="gv.key" size="small" :title="gv.name" class="group-card">
               <template #header-extra>
                 <div class="group-actions">
+                  <n-tag v-if="gv.group?.is_ai" size="tiny" type="success" :bordered="false">AI 路由</n-tag>
                   <n-tag size="tiny" :type="gv.isUngrouped ? 'default' : 'info'" :bordered="false">{{ gv.nodes.length }} 节点</n-tag>
                   <n-button size="tiny" type="primary" @click="openNodeInGroup(gv.group)">＋ 节点</n-button>
                   <n-button v-if="gv.group" size="tiny" @click="openGroup(gv.group)">编辑</n-button>
@@ -221,6 +222,12 @@
         <n-form label-placement="left" label-width="60">
           <n-form-item label="名称"><n-input v-model:value="groupForm.name" /></n-form-item>
           <n-form-item label="描述"><n-input v-model:value="groupForm.description" /></n-form-item>
+          <n-form-item label="AI 路由">
+            <div>
+              <n-switch v-model:value="groupForm.is_ai" />
+              <div class="form-tip">AI 域名会优先使用该分组内用户有权访问的节点；无需用户手动选择。</div>
+            </div>
+          </n-form-item>
           <n-form-item label="排序"><n-input-number v-model:value="groupForm.sort_order" :min="0" style="width:100%;" /></n-form-item>
         </n-form>
         <n-button type="primary" block :loading="saving" @click="handleSaveGroup">保存</n-button>
@@ -504,11 +511,11 @@ async function handleImport() {
 // --- Groups ---
 const showGroup = ref(false)
 const editingGroup = ref<any>(null)
-const groupForm = reactive({ name: '', description: '', sort_order: 0 })
+const groupForm = reactive({ name: '', description: '', is_ai: false, sort_order: 0 })
 function openGroup(g?: any) {
   editingGroup.value = g || null
-  if (g) Object.assign(groupForm, { name: g.name, description: g.description || '', sort_order: g.sort_order || 0 })
-  else Object.assign(groupForm, { name: '', description: '', sort_order: 0 })
+  if (g) Object.assign(groupForm, { name: g.name, description: g.description || '', is_ai: !!g.is_ai, sort_order: g.sort_order || 0 })
+  else Object.assign(groupForm, { name: '', description: '', is_ai: false, sort_order: 0 })
   showGroup.value = true
 }
 async function handleSaveGroup() {
@@ -582,6 +589,7 @@ async function load() {
 .group-card { margin-bottom: 14px; }
 .group-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .group-desc { color: var(--text-2); font-size: 12px; margin-bottom: 10px; }
+.form-tip { font-size: 12px; color: var(--text-3, #999); margin-top: 5px; line-height: 1.5; }
 
 /* 节点卡片上的链路摘要 */
 .lc-chain { font-size: 12px; color: var(--text-3, #999); line-height: 1.5; margin-top: 2px; word-break: break-word; }

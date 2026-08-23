@@ -19,7 +19,7 @@ func Clash(proxies []*Proxy, template string) (string, error) {
 		doc = map[string]any{}
 	}
 
-	// Convert first, then dedupe the kept set so url-test groups reference
+	// Convert first, then dedupe the kept set so policy groups reference
 	// unique, real node names (clashProxy drops unsupported protocols).
 	type conv struct {
 		m map[string]any
@@ -42,7 +42,11 @@ func Clash(proxies []*Proxy, template string) (string, error) {
 		list[i] = c.m
 	}
 	doc["proxies"] = list
-	doc["proxy-groups"] = mergeClashGroups(doc["proxy-groups"], clashGroups(buildAutoGroups(kept)), kept)
+	sg := buildStrategyGroups(kept)
+	doc["proxy-groups"] = mergeClashGroups(doc["proxy-groups"], clashGroups(sg), kept)
+	if len(sg.ai) > 0 {
+		injectClashAIRoute(doc)
+	}
 	// Always append the final catch-all referencing the ACTUAL primary group, so
 	// the rule can never drift from the group name (templates must NOT hardcode
 	// it — a stale "MATCH,<old name>" yields "proxy not found" in the client).
@@ -81,7 +85,7 @@ const allPlaceholder = "all"
 //
 // The built-in primary selector always comes first because it is the overall
 // control point referenced by MATCH. Admin groups follow it, then the generated
-// auto/per-panel groups. Generated names are reserved: a colliding custom group
+// fixed/fallback/AI groups. Generated names are reserved: a colliding custom group
 // is ignored rather than producing two groups with one name or replacing an
 // internal group that other generated entries reference.
 //
@@ -136,6 +140,12 @@ func expandAllPlaceholder(g map[string]any, names []string) {
 				out = append(out, n)
 			}
 			continue
+		} else if ok && s == legacyAutoClash {
+			// Stored templates from before the strategy simplification commonly
+			// referenced the generated auto group. Carry them forward without
+			// leaving a dangling proxy name that makes mihomo reject the config.
+			out = append(out, grpFallbackClash)
+			continue
 		}
 		out = append(out, e)
 	}
@@ -147,36 +157,54 @@ func expandAllPlaceholder(g map[string]any, names []string) {
 	g["proxies"] = out
 }
 
-// clashGroups builds the proxy-groups: a primary selector to pick manually, a
-// global "auto" url-test, and one auto-select url-test per panel node-group
-// (named after the group, so the client mirrors the admin's organisation).
-func clashGroups(ag autoGroups) []map[string]any {
-	if len(ag.all) == 0 {
+// clashGroups deliberately exposes policies rather than panel organisation.
+// The fixed selector persists an exact manual node choice. Fallback respects
+// node order and moves only when the active node fails its health check.
+func clashGroups(sg strategyGroups) []map[string]any {
+	if len(sg.all) == 0 {
 		return []map[string]any{{
 			"name": grpSelectClash, "type": "select", "proxies": []string{"DIRECT"},
 		}}
 	}
-	sel := []string{grpAutoClash}
-	for _, g := range ag.byGroup {
-		sel = append(sel, g.name)
+	sel := []string{grpFixedClash}
+	if len(sg.all) > 1 {
+		sel = append(sel, grpFallbackClash)
 	}
-	sel = append(sel, ag.all...)
 	sel = append(sel, "DIRECT")
 
 	groups := []map[string]any{
 		{"name": grpSelectClash, "type": "select", "proxies": sel},
-		clashURLTest(grpAutoClash, ag.all),
+		{"name": grpFixedClash, "type": "select", "proxies": sg.all},
 	}
-	for _, g := range ag.byGroup {
-		groups = append(groups, clashURLTest(g.name, g.names))
+	if len(sg.all) > 1 {
+		groups = append(groups, clashFallback(grpFallbackClash, sg.all))
+	}
+	if len(sg.ai) > 0 {
+		groups = append(groups, clashFallback(grpAIClash, sg.aiFallbackOrder()))
 	}
 	return groups
 }
 
-func clashURLTest(name string, proxies []string) map[string]any {
+func injectClashAIRoute(doc map[string]any) {
+	providers, _ := doc["rule-providers"].(map[string]any)
+	if providers == nil {
+		providers = map[string]any{}
+	}
+	providers["qingzhou-ai"] = map[string]any{
+		"type": "http", "behavior": "domain", "format": "mrs",
+		"path": "./ruleset/qingzhou-ai.mrs", "url": clashAIRuleURL,
+		"interval": 86400, "proxy": grpFixedClash,
+	}
+	doc["rule-providers"] = providers
+
+	rules, _ := doc["rules"].([]any)
+	doc["rules"] = append([]any{"RULE-SET,qingzhou-ai," + grpAIClash}, rules...)
+}
+
+func clashFallback(name string, proxies []string) map[string]any {
 	return map[string]any{
-		"name": name, "type": "url-test", "url": urltestURL,
-		"interval": 300, "tolerance": 50, "proxies": proxies,
+		"name": name, "type": "fallback", "url": urltestURL,
+		"interval": 300, "proxies": proxies,
 	}
 }
 

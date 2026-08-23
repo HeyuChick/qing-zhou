@@ -895,19 +895,20 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 		serviceable = false
 	}
 
-	// Build the link list + a link→group map (drives the per-group auto-select
-	// groups), honoring the user's per-node blocklist.
+	// Build the link list plus the user's accessible AI-node set, honoring the
+	// per-node blocklist. Group membership never grants access here; it only marks
+	// an already-accessible node as eligible for the guarded AI route.
 	disabled, _ := a.st.DisabledNodeKeys(u.ID)
 	var links []string
-	groups := map[string]string{}
+	aiNodes := map[string]bool{}
 	if serviceable {
 		for _, e := range a.collectEntries(u) {
 			if subconv.NodeDisabled(disabled, e.Link) {
 				continue
 			}
 			links = append(links, e.Link)
-			if e.GroupName != "" {
-				groups[e.Link] = e.GroupName
+			if e.IsAI {
+				aiNodes[e.Link] = true
 			}
 		}
 	}
@@ -940,7 +941,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = subconv.FormatForUA(r.Header.Get("User-Agent"))
 	}
-	body, ctype, err := subconv.Render(format, links, groups, clashTpl, singboxTpl, subURL)
+	body, ctype, err := subconv.Render(format, links, aiNodes, clashTpl, singboxTpl, subURL)
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)
 		return
@@ -976,7 +977,7 @@ func (a *API) userHasNodeAccess(u *store.User) bool {
 	return len(gids) > 0
 }
 
-// collectEntries returns the user's nodes (link + group), cached ~30s to avoid
+// collectEntries returns the user's nodes (link + accessible group metadata), cached ~30s to avoid
 // recomputing on every client poll.
 func (a *API) collectEntries(u *store.User) []nodeEntry {
 	a.linkMu.Lock()
@@ -1023,6 +1024,7 @@ type nodeEntry struct {
 	Link      string
 	GroupID   int64
 	GroupName string
+	IsAI      bool
 	// Tag is the sing-box inbound tag for a self-built node, "" for an external
 	// (imported share-link) one. It is the join key to the inbound row, and so to
 	// the relay/egress chain behind the node.
@@ -1035,12 +1037,17 @@ type nodeEntry struct {
 // free group) means no nodes — including when the admin never created groups.
 func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	var out []nodeEntry
-	seen := map[string]bool{}
-	add := func(l string, gid int64, gname, tag string) {
-		if l != "" && !seen[l] {
-			seen[l] = true
-			out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname, Tag: tag})
+	seen := map[string]int{}
+	add := func(l string, gid int64, gname, tag string, isAI bool) {
+		if l == "" {
+			return
 		}
+		if idx, ok := seen[l]; ok {
+			out[idx].IsAI = out[idx].IsAI || isAI
+			return
+		}
+		seen[l] = len(out)
+		out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname, IsAI: isAI, Tag: tag})
 	}
 
 	groupIDs, _ := a.st.AccessibleGroupIDs(u)
@@ -1057,21 +1064,30 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	}
 
 	nodes, _ := a.st.NodesInGroupsTagged(groupIDs)
-	tagGroup := map[string]int64{} // self-built inbound tag → representative group
+	type tagMeta struct {
+		groupID int64
+		isAI    bool
+	}
+	tagGroup := map[string]tagMeta{} // self-built inbound tag → accessible metadata
 	for _, n := range nodes {
 		switch n.Type {
 		case "external":
-			add(n.ShareLink, n.GroupID, gname[n.GroupID], "")
+			add(n.ShareLink, n.GroupID, gname[n.GroupID], "", n.IsAI)
 		case "self_built":
 			if n.InboundTag != "" {
-				tagGroup[n.InboundTag] = n.GroupID
+				meta, exists := tagGroup[n.InboundTag]
+				if !exists || n.GroupID < meta.groupID {
+					meta.groupID = n.GroupID
+				}
+				meta.isAI = meta.isAI || n.IsAI
+				tagGroup[n.InboundTag] = meta
 			}
 		}
 	}
 	if len(tagGroup) > 0 {
 		for _, l := range a.selfBuiltLinks(u) {
-			if gid, ok := tagGroup[l.Tag]; ok {
-				add(l.Link, gid, gname[gid], l.Tag)
+			if meta, ok := tagGroup[l.Tag]; ok {
+				add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, meta.isAI)
 			}
 		}
 	}

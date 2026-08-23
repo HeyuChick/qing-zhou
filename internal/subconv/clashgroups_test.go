@@ -47,13 +47,16 @@ func nodeLinks() []string {
 	}
 }
 
-// The built-in template declares no proxy-groups, so the generated set must be
-// exactly what it always was.
-func TestClashDefaultTemplateGroupsUnchanged(t *testing.T) {
+func TestClashDefaultTemplateUsesFixedAndFallback(t *testing.T) {
 	doc := renderClashDoc(t, "", nodeLinks()...)
 	names := groupNames(doc)
-	if len(names) != 2 || names[0] != grpSelectClash || names[1] != grpAutoClash {
+	want := []string{grpSelectClash, grpFixedClash, grpFallbackClash}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Errorf("default groups = %v", names)
+	}
+	primary, _ := groupByName(doc, grpSelectClash)["proxies"].([]any)
+	if len(primary) != 3 || primary[0] != grpFixedClash || primary[1] != grpFallbackClash || primary[2] != "DIRECT" {
+		t.Errorf("primary policies = %v", primary)
 	}
 }
 
@@ -68,16 +71,20 @@ rules: []
 `
 	doc := renderClashDoc(t, tpl, nodeLinks()...)
 	names := groupNames(doc)
-	if len(names) < 3 || names[0] != grpSelectClash || names[1] != "我的分组" || names[2] != grpAutoClash {
-		t.Fatalf("groups not ordered primary/custom/auto: %v", names)
+	if len(names) < 4 || names[0] != grpSelectClash || names[1] != "我的分组" || names[2] != grpFixedClash {
+		t.Fatalf("groups not ordered primary/custom/policies: %v", names)
 	}
 	// The generated groups are still appended — the MATCH rule points at the
 	// primary selector, which must exist.
 	if groupByName(doc, grpSelectClash) == nil {
 		t.Error("generated primary selector was dropped")
 	}
-	if groupByName(doc, grpAutoClash) == nil {
-		t.Error("generated auto group was dropped")
+	if groupByName(doc, grpFallbackClash) == nil {
+		t.Error("generated fallback group was dropped")
+	}
+	custom, _ := groupByName(doc, "我的分组")["proxies"].([]any)
+	if len(custom) != 2 || custom[1] != grpFallbackClash {
+		t.Errorf("legacy auto reference was not migrated: %v", custom)
 	}
 }
 
@@ -133,7 +140,7 @@ rules: []
 	}
 	g := groupByName(doc, grpSelectClash)
 	proxies, _ := g["proxies"].([]any)
-	if len(proxies) == 0 || proxies[0] != grpAutoClash {
+	if len(proxies) == 0 || proxies[0] != grpFixedClash {
 		t.Errorf("built-in primary selector was overwritten: %v", proxies)
 	}
 	// The MATCH rule still resolves.
@@ -141,6 +148,41 @@ rules: []
 	last, _ := rules[len(rules)-1].(string)
 	if !strings.HasSuffix(last, grpSelectClash) {
 		t.Errorf("MATCH rule = %q", last)
+	}
+}
+
+func TestClashAIRouteIsAutomaticAndPrecedesDirectRules(t *testing.T) {
+	ps := ParseLinks(nodeLinks())
+	ps[0].AI = true
+	out, err := Clash(ps, `rules: ["GEOSITE,cn,DIRECT"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := map[string]any{}
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	primary, _ := groupByName(doc, grpSelectClash)["proxies"].([]any)
+	for _, policy := range primary {
+		if policy == grpAIClash {
+			t.Fatalf("AI guard leaked into the manual top-level selector: %v", primary)
+		}
+	}
+	ai := groupByName(doc, grpAIClash)
+	if ai == nil || ai["type"] != "fallback" {
+		t.Fatalf("AI fallback missing: %v", ai)
+	}
+	refs, _ := ai["proxies"].([]any)
+	if len(refs) != 2 || refs[0] != "A" || refs[1] != "B" {
+		t.Errorf("AI fallback order = %v, want AI nodes then ordinary fallback", refs)
+	}
+	rules, _ := doc["rules"].([]any)
+	if len(rules) < 2 || rules[0] != "RULE-SET,qingzhou-ai,"+grpAIClash || rules[1] != "GEOSITE,cn,DIRECT" {
+		t.Errorf("AI rule priority = %v", rules)
+	}
+	providers, _ := doc["rule-providers"].(map[string]any)
+	if providers["qingzhou-ai"] == nil {
+		t.Error("AI rule provider missing")
 	}
 }
 

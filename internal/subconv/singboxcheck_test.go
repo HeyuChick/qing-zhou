@@ -57,8 +57,10 @@ func TestRenderedConfigPassesSingboxCheck(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		tpl  string
+		ai   bool
 	}{
-		{"builtin default", ""},
+		{"builtin default", "", false},
+		{"builtin default with AI guard", "", true},
 		// The shape an install that predates this change still has stored.
 		{"legacy admin template, rewritten at render time", `{
 		  "dns": {
@@ -72,7 +74,7 @@ func TestRenderedConfigPassesSingboxCheck(t *testing.T) {
 		    "final": "remote"
 		  },
 		  "route": {"auto_detect_interface": true, "final": "proxy", "rules": [{"action": "sniff"}]}
-		}`},
+		}`, false},
 		{"custom platform selector", `{
 		  "outbounds": [
 		    {"type": "selector", "tag": "ai", "outbounds": ["proxy", "all"], "default": "proxy"}
@@ -82,10 +84,15 @@ func TestRenderedConfigPassesSingboxCheck(t *testing.T) {
 		    "final": "proxy",
 		    "rules": [{"domain_suffix": ["openai.com"], "outbound": "ai"}]
 		  }
-		}`},
+		}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := Singbox(ParseLinks(links), tc.tpl)
+			proxies := ParseLinks(links)
+			if tc.ai {
+				proxies[0].AI = true
+				proxies[1].AI = true // exercise the generated urltest form too
+			}
+			out, err := Singbox(proxies, tc.tpl)
 			if err != nil {
 				t.Fatalf("render: %v", err)
 			}
