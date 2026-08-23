@@ -1,3 +1,4 @@
+import { useConfigStore } from '@/stores/config'
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null || n <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
@@ -38,9 +39,15 @@ export function daysLeft(ts: number | null | undefined): number | null {
   return Math.ceil((ts * 1000 - Date.now()) / 86400000)
 }
 
-export function yuan(points: number | null | undefined, rate = 10): string {
+
+// Converts a points balance to its CNY equivalent. The exchange rate comes
+// from site config (points_per_cny, admin-editable); the old hardcoded default
+// of 10 ignored that setting, so the shop/dashboard showed wrong prices
+// whenever the admin changed the rate.
+export function yuan(points: number | null | undefined, rate?: number): string {
+  const r = rate ?? useConfigStore().config.points_per_cny ?? 10
   if (!points) return '≈¥0'
-  return '≈¥' + (points / rate).toFixed(points % rate ? 1 : 0)
+  return '≈¥' + (points / r).toFixed(points % r ? 1 : 0)
 }
 
 export function pct(used: number | null | undefined, total: number | null | undefined): number {
