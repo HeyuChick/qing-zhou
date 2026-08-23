@@ -476,6 +476,21 @@ const KindFree = "free"
 // admin grant and a signup grant can coexist instead of overwriting each other.
 const WelcomePackageID = -1
 
+// HasLivePaidPlan reports whether the user holds a purchased or admin-assigned
+// plan that is still in play (active or queued). The signup grant
+// (WelcomePackageID = -1) and the free-group bucket do not count — those are
+// minted for every provisioned account and must not punch a hole in the
+// email-verify subscription gate.
+func (s *Store) HasLivePaidPlan(userID int64) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM user_plans
+		WHERE user_id=? AND kind='plan' AND package_id>=0
+		  AND status IN ('active','queued')
+		  AND (expiry_at=0 OR expiry_at>?)`,
+		userID, time.Now().Unix()).Scan(&n)
+	return n > 0, err
+}
+
 // EnsureFreeBucket creates the user's unmetered free-group bucket if it has none
 // yet. Idempotent, so it doubles as the backfill for accounts provisioned before
 // the free bucket existed.
