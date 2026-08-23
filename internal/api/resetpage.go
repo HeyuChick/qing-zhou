@@ -57,7 +57,7 @@ func writeResetFormPage(w http.ResponseWriter, token string) {
 // %% escapes are literal percent signs for Fprintf; the single %s is the token.
 const resetPageHTML = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>重置密码 - 轻舟</title>
+<title>重置密码 - 黑羽短腿机场</title>
 <style>body{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:#f5f6f8;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}
 .card{background:#fff;padding:32px 28px;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.08);width:100%%;max-width:360px;box-sizing:border-box}
 h1{font-size:20px;margin:0 0 6px;color:#1f2937;text-align:center}
@@ -72,7 +72,7 @@ button:disabled{background:#9ca3af;cursor:not-allowed}
 a{color:#2563eb}</style></head>
 <body><div class="card">
 <h1>重置密码</h1>
-<p class="sub">为你的轻舟账号设置一个新密码。</p>
+<p class="sub">为你的黑羽短腿机场账号设置一个新密码。</p>
 <form id="f" autocomplete="off">
 <input type="hidden" id="tok" value="%s">
 <label for="p1">新密码（至少 6 位）</label>

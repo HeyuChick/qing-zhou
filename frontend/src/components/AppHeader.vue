@@ -1,7 +1,7 @@
 <template>
   <header class="app-header">
     <div class="header-left" @click="router.push('/')">
-      <div class="logo">舟</div>
+      <div class="logo">鸡</div>
       <span class="brand-name">{{ config.config.site_name || '轻舟' }}</span>
     </div>
     <div class="header-right">

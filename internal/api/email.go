@@ -40,7 +40,7 @@ func (a *API) currentMailer() *mailer.Mailer {
 		User:     get("QZ_SMTP_USER", "smtp_user"),
 		Pass:     get("QZ_SMTP_PASS", "smtp_pass"),
 		From:     first(get("QZ_SMTP_FROM", "smtp_from"), get("QZ_SMTP_USER", "smtp_user")),
-		FromName: first(get("QZ_SMTP_FROM_NAME", "smtp_from_name"), "轻舟"),
+		FromName: first(get("QZ_SMTP_FROM_NAME", "smtp_from_name"), "黑羽短腿机场"),
 		Security: get("QZ_SMTP_SECURITY", "smtp_security"),
 	}
 }
@@ -175,7 +175,7 @@ func (a *API) handleForgot(w http.ResponseWriter, r *http.Request) {
 		token, _ := idgen.RandToken(24)
 		if err := a.st.CreateEmailToken(u.ID, token, "reset", time.Hour); err == nil {
 			link := a.publicBase(r) + "/reset?token=" + token
-			a.deliver(email, "重置密码 - 轻舟", resetEmailHTML(link), link)
+			a.deliver(email, "重置密码 - 黑羽短腿机场", resetEmailHTML(link), link)
 		}
 	}
 	// Always succeed to avoid leaking which emails are registered.
@@ -288,7 +288,7 @@ func (a *API) handleBindEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	link := a.publicBase(r) + "/api/auth/verify?token=" + token
-	a.deliver(email, "验证你的邮箱 - 轻舟", verifyEmailHTML(link), link)
+	a.deliver(email, "验证你的邮箱 - 黑羽短腿机场", verifyEmailHTML(link), link)
 	ok(w, J{"message": "验证邮件已发送到该邮箱，请点击其中链接完成绑定"})
 }
 
@@ -325,7 +325,7 @@ func (a *API) handleResendVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	link := a.publicBase(r) + "/api/auth/verify?token=" + token
-	a.deliver(email, "验证你的邮箱 - 轻舟", verifyEmailHTML(link), link)
+	a.deliver(email, "验证你的邮箱 - 黑羽短腿机场", verifyEmailHTML(link), link)
 	ok(w, J{"message": "验证邮件已发送，请查收（含垃圾箱）"})
 }
 
@@ -343,8 +343,8 @@ func (a *API) handleTestSMTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "请填写收件邮箱")
 		return
 	}
-	if err := m.Send([]string{req.To}, "测试邮件 - 轻舟",
-		"<p>这是一封来自<strong>轻舟面板</strong>的测试邮件。收到它说明你的 SMTP 配置正确。</p>"); err != nil {
+	if err := m.Send([]string{req.To}, "测试邮件 - 黑羽短腿机场",
+		"<p>这是一封来自<strong>黑羽短腿机场</strong>的测试邮件。收到它说明你的 SMTP 配置正确。</p>"); err != nil {
 		fail(w, http.StatusBadGateway, "发送失败: "+err.Error())
 		return
 	}
@@ -358,7 +358,7 @@ func writeHTMLPage(w http.ResponseWriter, status int, title, body string) {
 	w.WriteHeader(status)
 	fmt.Fprintf(w, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>%s - 轻舟</title>
+<title>%s - 黑羽短腿机场</title>
 <style>body{font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif;background:#f5f6f8;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}
 .card{background:#fff;padding:32px 28px;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.08);max-width:360px;text-align:center}
 h1{font-size:20px;margin:0 0 12px;color:#1f2937}p{color:#4b5563;line-height:1.6;margin:0}</style></head>
@@ -367,7 +367,7 @@ h1{font-size:20px;margin:0 0 12px;color:#1f2937}p{color:#4b5563;line-height:1.6;
 
 func verifyEmailHTML(link string) string {
 	return fmt.Sprintf(`<div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto">
-<h2>欢迎注册轻舟</h2>
+<h2>欢迎注册黑羽短腿机场</h2>
 <p>请点击下面的按钮验证你的邮箱并激活账号（24 小时内有效）：</p>
 <p><a href="%s" style="display:inline-block;background:#2563eb;color:#fff;padding:10px 22px;border-radius:8px;text-decoration:none">验证邮箱</a></p>
 <p style="color:#6b7280;font-size:13px">如果按钮无法点击，请复制此链接到浏览器：<br>%s</p></div>`, link, link)

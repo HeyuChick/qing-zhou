@@ -3,7 +3,7 @@
     <!-- 桌面侧边栏 -->
     <aside v-if="!isMobile" class="app-sider">
       <div class="sidebar-brand" @click="router.push('/')">
-        <div class="sidebar-logo">舟</div>
+        <div class="sidebar-logo">鸡</div>
         <span class="brand-text">{{ config.config.site_name || '轻舟' }}</span>
       </div>
       <nav class="sidebar-menu">
@@ -15,7 +15,7 @@
     <n-drawer v-model:show="drawerShow" placement="left" :width="260" :block-scroll="true">
       <n-drawer-content :native-scrollbar="true" body-content-style="padding:0;">
         <div class="sidebar-brand" @click="goAndClose('/')">
-          <div class="sidebar-logo">舟</div>
+          <div class="sidebar-logo">鸡</div>
           <span class="brand-text">{{ config.config.site_name || '轻舟' }}</span>
         </div>
         <nav class="sidebar-menu">
