@@ -15,6 +15,7 @@ import (
 	"qingzhou/internal/mailer"
 	"qingzhou/internal/sbctl"
 	"qingzhou/internal/store"
+	"qingzhou/internal/telegram"
 	"qingzhou/internal/updater"
 )
 
@@ -47,8 +48,9 @@ type API struct {
 	// Per-Telegram-user command limiter. The bind token is already gated by
 	// resendRL; this one stops a bound chat from hammering /sub.
 	tgRL *rateLimiter
-	// Tests replace send; production leaves this nil and tgSend talks to Telegram.
-	tgSendFn func(chatID int64, html string)
+	// Tests replace Telegram I/O; production leaves these nil.
+	tgSendFn   func(chatID int64, html string) error
+	tgClientFn func(token string) *telegram.Client
 }
 
 // SetSbController attaches the native sing-box controller so admin changes to

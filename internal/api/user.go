@@ -110,6 +110,10 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		SubToken:     subToken,
 		TrafficLimit: traffic,
 		ExpiryAt:     expiryAt,
+		// A valid invite is a trusted admission path and remains exempt from
+		// open-registration email verification. This decision is persisted now;
+		// it is never inferred from a package bought later.
+		EmailGateExempt: mode == "code",
 	})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "创建用户失败")
@@ -512,6 +516,10 @@ func (a *API) handleUserProxies(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "未登录")
 		return
 	}
+	if !a.userMayReadNodes(u) {
+		fail(w, http.StatusForbidden, "请先完成邮箱验证")
+		return
+	}
 	proxies := a.st.BuildUserProxies(u, a.nodeHost())
 	if proxies == nil {
 		proxies = []store.UserProxy{}
@@ -527,6 +535,10 @@ func (a *API) handleUpdateUserProxy(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
 		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	if !a.userMayReadNodes(u) {
+		fail(w, http.StatusForbidden, "请先完成邮箱验证")
 		return
 	}
 	bucketID := int64(atoi(chi.URLParam(r, "bucket")))
@@ -561,6 +573,10 @@ func (a *API) handleUserProxyAccount(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "未登录")
 		return
 	}
+	if !a.userMayReadNodes(u) {
+		fail(w, http.StatusForbidden, "请先完成邮箱验证")
+		return
+	}
 	ok(w, a.st.ProxyAccountView(u))
 }
 
@@ -573,6 +589,10 @@ func (a *API) handleUpdateUserProxyAccount(w http.ResponseWriter, r *http.Reques
 	u := a.currentUser(r)
 	if u == nil {
 		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	if !a.userMayReadNodes(u) {
+		fail(w, http.StatusForbidden, "请先完成邮箱验证")
 		return
 	}
 	var req struct {
@@ -829,36 +849,17 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 // emptied the subscription of paying customers who still showed an active
 // plan in the panel (handleUserNodes never had this check).
 //
-// Only open-registration pending-verify accounts are blocked: no client, no
-// paid plan, no invite code. Admin-created users are pre-verified; invite-
-// code users are allowed to skip verify. Anyone already in service keeps
-// their nodes.
+// Only open-registration pending-verify accounts are blocked. Compatibility
+// for accounts that were already admitted before enforcement is persisted by
+// migration (and set explicitly by invite/admin admission), not inferred from
+// current plan/client state: otherwise an unverified new signup could buy a
+// package and turn that purchase into its own verification bypass.
 func (a *API) emailBlocksSub(u *store.User) bool {
-	if u == nil || u.Role == "admin" || u.EmailVerified {
+	if u == nil || u.Role == "admin" || u.EmailVerified || u.EmailGateExempt {
 		return false
 	}
 	verifyReq, _ := a.st.GetSettingBool("email_verify_required")
-	if !verifyReq {
-		return false
-	}
-	if u.ClientID.Valid {
-		return false
-	}
-	// Invite-code accounts are allowed to remain unverified. They may only
-	// have the signup grant / free group — no paid plan, no client yet if
-	// they registered while the old gate deferred provisioning.
-	if used, err := a.st.UserUsedRegCode(u.ID); err != nil {
-		return true
-	} else if used {
-		return false
-	}
-	paid, err := a.st.HasLivePaidPlan(u.ID)
-	if err != nil {
-		// Fail closed on a DB error: better an empty sub than leaking
-		// upstream credentials because we could not read entitlements.
-		return true
-	}
-	return !paid
+	return verifyReq
 }
 
 // ---- Public subscription endpoint ----
@@ -967,18 +968,12 @@ type linkCacheEntry struct {
 }
 
 // userHasNodeAccess reports whether the user is entitled to any self-built node,
-// i.e. whether their sing-box client should be enabled. No plan + no free group = no
-// access — unless grouping isn't set up at all (zero-config convenience).
-// This is the real enforcement: subscription filtering only changes what links
-// are shown; sing-box enable/inbound membership is what actually grants access.
+// i.e. whether their sing-box client should be enabled. No plan and no free
+// group means no access. A missing free group must not fall back to "every
+// inbound" — that used to dump the whole node list on anyone with a live quota.
 func (a *API) userHasNodeAccess(u *store.User) bool {
-	if gids, _ := a.st.AccessibleGroupIDs(u); len(gids) > 0 {
-		return true
-	}
-	if n, _ := a.st.GroupCount(); n == 0 {
-		return true
-	}
-	return false
+	gids, _ := a.st.AccessibleGroupIDs(u)
+	return len(gids) > 0
 }
 
 // collectEntries returns the user's nodes (link + group), cached ~30s to avoid
@@ -1036,8 +1031,8 @@ type nodeEntry struct {
 
 // computeNodeEntries builds the user's nodes with group attribution: external
 // nodes in their accessible groups (raw), plus self-built node links filtered to
-// the inbound tags in those groups. If no groups are configured at all, falls
-// back to all self-built nodes (zero-config). Deduped by link.
+// the inbound tags in those groups. No accessible group (no live plan and no
+// free group) means no nodes — including when the admin never created groups.
 func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	var out []nodeEntry
 	seen := map[string]bool{}
@@ -1051,14 +1046,6 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	groupIDs, _ := a.st.AccessibleGroupIDs(u)
 
 	if len(groupIDs) == 0 {
-		// User has no accessible group (no plan, no free group). Only fall back
-		// to all self-built nodes when grouping isn't set up at all (zero-config
-		// convenience). Once any group exists, "unassigned" means "no nodes".
-		if n, _ := a.st.GroupCount(); n == 0 {
-			for _, l := range a.selfBuiltLinks(u) {
-				add(l.Link, 0, "", l.Tag)
-			}
-		}
 		return out
 	}
 

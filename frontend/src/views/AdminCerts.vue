@@ -22,11 +22,11 @@
         <div v-for="c in certs" :key="c.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title">{{ c.name }}</span>
-            <n-tag :type="statusType(c)" size="tiny" bordered="false">{{ statusLabel(c) }}</n-tag>
+            <n-tag :type="statusType(c)" size="tiny" :bordered="false">{{ statusLabel(c) }}</n-tag>
           </div>
           <div class="lc-meta">
             <span class="kv">域名 <b>{{ c.domain || '—' }}</b></span>
-            <n-tag :type="sourceType(c.source)" size="tiny" bordered="false">{{ sourceLabel(c.source) }}</n-tag>
+            <n-tag :type="sourceType(c.source)" size="tiny" :bordered="false">{{ sourceLabel(c.source) }}</n-tag>
           </div>
           <div class="lc-meta">
             <span class="kv">到期 <b>{{ c.not_after ? fmtDateTime(c.not_after) : '—' }}</b></span>

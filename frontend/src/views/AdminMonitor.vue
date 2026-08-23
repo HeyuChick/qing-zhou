@@ -172,7 +172,7 @@
           <n-form-item label="位置"><n-input v-model:value="assetForm.location" /></n-form-item>
           <n-form-item label="规格"><n-input v-model:value="assetForm.spec" /></n-form-item>
           <n-form-item label="月费 (¥)"><n-input-number v-model:value="assetForm.price" :min="0" style="width:100%;" /></n-form-item>
-          <n-form-item label="到期时间"><n-input v-model:value="assetExpiry" type="datetime-local" style="width:100%;" /></n-form-item>
+          <n-form-item label="到期时间"><n-input v-model:value="assetExpiry" :input-props="{ type: 'datetime-local' }" style="width:100%;" /></n-form-item>
           <n-form-item label="备注"><n-input v-model:value="assetForm.notes" type="textarea" :rows="2" /></n-form-item>
           <n-form-item v-if="!assetServer.local" label="启用探针"><n-switch v-model:value="assetForm.probe_enabled" /></n-form-item>
         </n-form>
@@ -199,7 +199,7 @@ const servers = ref<any[]>([])
 const saving = ref(false)
 const loading = ref(false)
 const chartRefs = ref<Record<number, HTMLElement>>({})
-const chartInstances = ref<Record<number, echarts.ECharts>>({})
+const chartInstances = ref<Partial<Record<number, echarts.ECharts>>>({})
 const chartRange = ref<Record<number, string>>({})
 const chartLoaded = ref<Record<number, boolean>>({}) // 懒加载标记
 
@@ -533,7 +533,7 @@ onUnmounted(() => {
   if (refreshTimer) clearInterval(refreshTimer)
   if (resizeTimer) clearInterval(resizeTimer)
   window.removeEventListener('resize', onWinResize)
-  Object.values(chartInstances.value).forEach(c => c.dispose())
+  Object.values(chartInstances.value).forEach(c => c?.dispose())
   heatChart.value?.dispose()
 })
 </script>

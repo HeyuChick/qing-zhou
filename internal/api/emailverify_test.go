@@ -64,6 +64,26 @@ func getSub(a *API, token string) *httptest.ResponseRecorder {
 	return w
 }
 
+func TestUnverified_MixedProxyCredentialEndpointsAreBlocked(t *testing.T) {
+	a, _, uid := unverifiedFixture(t)
+	for _, tc := range []struct {
+		name, method, path, body string
+		handler                  http.HandlerFunc
+	}{
+		{"list", "GET", "/api/user/proxies", "", a.handleUserProxies},
+		{"account", "GET", "/api/user/proxy-account", "", a.handleUserProxyAccount},
+		{"update bucket", "PUT", "/api/user/proxies/1", `{}`, a.handleUpdateUserProxy},
+		{"update account", "PUT", "/api/user/proxy-account", `{}`, a.handleUpdateUserProxyAccount},
+	} {
+		w := httptest.NewRecorder()
+		r := asUser(uid, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+		tc.handler(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s = %d, want 403: %s", tc.name, w.Code, w.Body.String())
+		}
+	}
+}
+
 // The resend-verify button only works after login. Mail scanners also consume
 // the one-shot verify link, so the recovery path is "log in → 个人中心 → 重发".
 // Blocking login made that a dead end.
@@ -123,10 +143,9 @@ func TestUnverified_SubWithholdsExternalLinks(t *testing.T) {
 	}
 }
 
-// v0.2.53 emptied every unverified subscription. Paying customers who never
-// clicked the verify mail still had an active plan in the panel, but /sub
-// came back with 0 nodes. A live paid plan means they are already in service.
-func TestUnverified_SubPassesWhenUserHasPaidPlan(t *testing.T) {
+// Buying after the verification gate is enabled must not verify the buyer by
+// proxy. Legacy paid accounts are handled by a one-time migration bit instead.
+func TestUnverified_NewPurchaseDoesNotLiftGate(t *testing.T) {
 	a, st, uid := unverifiedFixture(t)
 	pkgID, err := st.CreatePackage(store.Package{
 		Type: "plan", Name: "月付", PricePoints: 100,
@@ -147,15 +166,15 @@ func TestUnverified_SubPassesWhenUserHasPaidPlan(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("sub = %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "可用节点</span><b>1</b>") {
-		t.Fatalf("unverified but paying account must still receive nodes:\n%s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "可用节点</span><b>0</b>") {
+		t.Fatalf("a new purchase must not bypass email verification:\n%s", w.Body.String())
 	}
 }
 
-// Same outage, other shape: they registered when verify was off (or were
-// provisioned before the gate), so they have a client identity but email_verified
-// is still 0 — CreateUser always writes 0 and nothing flips it later.
-func TestUnverified_SubPassesWhenAlreadyProvisioned(t *testing.T) {
+// Runtime client state is not an exemption: letting a newly provisioned identity
+// lift the gate recreates the same bypass as checking for a newly purchased plan.
+// Historical provisioned accounts are marked by migration before requests run.
+func TestUnverified_NewProvisioningDoesNotLiftGate(t *testing.T) {
 	a, st, uid := unverifiedFixture(t)
 	if err := st.SetUserClient(uid, 0, "qz_unverified", "uuid", "secret"); err != nil {
 		t.Fatal(err)
@@ -165,14 +184,47 @@ func TestUnverified_SubPassesWhenAlreadyProvisioned(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("sub = %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "可用节点</span><b>1</b>") {
-		t.Fatalf("already-provisioned unverified account must still receive nodes:\n%s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "可用节点</span><b>0</b>") {
+		t.Fatalf("new provisioning state must not bypass email verification:\n%s", w.Body.String())
 	}
 }
 
 // The signup grant is minted for every provisioned account and must not be
 // mistaken for a paid plan — otherwise a brand-new unverified signup that
 // somehow got a welcome bucket would punch through the leak gate.
+func TestUnverified_NodeInventoryAndPingRoutesAreGated(t *testing.T) {
+	a, _, _ := unverifiedFixture(t)
+	login := loginAs(a, "unverified", "secret1")
+	if login.Code != http.StatusOK {
+		t.Fatalf("login = %d %s", login.Code, login.Body.String())
+	}
+	var authResp struct {
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &authResp); err != nil || authResp.Data.Token == "" {
+		t.Fatalf("decode login token: %v %s", err, login.Body.String())
+	}
+
+	// Exercise the registered routes, not the handlers directly. This locks both
+	// /nodes and /nodes/ping behind the gate even if router wiring changes later.
+	for _, path := range []string{"/api/user/nodes", "/api/user/nodes/ping"} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", path, nil)
+			r.Header.Set("Authorization", "Bearer "+authResp.Data.Token)
+			a.Router().ServeHTTP(w, r)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("%s = %d %s, want 403", path, w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "upstream.example") {
+				t.Fatalf("%s leaked node coordinates: %s", path, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestUnverified_WelcomeGrantDoesNotLiftTheGate(t *testing.T) {
 	a, st, uid := unverifiedFixture(t)
 	if err := st.EnsureWelcomeBucket(uid, "unverified", 10<<30, time.Now().Unix()+86400); err != nil {

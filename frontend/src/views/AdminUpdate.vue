@@ -8,14 +8,14 @@
         <div class="ver-card">
           <div class="ver-label">当前版本</div>
           <div class="ver-value">{{ info?.current || '—' }}</div>
-          <n-tag v-if="info?.dev" type="warning" size="tiny" bordered="false">开发构建</n-tag>
+          <n-tag v-if="info?.dev" type="warning" size="tiny" :bordered="false">开发构建</n-tag>
         </div>
         <div class="ver-arrow">→</div>
         <div class="ver-card" :class="{ hot: info?.update_available }">
           <div class="ver-label">最新版本</div>
           <div class="ver-value">{{ info?.latest || '—' }}</div>
-          <n-tag v-if="info && info.update_available" type="success" size="tiny" bordered="false">可更新</n-tag>
-          <n-tag v-else-if="info" type="default" size="tiny" bordered="false">已是最新</n-tag>
+          <n-tag v-if="info && info.update_available" type="success" size="tiny" :bordered="false">可更新</n-tag>
+          <n-tag v-else-if="info" type="default" size="tiny" :bordered="false">已是最新</n-tag>
         </div>
       </div>
 
@@ -47,8 +47,8 @@
       <div class="rb-box">
         <div class="rb-head">
           <span class="rb-title">回滚到上一个版本</span>
-          <n-tag v-if="rollback?.available" type="success" size="tiny" bordered="false">可用</n-tag>
-          <n-tag v-else type="default" size="tiny" bordered="false">不可用</n-tag>
+          <n-tag v-if="rollback?.available" type="success" size="tiny" :bordered="false">可用</n-tag>
+          <n-tag v-else type="default" size="tiny" :bordered="false">不可用</n-tag>
         </div>
         <p class="rb-desc">
           <template v-if="rollback?.available">

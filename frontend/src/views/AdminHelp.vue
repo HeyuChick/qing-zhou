@@ -10,7 +10,7 @@
         <div v-for="d in docs" :key="d.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title">{{ d.title || '—' }}</span>
-            <n-tag :type="d.published ? 'success' : 'default'" size="tiny" bordered="false">{{ d.published ? '已发布' : '草稿' }}</n-tag>
+            <n-tag :type="d.published ? 'success' : 'default'" size="tiny" :bordered="false">{{ d.published ? '已发布' : '草稿' }}</n-tag>
           </div>
           <div class="lc-meta">
             <span class="kv">排序 <b>{{ d.sort_order ?? 0 }}</b></span>

@@ -45,8 +45,8 @@
               <div class="uc-name-row">
                 <span class="uc-name" :title="u.username">{{ u.username }}</span>
                 <span v-if="u.online" class="dot-live" title="在线" />
-                <n-tag v-if="u.status === 'banned'" type="error" size="tiny" bordered="false">封禁</n-tag>
-                <n-tag v-if="u.role === 'admin'" type="warning" size="tiny" bordered="false">管理员</n-tag>
+                <n-tag v-if="u.status === 'banned'" type="error" size="tiny" :bordered="false">封禁</n-tag>
+                <n-tag v-if="u.role === 'admin'" type="warning" size="tiny" :bordered="false">管理员</n-tag>
               </div>
               <div class="uc-sub" :title="u.email || ''">
                 {{ u.email || '未绑定邮箱' }} · {{ u.online ? '在线' : timeAgo(u.last_online_at) }}
@@ -148,8 +148,8 @@
             <button class="grp-head" type="button" @click="toggleGroup(g.key)">
               <span class="chev" :class="{ open: openGroups.has(g.key) }" aria-hidden="true">›</span>
               <span class="grp-name" :title="g.name">{{ g.name }}</span>
-              <n-tag v-if="g.kind === 'pool'" size="tiny" type="info" bordered="false">流量包</n-tag>
-              <n-tag v-else-if="g.items.length > 1" size="tiny" bordered="false">{{ g.items.length }} 份</n-tag>
+              <n-tag v-if="g.kind === 'pool'" size="tiny" type="info" :bordered="false">流量包</n-tag>
+              <n-tag v-else-if="g.items.length > 1" size="tiny" :bordered="false">{{ g.items.length }} 份</n-tag>
               <span class="grp-chips">
                 <i v-if="g.active" class="chip ok">生效 {{ g.active }}</i>
                 <i v-if="g.queued" class="chip q">排队 {{ g.queued }}</i>
@@ -255,7 +255,7 @@
         <template v-if="manualEnabled">
           <n-form-item label="不限流量"><n-switch v-model:value="unlimitedTraffic" /></n-form-item>
           <n-form-item v-if="!unlimitedTraffic" label="流量 (GB)"><n-input-number v-model:value="editTrafficGB" :min="0" style="width:100%;" /></n-form-item>
-          <n-form-item label="到期时间"><n-input v-model:value="editExpiry" type="datetime-local" style="width:100%;" /></n-form-item>
+          <n-form-item label="到期时间"><n-input v-model:value="editExpiry" :input-props="{ type: 'datetime-local' }" style="width:100%;" /></n-form-item>
         </template>
         <n-form-item label="用户组">
           <div style="width:100%;">
@@ -293,7 +293,7 @@
           <div v-for="o in userOrders" :key="o.id" class="list-card">
             <div class="lc-head">
               <span class="lc-title">{{ o.name || '—' }}</span>
-              <n-tag :type="o.status === 'success' ? 'success' : 'warning'" size="tiny" bordered="false">{{ o.status === 'success' ? '成功' : '已退款' }}</n-tag>
+              <n-tag :type="o.status === 'success' ? 'success' : 'warning'" size="tiny" :bordered="false">{{ o.status === 'success' ? '成功' : '已退款' }}</n-tag>
             </div>
             <div class="lc-meta">
               <span class="kv">积分 <b>{{ o.price_points }}</b></span>

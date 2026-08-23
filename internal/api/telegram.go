@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -36,10 +37,15 @@ func (a *API) telegramToken() string {
 
 func (a *API) telegramConfigured() bool { return a.telegramToken() != "" }
 
-func (a *API) telegramClient() *telegram.Client {
-	tok := a.telegramToken()
+func (a *API) telegramClient() *telegram.Client { return a.telegramClientFor(a.telegramToken()) }
+
+func (a *API) telegramClientFor(tok string) *telegram.Client {
+	tok = strings.TrimSpace(tok)
 	if tok == "" {
 		return nil
+	}
+	if a.tgClientFn != nil {
+		return a.tgClientFn(tok)
 	}
 	return &telegram.Client{Token: tok}
 }
@@ -62,8 +68,9 @@ func (a *API) refreshTelegramUsername(ctx context.Context, c *telegram.Client) (
 	if err != nil {
 		return "", err
 	}
-	name := strings.TrimSpace(me.Username)
-	if name != "" && os.Getenv("QZ_TELEGRAM_BOT_USERNAME") == "" {
+	name := strings.TrimPrefix(strings.TrimSpace(me.Username), "@")
+	if os.Getenv("QZ_TELEGRAM_BOT_USERNAME") == "" {
+		// Also clear an old cached name when a changed token reports no username.
 		_ = a.st.SetSetting("telegram_bot_username", name)
 	}
 	return name, nil
@@ -132,7 +139,10 @@ func (a *API) handleTelegramBindToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bot := a.telegramUsername()
-	if bot == "" {
+	// A stored token can change independently of the cached username. Resolve
+	// getMe before minting every link so a newly pasted token never produces a
+	// deep link to the previous bot. A host-pinned username remains authoritative.
+	if os.Getenv("QZ_TELEGRAM_BOT_USERNAME") == "" {
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		name, err := a.refreshTelegramUsername(ctx, a.telegramClient())
 		cancel()
@@ -214,17 +224,34 @@ func (a *API) handleTelegramNotifyPrefs(w http.ResponseWriter, r *http.Request) 
 	ok(w, J{"notify_expiry": expiry, "notify_traffic": traffic})
 }
 
-// POST /api/admin/settings/test-telegram — getMe, cache username, and if the
-// admin themselves is bound, drop a test message in that chat.
+// POST /api/admin/settings/test-telegram — getMe with an optional unsaved
+// candidate token and, if the admin is bound, drop a test message in that chat.
 func (a *API) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
-	c := a.telegramClient()
+	var req struct {
+		Token string `json:"token"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			fail(w, http.StatusBadRequest, "请求格式错误")
+			return
+		}
+	}
+	token := strings.TrimSpace(req.Token)
+	if token == "" || token == "***" {
+		token = a.telegramToken()
+	}
+	c := a.telegramClientFor(token)
 	if c == nil {
 		fail(w, http.StatusBadRequest, "尚未填写 Bot Token")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	name, err := a.refreshTelegramUsername(ctx, c)
+	me, err := telegram.GetMe(ctx, c)
+	name := ""
+	if me != nil {
+		name = strings.TrimPrefix(strings.TrimSpace(me.Username), "@")
+	}
 	if err != nil {
 		fail(w, http.StatusBadGateway, "连接失败: "+err.Error())
 		return
@@ -379,23 +406,23 @@ func (a *API) tgCmdStart(msg *telegram.Message, token string) {
 		a.tgSend(msg.Chat.ID, "请先在「"+telegram.Escape(a.siteName())+"」面板的<b>账户设置</b>里点击绑定，再打开机器人。")
 		return
 	}
-	userID, ok, err := a.st.UseTelegramBindToken(token)
-	if err != nil || !ok {
+	userID, ok, err := a.st.BindTelegramWithToken(token, from.ID, msg.Chat.ID, from.Username, from.FirstName)
+	if errors.Is(err, store.ErrTelegramTaken) {
+		a.tgSend(msg.Chat.ID, "这个 Telegram 已绑定其他账号。请先 /unbind 解绑，或在原账号的面板里解绑。")
+		return
+	}
+	if err != nil {
+		log.Printf("telegram: bind token: %v", err)
+		a.tgSend(msg.Chat.ID, "绑定失败，请稍后重试。")
+		return
+	}
+	if !ok {
 		a.tgSend(msg.Chat.ID, "绑定码无效或已过期，请回面板重新生成。")
 		return
 	}
 	u, _ := a.st.UserByID(userID)
 	if u == nil {
 		a.tgSend(msg.Chat.ID, "对应账号已不存在。")
-		return
-	}
-	if err := a.st.BindTelegram(userID, from.ID, msg.Chat.ID, from.Username, from.FirstName); err != nil {
-		if errors.Is(err, store.ErrTelegramTaken) {
-			a.tgSend(msg.Chat.ID, "这个 Telegram 已绑定其他账号。请先 /unbind 解绑，或在原账号的面板里解绑。")
-			return
-		}
-		log.Printf("telegram: bind user %d: %v", userID, err)
-		a.tgSend(msg.Chat.ID, "绑定失败，请稍后重试。")
 		return
 	}
 	a.tgSend(msg.Chat.ID, a.renderTGBound(u.Username))
@@ -536,18 +563,19 @@ func (a *API) subURLAt(u *store.User) string {
 	return base + "/sub/" + u.SubToken.String
 }
 
-func (a *API) tgSend(chatID int64, html string) {
+func (a *API) tgSend(chatID int64, html string) error {
 	if a.tgSendFn != nil {
-		a.tgSendFn(chatID, html)
-		return
+		return a.tgSendFn(chatID, html)
 	}
 	c := a.telegramClient()
 	if c == nil {
-		return
+		return errors.New("telegram bot not configured")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	if err := telegram.SendHTML(ctx, c, chatID, html); err != nil {
 		log.Printf("telegram: send to %d: %v", chatID, err)
+		return err
 	}
+	return nil
 }

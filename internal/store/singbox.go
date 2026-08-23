@@ -1079,9 +1079,9 @@ func firstShortID(v interface{}) string {
 // user's other plans keep working. The owning bucket's identity (its own stats
 // key) goes into the inbound, giving sing-box per-bucket traffic accounting.
 // Banned users are excluded; admins holding an active plan are provisioned like
-// any other user (so an admin account can also be used as a subscription). With
-// no node groups configured at all it falls back to "every user's first active
-// bucket in every inbound" (zero-config).
+// any other user (so an admin account can also be used as a subscription).
+// No node groups and no free group means nobody is injected into any inbound —
+// a missing free group must not become "every user owns every node".
 // inboundUser identifies one emitted user within one inbound, for deduplication.
 type inboundUser struct{ tag, name string }
 
@@ -1301,14 +1301,11 @@ func orderBuckets(bs []*Bucket, now, freeGroup int64, planGroups func(int64) []i
 }
 
 // pickOwner returns the highest-priority active bucket that covers the inbound's
-// node groups, or nil. With no groups configured (zero-config) the first active
-// bucket owns every inbound.
+// node groups, or nil. No groups configured means no owner — do not hand the
+// inbound to the first active bucket.
 func pickOwner(ord []ownedBucket, ibGroups []int64, groupCount int) *Bucket {
-	if len(ord) == 0 {
+	if len(ord) == 0 || groupCount == 0 {
 		return nil
-	}
-	if groupCount == 0 {
-		return ord[0].b
 	}
 	for _, ob := range ord {
 		for _, g := range ibGroups {
@@ -1347,8 +1344,8 @@ func (s *Store) userBucketOrder(userID, now int64) ([]ownedBucket, int, error) {
 // UserGroupOwners maps each node group to the bucket that grants this user
 // access to it. Same assignment as UserOwnedInbounds, keyed by group instead of
 // inbound tag — external nodes carry a group id but no inbound tag, so they have
-// nothing to join on there. Key 0 additionally holds the zero-config owner (no
-// groups configured at all, so every node falls to the first bucket).
+// nothing to join on there. No groups configured yields an empty map: there is
+// no implicit "own everything" owner.
 func (s *Store) UserGroupOwners(userID, now int64) (map[int64]*Bucket, error) {
 	ord, groupCount, err := s.userBucketOrder(userID, now)
 	if err != nil {
@@ -1356,9 +1353,6 @@ func (s *Store) UserGroupOwners(userID, now int64) (map[int64]*Bucket, error) {
 	}
 	out := map[int64]*Bucket{}
 	if groupCount == 0 {
-		if b := pickOwner(ord, nil, 0); b != nil {
-			out[0] = b
-		}
 		return out, nil
 	}
 	groups, err := s.ListGroups()

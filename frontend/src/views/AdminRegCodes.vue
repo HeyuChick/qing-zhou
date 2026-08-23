@@ -32,7 +32,7 @@
         <div v-for="r in codes" :key="r.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title" style="font-family:monospace;font-size:12.5px;">{{ r.code }}</span>
-            <n-tag :type="regStatusType(r)" size="tiny" bordered="false">{{ regStatusLabel(r) }}</n-tag>
+            <n-tag :type="regStatusType(r)" size="tiny" :bordered="false">{{ regStatusLabel(r) }}</n-tag>
           </div>
           <div class="lc-meta">
             <span class="kv">已用/上限 <b>{{ r.used || 0 }} / {{ r.max_uses || '∞' }}</b></span>

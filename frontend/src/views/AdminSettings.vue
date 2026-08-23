@@ -396,7 +396,7 @@ const tgSample: Record<string, string> = {
 }
 const tgTplPreview = computed(() => {
   const src = (currentTgTplBody.value || currentTgTpl.value?.body || '').trim() || (currentTgTpl.value?.body || '')
-  return src.replace(/\{\{([a-z0-9_]+)\}\}/g, (_, k) => tgSample[k] ?? `{{${k}}}`)
+  return src.replace(/\{\{([a-z0-9_]+)\}\}/g, (_: string, k: string) => tgSample[k] ?? `{{${k}}}`)
 })
 function loadTgTplDefault() {
   const body = currentTgTpl.value?.body
@@ -554,7 +554,9 @@ async function handleTestSMTP() {
 async function handleTestTelegram() {
   testingTg.value = true
   try {
-    const data = await apiPost<{ username?: string; sent?: boolean }>('/api/admin/settings/test-telegram')
+    const data = await apiPost<{ username?: string; sent?: boolean }>('/api/admin/settings/test-telegram', {
+      token: form.telegram_bot_token,
+    })
     if (data?.username) form.telegram_bot_username = data.username
     message.success(data?.sent ? `Bot @${data.username || ''} 正常，测试消息已发送` : `Bot @${data?.username || ''} 连接正常`)
   } catch (e: any) { message.error(e.message) } finally { testingTg.value = false }

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // openMigrated returns a Store on a throwaway file, migrated once.
@@ -70,6 +71,143 @@ func TestMigrate_Idempotent(t *testing.T) {
 	st := openMigrated(t)
 	if err := st.Migrate(); err != nil {
 		t.Fatalf("second migrate: %v", err)
+	}
+}
+
+func TestMigrate_FreshDBDoesNotBackfillEmailGateExemption(t *testing.T) {
+	st := openMigrated(t)
+	uid, err := st.CreateUser(NewUser{Username: "freshdb", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgID, err := st.CreatePackage(Package{Type: "plan", Name: "fresh plan", DurationDays: 30, Stock: -1, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, _ := st.GetPackage(pkgID)
+	if _, err := st.AssignPackage(uid, pkg, 0, func(*User, bool) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil { // fresh schema already had the column
+		t.Fatal(err)
+	}
+	u, _ := st.UserByID(uid)
+	if u == nil || u.EmailGateExempt {
+		t.Fatal("fresh DB user was mistaken for a legacy exemption")
+	}
+}
+
+func TestMigrate_EmailGateExemptionOnlyWhenColumnAdded(t *testing.T) {
+	st := openMigrated(t)
+	legacy, err := st.CreateUser(NewUser{Username: "legacy", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE users SET client_id=7 WHERE id=?`, legacy); err != nil {
+		t.Fatal(err)
+	}
+	// Rewind only this feature: this is the exact pre-upgrade shape. The next
+	// Migrate must both add the column and classify rows that already existed.
+	if _, err := st.db.Exec(`ALTER TABLE users DROP COLUMN email_gate_exempt`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := st.UserByID(legacy)
+	if u == nil || !u.EmailGateExempt {
+		t.Fatal("historical provisioned account was not preserved when column was added")
+	}
+
+	// This account and purchase happen after the column exists. A normal restart
+	// runs Migrate again, but must not reinterpret the now-paid user as historical.
+	fresh, err := st.CreateUser(NewUser{Username: "fresh", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgID, err := st.CreatePackage(Package{Type: "plan", Name: "新购套餐", DurationDays: 30, Stock: -1, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, _ := st.GetPackage(pkgID)
+	if _, err := st.AssignPackage(fresh, pkg, 0, func(*User, bool) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil { // restart
+		t.Fatal(err)
+	}
+	u, _ = st.UserByID(fresh)
+	if u == nil || u.EmailGateExempt {
+		t.Fatal("new unverified buyer became exempt after restart")
+	}
+}
+
+func TestMigrate_ZeroConfigPreservesOnlyHistoricalPaidPackages(t *testing.T) {
+	st := openMigrated(t)
+	paid, err := st.CreatePackage(Package{Type: "plan", Name: "旧套餐", DurationDays: 30, Stock: -1, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, err := st.CreateUser(NewUser{Username: "paid", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := st.GetPackage(paid)
+	if _, err := st.AssignPackage(uid, p, 0, func(*User, bool) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveSbInbound(&SbInbound{Type: "vless", Tag: "legacy-in", Listen: "::", ListenPort: 443, Options: "{}", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Historical zero-config installs did not need a nodes row: the old fallback
+	// walked sb_inbounds directly. Also keep an external node around to prove the
+	// compatibility group does not broaden the old self-built-only grant.
+	externalID, err := st.CreateNode(Node{Type: "external", Name: "不应迁移", ShareLink: "ss://YWVzLTEyOC1nY206cGFzcw@example.com:8388", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`DELETE FROM settings WHERE key='migrated_zero_config_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	byTag, err := st.BuildUsersByTag(time.Now().Unix())
+	if err != nil || len(byTag["legacy-in"]) == 0 {
+		t.Fatalf("historical paid user lost zero-config access: %v %#v", err, byTag)
+	}
+	var externalMembership int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM node_group_members WHERE node_id=?`, externalID).Scan(&externalMembership); err != nil {
+		t.Fatal(err)
+	}
+	if externalMembership != 0 {
+		t.Fatal("zero-config migration broadened legacy access to an external node")
+	}
+
+	bare, err := st.CreateUser(NewUser{Username: "bare", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWelcomeBucket(bare, "bare", 1<<30, time.Now().Unix()+86400); err != nil {
+		t.Fatal(err)
+	}
+	gids, err := st.AccessibleGroupIDs(&User{ID: bare})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gids) != 0 {
+		t.Fatalf("plan-less user inherited migrated all-node group: %v", gids)
+	}
+
+	newPkg, err := st.CreatePackage(Package{Type: "plan", Name: "新套餐", DurationDays: 30, Stock: -1, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if gs, _ := st.PlanGroupIDs(newPkg); len(gs) != 0 {
+		t.Fatalf("package created after migration silently inherited all nodes: %v", gs)
 	}
 }
 

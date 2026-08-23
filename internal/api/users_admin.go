@@ -225,7 +225,7 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	id, err := a.st.CreateUser(store.NewUser{
 		Username: req.Username, Email: req.Email, PasswordHash: hash,
 		SubToken: subToken, TrafficLimit: traffic, ExpiryAt: expiryAt,
-		Remark: req.Remark,
+		Remark: req.Remark, EmailGateExempt: true,
 	})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "创建用户失败")

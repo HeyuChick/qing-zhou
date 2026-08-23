@@ -54,7 +54,7 @@ func TestAdminAssignPlan_AdminTargetIsAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Bind the plan to a node group so the entitlement assertion below is real:
-	// with no groups configured at all, access falls through to zero-config yes.
+	// a missing free group no longer falls through to "every node".
 	gid, err := st.CreateGroup(store.NodeGroup{Name: "香港"})
 	if err != nil {
 		t.Fatal(err)

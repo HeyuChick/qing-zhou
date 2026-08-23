@@ -10,13 +10,13 @@
         <div v-for="(p, idx) in packages" :key="p.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title">{{ p.name || '—' }}</span>
-            <n-tag v-if="p.user_group_ids?.length" type="warning" size="tiny" bordered="false" :title="userGroupNames(p.user_group_ids)">
+            <n-tag v-if="p.user_group_ids?.length" type="warning" size="tiny" :bordered="false" :title="userGroupNames(p.user_group_ids)">
               专属
             </n-tag>
-            <n-tag :type="p.enabled !== false ? 'success' : 'default'" size="tiny" bordered="false">{{ p.enabled !== false ? '上架' : '下架' }}</n-tag>
+            <n-tag :type="p.enabled !== false ? 'success' : 'default'" size="tiny" :bordered="false">{{ p.enabled !== false ? '上架' : '下架' }}</n-tag>
           </div>
           <div class="lc-meta">
-            <span class="kv"><n-tag :type="p.type === 'traffic' ? 'info' : 'success'" size="tiny" bordered="false">{{ p.type === 'traffic' ? '流量' : '计划' }}</n-tag></span>
+            <span class="kv"><n-tag :type="p.type === 'traffic' ? 'info' : 'success'" size="tiny" :bordered="false">{{ p.type === 'traffic' ? '流量' : '计划' }}</n-tag></span>
             <span class="kv">积分 <b>{{ p.price_points }}</b></span>
             <span class="kv">库存 <b>{{ p.stock < 0 ? '不限' : p.stock }}</b></span>
             <span class="kv">订阅 <b>{{ p.subscribers || 0 }}</b></span>

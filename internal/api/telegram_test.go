@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,8 +24,9 @@ func newTelegramAPI(t *testing.T) (*API, *store.Store, *[]tgMsg) {
 	t.Helper()
 	a, st := newUserEditAPI(t)
 	inbox := &[]tgMsg{}
-	a.tgSendFn = func(chatID int64, html string) {
+	a.tgSendFn = func(chatID int64, html string) error {
 		*inbox = append(*inbox, tgMsg{chat: chatID, html: html})
+		return nil
 	}
 	if err := st.SetSetting("telegram_bot_token", "TEST:token"); err != nil {
 		t.Fatal(err)
@@ -39,6 +42,18 @@ func newTelegramAPI(t *testing.T) (*API, *store.Store, *[]tgMsg) {
 
 func asUser(uid int64, r *http.Request) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), ctxUserID, uid))
+}
+
+func telegramTestClient(t *testing.T, token, username string) *telegram.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bot"+token+"/getMe" {
+			t.Errorf("telegram path = %q", r.URL.Path)
+		}
+		fmt.Fprintf(w, `{"ok":true,"result":{"id":1,"is_bot":true,"username":%q}}`, username)
+	}))
+	t.Cleanup(srv.Close)
+	return &telegram.Client{Token: token, APIBase: srv.URL, HTTP: srv.Client()}
 }
 
 func insertPlan(t *testing.T, st *store.Store, userID int64, name string, limit, used, expiry int64) {
@@ -95,6 +110,9 @@ func TestTelegramBindToken_RequiresBot(t *testing.T) {
 
 func TestTelegramBindToken_ReturnsDeepLink(t *testing.T) {
 	a, st, _ := newTelegramAPI(t)
+	a.tgClientFn = func(token string) *telegram.Client {
+		return telegramTestClient(t, token, "qingzhou_bot")
+	}
 	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x"})
 	if err != nil {
 		t.Fatal(err)
@@ -115,6 +133,55 @@ func TestTelegramBindToken_ReturnsDeepLink(t *testing.T) {
 	}
 	if resp.Data.Bot != "qingzhou_bot" || !strings.HasPrefix(resp.Data.URL, "https://t.me/qingzhou_bot?start=") {
 		t.Fatalf("link = %+v", resp.Data)
+	}
+}
+
+func TestTelegramTestConnectionUsesCandidateToken(t *testing.T) {
+	a, st, _ := newTelegramAPI(t)
+	var gotToken string
+	a.tgClientFn = func(token string) *telegram.Client {
+		gotToken = token
+		return telegramTestClient(t, token, "candidate_bot")
+	}
+	body := strings.NewReader(`{"token":"CANDIDATE:token"}`)
+	w := httptest.NewRecorder()
+	a.handleTestTelegram(w, httptest.NewRequest("POST", "/api/admin/settings/test-telegram", body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if gotToken != "CANDIDATE:token" {
+		t.Fatalf("tested token %q", gotToken)
+	}
+	if saved, _ := st.GetSetting("telegram_bot_token"); saved != "TEST:token" {
+		t.Fatalf("candidate persisted as %q", saved)
+	}
+	if cached, _ := st.GetSetting("telegram_bot_username"); cached != "qingzhou_bot" {
+		t.Fatalf("candidate username cached as %q", cached)
+	}
+}
+
+func TestTelegramBindTokenRefreshesUsernameForCurrentToken(t *testing.T) {
+	a, st, _ := newTelegramAPI(t)
+	if err := st.SetSetting("telegram_bot_token", "NEW:token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("telegram_bot_username", "old_bot"); err != nil {
+		t.Fatal(err)
+	}
+	a.tgClientFn = func(token string) *telegram.Client {
+		if token != "NEW:token" {
+			t.Fatalf("token = %q", token)
+		}
+		return telegramTestClient(t, token, "new_bot")
+	}
+	uid, err := st.CreateUser(store.NewUser{Username: "fresh", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	a.handleTelegramBindToken(w, asUser(uid, httptest.NewRequest("POST", "/api/user/telegram/bind-token", nil)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "https://t.me/new_bot?start=") {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
 	}
 }
 
@@ -268,6 +335,14 @@ func TestTelegramStartTakenChat(t *testing.T) {
 	if len(*inbox) == 0 || !strings.Contains((*inbox)[0].html, "已绑定其他账号") {
 		t.Fatalf("taken chat reply = %#v", *inbox)
 	}
+	// The failed bind and token consumption are one transaction: retrying with
+	// a free Telegram account must still work.
+	a.handleTelegramUpdate(telegram.Update{UpdateID: 2, Message: &telegram.Message{
+		From: &telegram.User{ID: 22}, Chat: telegram.Chat{ID: 22, Type: "private"}, Text: "/start bobtok",
+	}})
+	if got, _ := st.TelegramBindByUser(bob); got == nil || got.TelegramID != 22 {
+		t.Fatalf("token was consumed by failed bind: %+v", got)
+	}
 }
 
 func TestNotifyExpirySoonOnce(t *testing.T) {
@@ -290,6 +365,33 @@ func TestNotifyExpirySoonOnce(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("expiry_soon sent %d times, want 1: %#v", n, *inbox)
+	}
+}
+
+func TestNotifySendFailureCanRetry(t *testing.T) {
+	a, st, inbox := newTelegramAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "retry", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindTelegram(uid, 121, 121, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	insertPlan(t, st, uid, "月付", 10<<30, 1<<30, time.Now().Unix()+2*86400)
+	attempts := 0
+	a.tgSendFn = func(chatID int64, html string) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("temporary")
+		}
+		*inbox = append(*inbox, tgMsg{chat: chatID, html: html})
+		return nil
+	}
+	a.sweepTelegramNotifies()
+	a.sweepTelegramNotifies()
+	a.sweepTelegramNotifies()
+	if attempts != 2 || len(*inbox) != 1 {
+		t.Fatalf("attempts=%d delivered=%d", attempts, len(*inbox))
 	}
 }
 
@@ -390,6 +492,50 @@ func TestNotifyPrefsCanSilence(t *testing.T) {
 	a.sweepTelegramNotifies()
 	if len(*inbox) != 0 {
 		t.Fatalf("silenced user was notified: %#v", *inbox)
+	}
+}
+
+func TestNotifyTrafficMutedSweepMaintainsRecoveryState(t *testing.T) {
+	a, st, inbox := newTelegramAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "muted", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindTelegram(uid, 161, 161, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	insertPlan(t, st, uid, "计量", 100<<30, 90<<30, time.Now().Unix()+30*86400)
+	a.sweepTelegramNotifies()
+	if err := st.SetTelegramNotify(uid, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(`UPDATE user_plans SET used_up=? WHERE user_id=?`, 10<<30, uid); err != nil {
+		t.Fatal(err)
+	}
+	a.sweepTelegramNotifies()
+	var claims int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM user_notify_log WHERE user_id=? AND kind=?`, uid, notifyKindTrafficLow).Scan(&claims); err != nil {
+		t.Fatal(err)
+	}
+	if claims != 0 {
+		t.Fatalf("muted recovery left %d stale low claims", claims)
+	}
+	if _, err := st.DB().Exec(`UPDATE user_plans SET used_up=? WHERE user_id=?`, 95<<30, uid); err != nil {
+		t.Fatal(err)
+	}
+	a.sweepTelegramNotifies()
+	if err := st.SetTelegramNotify(uid, true, true); err != nil {
+		t.Fatal(err)
+	}
+	a.sweepTelegramNotifies()
+	lows := 0
+	for _, m := range *inbox {
+		if strings.Contains(m.html, "流量不足") {
+			lows++
+		}
+	}
+	if lows != 2 {
+		t.Fatalf("low notifications=%d, want 2: %#v", lows, *inbox)
 	}
 }
 

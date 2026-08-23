@@ -155,6 +155,7 @@ func TestBuildUsers_NoDuplicateUserInAnInbound(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	bindPlanToInbound(t, st, pkg.ID, "in-1")
 
 	byTag, err := st.BuildUsersByTag(time.Now().Unix())
 	if err != nil {

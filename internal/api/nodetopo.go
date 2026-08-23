@@ -175,15 +175,10 @@ func (a *API) planGrants(u *store.User) func(nodeEntry) []planRef {
 
 	buckets, _ := a.st.ListBuckets(u.ID)
 
-	// No node groups configured at all — nothing to attribute by, so fall back to
-	// the billing owner, the only plan identity that exists in that setup.
+	// No node groups configured — nothing to attribute, and no implicit
+	// "first bucket owns every node" owner either.
 	if groupCount == 0 {
-		owners, _ := a.st.UserGroupOwners(u.ID, now)
-		var all []planRef
-		if b := owners[0]; b != nil {
-			all = []planRef{{ID: b.ID, Name: label(b)}}
-		}
-		return func(nodeEntry) []planRef { return all }
+		return func(nodeEntry) []planRef { return nil }
 	}
 
 	// group id → the plans granting it. Mirrors AccessibleGroupIDs' predicate
