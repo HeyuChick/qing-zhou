@@ -77,22 +77,27 @@ func (s *Store) BindTelegram(userID, telegramID, chatID int64, username, firstNa
 	if userID <= 0 || telegramID == 0 {
 		return errors.New("invalid telegram bind")
 	}
-	now := time.Now().Unix()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := bindTelegramTx(tx, userID, telegramID, chatID, username, firstName); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+func bindTelegramTx(tx *sql.Tx, userID, telegramID, chatID int64, username, firstName string) error {
 	var owner int64
-	err = tx.QueryRow(`SELECT user_id FROM telegram_binds WHERE telegram_id=?`, telegramID).Scan(&owner)
+	err := tx.QueryRow(`SELECT user_id FROM telegram_binds WHERE telegram_id=?`, telegramID).Scan(&owner)
 	if err == nil && owner != userID {
 		return ErrTelegramTaken
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-
+	now := time.Now().Unix()
 	_, err = tx.Exec(`INSERT INTO telegram_binds
 		(user_id, telegram_id, chat_id, username, first_name, notify_expiry, notify_traffic, bound_at, last_chat_at)
 		VALUES (?,?,?,?,?,1,1,?,?)
@@ -104,10 +109,7 @@ func (s *Store) BindTelegram(userID, telegramID, chatID int64, username, firstNa
 			bound_at=excluded.bound_at,
 			last_chat_at=excluded.last_chat_at`,
 		userID, telegramID, chatID, username, firstName, now, now)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	return err
 }
 
 func (s *Store) UnbindTelegram(userID int64) error {
@@ -116,16 +118,14 @@ func (s *Store) UnbindTelegram(userID int64) error {
 }
 
 // UnbindTelegramByTelegramID drops the bind for a chat-initiated /unbind.
-// Returns the panel user id that was attached, if any.
+// DELETE ... RETURNING makes lookup and deletion one atomic statement, so a
+// concurrent rebind cannot make this command report or remove the wrong owner.
 func (s *Store) UnbindTelegramByTelegramID(telegramID int64) (userID int64, ok bool, err error) {
-	err = s.db.QueryRow(`SELECT user_id FROM telegram_binds WHERE telegram_id=?`, telegramID).Scan(&userID)
+	err = s.db.QueryRow(`DELETE FROM telegram_binds WHERE telegram_id=? RETURNING user_id`, telegramID).Scan(&userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
 	if err != nil {
-		return 0, false, err
-	}
-	if _, err = s.db.Exec(`DELETE FROM telegram_binds WHERE telegram_id=?`, telegramID); err != nil {
 		return 0, false, err
 	}
 	return userID, true, nil
@@ -177,35 +177,51 @@ func (s *Store) CreateTelegramBindToken(userID int64, token string, ttl time.Dur
 	return tx.Commit()
 }
 
-// UseTelegramBindToken atomically consumes a live token. ok=false means used,
-// expired, or unknown — the caller must not distinguish those to the chat.
-func (s *Store) UseTelegramBindToken(token string) (userID int64, ok bool, err error) {
+// BindTelegramWithToken validates and consumes a live token in the same
+// transaction that installs the bind. A failed/taken bind therefore leaves the
+// one-time token usable for a corrected attempt.
+func (s *Store) BindTelegramWithToken(token string, telegramID, chatID int64, username, firstName string) (userID int64, ok bool, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, false, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
+	defer tx.Rollback()
 	err = tx.QueryRow(
 		`SELECT user_id FROM telegram_bind_tokens
 		 WHERE token=? AND used=0 AND expires_at>?`,
 		token, time.Now().Unix()).Scan(&userID)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
-	if _, err = tx.Exec(`UPDATE telegram_bind_tokens SET used=1 WHERE token=?`, token); err != nil {
+	if err != nil {
 		return 0, false, err
+	}
+	if err = bindTelegramTx(tx, userID, telegramID, chatID, username, firstName); err != nil {
+		return userID, false, err
+	}
+	res, err := tx.Exec(`UPDATE telegram_bind_tokens SET used=1 WHERE token=? AND used=0`, token)
+	if err != nil {
+		return userID, false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return 0, false, nil
 	}
 	if err = tx.Commit(); err != nil {
-		return 0, false, err
+		return userID, false, err
 	}
-	committed = true
 	return userID, true, nil
+}
+
+// UseTelegramBindToken remains for callers that only need token consumption.
+func (s *Store) UseTelegramBindToken(token string) (userID int64, ok bool, err error) {
+	err = s.db.QueryRow(
+		`UPDATE telegram_bind_tokens SET used=1
+		 WHERE token=? AND used=0 AND expires_at>?
+		 RETURNING user_id`, token, time.Now().Unix()).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return userID, err == nil, err
 }
 
 func (s *Store) CleanupTelegramBindTokens() {

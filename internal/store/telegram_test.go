@@ -58,6 +58,28 @@ func TestTelegramBindTokenConsumeOnce(t *testing.T) {
 	}
 }
 
+func TestBindTelegramWithTokenRollsBackWhenTaken(t *testing.T) {
+	st := newRefundStore(t)
+	alice := mkUser(t, st, "alice")
+	bob := mkUser(t, st, "bob")
+	if err := st.BindTelegram(alice, 1001, 1001, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTelegramBindToken(bob, "bob-token", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.BindTelegramWithToken("bob-token", 1001, 1001, "", ""); !errors.Is(err, ErrTelegramTaken) {
+		t.Fatalf("taken bind err=%v", err)
+	}
+	uid, ok, err := st.BindTelegramWithToken("bob-token", 2002, 2002, "", "")
+	if err != nil || !ok || uid != bob {
+		t.Fatalf("retry uid=%d ok=%v err=%v", uid, ok, err)
+	}
+	if _, ok, err := st.BindTelegramWithToken("bob-token", 3003, 3003, "", ""); err != nil || ok {
+		t.Fatalf("used token ok=%v err=%v", ok, err)
+	}
+}
+
 func TestTelegramBindTokenLatestWins(t *testing.T) {
 	st := newRefundStore(t)
 	uid := mkUser(t, st, "alice")
@@ -132,6 +154,21 @@ func TestDeleteUserDropsTelegramRows(t *testing.T) {
 	}
 	if err := st.db.QueryRow(`SELECT COUNT(*) FROM user_notify_log WHERE user_id=?`, uid).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("notify log left=%d err=%v", n, err)
+	}
+}
+
+func TestUnbindTelegramByTelegramIDReturnsDeletedOwner(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "unbind")
+	if err := st.BindTelegram(uid, 42, 42, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := st.UnbindTelegramByTelegramID(42)
+	if err != nil || !ok || got != uid {
+		t.Fatalf("uid=%d ok=%v err=%v", got, ok, err)
+	}
+	if _, ok, err := st.UnbindTelegramByTelegramID(42); err != nil || ok {
+		t.Fatalf("second ok=%v err=%v", ok, err)
 	}
 }
 

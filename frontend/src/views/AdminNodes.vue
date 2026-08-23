@@ -15,7 +15,7 @@
             <n-card v-for="gv in groupedView" :key="gv.key" size="small" :title="gv.name" class="group-card">
               <template #header-extra>
                 <div class="group-actions">
-                  <n-tag size="tiny" :type="gv.isUngrouped ? 'default' : 'info'" bordered="false">{{ gv.nodes.length }} 节点</n-tag>
+                  <n-tag size="tiny" :type="gv.isUngrouped ? 'default' : 'info'" :bordered="false">{{ gv.nodes.length }} 节点</n-tag>
                   <n-button size="tiny" type="primary" @click="openNodeInGroup(gv.group)">＋ 节点</n-button>
                   <n-button v-if="gv.group" size="tiny" @click="openGroup(gv.group)">编辑</n-button>
                   <n-button v-if="gv.group" size="tiny" type="error" @click="handleDeleteGroup(gv.group.id)">删除</n-button>
@@ -26,10 +26,10 @@
                 <div v-for="(r, idx) in gv.nodes" :key="r.id" class="list-card">
                   <div class="lc-head">
                     <span class="lc-title">{{ r.name || '—' }}</span>
-                    <n-tag :type="r.enabled ? 'success' : 'default'" size="tiny" bordered="false">{{ r.enabled ? '启用' : '禁用' }}</n-tag>
+                    <n-tag :type="r.enabled ? 'success' : 'default'" size="tiny" :bordered="false">{{ r.enabled ? '启用' : '禁用' }}</n-tag>
                   </div>
                   <div class="lc-meta">
-                    <span class="kv"><n-tag :type="r.type === 'self_built' ? 'info' : 'warning'" size="tiny" bordered="false">{{ r.type === 'self_built' ? '自建' : '外部' }}</n-tag></span>
+                    <span class="kv"><n-tag :type="r.type === 'self_built' ? 'info' : 'warning'" size="tiny" :bordered="false">{{ r.type === 'self_built' ? '自建' : '外部' }}</n-tag></span>
                     <span class="kv">协议 <b>{{ nodeProtocol(r) }}</b></span>
                     <!-- 节点跑在哪台机器上。外部节点不在我们的机器上，自建但入站失踪时
                          也没有答案——那两种情况下面的链路行会说明，这里就不占位了。 -->
@@ -72,7 +72,7 @@
             <div v-for="gv in topoGroups" :key="gv.key" class="topo-machine">
               <div class="topo-mhead">
                 <span class="machine-name">{{ gv.name }}</span>
-                <n-tag size="tiny" :type="gv.isUngrouped ? 'default' : 'info'" bordered="false">{{ gv.rows.length }} 节点</n-tag>
+                <n-tag size="tiny" :type="gv.isUngrouped ? 'default' : 'info'" :bordered="false">{{ gv.rows.length }} 节点</n-tag>
               </div>
               <n-empty v-if="!gv.rows.length" description="该分组暂无节点" size="small" style="padding:10px 0;" />
               <div v-for="row in gv.rows" :key="row.node.id" class="topo-row" :class="{ off: row.off }">
@@ -150,8 +150,8 @@
                 <span style="display:flex;gap:4px;flex-shrink:0;">
                   <!-- 停用的源后台不会去拉，节点数会一直停在上次的值。不标出来的话，
                        它和「拉到 0 个」长得一模一样。 -->
-                  <n-tag v-if="!r.enabled" size="tiny" type="warning" bordered="false">已停用</n-tag>
-                  <n-tag size="tiny" :type="r.last_error ? 'error' : 'default'" bordered="false">{{ r.last_count || 0 }} 节点</n-tag>
+                  <n-tag v-if="!r.enabled" size="tiny" type="warning" :bordered="false">已停用</n-tag>
+                  <n-tag size="tiny" :type="r.last_error ? 'error' : 'default'" :bordered="false">{{ r.last_count || 0 }} 节点</n-tag>
                 </span>
               </div>
               <div class="lc-meta" style="word-break:break-all;"><span class="kv">{{ r.url }}</span></div>

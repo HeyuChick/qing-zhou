@@ -86,9 +86,9 @@ func (a *API) sweepTelegramNotifies() {
 		if b.NotifyExpiry {
 			a.notifyExpiry(b, u.Username, buckets, names, now, days, panel, site)
 		}
-		if b.NotifyTraffic {
-			a.notifyTraffic(b, u.Username, buckets, pct, panel, site)
-		}
+		// Traffic evaluation also maintains recovery state. While muted it only
+		// clears stale low/out claims; it never creates a claim or sends.
+		a.notifyTraffic(b, u.Username, buckets, pct, panel, site, b.NotifyTraffic)
 	}
 }
 
@@ -121,7 +121,9 @@ func (a *API) notifyExpiry(b *store.TelegramBind, username string, buckets []*st
 			m["plan"] = telegram.Escape(name)
 			m["expiry"] = fmtUnix(bk.ExpiryAt)
 			m["footer"] = tgFooter(panel, site, "打开面板续费")
-			a.tgSend(b.ChatID, applyTpl(a.tgTpl("expired"), m))
+			if err := a.tgSend(b.ChatID, applyTpl(a.tgTpl("expired"), m)); err != nil {
+				_ = a.st.ClearNotify(b.UserID, notifyKindExpired, subject)
+			}
 		case bk.ExpiryAt <= horizon && bk.NotExpired(now):
 			subject := fmt.Sprintf("b%d:%d", bk.ID, bk.ExpiryAt)
 			ok, err := a.st.ClaimNotify(b.UserID, notifyKindExpirySoon, subject)
@@ -140,12 +142,14 @@ func (a *API) notifyExpiry(b *store.TelegramBind, username string, buckets []*st
 			m["expiry"] = fmtUnix(bk.ExpiryAt)
 			m["left"] = leftText
 			m["footer"] = tgFooter(panel, site, "打开面板续费")
-			a.tgSend(b.ChatID, applyTpl(a.tgTpl("expiry_soon"), m))
+			if err := a.tgSend(b.ChatID, applyTpl(a.tgTpl("expiry_soon"), m)); err != nil {
+				_ = a.st.ClearNotify(b.UserID, notifyKindExpirySoon, subject)
+			}
 		}
 	}
 }
 
-func (a *API) notifyTraffic(b *store.TelegramBind, username string, buckets []*store.Bucket, pct int64, panel, site string) {
+func (a *API) notifyTraffic(b *store.TelegramBind, username string, buckets []*store.Bucket, pct int64, panel, site string, send bool) {
 	tr := dashboardTraffic(buckets)
 	// Uncapped traffic has no "remaining percent" that means anything; an
 	// empty roll-up is "no quota", not "0% left".
@@ -157,18 +161,26 @@ func (a *API) notifyTraffic(b *store.TelegramBind, username string, buckets []*s
 	remainPct := tr.Remaining * 100 / tr.Total
 	if tr.Remaining <= 0 {
 		_ = a.st.ClearNotify(b.UserID, notifyKindTrafficLow, notifyTrafficSubject)
+		if !send {
+			return
+		}
 		ok, err := a.st.ClaimNotify(b.UserID, notifyKindTrafficOut, notifyTrafficSubject)
 		if err != nil || !ok {
 			return
 		}
 		m := a.trafficVars(username, buckets)
 		m["footer"] = tgFooter(panel, site, "打开面板查看")
-		a.tgSend(b.ChatID, applyTpl(a.tgTpl("traffic_out"), m))
+		if err := a.tgSend(b.ChatID, applyTpl(a.tgTpl("traffic_out"), m)); err != nil {
+			_ = a.st.ClearNotify(b.UserID, notifyKindTrafficOut, notifyTrafficSubject)
+		}
 		return
 	}
 	_ = a.st.ClearNotify(b.UserID, notifyKindTrafficOut, notifyTrafficSubject)
 	if remainPct > pct {
 		_ = a.st.ClearNotify(b.UserID, notifyKindTrafficLow, notifyTrafficSubject)
+		return
+	}
+	if !send {
 		return
 	}
 	ok, err := a.st.ClaimNotify(b.UserID, notifyKindTrafficLow, notifyTrafficSubject)
@@ -177,7 +189,9 @@ func (a *API) notifyTraffic(b *store.TelegramBind, username string, buckets []*s
 	}
 	m := a.trafficVars(username, buckets)
 	m["footer"] = tgFooter(panel, site, "打开面板查看")
-	a.tgSend(b.ChatID, applyTpl(a.tgTpl("traffic_low"), m))
+	if err := a.tgSend(b.ChatID, applyTpl(a.tgTpl("traffic_low"), m)); err != nil {
+		_ = a.st.ClearNotify(b.UserID, notifyKindTrafficLow, notifyTrafficSubject)
+	}
 }
 
 func bucketDisplayName(b *store.Bucket, names map[int64]string) string {

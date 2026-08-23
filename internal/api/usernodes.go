@@ -16,6 +16,14 @@ func (a *API) userProxies(u *store.User) []*subconv.Proxy {
 	return subconv.ParseLinks(a.collectLinks(u))
 }
 
+// userMayReadNodes is the same credential-release gate as /sub. Keeping it in
+// front of both the node inventory and the server-side ping prevents those JSON
+// endpoints from becoming an alternate way for a pending-verify signup to learn
+// upstream hosts/ports while its subscription is intentionally empty.
+func (a *API) userMayReadNodes(u *store.User) bool {
+	return u != nil && u.Status != "banned" && !a.emailBlocksSub(u)
+}
+
 // expandEnableKeys maps the keys a client asked to re-enable onto every key the
 // blocklist row might actually be stored under. Clients only ever see the
 // current NodeKey, so without this a row written under the legacy key survives
@@ -53,6 +61,10 @@ func (a *API) handleUserNodes(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
 		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	if !a.userMayReadNodes(u) {
+		fail(w, http.StatusForbidden, "请先完成邮箱验证")
 		return
 	}
 	entries := a.computeNodeEntries(u)
@@ -184,6 +196,10 @@ func (a *API) handleUserNodesPing(w http.ResponseWriter, r *http.Request) {
 	u := a.currentUser(r)
 	if u == nil {
 		fail(w, http.StatusUnauthorized, "未登录")
+		return
+	}
+	if !a.userMayReadNodes(u) {
+		fail(w, http.StatusForbidden, "请先完成邮箱验证")
 		return
 	}
 	entries := a.computeNodeEntries(u)

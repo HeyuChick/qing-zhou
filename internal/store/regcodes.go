@@ -96,9 +96,24 @@ func (s *Store) ListRegCodes() ([]*RegCode, error) {
 // RecordRegCodeUse logs which user consumed a reg code, snapshotting the
 // username/email so the record stands even if the user is later deleted.
 func (s *Store) RecordRegCodeUse(codeID, userID int64, username, email string) error {
-	_, err := s.db.Exec(`INSERT INTO reg_code_uses (code_id, user_id, username, email, used_at) VALUES (?,?,?,?,?)`,
-		codeID, userID, username, email, time.Now().Unix())
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO reg_code_uses (code_id, user_id, username, email, used_at) VALUES (?,?,?,?,?)`,
+		codeID, userID, username, email, time.Now().Unix()); err != nil {
+		return err
+	}
+	// The invite is the trusted admission decision. Persist it on the account so
+	// later node gates do not rely on mutable plan/client state or a historical
+	// join, while tests/import tools using this canonical recorder get the same
+	// semantics as the HTTP registration path.
+	if _, err := tx.Exec(`UPDATE users SET email_gate_exempt=1, updated_at=? WHERE id=?`,
+		time.Now().Unix(), userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UserUsedRegCode reports whether this account was created with an invite

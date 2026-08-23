@@ -24,13 +24,13 @@
               <template #header>
                 <div class="machine-head">
                   <span class="machine-name">{{ g.machine.name }}</span>
-                  <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
+                  <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" :bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
                   <span class="machine-host">{{ dispHost(g.machine.host) }}</span>
                 </div>
               </template>
               <template #header-extra>
                 <div class="machine-extra" @click.stop>
-                  <n-tag size="tiny" :type="g.total ? 'success' : 'default'" bordered="false">{{ g.total }} 项</n-tag>
+                  <n-tag size="tiny" :type="g.total ? 'success' : 'default'" :bordered="false">{{ g.total }} 项</n-tag>
                   <n-button size="tiny" type="primary" @click="openTlsFor(g.machine.id)">＋ TLS</n-button>
                 </div>
               </template>
@@ -38,8 +38,8 @@
                 <div v-for="(r, idx) in g.items" :key="r.id" class="list-card">
                   <div class="lc-head">
                     <span class="lc-title wrap" :title="r.name || ''">{{ r.name || '—' }}</span>
-                    <n-tag :type="r.mode === 'reality' ? 'success' : 'info'" size="tiny" bordered="false">{{ r.mode === 'reality' ? 'Reality' : '证书 TLS' }}</n-tag>
-                    <n-tag v-if="r.cert_info" :type="r.cert_info.expired ? 'error' : r.cert_info.expiring ? 'warning' : 'success'" size="tiny" bordered="false">
+                    <n-tag :type="r.mode === 'reality' ? 'success' : 'info'" size="tiny" :bordered="false">{{ r.mode === 'reality' ? 'Reality' : '证书 TLS' }}</n-tag>
+                    <n-tag v-if="r.cert_info" :type="r.cert_info.expired ? 'error' : r.cert_info.expiring ? 'warning' : 'success'" size="tiny" :bordered="false">
                       {{ r.cert_info.expired ? '已过期' : r.cert_info.days_left + '天' }}
                     </n-tag>
                   </div>
@@ -84,14 +84,14 @@
               <template #header>
                 <div class="machine-head">
                   <span class="machine-name">{{ g.machine.name }}</span>
-                  <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
+                  <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" :bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
                   <span class="machine-host">{{ dispHost(g.machine.host) }}</span>
-                  <n-tag v-if="!g.machine.enabled" size="tiny" type="warning" bordered="false">已禁用</n-tag>
+                  <n-tag v-if="!g.machine.enabled" size="tiny" type="warning" :bordered="false">已禁用</n-tag>
                 </div>
               </template>
               <template #header-extra>
                 <div class="machine-extra" @click.stop>
-                  <n-tag size="tiny" :type="g.enabledCount ? 'success' : 'default'" bordered="false">启用 {{ g.enabledCount }} / {{ g.total }}</n-tag>
+                  <n-tag size="tiny" :type="g.enabledCount ? 'success' : 'default'" :bordered="false">启用 {{ g.enabledCount }} / {{ g.total }}</n-tag>
                   <n-button size="tiny" @click="previewMachine(g.machine.id)">预览</n-button>
                   <n-button size="tiny" type="primary" @click="openInboundFor(g.machine.id)">＋ 入站</n-button>
                 </div>
@@ -101,10 +101,10 @@
                   <div class="lc-head">
                     <n-checkbox :checked="checkedIds.has(r.id)" @update:checked="toggleCheck(r.id)" style="margin-right:6px;" />
                     <span class="lc-title wrap" :title="r.tag || ''">{{ r.tag || '—' }}</span>
-                    <n-tag :type="r.enabled ? 'success' : 'error'" size="tiny" bordered="false" style="cursor:pointer;" @click="toggleInbound(r)">{{ r.enabled ? '启用' : '停用' }}</n-tag>
+                    <n-tag :type="r.enabled ? 'success' : 'error'" size="tiny" :bordered="false" style="cursor:pointer;" @click="toggleInbound(r)">{{ r.enabled ? '启用' : '停用' }}</n-tag>
                   </div>
                   <div class="lc-meta">
-                    <span class="kv"><n-tag size="tiny" bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag></span>
+                    <span class="kv"><n-tag size="tiny" :bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag></span>
                     <span class="kv">端口 <b>{{ r.listen_port }}</b></span>
                     <span class="kv">用户 <b>{{ r.user_count ?? 0 }}</b></span>
                     <span class="kv">TLS <b :title="tlsName(r.tls_id)">{{ tlsName(r.tls_id) }}</b></span>
@@ -145,8 +145,8 @@
             <div v-for="r in egresses" :key="r.id" class="list-card">
               <div class="lc-head">
                 <span class="lc-title wrap" :title="r.name">{{ r.name }}</span>
-                <n-tag size="tiny" type="info" bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag>
-                <n-tag v-if="r.tls_enabled" size="tiny" :type="r.tls_insecure ? 'warning' : 'success'" bordered="false">
+                <n-tag size="tiny" type="info" :bordered="false">{{ (r.type || '').toUpperCase() }}</n-tag>
+                <n-tag v-if="r.tls_enabled" size="tiny" :type="r.tls_insecure ? 'warning' : 'success'" :bordered="false">
                   {{ r.tls_insecure ? 'TLS·不校验' : 'TLS' }}
                 </n-tag>
               </div>
@@ -206,7 +206,7 @@
             <div v-for="g in inboundGroups" :key="g.machine.id" class="topo-machine">
               <div class="topo-mhead">
                 <span class="machine-name">{{ g.machine.name }}</span>
-                <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
+                <n-tag size="tiny" :type="g.machine.isLocal ? 'info' : 'default'" :bordered="false">{{ g.machine.isLocal ? '本机' : '远程' }}</n-tag>
                 <span class="machine-host">{{ dispHost(g.machine.host) }}</span>
                 <n-tag v-if="syncBadge(g.machine.id)" size="tiny" :type="syncBadge(g.machine.id)!.type" :bordered="false">
                   {{ syncBadge(g.machine.id)!.text }}
@@ -531,10 +531,10 @@
           <div class="import-head">解析出 {{ egImportItems.length }} 条：</div>
           <div v-for="(it, i) in egImportItems" :key="i" class="import-row">
             <n-input v-model:value="it.name" size="small" placeholder="名称" style="max-width:190px;" />
-            <n-tag size="tiny" :type="it.type_guessed ? 'warning' : 'info'" bordered="false">
+            <n-tag size="tiny" :type="it.type_guessed ? 'warning' : 'info'" :bordered="false">
               {{ (it.type || '').toUpperCase() }}<template v-if="it.type_guessed">?</template>
             </n-tag>
-            <n-tag v-if="it.tls_enabled" size="tiny" type="success" bordered="false">TLS</n-tag>
+            <n-tag v-if="it.tls_enabled" size="tiny" type="success" :bordered="false">TLS</n-tag>
             <span class="import-addr">{{ it.host }}:{{ it.port }}</span>
             <span class="import-user">{{ it.username || '无认证' }}</span>
           </div>
@@ -620,9 +620,9 @@
             <n-form-item label="加密方式"><n-select v-model:value="ie.ss_method" :options="ssOpts" /></n-form-item>
           </template>
           <template v-if="ie.type === 'anytls'">
-            <n-form-item label="空闲检查(秒)"><n-input-number v-model:value="ie.anytls_idle_check" :min="0" :placeholder="30" style="width:100%;" /></n-form-item>
-            <n-form-item label="空闲超时(秒)"><n-input-number v-model:value="ie.anytls_idle_timeout" :min="0" :placeholder="30" style="width:100%;" /></n-form-item>
-            <n-form-item label="最小空闲会话"><n-input-number v-model:value="ie.anytls_min_idle" :min="0" :placeholder="0" style="width:100%;" /></n-form-item>
+            <n-form-item label="空闲检查(秒)"><n-input-number v-model:value="ie.anytls_idle_check" :min="0" placeholder="30" style="width:100%;" /></n-form-item>
+            <n-form-item label="空闲超时(秒)"><n-input-number v-model:value="ie.anytls_idle_timeout" :min="0" placeholder="30" style="width:100%;" /></n-form-item>
+            <n-form-item label="最小空闲会话"><n-input-number v-model:value="ie.anytls_min_idle" :min="0" placeholder="0" style="width:100%;" /></n-form-item>
           </template>
           <template v-if="['vless','vmess','trojan'].includes(ie.type)">
             <n-form-item label="传输层"><n-select v-model:value="ie.net" :options="[{label:'TCP',value:'tcp'},{label:'WebSocket',value:'ws'},{label:'gRPC',value:'grpc'},{label:'HTTPUpgrade',value:'httpupgrade'}]" /></n-form-item>
