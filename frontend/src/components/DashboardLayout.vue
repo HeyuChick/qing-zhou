@@ -2,7 +2,7 @@
   <div class="app-shell" :class="{ mobile: isMobile }">
     <!-- 桌面侧边栏 -->
     <aside v-if="!isMobile" class="app-sider">
-      <div class="sidebar-brand" @click="router.push('/')">
+      <div class="sidebar-brand" @click="router.push('/dashboard')">
         <div class="sidebar-logo">鸡</div>
         <span class="brand-text">{{ config.config.site_name || '轻舟' }}</span>
       </div>
@@ -14,7 +14,7 @@
     <!-- 移动端抽屉 -->
     <n-drawer v-model:show="drawerShow" placement="left" :width="260" :block-scroll="true">
       <n-drawer-content :native-scrollbar="true" body-content-style="padding:0;">
-        <div class="sidebar-brand" @click="goAndClose('/')">
+        <div class="sidebar-brand" @click="goAndClose('/dashboard')">
           <div class="sidebar-logo">鸡</div>
           <span class="brand-text">{{ config.config.site_name || '轻舟' }}</span>
         </div>
@@ -55,6 +55,8 @@
         </div>
       </header>
       <main class="layout-content">
+        <!-- 品牌定制：未登录访问控制台时弹出登录框（首页已不对未登录开放） -->
+        <LoginDialog v-model:show="showLogin" />
         <router-view />
       </main>
     </div>
@@ -78,6 +80,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
 import { apiPost } from '@/api'
 import { useMessage } from 'naive-ui'
+import LoginDialog from './LoginDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -109,6 +112,10 @@ async function resendVerify() {
 }
 
 const activeKey = computed(() => route.path)
+
+// 品牌定制：未登录落地控制台时自动弹登录框（?login=1）
+const showLogin = ref(false)
+onMounted(() => { if (route.query.login === '1') showLogin.value = true })
 
 // ---- 响应式：移动端判定 ----
 const isMobile = ref(false)
@@ -168,13 +175,15 @@ const adminSysItems: MenuOption[] = [
 ]
 
 const menuOptions = computed<MenuOption[]>(() => {
-  const items: MenuOption[] = [
-    { label: '首页', key: '/', icon: renderIcon(HomeOutline) },
+  const items: MenuOption[] = []
+        // 品牌定制：首页（监控大屏）仅管理员保留入口
+        if (auth.isAdmin) items.push({ label: '首页', key: '/', icon: renderIcon(HomeOutline) })
+        items.push(
     { type: 'group', key: 'g-common', label: groupLabel('常用'), children: userMenuItems },
     { type: 'group', key: 'g-shop', label: groupLabel('商城'), children: shopItems },
     { type: 'group', key: 'g-info', label: groupLabel('信息'), children: infoItems },
     { label: '账户设置', key: '/account', icon: renderIcon(PersonOutline) },
-  ]
+  )
   if (auth.isAdmin) {
     items.push({
       label: '管理后台', key: 'admin-root', icon: renderIcon(SettingsOutline),
@@ -217,7 +226,7 @@ function goAndClose(key: string) {
   drawerShow.value = false
 }
 function handleUserSelect(key: string) {
-  if (key === 'logout') { auth.logout(); router.push('/') }
+  if (key === 'logout') { auth.logout(); router.push('/dashboard') }
 }
 function handleAdminSelect(key: string) { router.push(key) }
 </script>

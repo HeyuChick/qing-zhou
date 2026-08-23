@@ -8,6 +8,11 @@ const router = createRouter({
       path: '/',
       name: 'monitor',
       component: () => import('@/views/Monitor.vue'),
+      // 品牌定制：首页（监控大屏）仅管理员可见，普通用户/未登录一律转控制台
+      beforeEnter: (to) => {
+        const auth = useAuthStore()
+        if (!auth.isAdmin) return { name: 'dashboard' }
+      },
     },
     {
       path: '/',
@@ -55,10 +60,11 @@ router.beforeEach(async (to) => {
   const requiresAdmin = to.matched.some(r => r.meta.requiresAdmin)
 
   if (requiresAuth && !auth.isLoggedIn) {
-    return { name: 'monitor', query: { login: '1' } }
+    // 品牌定制：首页不对未登录开放，直接送到控制台——那里有内嵌登录框
+    return { name: 'dashboard', query: { login: '1' } }
   }
   if (requiresAdmin && !auth.isAdmin) {
-    return { name: 'monitor' }
+    return { name: 'dashboard' }
   }
 })
 
