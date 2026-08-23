@@ -82,7 +82,43 @@ func modernizeSingboxDNS(doc map[string]any) {
 		delete(dns, "fakeip")
 	}
 
+	stripEmptyDirectDetour(doc, servers)
+
 	ensureDomainResolver(doc, servers)
+}
+
+// stripEmptyDirectDetour removes `detour: "direct"` from DNS servers when the
+// direct outbound it points at carries no dial options of its own.
+// sing-box 1.12.0 rejects such a config outright:
+//
+//	dns/https[local]: detour to an empty direct outbound makes no sense
+//
+// Detouring to an empty direct outbound is functionally identical to not
+// detouring at all (both dial from the default route), so dropping the field
+// preserves behavior on every version. When the direct outbound IS customized
+// (bind_interface, routing_mark, …) the detour has meaning and stays.
+func stripEmptyDirectDetour(doc map[string]any, servers []map[string]any) {
+	outbounds := mapSlice(doc["outbounds"])
+	directIsPlain := false
+	for _, o := range outbounds {
+		if t, _ := o["type"].(string); t == "direct" {
+			// Any extra dial option beyond type/tag marks it as customized.
+			directIsPlain = true
+			for k := range o {
+				if k != "type" && k != "tag" {
+					directIsPlain = false
+				}
+			}
+		}
+	}
+	if !directIsPlain {
+		return
+	}
+	for _, srv := range servers {
+		if detour, _ := srv["detour"].(string); detour == "direct" {
+			delete(srv, "detour")
+		}
+	}
 }
 
 // ensureDomainResolver sets route.default_domain_resolver when the config has
