@@ -244,6 +244,7 @@ func userView(u *store.User) J {
 		"username":       u.Username,
 		"email":          email,
 		"email_verified": u.EmailVerified,
+		"email_gate_exempt": u.EmailGateExempt,
 		"role":           u.Role,
 		"is_admin":       u.Role == "admin",
 		"status":         u.Status,

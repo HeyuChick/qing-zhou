@@ -7,6 +7,7 @@ export interface User {
   username: string
   email: string
   email_verified: boolean
+  email_gate_exempt?: boolean
   role: string
   is_admin: boolean
   status: string

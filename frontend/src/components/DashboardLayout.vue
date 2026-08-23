@@ -93,7 +93,7 @@ const resendingVerify = ref(false)
 const showVerifyBanner = computed(() =>
   config.config.email_verify_required
   && auth.isLoggedIn && !auth.isAdmin
-  && !!auth.user?.email && !auth.user?.email_verified
+  && !!auth.user?.email && !auth.user?.email_verified && !auth.user?.email_gate_exempt
   && !verifyBannerClosed.value)
 async function resendVerify() {
   if (resendingVerify.value) return
