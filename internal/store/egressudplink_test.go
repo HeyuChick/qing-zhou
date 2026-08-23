@@ -51,6 +51,7 @@ func TestSelfBuiltLinks_UDPBlockedEgressMarksLink(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	bindPlanToInbounds(t, st, pkg.ID, "blocked-in", "open-in", "plain-in")
 
 	u, err := st.UserByID(uid)
 	if err != nil {
@@ -100,6 +101,7 @@ func TestSelfBuiltLinks_HTTPEgressMarkedByDefault(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	bindPlanToInbound(t, st, pkg.ID, "http-eg-in")
 
 	u, _ := st.UserByID(uid)
 	links := st.BuildSelfBuiltLinks(u, "example.com")

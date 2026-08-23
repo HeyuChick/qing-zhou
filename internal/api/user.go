@@ -967,18 +967,12 @@ type linkCacheEntry struct {
 }
 
 // userHasNodeAccess reports whether the user is entitled to any self-built node,
-// i.e. whether their sing-box client should be enabled. No plan + no free group = no
-// access — unless grouping isn't set up at all (zero-config convenience).
-// This is the real enforcement: subscription filtering only changes what links
-// are shown; sing-box enable/inbound membership is what actually grants access.
+// i.e. whether their sing-box client should be enabled. No plan and no free
+// group means no access. A missing free group must not fall back to "every
+// inbound" — that used to dump the whole node list on anyone with a live quota.
 func (a *API) userHasNodeAccess(u *store.User) bool {
-	if gids, _ := a.st.AccessibleGroupIDs(u); len(gids) > 0 {
-		return true
-	}
-	if n, _ := a.st.GroupCount(); n == 0 {
-		return true
-	}
-	return false
+	gids, _ := a.st.AccessibleGroupIDs(u)
+	return len(gids) > 0
 }
 
 // collectEntries returns the user's nodes (link + group), cached ~30s to avoid
@@ -1036,8 +1030,8 @@ type nodeEntry struct {
 
 // computeNodeEntries builds the user's nodes with group attribution: external
 // nodes in their accessible groups (raw), plus self-built node links filtered to
-// the inbound tags in those groups. If no groups are configured at all, falls
-// back to all self-built nodes (zero-config). Deduped by link.
+// the inbound tags in those groups. No accessible group (no live plan and no
+// free group) means no nodes — including when the admin never created groups.
 func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	var out []nodeEntry
 	seen := map[string]bool{}
@@ -1051,14 +1045,6 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	groupIDs, _ := a.st.AccessibleGroupIDs(u)
 
 	if len(groupIDs) == 0 {
-		// User has no accessible group (no plan, no free group). Only fall back
-		// to all self-built nodes when grouping isn't set up at all (zero-config
-		// convenience). Once any group exists, "unassigned" means "no nodes".
-		if n, _ := a.st.GroupCount(); n == 0 {
-			for _, l := range a.selfBuiltLinks(u) {
-				add(l.Link, 0, "", l.Tag)
-			}
-		}
 		return out
 	}
 

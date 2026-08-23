@@ -27,6 +27,7 @@ func TestSelfBuiltLinks_RemarkUsesNodeName(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	bindPlanToInbound(t, st, pkg.ID, "vless-in")
 
 	u, err := st.UserByID(uid)
 	if err != nil {
@@ -58,6 +59,22 @@ func TestSelfBuiltLinks_RemarkFallsBackToTag(t *testing.T) {
 		Type: "vless", Tag: "orphan-in", Listen: "::", ListenPort: 8443,
 		Options: "{}", Enabled: true,
 	}); err != nil {
+		t.Fatal(err)
+	}
+	// Empty name so the remark still falls back to the tag; the node row is
+	// only here to put the inbound in the plan's group.
+	gid, err := st.CreateGroup(NodeGroup{Name: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetPlanGroups(pkg.ID, []int64{gid}); err != nil {
+		t.Fatal(err)
+	}
+	nid, err := st.CreateNode(Node{Type: "self_built", Name: "", InboundTag: "orphan-in", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetNodeGroups(nid, []int64{gid}); err != nil {
 		t.Fatal(err)
 	}
 

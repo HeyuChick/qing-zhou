@@ -34,10 +34,10 @@ func TestProxyCred_MeteringAndConfig(t *testing.T) {
 		t.Fatalf("SetBucketProxyCred: %v", err)
 	}
 
-	// Zero-config (no groups) → the active bucket owns every inbound.
 	if _, err := st.SaveSbInbound(&SbInbound{Type: "mixed", Tag: "mixed-proxy", Listen: "::", ListenPort: 7890, Options: "{}", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
+	bindPlanToInbound(t, st, pkg.ID, "mixed-proxy")
 	now := time.Now().Unix()
 	usersByTag, err := st.BuildUsersByTag(now)
 	if err != nil {
@@ -91,6 +91,7 @@ func TestProxyCred_ExpiryDropsInbound(t *testing.T) {
 	if _, err := st.SaveSbInbound(&SbInbound{Type: "mixed", Tag: "mixed-proxy", Listen: "::", ListenPort: 7890, Options: "{}", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
+	bindPlanToInbound(t, st, pkg.ID, "mixed-proxy")
 	now := time.Now().Unix()
 	// Proxy credential already expired.
 	if err := st.SetBucketProxyCred(bkt.ID, uid, "bob-proxy", "s3cretpassword", now-1); err != nil {
