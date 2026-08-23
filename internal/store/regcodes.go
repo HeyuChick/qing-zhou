@@ -117,9 +117,8 @@ func (s *Store) RecordRegCodeUse(codeID, userID int64, username, email string) e
 }
 
 // UserUsedRegCode reports whether this account was created with an invite
-// code. Those users are allowed to skip email verification — the code is the
-// admission ticket — so the subscription gate must not treat them as
-// pending-verify signups.
+// code. It remains useful for migration/diagnostics; runtime node authorization
+// uses the persisted email_gate_exempt decision instead of re-inferring it.
 func (s *Store) UserUsedRegCode(userID int64) (bool, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM reg_code_uses WHERE user_id=?`, userID).Scan(&n)
