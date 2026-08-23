@@ -1,0 +1,118 @@
+name: build-custom-release
+
+# 自用版发布流水线：跟踪上游 release → 合并进 heiyu-custom → 构建发布。
+# 面板端设置 QZ_UPDATE_REPO=HeyuChick/qing-zhou 即可从本仓库在线更新。
+#
+# 版本方案: 上游 vX.Y.Z → 本仓库 vX.Y.Z.N（第4位自增）。
+# 这样既严格大于上游同版本（面板会提示更新），又严格小于上游下一个版本
+# （上游发 v0.2.53 后仍会被识别为更新，不会卡住）。
+#
+# 跳过逻辑: 合并结果 SHA 与上一个同基底 release 记录的一致 → 无变化不构建。
+# 冲突时任务失败（红色），需要手动在 heiyu-custom 分支解决后重跑。
+
+on:
+  schedule:
+    - cron: "17 */6 * * *" # 每6小时检查上游
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "强制构建（忽略无变化跳过）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-custom-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: heiyu-custom
+          fetch-depth: 0
+
+      - name: Merge upstream latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          git config user.name "heiyu-ci"
+          git config user.email "actions@users.noreply.github.com"
+          UP_TAG=$(gh api repos/mllt992/qing-zhou/releases/latest --jq .tag_name)
+          echo "UP_TAG=$UP_TAG" >> "$GITHUB_ENV"
+          echo "上游最新 release: $UP_TAG"
+          git remote add upstream https://github.com/mllt992/qing-zhou.git
+          git fetch upstream "refs/tags/$UP_TAG:refs/tags/$UP_TAG" --no-tags
+          # 冲突会让本步骤失败（任务红色），需手动解决
+          git merge "$UP_TAG" -m "merge upstream $UP_TAG"
+          echo "MERGED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Decide tag / skip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          BASE=${UP_TAG#v}
+          LAST_N=$(gh api "repos/${REPO}/releases?per_page=100" \
+            --jq '.[].tag_name' 2>/dev/null \
+            | grep -E "^v${BASE}\.[0-9]+$" | sort -V | tail -1 | sed 's/.*\.//' || true)
+          LAST_N=${LAST_N:-0}
+          NEW_N=$((LAST_N + 1))
+          TAG="v${BASE}.${NEW_N}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          if [ "$LAST_N" -ge 1 ] && [ "$FORCE" != "true" ]; then
+            PREV_BODY=$(gh api "repos/${REPO}/releases/tags/v${BASE}.${LAST_N}" --jq .body 2>/dev/null || true)
+            if printf '%s' "$PREV_BODY" | grep -q "built-from: ${MERGED_SHA}"; then
+              echo "::notice::无变化：${MERGED_SHA} 已作为 v${BASE}.${LAST_N} 发布，跳过构建"
+              echo "SKIP=true" >> "$GITHUB_ENV"
+            fi
+          fi
+
+      - name: Push merge
+        if: env.SKIP != 'true'
+        run: git push origin heiyu-custom
+
+      - uses: actions/setup-node@v4
+        if: env.SKIP != 'true'
+        with:
+          node-version: 22
+
+      - name: Build frontend
+        if: env.SKIP != 'true'
+        run: |
+          cd frontend
+          npm ci --no-audit --no-fund
+          # 上游 vue-tsc 有存量类型错误，直接 vite build（与本地构建一致）
+          npx vite build
+
+      - uses: actions/setup-go@v5
+        if: env.SKIP != 'true'
+        with:
+          go-version-file: go.mod
+
+      - name: Build linux-amd64
+        if: env.SKIP != 'true'
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X qingzhou/internal/version.Version=${TAG}" \
+            -o qingzhou-linux-amd64 .
+
+      - name: Create release
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "$TAG" --repo "$REPO" \
+            --target "$MERGED_SHA" \
+            --title "$TAG" \
+            --notes "基于上游 ${UP_TAG} + 自定义修复与品牌定制。
+
+          built-from: ${MERGED_SHA}" \
+            qingzhou-linux-amd64
