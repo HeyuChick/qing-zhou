@@ -123,6 +123,71 @@ func TestUnverified_SubWithholdsExternalLinks(t *testing.T) {
 	}
 }
 
+// v0.2.53 emptied every unverified subscription. Paying customers who never
+// clicked the verify mail still had an active plan in the panel, but /sub
+// came back with 0 nodes. A live paid plan means they are already in service.
+func TestUnverified_SubPassesWhenUserHasPaidPlan(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	pkgID, err := st.CreatePackage(store.Package{
+		Type: "plan", Name: "月付", PricePoints: 100,
+		TrafficBytes: 100 << 30, DurationDays: 30, Stock: -1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := st.GetPackage(pkgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AssignPackage(uid, pkg, 0, func(*store.User, bool) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	w := getSub(a, "tok-unverified")
+	if w.Code != http.StatusOK {
+		t.Fatalf("sub = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "可用节点</span><b>1</b>") {
+		t.Fatalf("unverified but paying account must still receive nodes:\n%s", w.Body.String())
+	}
+}
+
+// Same outage, other shape: they registered when verify was off (or were
+// provisioned before the gate), so they have a client identity but email_verified
+// is still 0 — CreateUser always writes 0 and nothing flips it later.
+func TestUnverified_SubPassesWhenAlreadyProvisioned(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	if err := st.SetUserClient(uid, 0, "qz_unverified", "uuid", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := getSub(a, "tok-unverified")
+	if w.Code != http.StatusOK {
+		t.Fatalf("sub = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "可用节点</span><b>1</b>") {
+		t.Fatalf("already-provisioned unverified account must still receive nodes:\n%s", w.Body.String())
+	}
+}
+
+// The signup grant is minted for every provisioned account and must not be
+// mistaken for a paid plan — otherwise a brand-new unverified signup that
+// somehow got a welcome bucket would punch through the leak gate.
+func TestUnverified_WelcomeGrantDoesNotLiftTheGate(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	if err := st.EnsureWelcomeBucket(uid, "unverified", 10<<30, time.Now().Unix()+86400); err != nil {
+		t.Fatal(err)
+	}
+
+	w := getSub(a, "tok-unverified")
+	if w.Code != http.StatusOK {
+		t.Fatalf("sub = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "可用节点</span><b>0</b>") {
+		t.Fatalf("welcome grant alone must not release external credentials:\n%s", w.Body.String())
+	}
+}
+
 // Turning the setting off must not keep withholding nodes from unverified
 // accounts — otherwise flipping the toggle would silently lock everyone out.
 func TestUnverified_SubPassesWhenVerifyNotRequired(t *testing.T) {
