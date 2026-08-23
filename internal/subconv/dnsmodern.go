@@ -82,13 +82,13 @@ func modernizeSingboxDNS(doc map[string]any) {
 		delete(dns, "fakeip")
 	}
 
-	stripEmptyDirectDetour(doc, servers)
-
 	ensureDomainResolver(doc, servers)
 }
 
 // stripEmptyDirectDetour removes `detour: "direct"` from DNS servers when the
-// direct outbound it points at carries no dial options of its own.
+// direct outbound it points at carries no dial options of its own. Call this
+// only after the renderer has assembled the final outbounds; templates often
+// omit outbounds because subscription nodes are generated later.
 // sing-box 1.12.0 rejects such a config outright:
 //
 //	dns/https[local]: detour to an empty direct outbound makes no sense
@@ -101,7 +101,9 @@ func stripEmptyDirectDetour(doc map[string]any, servers []map[string]any) {
 	outbounds := mapSlice(doc["outbounds"])
 	directIsPlain := false
 	for _, o := range outbounds {
-		if t, _ := o["type"].(string); t == "direct" {
+		t, _ := o["type"].(string)
+		tag, _ := o["tag"].(string)
+		if t == "direct" && tag == "direct" {
 			// Any extra dial option beyond type/tag marks it as customized.
 			directIsPlain = true
 			for k := range o {
@@ -109,6 +111,7 @@ func stripEmptyDirectDetour(doc map[string]any, servers []map[string]any) {
 					directIsPlain = false
 				}
 			}
+			break
 		}
 	}
 	if !directIsPlain {
