@@ -813,6 +813,37 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 	return out
 }
 
+// emailBlocksSub withholds node links from a pending-verify signup.
+//
+// v0.2.53 applied this to every unverified account. CreateUser always writes
+// email_verified=0, and before the login/sub gates existed people just signed
+// in and bought plans without clicking the mail. Flipping the gate on then
+// emptied the subscription of paying customers who still showed an active
+// plan in the panel (handleUserNodes never had this check).
+//
+// Only brand-new unverified accounts are blocked: no provisioned client, no
+// purchased/assigned plan. That is the external-share_link leak. Anyone
+// already in service keeps their nodes and can verify later from 个人中心.
+func (a *API) emailBlocksSub(u *store.User) bool {
+	if u == nil || u.Role == "admin" || u.EmailVerified {
+		return false
+	}
+	verifyReq, _ := a.st.GetSettingBool("email_verify_required")
+	if !verifyReq {
+		return false
+	}
+	if u.ClientID.Valid {
+		return false
+	}
+	paid, err := a.st.HasLivePaidPlan(u.ID)
+	if err != nil {
+		// Fail closed on a DB error: better an empty sub than leaking
+		// upstream credentials because we could not read entitlements.
+		return true
+	}
+	return !paid
+}
+
 // ---- Public subscription endpoint ----
 
 // handleSub aggregates the user's accessible nodes (self-built from sing-box +
@@ -842,12 +873,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	serviceable := (u.ExpiryAt == 0 || u.ExpiryAt > now) &&
 		(u.TrafficLimit == 0 || u.UsedUp+u.UsedDown < u.TrafficLimit)
-	// Email verification gate: an unverified account must not be served any
-	// node links. External nodes carry raw upstream credentials that the panel
-	// cannot meter or revoke — with verify_required on, withholding them until
-	// verified is the whole point of the setting. Self-built access is moot too
-	// since provisioning is deferred until verification.
-	if verifyReq, _ := a.st.GetSettingBool("email_verify_required"); verifyReq && u.Role != "admin" && !u.EmailVerified {
+	if a.emailBlocksSub(u) {
 		serviceable = false
 	}
 
