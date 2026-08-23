@@ -89,7 +89,7 @@ const regRules: FormRules = {
   email: {
     trigger: ['blur', 'input'],
     validator(_rule, value: string) {
-      if (config.config.email_verify_required && !value) {
+      if (config.config.email_verify_required && config.config.register_mode !== 'code' && !value) {
         return new Error('需要邮箱以完成验证')
       }
       if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {

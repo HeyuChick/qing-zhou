@@ -188,6 +188,75 @@ func TestUnverified_WelcomeGrantDoesNotLiftTheGate(t *testing.T) {
 	}
 }
 
+// Invite-code signup is allowed to skip email verify. Those accounts often
+// have only the free group / signup grant — no paid plan, and (under the old
+// gate) no client either — so the v0.2.53/54 heuristics still emptied them.
+func TestUnverified_RegCodeUserKeepsNodes(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	codes, err := st.GenerateRegCodes(1, 1, "test", nil)
+	if err != nil || len(codes) != 1 {
+		t.Fatalf("GenerateRegCodes: %v %v", codes, err)
+	}
+	cid, ok := st.ConsumeRegCode(codes[0])
+	if !ok {
+		t.Fatal("ConsumeRegCode")
+	}
+	if err := st.RecordRegCodeUse(cid, uid, "unverified", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	w := getSub(a, "tok-unverified")
+	if w.Code != http.StatusOK {
+		t.Fatalf("sub = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "可用节点</span><b>1</b>") {
+		t.Fatalf("invite-code account must keep its nodes without verifying email:\n%s", w.Body.String())
+	}
+}
+
+// Admin-created accounts are pre-verified. Even if that flag were missing,
+// they are provisioned immediately — covered by the client-id path. This
+// locks the documented contract: the verify switch does not apply to them.
+func TestUnverified_AdminCreatedIsPreVerified(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	if err := st.SetEmailVerified(uid); err != nil {
+		t.Fatal(err)
+	}
+	w := getSub(a, "tok-unverified")
+	if w.Code != http.StatusOK {
+		t.Fatalf("sub = %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "可用节点</span><b>1</b>") {
+		t.Fatalf("admin-created (pre-verified) account must receive nodes:\n%s", w.Body.String())
+	}
+}
+
+// Invite-code registration must not demand an email just because the open-
+// signup verify switch is on.
+func TestRegister_CodeDoesNotRequireEmailWhenVerifyOn(t *testing.T) {
+	a, st := newUserEditAPI(t)
+	if err := st.SetSetting("register_mode", "code"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSettingBool("email_verify_required", true); err != nil {
+		t.Fatal(err)
+	}
+	codes, err := st.GenerateRegCodes(1, 1, "", nil)
+	if err != nil || len(codes) != 1 {
+		t.Fatalf("GenerateRegCodes: %v %v", codes, err)
+	}
+
+	w := httptest.NewRecorder()
+	body := `{"username":"codeuser","password":"secret1","code":"` + codes[0] + `"}`
+	a.handleRegister(w, httptest.NewRequest("POST", "/api/auth/register", strings.NewReader(body)))
+	if w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), "需要邮箱") {
+		t.Fatalf("invite-code signup demanded an email: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "need_verify") {
+		t.Fatalf("invite-code signup deferred to email verify: %s", w.Body.String())
+	}
+}
+
 // Turning the setting off must not keep withholding nodes from unverified
 // accounts — otherwise flipping the toggle would silently lock everyone out.
 func TestUnverified_SubPassesWhenVerifyNotRequired(t *testing.T) {
