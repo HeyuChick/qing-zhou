@@ -385,7 +385,7 @@ const DefaultSingboxTemplate = `{
   "dns": {
     "servers": [
       {"tag": "remote", "type": "https", "server": "1.1.1.1", "detour": "proxy"},
-      {"tag": "local", "type": "https", "server": "223.5.5.5", "detour": "direct"},
+      {"tag": "local", "type": "https", "server": "223.5.5.5"},
       {"tag": "fake", "type": "fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18"}
     ],
     "rules": [

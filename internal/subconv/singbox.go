@@ -78,6 +78,12 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 	all = append(all, outs...)
 	all = append(all, map[string]any{"type": "direct", "tag": "direct"})
 	doc["outbounds"] = all
+	// Templates are normalized before generated outbounds exist. Perform this
+	// compatibility cleanup only now, against the final direct outbound, so old
+	// admin-stored templates without an outbounds array are fixed too.
+	if dns, ok := doc["dns"].(map[string]any); ok {
+		stripEmptyDirectDetour(doc, mapSlice(dns["servers"]))
+	}
 
 	if _, ok := doc["inbounds"]; !ok {
 		doc["inbounds"] = []map[string]any{
