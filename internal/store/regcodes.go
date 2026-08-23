@@ -14,8 +14,8 @@ type RegCode struct {
 	Enabled   bool         `json:"enabled"`
 	Note      string       `json:"note"`
 	CreatedAt int64        `json:"created_at"`
-	Uses      []RegCodeUse `json:"uses"`                     // who consumed it (registration records)
-	GroupIDs  []int64      `json:"group_ids"`                // user groups the redeemer joins (not a column)
+	Uses      []RegCodeUse `json:"uses"`      // who consumed it (registration records)
+	GroupIDs  []int64      `json:"group_ids"` // user groups the redeemer joins (not a column)
 }
 
 // RegCodeUse is one consumption of a reg code by a registering user. The
@@ -99,6 +99,16 @@ func (s *Store) RecordRegCodeUse(codeID, userID int64, username, email string) e
 	_, err := s.db.Exec(`INSERT INTO reg_code_uses (code_id, user_id, username, email, used_at) VALUES (?,?,?,?,?)`,
 		codeID, userID, username, email, time.Now().Unix())
 	return err
+}
+
+// UserUsedRegCode reports whether this account was created with an invite
+// code. Those users are allowed to skip email verification — the code is the
+// admission ticket — so the subscription gate must not treat them as
+// pending-verify signups.
+func (s *Store) UserUsedRegCode(userID int64) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM reg_code_uses WHERE user_id=?`, userID).Scan(&n)
+	return n > 0, err
 }
 
 // GenerateRegCodes creates count codes with the given per-code usage cap. Every

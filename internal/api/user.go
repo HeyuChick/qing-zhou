@@ -49,6 +49,14 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verifyRequired, _ := a.st.GetSettingBool("email_verify_required")
+	// Invite-code signup is an admission ticket: the holder is already
+	// allowed in. Forcing email verify on top would defer provisioning and
+	// then empty their subscription until they click a mail they were never
+	// required to have. Admin-created accounts are the other exempt path
+	// (pre-verified in handleAdminCreateUser).
+	if mode == "code" {
+		verifyRequired = false
+	}
 	if verifyRequired && req.Email == "" {
 		fail(w, http.StatusBadRequest, "需要邮箱以完成验证")
 		return
@@ -813,6 +821,46 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 	return out
 }
 
+// emailBlocksSub withholds node links from a pending-verify signup.
+//
+// v0.2.53 applied this to every unverified account. CreateUser always writes
+// email_verified=0, and before the login/sub gates existed people just signed
+// in and bought plans without clicking the mail. Flipping the gate on then
+// emptied the subscription of paying customers who still showed an active
+// plan in the panel (handleUserNodes never had this check).
+//
+// Only open-registration pending-verify accounts are blocked: no client, no
+// paid plan, no invite code. Admin-created users are pre-verified; invite-
+// code users are allowed to skip verify. Anyone already in service keeps
+// their nodes.
+func (a *API) emailBlocksSub(u *store.User) bool {
+	if u == nil || u.Role == "admin" || u.EmailVerified {
+		return false
+	}
+	verifyReq, _ := a.st.GetSettingBool("email_verify_required")
+	if !verifyReq {
+		return false
+	}
+	if u.ClientID.Valid {
+		return false
+	}
+	// Invite-code accounts are allowed to remain unverified. They may only
+	// have the signup grant / free group — no paid plan, no client yet if
+	// they registered while the old gate deferred provisioning.
+	if used, err := a.st.UserUsedRegCode(u.ID); err != nil {
+		return true
+	} else if used {
+		return false
+	}
+	paid, err := a.st.HasLivePaidPlan(u.ID)
+	if err != nil {
+		// Fail closed on a DB error: better an empty sub than leaking
+		// upstream credentials because we could not read entitlements.
+		return true
+	}
+	return !paid
+}
+
 // ---- Public subscription endpoint ----
 
 // handleSub aggregates the user's accessible nodes (self-built from sing-box +
@@ -842,12 +890,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	serviceable := (u.ExpiryAt == 0 || u.ExpiryAt > now) &&
 		(u.TrafficLimit == 0 || u.UsedUp+u.UsedDown < u.TrafficLimit)
-	// Email verification gate: an unverified account must not be served any
-	// node links. External nodes carry raw upstream credentials that the panel
-	// cannot meter or revoke — with verify_required on, withholding them until
-	// verified is the whole point of the setting. Self-built access is moot too
-	// since provisioning is deferred until verification.
-	if verifyReq, _ := a.st.GetSettingBool("email_verify_required"); verifyReq && u.Role != "admin" && !u.EmailVerified {
+	if a.emailBlocksSub(u) {
 		serviceable = false
 	}
 
