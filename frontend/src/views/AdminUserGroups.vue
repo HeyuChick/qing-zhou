@@ -15,7 +15,7 @@
         <div v-for="g in groups" :key="g.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title">{{ g.name }}</span>
-            <n-tag size="tiny" bordered="false" type="info">{{ g.members || 0 }} 人</n-tag>
+            <n-tag size="tiny" :bordered="false" type="info">{{ g.members || 0 }} 人</n-tag>
           </div>
           <div v-if="g.description" class="lc-meta" style="color:var(--text-3);">{{ g.description }}</div>
           <div class="lc-meta">

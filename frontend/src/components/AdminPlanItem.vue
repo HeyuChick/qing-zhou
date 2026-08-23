@@ -4,7 +4,7 @@
   <div class="pi" :class="{ queued: bucket === 'queued', done: bucket === 'finished' }">
     <div class="pi-top">
       <span class="pi-name" :title="plan.name">{{ plan.name || '份 #' + plan.id }}</span>
-      <n-tag :type="meta.type" size="tiny" bordered="false">{{ meta.label }}</n-tag>
+      <n-tag :type="meta.type" size="tiny" :bordered="false">{{ meta.label }}</n-tag>
       <span class="pi-num">{{ amountText }}</span>
     </div>
     <!-- 排队中的份还没开始计量，画一条斜纹而不是 0% 的进度条：后者看起来像

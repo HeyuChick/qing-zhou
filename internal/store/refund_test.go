@@ -72,6 +72,38 @@ func mkPlan(t *testing.T, st *Store, name string, price, trafficGiB, days int64)
 	return p
 }
 
+// bindPlanToInbounds hangs pkg and every inbound tag on the same node group
+// so BuildUsersByTag / BuildSelfBuiltLinks will inject buyers. Access is no
+// longer implied by "no groups exist" — a missing free group must not grant
+// every inbound.
+func bindPlanToInbounds(t *testing.T, st *Store, pkgID int64, inboundTags ...string) {
+	t.Helper()
+	name := "g"
+	if len(inboundTags) > 0 {
+		name = "g-" + inboundTags[0]
+	}
+	gid, err := st.CreateGroup(NodeGroup{Name: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetPlanGroups(pkgID, []int64{gid}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range inboundTags {
+		nid, err := st.CreateNode(Node{Type: "self_built", Name: tag, InboundTag: tag, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetNodeGroups(nid, []int64{gid}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func bindPlanToInbound(t *testing.T, st *Store, pkgID int64, inboundTag string) {
+	bindPlanToInbounds(t, st, pkgID, inboundTag)
+}
+
 // --- Tests ---
 
 // Half the traffic used, most of the time left → traffic governs min() → 50%.
@@ -158,7 +190,7 @@ func TestRefund_RenewalStacking(t *testing.T) {
 	uid := mkUser(t, st, "erin")
 	pkg := mkPlan(t, st, "100G/30d", 100, 100, 30)
 	o1 := buy(t, st, uid, pkg)
-	o2 := buy(t, st, uid, pkg)                  // renew → bucket 200G / 60d
+	o2 := buy(t, st, uid, pkg)                   // renew → bucket 200G / 60d
 	setBucketUsed(t, st, uid, "plan", 50*giB, 0) // 50 of 200 used
 
 	_, q2, err := st.RefundOrder(o2, 0, "prorated", noopSync)

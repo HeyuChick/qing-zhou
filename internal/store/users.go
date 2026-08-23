@@ -27,17 +27,20 @@ type User struct {
 	Role          string
 	Status        string
 	EmailVerified bool
-	Points        int64
-	ClientID      sql.NullInt64
-	ClientName    sql.NullString
-	ClientUUID    sql.NullString
-	ClientSecret  sql.NullString
-	SubToken      sql.NullString
-	CurrentPlanID sql.NullInt64
-	TrafficLimit  int64
-	UsedUp        int64
-	UsedDown      int64
-	ExpiryAt      int64
+	// EmailGateExempt is a persisted compatibility decision made at account
+	// admission/migration time. It must not be inferred from a later purchase.
+	EmailGateExempt bool
+	Points          int64
+	ClientID        sql.NullInt64
+	ClientName      sql.NullString
+	ClientUUID      sql.NullString
+	ClientSecret    sql.NullString
+	SubToken        sql.NullString
+	CurrentPlanID   sql.NullInt64
+	TrafficLimit    int64
+	UsedUp          int64
+	UsedDown        int64
+	ExpiryAt        int64
 	// CredsResetAt is when the user last rotated their node credentials, 0 if
 	// never. Backs the cooldown on that action (see RotateNodeCredentials).
 	CredsResetAt int64
@@ -58,7 +61,7 @@ type User struct {
 	LastOnlineAt int64
 }
 
-const userCols = `id, username, email, password_hash, role, status, email_verified, points,
+const userCols = `id, username, email, password_hash, role, status, email_verified, email_gate_exempt, points,
 	client_id, client_name, client_uuid, client_secret, sub_token, current_plan_id,
 	traffic_limit, used_up, used_down, expiry_at, created_at, updated_at,
 	last_online_at, creds_reset_at, proxy_username, proxy_password, proxy_expires_at, remark`
@@ -68,7 +71,7 @@ type scanner interface{ Scan(...any) error }
 func scanUser(sc scanner) (*User, error) {
 	var u User
 	err := sc.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Status,
-		&u.EmailVerified, &u.Points, &u.ClientID, &u.ClientName, &u.ClientUUID,
+		&u.EmailVerified, &u.EmailGateExempt, &u.Points, &u.ClientID, &u.ClientName, &u.ClientUUID,
 		&u.ClientSecret, &u.SubToken, &u.CurrentPlanID, &u.TrafficLimit,
 		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt, &u.LastOnlineAt,
 		&u.CredsResetAt, &u.ProxyUsername, &u.ProxyPassword, &u.ProxyExpiresAt, &u.Remark)
@@ -108,6 +111,9 @@ type NewUser struct {
 	TrafficLimit int64
 	ExpiryAt     int64
 	Remark       string
+	// EmailGateExempt is set only by trusted admission paths (invite/admin).
+	// Ordinary open registration leaves it false, regardless of later purchases.
+	EmailGateExempt bool
 }
 
 func (s *Store) CreateUser(nu NewUser) (int64, error) {
@@ -117,10 +123,10 @@ func (s *Store) CreateUser(nu NewUser) (int64, error) {
 	}
 	now := time.Now().Unix()
 	res, err := s.db.Exec(`INSERT INTO users
-		(username, email, password_hash, role, status, email_verified, points,
+		(username, email, password_hash, role, status, email_verified, email_gate_exempt, points,
 		 sub_token, traffic_limit, expiry_at, remark, created_at, updated_at)
-		VALUES (?,?,?,?,'active',0,?,?,?,?,?,?,?)`,
-		nu.Username, nullStr(nu.Email), nu.PasswordHash, role, nu.Points,
+		VALUES (?,?,?,?,'active',0,?,?,?,?,?,?,?,?)`,
+		nu.Username, nullStr(nu.Email), nu.PasswordHash, role, nu.EmailGateExempt, nu.Points,
 		nullStr(nu.SubToken), nu.TrafficLimit, nu.ExpiryAt, nu.Remark, now, now)
 	if err != nil {
 		return 0, err

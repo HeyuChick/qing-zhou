@@ -116,7 +116,18 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
+	// Bot username is derived from getMe. If a real token submission changes,
+	// ignore the form's stale username regardless of map iteration order and
+	// clear the cache after all writes.
+	tokenChanged := false
+	if submitted, ok := in["telegram_bot_token"]; ok && submitted != "***" {
+		current, _ := a.st.GetSetting("telegram_bot_token")
+		tokenChanged = strings.TrimSpace(submitted) != strings.TrimSpace(current)
+	}
 	for k, v := range in {
+		if tokenChanged && k == "telegram_bot_username" {
+			continue
+		}
 		if strings.HasPrefix(k, "_") {
 			continue // UI-only fields like _env_keys
 		}
@@ -150,6 +161,12 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		// waiting for the one caller that never wires it.
 		if k == store.SettingBlockPrivateEgress {
 			a.sbRebuildLog()
+		}
+	}
+	if tokenChanged {
+		if err := a.st.SetSetting("telegram_bot_username", ""); err != nil {
+			fail(w, http.StatusInternalServerError, "保存配置失败")
+			return
 		}
 	}
 	a.handleGetSettings(w, r)

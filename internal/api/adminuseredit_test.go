@@ -213,6 +213,47 @@ func TestSettings_SavingTheMaskKeepsTheGitHubToken(t *testing.T) {
 	}
 }
 
+func TestSettings_ChangingTelegramTokenClearsCachedUsername(t *testing.T) {
+	a, st := newUserEditAPI(t)
+	if err := st.SetSetting("telegram_bot_token", "OLD:token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("telegram_bot_username", "old_bot"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	a.handlePutSettings(w, httptest.NewRequest("PUT", "/api/admin/settings",
+		strings.NewReader(`{"telegram_bot_token":"NEW:token","telegram_bot_username":"old_bot"}`)))
+	if w.Code != 200 {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if got, _ := st.GetSetting("telegram_bot_token"); got != "NEW:token" {
+		t.Fatalf("token = %q", got)
+	}
+	if got, _ := st.GetSetting("telegram_bot_username"); got != "" {
+		t.Fatalf("stale username survived token change: %q", got)
+	}
+}
+
+func TestSettings_MaskedTelegramTokenKeepsCachedUsername(t *testing.T) {
+	a, st := newUserEditAPI(t)
+	if err := st.SetSetting("telegram_bot_token", "REAL:token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("telegram_bot_username", "real_bot"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	a.handlePutSettings(w, httptest.NewRequest("PUT", "/api/admin/settings",
+		strings.NewReader(`{"telegram_bot_token":"***","telegram_bot_username":"real_bot"}`)))
+	if w.Code != 200 {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if got, _ := st.GetSetting("telegram_bot_username"); got != "real_bot" {
+		t.Fatalf("unchanged token cleared username: %q", got)
+	}
+}
+
 // A rejection found halfway through must not leave earlier writes committed.
 // The concrete case: a password reset submitted together with a mistyped
 // address changed the password and killed every session that user had, then

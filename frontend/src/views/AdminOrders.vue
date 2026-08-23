@@ -51,7 +51,7 @@
               <tr v-for="o in g.items" :key="o.id" :class="{ refunded: o.status === 'refunded' }">
                 <td class="strong">{{ o.name || '—' }}</td>
                 <td :class="{ muted: !o.username }">{{ o.username || '已删除' }}</td>
-                <td><n-tag :type="o.type === 'plan' ? 'success' : 'info'" size="tiny" bordered="false">{{ o.type || '—' }}</n-tag></td>
+                <td><n-tag :type="o.type === 'plan' ? 'success' : 'info'" size="tiny" :bordered="false">{{ o.type || '—' }}</n-tag></td>
                 <td class="num">
                   <span class="amount">{{ o.price_points }}</span>
                   <span v-if="o.status === 'refunded'" class="amount-sub">退 {{ o.refunded_points }}<template v-if="o.refund_ratio > 0 && o.refund_ratio < 1"> ({{ Math.round(o.refund_ratio * 100) }}%)</template></span>
@@ -85,7 +85,7 @@
               </div>
               <div class="lc-meta">
                 <span class="kv">用户 <b>{{ o.username || '已删除' }}</b></span>
-                <span class="kv"><n-tag :type="o.type === 'plan' ? 'success' : 'info'" size="tiny" bordered="false">{{ o.type || '—' }}</n-tag></span>
+                <span class="kv"><n-tag :type="o.type === 'plan' ? 'success' : 'info'" size="tiny" :bordered="false">{{ o.type || '—' }}</n-tag></span>
                 <span class="kv">积分 <b>{{ o.price_points }}</b></span>
                 <span class="kv" v-if="o.status === 'refunded'">已退 <b style="color:var(--warn);">{{ o.refunded_points }}</b>
                   <template v-if="o.refund_ratio > 0 && o.refund_ratio < 1">（{{ Math.round(o.refund_ratio * 100) }}%）</template>

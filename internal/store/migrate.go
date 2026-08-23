@@ -3,6 +3,7 @@ package store
 import (
 	"log"
 	"strings"
+	"time"
 )
 
 // schema is applied idempotently on every boot. Tables for later phases
@@ -21,6 +22,9 @@ CREATE TABLE IF NOT EXISTS users (
   role            TEXT    NOT NULL DEFAULT 'user',
   status          TEXT    NOT NULL DEFAULT 'active',
   email_verified  INTEGER NOT NULL DEFAULT 0,
+  -- One-time compatibility bit for accounts already admitted before the email
+  -- gate became enforceable (legacy paid/provisioned/invite/admin accounts).
+  email_gate_exempt INTEGER NOT NULL DEFAULT 0,
   points          INTEGER NOT NULL DEFAULT 0,
   client_id     INTEGER,
   client_name   TEXT,
@@ -606,8 +610,49 @@ CREATE INDEX IF NOT EXISTS idx_notify_log_user ON user_notify_log(user_id);
 // additive columns, then indexes. The order is load-bearing — see the comment on
 // indexes for the outage that fixed it in place — and nothing that references a
 // column may run before the phase that adds it.
+//
+// migrateEmailGateExempt is separate because its backfill is security-sensitive:
+// it must execute iff this invocation actually adds the column. The existence
+// check and ALTER share one IMMEDIATE transaction, so another migrator cannot
+// race between them; rollback removes both the column and classifications if the
+// backfill fails.
+func (s *Store) migrateEmailGateExempt() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='email_gate_exempt'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists > 0 {
+		return tx.Commit()
+	}
+	if _, err := tx.Exec(`ALTER TABLE users ADD COLUMN email_gate_exempt INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE users SET email_gate_exempt=1 WHERE
+		role='admin' OR client_id IS NOT NULL
+		OR EXISTS (SELECT 1 FROM reg_code_uses r WHERE r.user_id=users.id)
+		OR EXISTS (SELECT 1 FROM user_plans p
+		           WHERE p.user_id=users.id AND p.kind='plan' AND p.package_id>=0)
+		OR (current_plan_id IS NOT NULL AND current_plan_id>0)`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// This migration carries a security-sensitive data backfill, so it cannot live
+	// in the best-effort additive list below: those statements run on every boot.
+	// Only the transaction that actually adds the column may classify existing
+	// accounts; later purchases/provisioning must never be reclassified on restart.
+	if err := s.migrateEmailGateExempt(); err != nil {
 		return err
 	}
 	// Additive column migrations for DBs created before these columns existed.
@@ -818,6 +863,13 @@ func (s *Store) Migrate() error {
 	if err := s.backfillUserPlans(); err != nil {
 		return err
 	}
+	// Preserve legacy zero-config paid service without preserving its unsafe rule
+	// ("no groups" meant every bucket — including a plan-less one — got every
+	// inbound). On the first upgrade only, materialise that implicit relationship
+	// as an ordinary node group bound to the packages historical users hold.
+	if err := s.migrateZeroConfigEntitlements(); err != nil {
+		return err
+	}
 	// Mark the已用完份 of existing queue chains as retired BEFORE the merge below,
 	// so a progressed queue is never mistaken for legacy duplicates (idempotent).
 	if err := s.backfillRetiredBuckets(); err != nil {
@@ -850,6 +902,77 @@ func (s *Store) Migrate() error {
 	// Extract inline-PEM sb_tls (mode=tls) profiles into managed certificates
 	// rows and repoint them via cert_id (idempotent).
 	return s.backfillCerts()
+}
+
+// migrateZeroConfigEntitlements converts the old implicit zero-config grant into
+// explicit data. It is intentionally one-shot: after the marker exists, a new
+// package with no groups must remain entitled to nothing until the admin binds
+// it, rather than silently inheriting every node.
+func (s *Store) migrateZeroConfigEntitlements() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var done int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM settings WHERE key='migrated_zero_config_v1'`).Scan(&done); err != nil {
+		return err
+	}
+	if done > 0 {
+		return nil
+	}
+	var groups int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM node_groups`).Scan(&groups); err != nil {
+		return err
+	}
+	var paidPackages int
+	if err := tx.QueryRow(`SELECT COUNT(DISTINCT package_id) FROM user_plans
+		WHERE kind='plan' AND package_id>0`).Scan(&paidPackages); err != nil {
+		return err
+	}
+	if groups == 0 && paidPackages > 0 {
+		now := time.Now().Unix()
+		res, err := tx.Exec(`INSERT INTO node_groups(name,description,sort_order,created_at)
+			VALUES('历史全节点','由升级迁移：保留原 zero-config 付费套餐的全节点访问',0,?)`, now)
+		if err != nil {
+			return err
+		}
+		gid, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		// The legacy fallback iterated enabled sing-box inbounds directly; many
+		// zero-config installs therefore have no corresponding nodes row. Materialise
+		// those inbounds first. External nodes were never part of that fallback and
+		// must not be swept into this compatibility grant.
+		if _, err := tx.Exec(`INSERT INTO nodes
+			(type,name,protocol,inbound_tag,share_link,source_id,enabled,sort_order,created_at)
+			SELECT 'self_built', tag, type, tag, '', 0, 1, sort_order, ?
+			  FROM sb_inbounds i
+			 WHERE i.enabled=1
+			   AND NOT EXISTS (SELECT 1 FROM nodes n
+			                    WHERE n.type='self_built' AND n.inbound_tag=i.tag)`, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO node_group_members(node_id,group_id)
+			SELECT id, ? FROM nodes WHERE type='self_built' AND enabled=1`, gid); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO plan_groups(package_id,group_id)
+			SELECT DISTINCT package_id, ? FROM user_plans
+			 WHERE kind='plan' AND package_id>0`, gid); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO settings(key,value) VALUES('migrated_zero_config_v1','1')`); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateSettingsCache()
+	return nil
 }
 
 // backfillTrafficDaily seeds the rollup from the traffic_samples still on disk

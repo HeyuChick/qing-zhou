@@ -26,9 +26,9 @@
           <div class="nv-main">
             <span class="nv-name">{{ n.name }}<span v-if="n.host" class="nv-host">{{ n.host }}</span></span>
             <span class="nv-ver">{{ n.version || '—' }}</span>
-            <n-tag v-if="n.too_old" type="error" size="tiny" bordered="false">版本过低</n-tag>
-            <n-tag v-else-if="!n.version" type="default" size="tiny" bordered="false">未知</n-tag>
-            <n-tag v-if="n.version && !n.has_v2ray_api" type="warning" size="tiny" bordered="false">无流量统计</n-tag>
+            <n-tag v-if="n.too_old" type="error" size="tiny" :bordered="false">版本过低</n-tag>
+            <n-tag v-else-if="!n.version" type="default" size="tiny" :bordered="false">未知</n-tag>
+            <n-tag v-if="n.version && !n.has_v2ray_api" type="warning" size="tiny" :bordered="false">无流量统计</n-tag>
           </div>
           <div class="nv-side">
             <span v-if="n.checked_at" class="nv-time">{{ fmtDateTime(n.checked_at) }}</span>
@@ -59,12 +59,12 @@
         <div v-for="s in servers" :key="s.id" class="list-card">
           <div class="lc-head">
             <span class="lc-title">{{ s.name || '—' }}</span>
-            <n-tag :type="s.enabled ? 'success' : 'default'" size="small" bordered="false">{{ s.enabled ? '启用' : '禁用' }}</n-tag>
+            <n-tag :type="s.enabled ? 'success' : 'default'" size="small" :bordered="false">{{ s.enabled ? '启用' : '禁用' }}</n-tag>
           </div>
           <div class="lc-meta">
             <span class="kv">主机 <b>{{ s.host }}</b></span>
             <span class="kv">端口 <b>{{ s.port }}</b></span>
-            <span class="kv">探针 <n-tag :type="s.probe_enabled ? 'info' : 'default'" size="tiny" bordered="false">{{ s.probe_enabled ? '开' : '关' }}</n-tag></span>
+            <span class="kv">探针 <n-tag :type="s.probe_enabled ? 'info' : 'default'" size="tiny" :bordered="false">{{ s.probe_enabled ? '开' : '关' }}</n-tag></span>
           </div>
           <div class="lc-foot">
             <n-button size="tiny" @click="handleRebuild(s.id)">重建</n-button>
