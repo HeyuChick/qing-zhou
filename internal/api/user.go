@@ -842,6 +842,14 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	serviceable := (u.ExpiryAt == 0 || u.ExpiryAt > now) &&
 		(u.TrafficLimit == 0 || u.UsedUp+u.UsedDown < u.TrafficLimit)
+	// Email verification gate: an unverified account must not be served any
+	// node links. External nodes carry raw upstream credentials that the panel
+	// cannot meter or revoke — with verify_required on, withholding them until
+	// verified is the whole point of the setting. Self-built access is moot too
+	// since provisioning is deferred until verification.
+	if verifyReq, _ := a.st.GetSettingBool("email_verify_required"); verifyReq && u.Role != "admin" && !u.EmailVerified {
+		serviceable = false
+	}
 
 	// Build the link list + a link→group map (drives the per-group auto-select
 	// groups), honoring the user's per-node blocklist.
