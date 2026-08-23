@@ -49,6 +49,14 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verifyRequired, _ := a.st.GetSettingBool("email_verify_required")
+	// Invite-code signup is an admission ticket: the holder is already
+	// allowed in. Forcing email verify on top would defer provisioning and
+	// then empty their subscription until they click a mail they were never
+	// required to have. Admin-created accounts are the other exempt path
+	// (pre-verified in handleAdminCreateUser).
+	if mode == "code" {
+		verifyRequired = false
+	}
 	if verifyRequired && req.Email == "" {
 		fail(w, http.StatusBadRequest, "需要邮箱以完成验证")
 		return
@@ -821,9 +829,10 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 // emptied the subscription of paying customers who still showed an active
 // plan in the panel (handleUserNodes never had this check).
 //
-// Only brand-new unverified accounts are blocked: no provisioned client, no
-// purchased/assigned plan. That is the external-share_link leak. Anyone
-// already in service keeps their nodes and can verify later from 个人中心.
+// Only open-registration pending-verify accounts are blocked: no client, no
+// paid plan, no invite code. Admin-created users are pre-verified; invite-
+// code users are allowed to skip verify. Anyone already in service keeps
+// their nodes.
 func (a *API) emailBlocksSub(u *store.User) bool {
 	if u == nil || u.Role == "admin" || u.EmailVerified {
 		return false
@@ -833,6 +842,14 @@ func (a *API) emailBlocksSub(u *store.User) bool {
 		return false
 	}
 	if u.ClientID.Valid {
+		return false
+	}
+	// Invite-code accounts are allowed to remain unverified. They may only
+	// have the signup grant / free group — no paid plan, no client yet if
+	// they registered while the old gate deferred provisioning.
+	if used, err := a.st.UserUsedRegCode(u.ID); err != nil {
+		return true
+	} else if used {
 		return false
 	}
 	paid, err := a.st.HasLivePaidPlan(u.ID)
