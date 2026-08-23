@@ -117,7 +117,12 @@ async function handleLogin() {
 async function handleRegister() {
   loading.value = true
   try {
-    await auth.register(regForm.username, regForm.password, regForm.code || undefined, regForm.email || undefined)
+    const data = await auth.register(regForm.username, regForm.password, regForm.code || undefined, regForm.email || undefined)
+    if (data?.need_verify) {
+      message.success(data.message || '注册成功，请查收验证邮件后激活账号')
+      tab.value = 'login'
+      return
+    }
     message.success('注册成功')
     emit('update:show', false)
     router.push('/dashboard')

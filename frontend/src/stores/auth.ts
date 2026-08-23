@@ -33,10 +33,17 @@ export const useAuthStore = defineStore('auth', () => {
     const body: any = { username, password }
     if (code) body.code = code
     if (email) body.email = email
-    const data = await apiPost<{ token: string; user: User }>('/api/auth/register', body)
+    const data = await apiPost<{ token?: string; user?: User; need_verify?: boolean; message?: string }>('/api/auth/register', body)
+    // email_verify_required: the panel creates the account and mails a link,
+    // but does not issue a session. Treating that 200 as a login used to write
+    // the string "undefined" into qz_token and dump the user on a 401 dashboard.
+    if (data?.need_verify || !data?.token) {
+      return data
+    }
     token.value = data.token
-    user.value = data.user
+    user.value = data.user ?? null
     localStorage.setItem('qz_token', data.token)
+    return data
   }
 
   async function fetchMe() {

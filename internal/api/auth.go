@@ -147,16 +147,10 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "账号已被封禁")
 		return
 	}
-	// Email verification gate: when email_verify_required is on, an unverified
-	// account must not log in — registration deferred provisioning until verify,
-	// so letting them in would expose the account page while the account is still
-	// half-created. Admins are always pre-verified and exempt.
-	if u.Role != "admin" {
-		if verify, _ := a.st.GetSettingBool("email_verify_required"); verify && !u.EmailVerified {
-			fail(w, http.StatusForbidden, "请先完成邮箱验证后再登录，请查收注册邮件（若未收到请联系管理员）")
-			return
-		}
-	}
+	// Unverified accounts may still log in. Resend-verify lives behind
+	// auth (/api/user/resend-verify, 个人中心), and mail scanners routinely
+	// consume the one-shot link — blocking login here would leave the user
+	// with no self-serve recovery. Node credentials are withheld in handleSub.
 
 	tok, err := a.issueLogin(w, r, u)
 	if err != nil {
