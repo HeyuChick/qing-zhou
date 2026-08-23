@@ -29,9 +29,9 @@
       <!-- 邮箱未验证横幅：订阅不含节点、无法使用代理，必须引导用户完成验证/重发 -->
       <n-alert v-if="showVerifyBanner" type="warning" :show-icon="true" style="margin: 12px 24px 0; max-width: 1056px;" closable @close="verifyBannerClosed = true">
         <template #header>邮箱尚未验证</template>
-        账号功能受限：订阅中不含任何节点，无法使用代理。请到注册邮箱点击验证链接；
-        没收到？<n-button text type="primary" size="tiny" :loading="resendingVerify" @click="resendVerify">重发验证邮件</n-button>
-        或前往 <router-link to="/user/account">个人中心 → 邮箱</router-link> 完成验证。
+        <p style="margin: 0 0 8px;">账号功能受限：订阅中不含任何节点，无法使用代理。请到注册邮箱点击验证链接；没收到？</p>
+        <n-button type="warning" size="small" round :loading="resendingVerify" @click="resendVerify">重发验证邮件</n-button>
+        <p style="margin: 8px 0 0;">或前往「<a class="verify-link" @click="router.push('/account')">账户设置 → 邮箱设置</a>」完成验证。</p>
       </n-alert>
       <header class="layout-header">
         <div class="header-left">
@@ -224,6 +224,16 @@ function handleAdminSelect(key: string) { router.push(key) }
 
 <style scoped>
 .app-shell { display: flex; min-height: 100vh; }
+
+/* 邮箱未验证横幅内的强调链接：warning 色同系 + 下划线，与胶囊按钮呼应 */
+.verify-link {
+  color: #f0a020;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.verify-link:hover { color: #e08c00; }
 .app-sider {
   width: 220px; flex-shrink: 0;
   background: var(--bg-soft);
