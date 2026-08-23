@@ -26,6 +26,13 @@
 
     <!-- 主区 -->
     <div class="app-main">
+      <!-- 邮箱未验证横幅：订阅不含节点、无法使用代理，必须引导用户完成验证/重发 -->
+      <n-alert v-if="showVerifyBanner" type="warning" :show-icon="true" style="margin: 12px 24px 0; max-width: 1056px;" closable @close="verifyBannerClosed = true">
+        <template #header>邮箱尚未验证</template>
+        账号功能受限：订阅中不含任何节点，无法使用代理。请到注册邮箱点击验证链接；
+        没收到？<n-button text type="primary" size="tiny" :loading="resendingVerify" @click="resendVerify">重发验证邮件</n-button>
+        或前往 <router-link to="/user/account">个人中心 → 邮箱</router-link> 完成验证。
+      </n-alert>
       <header class="layout-header">
         <div class="header-left">
           <button v-if="isMobile" class="icon-btn" @click="drawerShow = true" aria-label="菜单">
@@ -57,7 +64,7 @@
 <script setup lang="ts">
 import { h, computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { NDrawer, NDrawerContent, NButton, NDropdown, NIcon, NMenu } from 'naive-ui'
+import { NDrawer, NDrawerContent, NButton, NDropdown, NIcon, NMenu, NAlert } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
 import {
   SpeedometerOutline, LinkOutline, CartOutline,
@@ -69,11 +76,37 @@ import {
 } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
+import { apiPost } from '@/api'
+import { useMessage } from 'naive-ui'
 
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 const config = useConfigStore()
+const message = useMessage()
+
+// ---- 邮箱未验证横幅 ----
+// email_verify_required 开启时，未验证账号能登录（为了重发验证邮件不被锁死）
+// 但订阅不含节点。没有这个横幅，用户只会在导入订阅后发现空列表，无从排查。
+const verifyBannerClosed = ref(false)
+const resendingVerify = ref(false)
+const showVerifyBanner = computed(() =>
+  config.config.email_verify_required
+  && auth.isLoggedIn && !auth.isAdmin
+  && !!auth.user?.email && !auth.user?.email_verified
+  && !verifyBannerClosed.value)
+async function resendVerify() {
+  if (resendingVerify.value) return
+  resendingVerify.value = true
+  try {
+    await apiPost('/api/user/resend-verify')
+    message.success('验证邮件已发送，请查收')
+  } catch (e: any) {
+    console.error('resend-verify failed', e)
+  } finally {
+    resendingVerify.value = false
+  }
+}
 
 const activeKey = computed(() => route.path)
 
