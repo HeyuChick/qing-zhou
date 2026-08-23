@@ -550,6 +550,43 @@ func TestSplitTelegramCommand(t *testing.T) {
 	}
 }
 
+func TestDeliverManualNotificationRecordsSentFailedAndSkipped(t *testing.T) {
+	a, st, _ := newTelegramAPI(t)
+	sentUser, _ := st.CreateUser(store.NewUser{Username: "manual-sent", PasswordHash: "x"})
+	failedUser, _ := st.CreateUser(store.NewUser{Username: "manual-failed", PasswordHash: "x"})
+	unboundUser, _ := st.CreateUser(store.NewUser{Username: "manual-unbound", PasswordHash: "x"})
+	if err := st.BindTelegram(sentUser, 301, 3001, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindTelegram(failedUser, 302, 3002, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	n, err := st.CreateManualNotification("通知 <标题>", "正文 & 内容", "selected", []int64{sentUser, failedUser, unboundUser}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var messages []string
+	a.tgSendFn = func(chatID int64, html string) error {
+		messages = append(messages, html)
+		if chatID == 3002 {
+			return errors.New("blocked by user")
+		}
+		return nil
+	}
+	a.deliverManualNotification(n.ID)
+
+	got, err := st.ManualNotificationByID(n.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Sent != 1 || got.Failed != 1 || got.Skipped != 1 || got.Pending != 0 {
+		t.Fatalf("counts = %+v", got)
+	}
+	if len(messages) != 2 || !strings.Contains(messages[0], "&lt;标题&gt;") || !strings.Contains(messages[0], "&amp;") {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
 func TestTelegramUnbindFromChat(t *testing.T) {
 	a, st, inbox := newTelegramAPI(t)
 	uid, err := st.CreateUser(store.NewUser{Username: "u1", PasswordHash: "x"})

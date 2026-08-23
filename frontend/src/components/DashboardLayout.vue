@@ -129,6 +129,7 @@ const adminNodeItems: MenuOption[] = [
 ]
 const adminSysItems: MenuOption[] = [
   { label: '公告管理', key: '/admin/announcements', icon: renderIcon(NotificationsOutline) },
+  { label: '手动通知', key: '/admin/manual-notifications', icon: renderIcon(MegaphoneOutline) },
   { label: '帮助文档', key: '/admin/help', icon: renderIcon(DocumentTextOutline) },
   { label: '系统设置', key: '/admin/settings', icon: renderIcon(SettingsOutline) },
   { label: '在线更新', key: '/admin/update', icon: renderIcon(CloudDownloadOutline) },
@@ -160,7 +161,7 @@ const titleMap: Record<string, string> = {
   '/orders': '订单记录', '/points': '积分明细', '/notices': '公告通知', '/help': '帮助中心', '/account': '账户设置',
   '/admin': '管理概览', '/admin/users': '用户管理', '/admin/user-groups': '用户组', '/admin/packages': '套餐管理', '/admin/nodes': '节点管理',
   '/admin/singbox': 'sing-box', '/admin/certs': '证书管理', '/admin/orders': '订单管理', '/admin/servers': '服务器', '/admin/monitor': '监控管理',
-  '/admin/settings': '系统设置', '/admin/reg-codes': '注册码', '/admin/announcements': '公告管理', '/admin/help': '帮助文档',
+  '/admin/settings': '系统设置', '/admin/reg-codes': '注册码', '/admin/announcements': '公告管理', '/admin/manual-notifications': '手动通知', '/admin/help': '帮助文档',
   '/admin/update': '在线更新',
 }
 const currentTitle = computed(() => titleMap[route.path] || config.config.site_name || '轻舟')

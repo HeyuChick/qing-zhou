@@ -395,6 +395,11 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/announcements", a.handleAdminCreateAnnouncement)
 		ar.Put("/api/admin/announcements/{id}", a.handleAdminUpdateAnnouncement)
 		ar.Delete("/api/admin/announcements/{id}", a.handleAdminDeleteAnnouncement)
+
+		ar.Get("/api/admin/manual-notifications/users", a.handleAdminManualNotificationUsers)
+		ar.Get("/api/admin/manual-notifications", a.handleAdminListManualNotifications)
+		ar.Post("/api/admin/manual-notifications", a.handleAdminCreateManualNotification)
+		ar.Get("/api/admin/manual-notifications/{id}", a.handleAdminManualNotificationDetail)
 	})
 
 	// sing-box one-click install script. Registered explicitly above the SPA

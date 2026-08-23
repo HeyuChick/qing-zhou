@@ -554,6 +554,28 @@ CREATE TABLE IF NOT EXISTS user_notify_log (
   sent_at  INTEGER NOT NULL,
   PRIMARY KEY (user_id, kind, subject)
 );
+
+-- Admin-created Telegram broadcasts. The recipient table is a snapshot: it
+-- preserves who was selected and why delivery did/did not happen even if the
+-- user later binds Telegram, changes their name, or is deleted.
+CREATE TABLE IF NOT EXISTS manual_notifications (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  title        TEXT    NOT NULL,
+  content      TEXT    NOT NULL DEFAULT '',
+  target_type  TEXT    NOT NULL, -- all | selected
+  created_by   INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS manual_notification_recipients (
+  notification_id INTEGER NOT NULL,
+  user_id         INTEGER NOT NULL,
+  username        TEXT    NOT NULL DEFAULT '',
+  chat_id         INTEGER NOT NULL DEFAULT 0,
+  status          TEXT    NOT NULL DEFAULT 'pending', -- pending | sending | sent | failed | skipped
+  error           TEXT    NOT NULL DEFAULT '',
+  sent_at         INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (notification_id, user_id)
+);
 `
 
 // indexes is the index DDL, kept OUT of schema above and applied AFTER the
@@ -604,6 +626,8 @@ CREATE INDEX IF NOT EXISTS idx_alerts_open ON server_alerts(server_id, type, rea
 CREATE INDEX IF NOT EXISTS idx_tg_bind_tokens_user ON telegram_bind_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_tg_bind_tokens_exp ON telegram_bind_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_notify_log_user ON user_notify_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_manual_notifications_created ON manual_notifications(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_manual_notify_recipients_status ON manual_notification_recipients(notification_id, status);
 `
 
 // Migrate brings the schema up to date in three ordered phases: tables, then
