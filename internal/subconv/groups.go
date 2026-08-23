@@ -11,8 +11,8 @@ import "fmt"
 const (
 	grpSelectClash = "✈️ 节点选择" // Clash primary selector (rules MATCH this)
 	grpAutoClash   = "♻️ 自动选择" // Clash global url-test (best IP + protocol)
-	tagProxy       = "proxy"    // sing-box primary selector (route.final points here)
-	tagAuto        = "auto"     // sing-box global url-test
+	tagProxy       = "proxy"   // sing-box primary selector (route.final points here)
+	tagAuto        = "auto"    // sing-box global url-test
 )
 
 const urltestURL = "http://www.gstatic.com/generate_204"
@@ -49,7 +49,18 @@ func reservedTags() map[string]bool {
 // duplicates would silently drop or alias nodes. Collisions get a " #N" suffix;
 // empties fall back to server.
 func dedupeNames(ps []*Proxy) {
+	dedupeNamesWithReserved(ps, nil)
+}
+
+// dedupeNamesWithReserved additionally keeps names owned by template-defined
+// groups free. A generated node is safe to rename because every generated
+// reference is updated with it; renaming a custom selector would instead break
+// route rules that refer to its stable tag.
+func dedupeNamesWithReserved(ps []*Proxy, extra map[string]bool) {
 	seen := reservedTags()
+	for name := range extra {
+		seen[name] = true
+	}
 	for _, p := range ps {
 		n := p.Name
 		if n == "" {
@@ -85,6 +96,10 @@ func uniqueName(base string, used map[string]bool) string {
 // the per-panel-group subsets. A group becomes its own auto-select group when it
 // has ≥2 nodes and isn't the whole set (which the global "auto" already covers).
 func buildAutoGroups(ps []*Proxy) autoGroups {
+	return buildAutoGroupsWithReserved(ps, nil)
+}
+
+func buildAutoGroupsWithReserved(ps []*Proxy, extra map[string]bool) autoGroups {
 	var ag autoGroups
 	order := []string{}
 	by := map[string][]string{}
@@ -103,6 +118,9 @@ func buildAutoGroups(ps []*Proxy) autoGroups {
 	// the client sees two different things under one tag (duplicate/omitted proxy
 	// or a self-referencing selector). Suffix any colliding group name.
 	used := reservedTags()
+	for name := range extra {
+		used[name] = true
+	}
 	for _, n := range ag.all {
 		used[n] = true
 	}

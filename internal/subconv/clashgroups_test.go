@@ -68,8 +68,8 @@ rules: []
 `
 	doc := renderClashDoc(t, tpl, nodeLinks()...)
 	names := groupNames(doc)
-	if len(names) == 0 || names[0] != "我的分组" {
-		t.Fatalf("custom group missing or not first: %v", names)
+	if len(names) < 3 || names[0] != grpSelectClash || names[1] != "我的分组" || names[2] != grpAutoClash {
+		t.Fatalf("groups not ordered primary/custom/auto: %v", names)
 	}
 	// The generated groups are still appended — the MATCH rule points at the
 	// primary selector, which must exist.
@@ -111,9 +111,9 @@ rules: []
 	}
 }
 
-// A name collision must resolve in the admin's favour, and must never yield two
-// groups sharing one name.
-func TestClashCustomGroupWinsOnNameCollision(t *testing.T) {
+// Built-in group names are stable API: generated rules and selectors reference
+// them, so a custom collision is ignored rather than replacing their meaning.
+func TestClashBuiltInGroupWinsOnNameCollision(t *testing.T) {
 	tpl := `
 proxy-groups:
   - name: ` + grpSelectClash + `
@@ -133,8 +133,8 @@ rules: []
 	}
 	g := groupByName(doc, grpSelectClash)
 	proxies, _ := g["proxies"].([]any)
-	if len(proxies) == 0 || proxies[0] != "DIRECT" {
-		t.Errorf("admin's definition was overwritten: %v", proxies)
+	if len(proxies) == 0 || proxies[0] != grpAutoClash {
+		t.Errorf("built-in primary selector was overwritten: %v", proxies)
 	}
 	// The MATCH rule still resolves.
 	rules, _ := doc["rules"].([]any)

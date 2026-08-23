@@ -73,6 +73,16 @@ func TestRenderedConfigPassesSingboxCheck(t *testing.T) {
 		  },
 		  "route": {"auto_detect_interface": true, "final": "proxy", "rules": [{"action": "sniff"}]}
 		}`},
+		{"custom platform selector", `{
+		  "outbounds": [
+		    {"type": "selector", "tag": "ai", "outbounds": ["proxy", "all"], "default": "proxy"}
+		  ],
+		  "route": {
+		    "auto_detect_interface": true,
+		    "final": "proxy",
+		    "rules": [{"domain_suffix": ["openai.com"], "outbound": "ai"}]
+		  }
+		}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := Singbox(ParseLinks(links), tc.tpl)

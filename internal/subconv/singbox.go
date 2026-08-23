@@ -22,6 +22,7 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 	modernizeSingboxDNS(doc)
 
 	// Convert first, then dedupe so url-test/selector tags are unique and real.
+	customTags := singboxTemplateSelectorTags(doc["outbounds"])
 	type conv struct {
 		o map[string]any
 		p *Proxy
@@ -36,13 +37,13 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 	for i, c := range cs {
 		kept[i] = c.p
 	}
-	dedupeNames(kept)
+	dedupeNamesWithReserved(kept, customTags)
 	outs := make([]map[string]any, len(cs))
 	for i, c := range cs {
 		c.o["tag"] = c.p.Name // sync after dedupe
 		outs[i] = c.o
 	}
-	ag := buildAutoGroups(kept)
+	ag := buildAutoGroupsWithReserved(kept, customTags)
 
 	// Primary selector: manual pick across auto + per-group auto-select + nodes.
 	sel := []string{}
@@ -55,7 +56,19 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 	sel = append(sel, ag.all...)
 	sel = append(sel, "direct")
 
+	generatedTags := map[string]bool{tagProxy: true, tagAuto: true, "direct": true, allPlaceholder: true}
+	for _, n := range ag.all {
+		generatedTags[n] = true
+	}
+	for _, g := range ag.byGroup {
+		generatedTags[g.name] = true
+	}
+	customSelectors := mergeSingboxSelectors(doc["outbounds"], ag.all, generatedTags)
+
 	all := []map[string]any{{"type": "selector", "tag": tagProxy, "outbounds": sel}}
+	// Keep optional platform selectors near the top and give them the same
+	// ordering semantics as Clash: primary, custom, auto, panel groups, nodes.
+	all = append(all, customSelectors...)
 	if len(ag.all) > 0 {
 		all = append(all, singboxURLTest(tagAuto, ag.all))
 		for _, g := range ag.byGroup {
@@ -81,7 +94,7 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 			// a hardcoded address — bypasses the tunnel out the physical NIC.
 			{"type": "tun", "tag": "tun-in",
 				"address":    []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
-				"auto_route": true, "strict_route": false, "stack": "gvisor",
+				"auto_route": true, "strict_route": true, "stack": "gvisor",
 				// Defensive, not load-bearing: auto_route installs ::/0, which
 				// nominally covers link-local and multicast, but the kernel's own
 				// more-specific on-link routes (fe80::/64 dev <if>) win in the main
@@ -109,6 +122,99 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 
 	b, err := json.MarshalIndent(doc, "", "  ")
 	return string(b), err
+}
+
+// singboxTemplateSelectorTags returns stable custom tags that generated nodes
+// and panel groups must not claim. Built-in tags and the placeholder are not
+// reservable by templates; those selectors are ignored later.
+func singboxTemplateSelectorTags(tpl any) map[string]bool {
+	tags := map[string]bool{}
+	reserved := map[string]bool{tagProxy: true, tagAuto: true, "direct": true, allPlaceholder: true}
+	for _, outbound := range mapSlice(tpl) {
+		typ, _ := outbound["type"].(string)
+		tag, _ := outbound["tag"].(string)
+		if typ == "selector" && tag != "" && !reserved[tag] {
+			tags[tag] = true
+		}
+	}
+	return tags
+}
+
+// mergeSingboxSelectors preserves extra selector outbounds from an admin
+// template. The renderer owns all other outbounds because node definitions are
+// generated per subscriber; retaining arbitrary template outbounds would make
+// collisions and dangling dependencies impossible to validate safely.
+//
+// "all" expands in place to every generated node tag. References are restricted
+// to generated outbounds so a typo or a custom-selector cycle cannot make
+// sing-box reject or loop the complete subscription. An empty selector falls
+// back to proxy, which also gives optional platform groups the intended
+// inherit-main behavior. A dangling `default` is removed so sing-box uses the
+// first valid outbound as documented.
+func mergeSingboxSelectors(tpl any, nodeTags []string, generatedTags map[string]bool) []map[string]any {
+	candidates := mapSlice(tpl)
+	accepted := make([]map[string]any, 0, len(candidates))
+	taken := make(map[string]bool, len(generatedTags)+len(candidates))
+	for tag := range generatedTags {
+		taken[tag] = true
+	}
+	for _, outbound := range candidates {
+		typ, _ := outbound["type"].(string)
+		tag, _ := outbound["tag"].(string)
+		if typ != "selector" || tag == "" || taken[tag] {
+			continue
+		}
+		taken[tag] = true
+		accepted = append(accepted, outbound)
+	}
+
+	for _, selector := range accepted {
+		self, _ := selector["tag"].(string)
+		raw := stringSlice(selector["outbounds"])
+		refs := make([]string, 0, len(raw)+len(nodeTags))
+		seen := map[string]bool{}
+		appendRef := func(ref string) {
+			if ref != "" && ref != self && generatedTags[ref] && !seen[ref] {
+				seen[ref] = true
+				refs = append(refs, ref)
+			}
+		}
+		for _, ref := range raw {
+			if ref == allPlaceholder {
+				for _, tag := range nodeTags {
+					appendRef(tag)
+				}
+				continue
+			}
+			appendRef(ref)
+		}
+		if len(refs) == 0 {
+			refs = []string{tagProxy}
+			seen[tagProxy] = true
+		}
+		selector["outbounds"] = refs
+		if def, ok := selector["default"].(string); !ok || !seen[def] {
+			delete(selector, "default")
+		}
+	}
+	return accepted
+}
+
+func stringSlice(v any) []string {
+	switch values := v.(type) {
+	case []string:
+		return values
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			if s, ok := value.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // mapSlice normalizes a JSON array value to []map[string]any. A template loaded

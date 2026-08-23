@@ -79,16 +79,17 @@ const allPlaceholder = "all"
 // documented way to customise the output, so overwriting the one key that
 // expresses that customisation is a bug rather than a policy.
 //
-// The admin's groups come first (a client selects the first group by default,
-// and someone who wrote their own wants it in front), generated groups follow.
-// A generated group whose name the admin already used is dropped: theirs wins,
-// and duplicate names would give the client two different groups under one name.
+// The built-in primary selector always comes first because it is the overall
+// control point referenced by MATCH. Admin groups follow it, then the generated
+// auto/per-panel groups. Generated names are reserved: a colliding custom group
+// is ignored rather than producing two groups with one name or replacing an
+// internal group that other generated entries reference.
 //
 // The `all` placeholder inside an admin group's `proxies` list expands to every
 // node name. It expands in place so the surrounding entries keep their order.
 func mergeClashGroups(tpl any, generated []map[string]any, nodes []*Proxy) []map[string]any {
 	custom := mapSlice(tpl)
-	if len(custom) == 0 {
+	if len(custom) == 0 || len(generated) == 0 {
 		return generated
 	}
 	names := make([]string, 0, len(nodes))
@@ -96,18 +97,25 @@ func mergeClashGroups(tpl any, generated []map[string]any, nodes []*Proxy) []map
 		names = append(names, p.Name)
 	}
 	taken := map[string]bool{}
-	out := make([]map[string]any, 0, len(custom)+len(generated))
-	for _, g := range custom {
+	for _, g := range generated {
 		if n, _ := g["name"].(string); n != "" {
 			taken[n] = true
 		}
+	}
+	out := make([]map[string]any, 0, len(custom)+len(generated))
+	// The primary selector is the stable top-level entry, regardless of how many
+	// platform selectors the template defines.
+	out = append(out, generated[0])
+	for _, g := range custom {
+		n, _ := g["name"].(string)
+		if n == "" || taken[n] {
+			continue
+		}
+		taken[n] = true
 		expandAllPlaceholder(g, names)
 		out = append(out, g)
 	}
-	for _, g := range generated {
-		if n, _ := g["name"].(string); n != "" && taken[n] {
-			continue
-		}
+	for _, g := range generated[1:] {
 		out = append(out, g)
 	}
 	return out

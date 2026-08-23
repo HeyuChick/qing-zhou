@@ -364,10 +364,10 @@ rules:
   - GEOIP,private,DIRECT,no-resolve
 `
 
-// DefaultSingboxTemplate carries the sing-box anti-leak dns+route with built-in
-// routing: CN domains resolve via local DNS and go direct, ads are rejected,
-// everything else is fake-ip'd through the proxy. Rule-sets are fetched once and
-// cached.
+// DefaultSingboxTemplate carries the sing-box anti-leak dns+route. Ads are
+// rejected and LAN traffic stays direct; all public traffic, including CN
+// destinations, otherwise falls through to the proxy. Rule-sets are fetched
+// once and cached.
 //
 // Targets sing-box ≥1.12. The DNS block uses the typed server format that 1.12
 // introduced and that 1.14 makes mandatory — the legacy `address` strings this
@@ -389,7 +389,6 @@ const DefaultSingboxTemplate = `{
       {"tag": "fake", "type": "fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18"}
     ],
     "rules": [
-      {"rule_set": "geosite-cn", "server": "local"},
       {"query_type": ["A", "AAAA"], "server": "fake"}
     ],
     "independent_cache": true,
@@ -403,16 +402,11 @@ const DefaultSingboxTemplate = `{
       {"action": "sniff"},
       {"protocol": "dns", "action": "hijack-dns"},
       {"rule_set": "geosite-ads", "action": "reject"},
-      {"ip_is_private": true, "outbound": "direct"},
-      {"rule_set": ["geoip-cn", "geosite-cn"], "outbound": "direct"}
+      {"ip_is_private": true, "outbound": "direct"}
     ],
     "rule_set": [
       {"type": "remote", "tag": "geosite-ads", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs"},
-      {"type": "remote", "tag": "geosite-cn", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs"},
-      {"type": "remote", "tag": "geoip-cn", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"}
+       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs"}
     ]
   },
   "experimental": {
