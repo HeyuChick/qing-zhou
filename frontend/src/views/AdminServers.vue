@@ -107,8 +107,8 @@
                         :loading="keysLoading" placeholder="选择一个私钥文件" style="margin-top:8px;" />
               <div class="hint">
                 目录：<code>{{ keyDir || '未配置' }}</code>
-                <template v-if="!keysConfigured"> —— 设置 <code>QZ_SSH_KEY_DIR</code> 后可用。</template>
-                <template v-else-if="!keyFiles.length"> —— 目录里还没有私钥文件。</template>
+                <template v-if="!keysConfigured"> —— 未配置，设置 <code>QZ_SSH_KEY_DIR</code> 后可用。</template>
+                <template v-else-if="!keyFiles.length"> —— 目录不存在或还没有私钥文件；把私钥放进去并 <code>chmod 600</code>。</template>
                 <br>私钥不经过浏览器、也不入库。容器内面板以 uid 10001 运行，挂进去的密钥要它能读（<code>chown 10001</code>）。
                 <template v-if="form.ssh_key"><br><b>已选文件时，上面粘贴过的私钥不再使用。</b></template>
               </div>
