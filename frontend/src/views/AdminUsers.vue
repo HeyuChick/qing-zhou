@@ -186,8 +186,8 @@
           <div class="pm-assign-row">
             <n-select v-model:value="assignPkgId" :options="pkgOptions" placeholder="选择套餐" filterable style="flex:1;" />
             <!-- 天数只对订阅计划有意义：流量包加的是共享池，没有按份倒计时。 -->
-            <n-input-number v-if="assignIsPlan" v-model:value="assignDays" :min="1" :max="3650" :show-button="false"
-                            placeholder="天数" style="width:96px;flex:none;" />
+            <n-input-number v-if="assignIsPlan" v-model:value="assignDays" :min="1" :max="assignDaysMax" :precision="0"
+                            :show-button="false" placeholder="天数" style="width:96px;flex:none;" />
             <n-button type="primary" :loading="saving" :disabled="!assignPkgId" @click="handleAssign">
               {{ assignWillQueue ? '分配并排队' : '分配' }}
             </n-button>
@@ -734,6 +734,8 @@ const assignDayChips = computed(() => {
   if (opts.length) return opts.map((o: any) => o.days)
   return pkg.duration_days > 0 ? [pkg.duration_days] : []
 })
+// 自定义天数封顶 3650，但已上架档位可以更长——输入框不能把快捷档夹成一个「自定义天数」。
+const assignDaysMax = computed(() => Math.max(3650, ...assignDayChips.value, 0))
 watch(assignPkgId, () => { assignDays.value = defaultAssignDays(assignPkg.value) })
 async function loadPackages() {
   if (pkgOptions.value.length) return
@@ -748,7 +750,7 @@ async function handleAssign() {
   saving.value = true
   try {
     await apiPost(`/api/admin/users/${plansUser.value.id}/assign-plan`,
-      { package_id: assignPkgId.value, duration_days: assignIsPlan.value ? (assignDays.value || 0) : 0 })
+      { package_id: assignPkgId.value, duration_days: assignIsPlan.value ? Math.round(assignDays.value || 0) : 0 })
     message.success(assignWillQueue.value ? '已分配并加入队列' : '分配成功')
     assignPkgId.value = null
     await Promise.all([loadPlans(plansUser.value.id), load()])

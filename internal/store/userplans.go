@@ -790,6 +790,10 @@ var (
 	// been used (or below zero). Used bytes cannot be un-spent this way; reset
 	// the counters first if that is the intent.
 	ErrTrafficFloor = errors.New("扣减后额度会低于已用流量")
+	// ErrBucketFinished — a retired or time-expired份 will never spend again.
+	// Growing its limit would inflate the users.* mirror without giving the user
+	// anything they can actually use. Top up the live/queued份, or grant a new one.
+	ErrBucketFinished = errors.New("已结束的套餐无法调整流量，请调整使用中或排队中的份")
 )
 
 // DeleteBucket removes one of a user's buckets — an admin pulling back a plan份
@@ -887,6 +891,13 @@ func (s *Store) AdjustBucketTraffic(userID, bucketID, delta int64) (*Bucket, err
 	}
 	if b.Kind == KindFree {
 		return nil, ErrBucketProtected
+	}
+	// Retired heads have already handed the slot to the next份. Time-expired
+	// plans will not come back online just because the number got bigger.
+	// A still-active exhausted head is different: adding quota is how it
+	// returns to service when nothing is queued behind it.
+	if b.Status == StatusRetired || (b.Kind == "plan" && !b.NotExpired(now)) {
+		return nil, ErrBucketFinished
 	}
 	// A plan with limit 0 is uncapped. A pool with limit 0 is empty — adding
 	// is the whole point of adjusting it.

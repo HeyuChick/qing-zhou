@@ -140,6 +140,61 @@ func TestAdjustBucketTraffic_PoolVsUnlimitedPlan(t *testing.T) {
 	}
 }
 
+// A time-expired or retired份 will never spend again. Growing its number would
+// only inflate the users.* mirror. A still-active exhausted head is different:
+// with nothing queued, adding quota is how it comes back.
+func TestAdjustBucketTraffic_RefusesFinished(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "faye")
+	pkg := mkPlan(t, st, "100G/30d", 100, 100, 30)
+	buy(t, st, uid, pkg)
+	bs := planBuckets(t, st, uid, pkg.ID)
+	if _, err := st.db.Exec(`UPDATE user_plans SET expiry_at=1 WHERE id=?`, bs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdjustBucketTraffic(uid, bs[0].ID, giB); !errors.Is(err, ErrBucketFinished) {
+		t.Errorf("expired plan err = %v, want ErrBucketFinished", err)
+	}
+
+	uid2 := mkUser(t, st, "gail")
+	buy(t, st, uid2, pkg)
+	buy(t, st, uid2, pkg)
+	pair := planBuckets(t, st, uid2, pkg.ID)
+	if _, err := st.db.Exec(`UPDATE user_plans SET used_down=? WHERE id=?`, 99*giB, pair[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AdjustBucketTraffic(uid2, pair[0].ID, -1*giB); err != nil {
+		t.Fatal(err)
+	}
+	after := planBuckets(t, st, uid2, pkg.ID)
+	var retired *Bucket
+	for _, b := range after {
+		if b.ID == pair[0].ID {
+			retired = b
+		}
+	}
+	if retired == nil || retired.Status != StatusRetired {
+		t.Fatalf("setup: head status = %v, want retired", retired)
+	}
+	if _, err := st.AdjustBucketTraffic(uid2, retired.ID, giB); !errors.Is(err, ErrBucketFinished) {
+		t.Errorf("retired plan err = %v, want ErrBucketFinished", err)
+	}
+
+	uid3 := mkUser(t, st, "hope")
+	buy(t, st, uid3, pkg)
+	lone := planBuckets(t, st, uid3, pkg.ID)
+	if _, err := st.db.Exec(`UPDATE user_plans SET used_down=? WHERE id=?`, 100*giB, lone[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.AdjustBucketTraffic(uid3, lone[0].ID, 10*giB)
+	if err != nil {
+		t.Fatalf("exhausted but still-active head: %v", err)
+	}
+	if got.TrafficLimit != 110*giB {
+		t.Errorf("rescued head limit = %d GiB, want 110", got.TrafficLimit/giB)
+	}
+}
+
 func TestAdjustBucketTraffic_RefusesFreeAndZero(t *testing.T) {
 	st := newRefundStore(t)
 	uid := mkUser(t, st, "eve")

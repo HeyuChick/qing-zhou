@@ -416,7 +416,8 @@ func (a *API) handleAdminAdjustUserPlanTraffic(w http.ResponseWriter, r *http.Re
 		case errors.Is(err, store.ErrBucketProtected),
 			errors.Is(err, store.ErrZeroDelta),
 			errors.Is(err, store.ErrBucketUnlimited),
-			errors.Is(err, store.ErrTrafficFloor):
+			errors.Is(err, store.ErrTrafficFloor),
+			errors.Is(err, store.ErrBucketFinished):
 			fail(w, http.StatusBadRequest, err.Error())
 		default:
 			fail(w, http.StatusInternalServerError, "调整失败")
