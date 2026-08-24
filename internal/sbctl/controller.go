@@ -350,6 +350,16 @@ func (c *Controller) forgetStatsCap(serverID int64) {
 	c.capMu.Unlock()
 }
 
+// invalidateRemoteCaches forces the next operation on a server to rediscover
+// both its capabilities and its sing-box path. The RemoteManager is long-lived;
+// clearing a short-lived API manager after an upgrade does not touch this cache.
+func (c *Controller) invalidateRemoteCaches(serverID int64) {
+	c.forgetStatsCap(serverID)
+	if c.remoteMgr != nil {
+		c.remoteMgr.ForgetSingBoxBin(serverID)
+	}
+}
+
 // Rebuild regenerates the sing-box config from the current entitlement and
 // applies it (validate + reload). Safe to call on every change; serialized.
 // When multi-server is configured, it iterates over all enabled remote servers
@@ -465,7 +475,7 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	// This is the admin-triggered path, reached right after a server is edited or
 	// its sing-box reinstalled — so re-probe rather than trusting a cached answer
 	// about a binary that may have just changed.
-	c.forgetStatsCap(serverID)
+	c.invalidateRemoteCaches(serverID)
 
 	byTag, err := c.st.BuildUsersByTag(time.Now().Unix())
 	if err != nil {

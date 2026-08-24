@@ -92,7 +92,7 @@
             </div>
           </div>
         </n-form-item>
-        <n-form-item v-if="form.use_sudo" label="sudo 密码"><n-input v-model:value="form.sudo_password" type="password" show-password-on="click" placeholder="留空 = 已配置免密 sudo" /></n-form-item>
+        <n-form-item v-if="form.use_sudo" label="sudo 密码"><n-input v-model:value="form.sudo_password" type="password" show-password-on="click" placeholder="留空并保存 = 改用免密 sudo" /></n-form-item>
         <n-form-item label="SSH 密码"><n-input v-model:value="form.ssh_password" type="password" show-password-on="click" placeholder="与密钥二选一" /></n-form-item>
         <n-form-item label="SSH 私钥">
           <div style="width:100%;">
@@ -115,7 +115,7 @@
             </template>
           </div>
         </n-form-item>
-        <n-form-item label="密钥密码"><n-input v-model:value="form.ssh_key_pass" type="password" show-password-on="click" /></n-form-item>
+        <n-form-item label="密钥密码"><n-input v-model:value="form.ssh_key_pass" type="password" show-password-on="click" placeholder="已保存时显示 ***；清空并保存可删除" /></n-form-item>
         <n-form-item label="配置路径"><n-input v-model:value="form.config_path" placeholder="/etc/sing-box/config.json" /></n-form-item>
         <n-form-item label="systemd 单元"><n-input v-model:value="form.systemd_unit" placeholder="sing-box" /></n-form-item>
         <n-form-item label="sing-box 路径"><n-input v-model:value="form.sing_box_bin" placeholder="/usr/local/bin/sing-box" /></n-form-item>
@@ -164,7 +164,7 @@ async function loadKeys(){
 }
 function openForm(s?:any){
   editing.value = s||null
-  if(s){ Object.assign(form,{ name:s.name, host:s.host, port:s.port||22, ssh_user:s.ssh_user||'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:s.use_sudo??false, sudo_password:'', ssh_key_path:s.ssh_key_path||'', config_path:s.config_path||'/etc/sing-box/config.json', systemd_unit:s.systemd_unit||'sing-box', sing_box_bin:s.sing_box_bin||'/usr/local/bin/sing-box', v2ray_listen:s.v2ray_listen||'127.0.0.1:18080', enabled:s.enabled??true }) }
+  if(s){ Object.assign(form,{ name:s.name, host:s.host, port:s.port||22, ssh_user:s.ssh_user||'root', ssh_password:'', ssh_key:'', ssh_key_pass:s.ssh_key_pass||'', use_sudo:s.use_sudo??false, sudo_password:s.sudo_password||'', ssh_key_path:s.ssh_key_path||'', config_path:s.config_path||'/etc/sing-box/config.json', systemd_unit:s.systemd_unit||'sing-box', sing_box_bin:s.sing_box_bin||'/usr/local/bin/sing-box', v2ray_listen:s.v2ray_listen||'127.0.0.1:18080', enabled:s.enabled??true }) }
   else { Object.assign(form, mk()) }
   keyMode.value = form.ssh_key_path ? 'file' : 'paste'
   showForm.value = true
@@ -183,8 +183,10 @@ async function handleSave(){
     const b:any = {...form}
     if(!b.ssh_password) delete b.ssh_password
     if(!b.ssh_key) delete b.ssh_key
-    if(!b.ssh_key_pass) delete b.ssh_key_pass
-    if(!b.sudo_password) delete b.sudo_password
+    // 这两个字段必须把空字符串送到后端：更新接口以「字段缺失」表示保留旧值，
+    // 以空字符串表示真的清除。编辑时保留的 *** 会由后端换回原密文。
+    // sudo 已关闭时密码不再有用途，保存时顺手从库里清掉。
+    if(!b.use_sudo) b.sudo_password = ''
     // 切回粘贴就是明确不要文件了，所以显式送空把它清掉（更新接口是「没送的字段
     // 保留原值」，delete 会让旧的文件名留在库里继续生效）。反过来选了文件时不动
     // ssh_key：后端本来就文件优先，而空的 ssh_key 会被下面删掉以免误清密钥。

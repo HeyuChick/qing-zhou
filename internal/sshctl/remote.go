@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,14 +85,14 @@ type ServerConfig struct {
 	Host        string `json:"host"`
 	Port        int    `json:"port"`
 	SSHUser     string `json:"ssh_user"`
-	SSHKey      string `json:"ssh_key"`       // PEM private key CONTENT (not a path)
-	SSHKeyPass  string `json:"ssh_key_pass"`  // passphrase for encrypted key
-	SSHPassword string `json:"ssh_password"`  // password auth fallback
-	ConfigPath  string `json:"config_path"`   // e.g. /etc/sing-box/config.json
-	SystemdUnit string `json:"systemd_unit"`  // e.g. sing-box
-	SingBoxBin  string `json:"sing_box_bin"`  // e.g. /usr/local/bin/sing-box
-	V2rayListen string `json:"v2ray_listen"`  // e.g. 127.0.0.1
-	HostKey     string `json:"-"`             // pinned SSH host key (authorized_keys line); "" = pin on first use
+	SSHKey      string `json:"ssh_key"`      // PEM private key CONTENT (not a path)
+	SSHKeyPass  string `json:"ssh_key_pass"` // passphrase for encrypted key
+	SSHPassword string `json:"ssh_password"` // password auth fallback
+	ConfigPath  string `json:"config_path"`  // e.g. /etc/sing-box/config.json
+	SystemdUnit string `json:"systemd_unit"` // e.g. sing-box
+	SingBoxBin  string `json:"sing_box_bin"` // e.g. /usr/local/bin/sing-box
+	V2rayListen string `json:"v2ray_listen"` // e.g. 127.0.0.1
+	HostKey     string `json:"-"`            // pinned SSH host key (authorized_keys line); "" = pin on first use
 
 	// UseSudo prefixes every privileged command with sudo. Set when SSHUser is
 	// not root: writing the config, installing it and restarting the unit all
@@ -126,7 +126,7 @@ type RemoteManager struct {
 	// called every minute but the config hasn't changed, this avoids
 	// needlessly writing the file and restarting sing-box — which would
 	// drop every active connection.
-	mu           sync.Mutex
+	mu             sync.Mutex
 	lastConfigHash map[string]string
 
 	// restartPending marks servers whose config landed but whose service restart
@@ -138,7 +138,21 @@ type RemoteManager struct {
 
 	// binCache holds the resolved absolute path of each node's sing-box, so the
 	// candidate scan costs one round trip per server rather than one per command.
-	binCache map[int64]string
+	// The connection identity and configured path travel with the entry: a server
+	// row can keep its ID while being pointed at a different host or binary.
+	binCache map[int64]binCacheEntry
+}
+
+type binCacheEntry struct {
+	host       string
+	port       int
+	configured string
+	resolved   string
+}
+
+func (e binCacheEntry) matches(cfg *ServerConfig) bool {
+	return e.resolved != "" && e.host == cfg.Host && e.port == cfg.Port &&
+		e.configured == strings.TrimSpace(cfg.SingBoxBin)
 }
 
 // Option configures a RemoteManager.
@@ -334,9 +348,9 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	// Per-server staging name: Rebuild fans out one goroutine per enabled server,
 	// so a shared ".qz-new" lets two rows targeting the same path interleave
 	// write/validate/mv and publish each other's config.
-	stage := m.stagePath(cfg)
-	if err := m.writeFile(ctx, client, stage, configJSON); err != nil {
-		return fmt.Errorf("write config: %w", err)
+	stage, err := m.createStageFile(ctx, client, cfg)
+	if err != nil {
+		return err
 	}
 	defer func() {
 		// Only the /tmp staging file needs sweeping; the root path stages next to
@@ -347,6 +361,9 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 			_, _ = m.run(cleanup, client, "rm -f "+shellQuote(stage))
 		}
 	}()
+	if err := m.writeFile(ctx, client, stage, configJSON); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
 	if err := m.validateConfigPath(ctx, client, cfg, stage); err != nil {
 		if !cfg.UseSudo {
 			_, _ = m.run(ctx, client, "rm -f "+shellQuote(stage))
@@ -395,22 +412,58 @@ func (m *RemoteManager) rememberApplied(cfg *ServerConfig, hash string) {
 	m.mu.Unlock()
 }
 
-// stagePath is where the new config is written before being installed.
+// rootStagePath is where a root login writes the new config before installing
+// it. It stays beside the destination so the final rename is atomic.
 //
 // When the panel can write the destination directory itself — which is to say
 // the SSH user is root — the staging file goes right next to the live config,
 // exactly as it always has. A same-directory rename is atomic, and the config,
 // which embeds the Reality private key and every user's credentials, never
 // leaves the directory it belongs in.
-//
-// Only an unprivileged account needs the /tmp hop, and only because sudo cannot
-// take the shell redirect that writes the file: the heredoc runs as the login
-// user, so it has to land somewhere that user can write.
-func (m *RemoteManager) stagePath(cfg *ServerConfig) string {
-	if cfg.UseSudo {
-		return fmt.Sprintf("/tmp/.qz-cfg-%d.json", cfg.ID)
-	}
+func rootStagePath(cfg *ServerConfig) string {
 	return fmt.Sprintf("%s.qz-new-%d", cfg.ConfigPath, cfg.ID)
+}
+
+// createStageFile returns a safe staging path for this apply.
+//
+// A fixed name in /tmp is not safe: another local account can pre-create it as
+// a symlink to an attacker-owned, writable file. The login user then follows the
+// link while writing the generated config, leaking every credential embedded in
+// it before the later chmod fails. mktemp atomically creates a 0600 file owned by
+// the SSH user; /tmp's sticky bit then prevents other users from replacing it.
+func (m *RemoteManager) createStageFile(ctx context.Context, client *ssh.Client, cfg *ServerConfig) (string, error) {
+	if !cfg.UseSudo {
+		return rootStagePath(cfg), nil
+	}
+	return m.createTempFile(ctx, client, ".qz-cfg.XXXXXXXXXX")
+}
+
+// createTempFile atomically creates a private file in /tmp and returns its
+// absolute path. template is always an internal constant, never user input.
+func (m *RemoteManager) createTempFile(ctx context.Context, client *ssh.Client, template string) (string, error) {
+	out, err := m.run(ctx, client, tempFileCommand(template))
+	if err != nil {
+		return "", fmt.Errorf("create remote temp file: %w", err)
+	}
+	remotePath := strings.TrimSpace(out)
+	if !validTempFilePath(remotePath, template) {
+		return "", fmt.Errorf("mktemp returned unexpected path %q", remotePath)
+	}
+	return remotePath, nil
+}
+
+func tempFileCommand(template string) string {
+	return "umask 077; mktemp " + shellQuote("/tmp/"+template)
+}
+
+func validTempFilePath(remotePath, template string) bool {
+	prefix := strings.TrimSuffix(template, "XXXXXXXXXX")
+	randomLen := len(template) - len(prefix)
+	base := path.Base(remotePath)
+	return path.Dir(remotePath) == "/tmp" &&
+		strings.HasPrefix(base, prefix) &&
+		randomLen > 0 && len(base) == len(prefix)+randomLen &&
+		!strings.ContainsAny(remotePath, "\r\n")
 }
 
 // installConfig moves the staged config into place.
@@ -428,7 +481,7 @@ func (m *RemoteManager) installConfig(ctx context.Context, client *ssh.Client, c
 		return nil
 	}
 	sibling := fmt.Sprintf("%s.qz-new-%d", cfg.ConfigPath, cfg.ID)
-	if _, err := m.runElevated(ctx, client, cfg, "mkdir -p "+shellQuote(filepath.Dir(cfg.ConfigPath))); err != nil {
+	if _, err := m.runElevated(ctx, client, cfg, "mkdir -p "+shellQuote(path.Dir(cfg.ConfigPath))); err != nil {
 		return fmt.Errorf("mkdir config dir: %w", err)
 	}
 	if _, err := m.runElevated(ctx, client, cfg,
@@ -732,7 +785,7 @@ func (m *RemoteManager) ReadRemoteConfig(ctx context.Context, cfg *ServerConfig)
 // using a shell pipe (avoids needing a sftp sub-dependency).
 func (m *RemoteManager) writeFile(ctx context.Context, client *ssh.Client, remotePath string, data []byte) error {
 	// Ensure remote directory exists.
-	dir := filepath.Dir(remotePath)
+	dir := path.Dir(remotePath)
 	if _, err := m.run(ctx, client, "mkdir -p "+shellQuote(dir)); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
@@ -783,12 +836,28 @@ func (m *RemoteManager) restartService(ctx context.Context, client *ssh.Client, 
 	if unit == "" {
 		unit = "sing-box"
 	}
-	// Try restart first; if unit is inactive, start it.
 	q := shellQuote(unit)
-	cmd := fmt.Sprintf("systemctl restart %s 2>&1 || systemctl start %s 2>&1", q, q)
-	out, err := m.runElevated(ctx, client, cfg, cmd)
-	if err != nil {
-		return fmt.Errorf("systemctl: %s: %w", out, err)
+	// Preserve the historical root command byte-for-byte. Existing root rows are
+	// the common case, and sudo support must not change what they execute.
+	if !cfg.UseSudo {
+		cmd := fmt.Sprintf("systemctl restart %s 2>&1 || systemctl start %s 2>&1", q, q)
+		out, err := m.run(ctx, client, cmd)
+		if err != nil {
+			return fmt.Errorf("systemctl: %s: %w", out, err)
+		}
+		return nil
+	}
+
+	// For sudo rows, restart and start must be separate elevated calls: prefixing
+	// `sudo` to `restart || start` only elevates the command to the left of ||
+	// because the login shell parses the operator first.
+	restartOut, restartErr := m.runElevated(ctx, client, cfg, fmt.Sprintf("systemctl restart %s 2>&1", q))
+	if restartErr == nil {
+		return nil
+	}
+	startOut, startErr := m.runElevated(ctx, client, cfg, fmt.Sprintf("systemctl start %s 2>&1", q))
+	if startErr != nil {
+		return fmt.Errorf("systemctl restart failed: %s: %v; start failed: %s: %w", restartOut, restartErr, startOut, startErr)
 	}
 	return nil
 }
@@ -833,8 +902,8 @@ func (m *RemoteManager) resolveBin(ctx context.Context, client *ssh.Client, cfg 
 		m.mu.Lock()
 		cached := m.binCache[cfg.ID]
 		m.mu.Unlock()
-		if cached != "" {
-			return cached, nil
+		if cached.matches(cfg) {
+			return cached.resolved, nil
 		}
 	}
 
@@ -866,9 +935,14 @@ func (m *RemoteManager) resolveBin(ctx context.Context, client *ssh.Client, cfg 
 	if cfg.ID != 0 {
 		m.mu.Lock()
 		if m.binCache == nil {
-			m.binCache = make(map[int64]string)
+			m.binCache = make(map[int64]binCacheEntry)
 		}
-		m.binCache[cfg.ID] = bin
+		m.binCache[cfg.ID] = binCacheEntry{
+			host:       cfg.Host,
+			port:       cfg.Port,
+			configured: strings.TrimSpace(cfg.SingBoxBin),
+			resolved:   bin,
+		}
 		m.mu.Unlock()
 	}
 	return bin, nil
@@ -1002,7 +1076,6 @@ func configHash(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-
 // UpgradeSingBox reinstalls sing-box on the remote node by running the panel's
 // own install script there with --force.
 //
@@ -1026,10 +1099,11 @@ func (m *RemoteManager) UpgradeSingBox(ctx context.Context, cfg *ServerConfig, s
 	}
 	defer client.Close()
 
-	// A path under /tmp, named per-run so two upgrades cannot collide.
-	remote := fmt.Sprintf("/tmp/.qz-install-singbox-%d.sh", time.Now().UnixNano())
-	if err := m.writeFile(ctx, client, remote, []byte(script)); err != nil {
-		return "", fmt.Errorf("上传安装脚本失败: %w", err)
+	// Atomically create the script path. A guessed/pre-created /tmp symlink would
+	// otherwise be executed as root below after the unprivileged upload.
+	remote, err := m.createTempFile(ctx, client, ".qz-install-singbox.XXXXXXXXXX")
+	if err != nil {
+		return "", err
 	}
 	// Removed whatever happens: it is a script the panel put on someone else's
 	// machine, and leaving copies of it lying around in /tmp is impolite at best.
@@ -1038,6 +1112,9 @@ func (m *RemoteManager) UpgradeSingBox(ctx context.Context, cfg *ServerConfig, s
 		defer cancel()
 		_, _ = m.run(cleanup, client, "rm -f "+shellQuote(remote))
 	}()
+	if err := m.writeFile(ctx, client, remote, []byte(script)); err != nil {
+		return "", fmt.Errorf("上传安装脚本失败: %w", err)
+	}
 
 	// install-singbox.sh dies on `[ "$(id -u)" = 0 ]`, so on a non-root account
 	// this is the difference between reinstalling and printing "请用 root 运行".

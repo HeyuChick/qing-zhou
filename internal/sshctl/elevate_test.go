@@ -56,30 +56,83 @@ func TestElevate_DoesNotWrapInAShell(t *testing.T) {
 // unprivileged account needs the /tmp hop, because sudo cannot take the shell
 // redirect that writes the file.
 func TestStagePath_RootStagesBesideTheConfig(t *testing.T) {
-	m := New()
 	root := &ServerConfig{ID: 7, ConfigPath: "/etc/sing-box/config.json"}
-	if got, want := m.stagePath(root), "/etc/sing-box/config.json.qz-new-7"; got != want {
+	if got, want := rootStagePath(root), "/etc/sing-box/config.json.qz-new-7"; got != want {
 		t.Errorf("root staging path: got %q, want %q", got, want)
-	}
-
-	sudo := &ServerConfig{ID: 7, ConfigPath: "/etc/sing-box/config.json", UseSudo: true}
-	if got, want := m.stagePath(sudo), "/tmp/.qz-cfg-7.json"; got != want {
-		t.Errorf("sudo staging path: got %q, want %q", got, want)
 	}
 }
 
 // Rebuild fans out one goroutine per enabled server, so two rows pointing at the
-// same host and path must not share a staging name or a cache slot — they would
-// interleave and publish each other's config.
+// same host and path must not share a root staging name or a cache slot — they
+// would interleave and publish each other's config.
 func TestStagePathAndCacheKeyArePerServer(t *testing.T) {
-	m := New()
 	a := &ServerConfig{ID: 1, Host: "h", ConfigPath: "/etc/sing-box/config.json"}
 	b := &ServerConfig{ID: 2, Host: "h", ConfigPath: "/etc/sing-box/config.json"}
-	if m.stagePath(a) == m.stagePath(b) {
+	if rootStagePath(a) == rootStagePath(b) {
 		t.Error("two servers on the same host+path share a staging file")
 	}
 	if cacheKeyFor(a) == cacheKeyFor(b) {
 		t.Error("two servers on the same host+path share an applied-config cache slot")
+	}
+}
+
+func TestTempStagePathMustBeRandomFileCreatedByMktemp(t *testing.T) {
+	template := ".qz-cfg.XXXXXXXXXX"
+	cmd := tempFileCommand(template)
+	if !strings.Contains(cmd, "mktemp ") || strings.Contains(cmd, "mktemp -u") {
+		t.Fatalf("temp file must be created atomically, got command %q", cmd)
+	}
+	for _, good := range []string{
+		"/tmp/.qz-cfg.aB91kLmN0p",
+		"/tmp/.qz-cfg.1234567890",
+	} {
+		if !validTempFilePath(good, template) {
+			t.Errorf("valid mktemp path rejected: %q", good)
+		}
+	}
+	for _, bad := range []string{
+		"/tmp/.qz-cfg-7.json", // old predictable name
+		"/var/tmp/.qz-cfg.1234567890",
+		"/tmp/other.1234567890",
+		"/tmp/.qz-cfg.123\n/tmp/second",
+	} {
+		if validTempFilePath(bad, template) {
+			t.Errorf("unsafe temp path accepted: %q", bad)
+		}
+	}
+}
+
+func TestBinCacheEntryIsBoundToConnectionAndConfiguredPath(t *testing.T) {
+	cfg := &ServerConfig{ID: 7, Host: "old.example", Port: 22, SingBoxBin: " /custom/sing-box "}
+	entry := binCacheEntry{
+		host:       "old.example",
+		port:       22,
+		configured: "/custom/sing-box",
+		resolved:   "/custom/sing-box",
+	}
+	if !entry.matches(cfg) {
+		t.Fatal("matching cache entry was rejected")
+	}
+
+	for name, mutate := range map[string]func(*ServerConfig){
+		"host":            func(c *ServerConfig) { c.Host = "new.example" },
+		"port":            func(c *ServerConfig) { c.Port = 2222 },
+		"configured path": func(c *ServerConfig) { c.SingBoxBin = "/usr/local/bin/sing-box" },
+	} {
+		changed := *cfg
+		mutate(&changed)
+		if entry.matches(&changed) {
+			t.Errorf("cache entry survived changed %s", name)
+		}
+	}
+}
+
+func TestForgetSingBoxBinClearsLongLivedManagerCache(t *testing.T) {
+	m := New()
+	m.binCache = map[int64]binCacheEntry{7: {resolved: "/old/sing-box"}}
+	m.ForgetSingBoxBin(7)
+	if _, ok := m.binCache[7]; ok {
+		t.Error("cached binary survived explicit invalidation")
 	}
 }
 

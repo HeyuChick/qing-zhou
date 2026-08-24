@@ -66,9 +66,10 @@ func (c *Controller) RefreshVersions() {
 		if !sv.Enabled {
 			continue
 		}
-		// Dropping the cached capability forces the next probe to actually run,
-		// and that probe is what records the version.
-		c.forgetStatsCap(sv.ID)
+		// A forced refresh must drop both caches. The binary may have just been
+		// reinstalled at a different path, while remoteMgr survives for the whole
+		// panel process.
+		c.invalidateRemoteCaches(sv.ID)
 		c.statsSupported(sv)
 	}
 }

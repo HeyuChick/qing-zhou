@@ -132,3 +132,59 @@ func TestUpdateServerKeepsPinWhenOnlyCredentialsChange(t *testing.T) {
 		t.Fatalf("pin must survive a credential/port/name change: %q -> %q", before, got)
 	}
 }
+
+func TestUpdateServerEmptySecretFieldsClearStoredValues(t *testing.T) {
+	a, st := newHostKeyAPI(t)
+	id, err := st.CreateServer(store.Server{
+		Name: "landing", Host: "192.0.2.1", Port: 22, SSHUser: "deploy",
+		SSHPassword: "fixture", SSHKeyPass: "fixture", UseSudo: true,
+		SudoPassword: "fixture", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":"landing","host":"192.0.2.1","port":22,"ssh_user":"deploy","use_sudo":true,"ssh_key_pass":"","sudo_password":""}`)
+	req := withID(httptest.NewRequest("PUT", "/api/admin/servers/1", body), id)
+	a.handleAdminUpdateServer(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := st.GetServer(id)
+	if err != nil || got == nil {
+		t.Fatalf("get server: %v", err)
+	}
+	if got.SSHKeyPass != "" || got.SudoPassword != "" {
+		t.Fatalf("empty fields did not clear secrets: key pass=%q sudo pass=%q", got.SSHKeyPass, got.SudoPassword)
+	}
+}
+
+func TestUpdateServerMaskedSecretFieldsKeepStoredValues(t *testing.T) {
+	a, st := newHostKeyAPI(t)
+	id, err := st.CreateServer(store.Server{
+		Name: "landing", Host: "192.0.2.1", Port: 22, SSHUser: "deploy",
+		SSHPassword: "fixture", SSHKeyPass: "fixture", UseSudo: true,
+		SudoPassword: "fixture", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"name":"landing","host":"192.0.2.1","port":22,"ssh_user":"deploy","use_sudo":true,"ssh_key_pass":"***","sudo_password":"***"}`)
+	req := withID(httptest.NewRequest("PUT", "/api/admin/servers/1", body), id)
+	a.handleAdminUpdateServer(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := st.GetServer(id)
+	if err != nil || got == nil {
+		t.Fatalf("get server: %v", err)
+	}
+	if got.SSHKeyPass != "fixture" || got.SudoPassword != "fixture" {
+		t.Fatalf("masked fields overwrote secrets: key pass=%q sudo pass=%q", got.SSHKeyPass, got.SudoPassword)
+	}
+}
