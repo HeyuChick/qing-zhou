@@ -121,13 +121,7 @@ type RemoteManager struct {
 	// key still applies).
 	persistHostKey func(serverID int64, hostKey string) error
 
-	// lastConfigHash tracks the SHA-256 of the last successfully applied
-	// config per server (keyed by host:configPath). When Rebuild() is
-	// called every minute but the config hasn't changed, this avoids
-	// needlessly writing the file and restarting sing-box — which would
-	// drop every active connection.
-	mu             sync.Mutex
-	lastConfigHash map[string]string
+	mu sync.Mutex
 
 	// restartPending marks servers whose config landed but whose service restart
 	// then failed. It gates the "node already has these exact bytes" shortcut:
@@ -310,19 +304,15 @@ func (m *RemoteManager) dial(ctx context.Context, cfg *ServerConfig) (*ssh.Clien
 
 // ApplyConfig writes configJSON to the remote server's ConfigPath,
 // validates it, and restarts the sing-box service.
-// Skips the write+restart when the config is byte-identical to the last
-// successfully applied config for this server, preventing needless restarts
-// that would drop every active connection.
+// Skips the write+restart when the remote config is byte-identical and the
+// service is active, preventing needless restarts without mistaking a stopped
+// node for a healthy one.
 func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, configJSON []byte) error {
-	// Fast path: skip if config hasn't changed since last successful apply.
-	hash := configHash(configJSON)
-	m.mu.Lock()
-	if m.lastConfigHash != nil && m.lastConfigHash[cacheKeyFor(cfg)] == hash {
-		m.mu.Unlock()
-		return nil // no-op: config identical to what's already live
-	}
-	m.mu.Unlock()
-
+	// Do not skip the remote check from an in-memory hash. The node can reboot or
+	// sing-box can crash while the panel process (and such a cache) stays alive;
+	// treating the old hash as proof of health would then report a dead node as
+	// successfully synced forever. nodeAlreadyHas verifies both the remote bytes
+	// and systemd state without rewriting or restarting a healthy node.
 	client, err := m.dial(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("ssh connect %s: %w", cfg.Host, err)
@@ -338,7 +328,6 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	// compared the on-disk bytes for exactly this reason all along; the remote
 	// path never did.
 	if same, err := m.nodeAlreadyHas(ctx, client, cfg, configJSON); err == nil && same {
-		m.rememberApplied(cfg, hash)
 		return nil
 	}
 
@@ -390,26 +379,7 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	delete(m.restartPending, cfg.ID)
 	m.mu.Unlock()
 
-	// Record successful apply so the next tick with identical config is a no-op.
-	m.rememberApplied(cfg, hash)
 	return nil
-}
-
-// cacheKeyFor identifies one server's applied-config slot. Keyed by server id,
-// not host+path: two enabled rows can legitimately point at the same host and
-// config path, and sharing an entry makes each one's apply look like a no-op
-// whenever the other just ran.
-func cacheKeyFor(cfg *ServerConfig) string {
-	return fmt.Sprintf("%d:%s:%s", cfg.ID, cfg.Host, cfg.ConfigPath)
-}
-
-func (m *RemoteManager) rememberApplied(cfg *ServerConfig, hash string) {
-	m.mu.Lock()
-	if m.lastConfigHash == nil {
-		m.lastConfigHash = make(map[string]string)
-	}
-	m.lastConfigHash[cacheKeyFor(cfg)] = hash
-	m.mu.Unlock()
 }
 
 // rootStagePath is where a root login writes the new config before installing

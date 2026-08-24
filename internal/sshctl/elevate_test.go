@@ -63,16 +63,13 @@ func TestStagePath_RootStagesBesideTheConfig(t *testing.T) {
 }
 
 // Rebuild fans out one goroutine per enabled server, so two rows pointing at the
-// same host and path must not share a root staging name or a cache slot — they
-// would interleave and publish each other's config.
-func TestStagePathAndCacheKeyArePerServer(t *testing.T) {
+// same host and path must not share a root staging name — they would interleave
+// and publish each other's config.
+func TestStagePathIsPerServer(t *testing.T) {
 	a := &ServerConfig{ID: 1, Host: "h", ConfigPath: "/etc/sing-box/config.json"}
 	b := &ServerConfig{ID: 2, Host: "h", ConfigPath: "/etc/sing-box/config.json"}
 	if rootStagePath(a) == rootStagePath(b) {
 		t.Error("two servers on the same host+path share a staging file")
-	}
-	if cacheKeyFor(a) == cacheKeyFor(b) {
-		t.Error("two servers on the same host+path share an applied-config cache slot")
 	}
 }
 
