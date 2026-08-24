@@ -173,7 +173,7 @@ func (c *Controller) RunOnServer(ctx context.Context, serverID int64, cmd string
 			if c.remoteMgr == nil {
 				return "", fmt.Errorf("remote manager not configured")
 			}
-			return c.remoteMgr.RunCommand(ctx, serverConfigFor(sv), cmd)
+			return c.remoteMgr.RunCommand(ctx, SSHConfigFor(sv), cmd)
 		}
 	}
 	ec := exec.CommandContext(ctx, "sh", "-c", cmd)

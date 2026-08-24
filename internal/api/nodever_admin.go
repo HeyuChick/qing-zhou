@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/assets"
+	"qingzhou/internal/sbctl"
 	"qingzhou/internal/sbver"
 	"qingzhou/internal/store"
 )
@@ -244,7 +245,7 @@ func (a *API) upgradeRemoteSingBox(ctx context.Context, id int64) (string, error
 	}
 	// Generous timeout: the script downloads a binary of tens of megabytes.
 	rm := a.newRemoteManager(2 * time.Minute)
-	return rm.UpgradeSingBox(ctx, sshConfigFor(sv), assets.InstallScript())
+	return rm.UpgradeSingBox(ctx, sbctl.SSHConfigFor(sv), assets.InstallScript())
 }
 
 // localSingboxBinDir is where the install script puts the binary — it must stay

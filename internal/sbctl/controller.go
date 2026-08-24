@@ -317,7 +317,7 @@ func (c *Controller) statsSupported(sv *store.Server) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	ok, version, err := c.remoteMgr.SupportsStatsAPI(ctx, serverConfigFor(sv))
+	ok, version, err := c.remoteMgr.SupportsStatsAPI(ctx, SSHConfigFor(sv))
 	// Record what the probe saw either way. This is the panel's only window onto
 	// which sing-box a node actually ended up with after the one-line installer,
 	// and an operator otherwise has to SSH in to find out.
@@ -432,7 +432,7 @@ func (c *Controller) Rebuild() error {
 			record(sv.ID, fmt.Errorf("未配置远程管理器，无法通过 SSH 下发"))
 			continue
 		}
-		serverCfg := serverConfigFor(sv)
+		serverCfg := SSHConfigFor(sv)
 		wg.Add(1)
 		go func(sv *store.Server, serverCfg *sshctl.ServerConfig, cfg []byte) {
 			defer wg.Done()
@@ -512,7 +512,7 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	if c.remoteMgr == nil {
 		return fmt.Errorf("remote manager not configured")
 	}
-	serverCfg := serverConfigFor(sv)
+	serverCfg := SSHConfigFor(sv)
 	applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	if err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg); err != nil {
@@ -521,10 +521,15 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	return nil
 }
 
-// serverConfigFor projects a stored server row onto the SSH config the remote
-// manager takes. Single definition so a newly-stored field can't reach one call
-// site and silently miss another.
-func serverConfigFor(sv *store.Server) *sshctl.ServerConfig {
+// SSHConfigFor projects a stored server row onto the SSH config the remote
+// manager takes.
+//
+// Exported and single: there used to be four copies of this mapping (two here,
+// one in api, two inlined in the remote-import handlers), and a field added to
+// the server row reached some of them and silently missed the others. That is
+// how you get a node whose "test connection" passes while every config deploy
+// fails on it — the two paths were not dialling with the same settings.
+func SSHConfigFor(sv *store.Server) *sshctl.ServerConfig {
 	return &sshctl.ServerConfig{
 		ID: sv.ID, Name: sv.Name, Host: sv.Host, Port: sv.Port,
 		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass,
@@ -623,7 +628,7 @@ func (c *Controller) remoteStats(ctx context.Context) []remoteResult {
 		wg.Add(1)
 		go func(sv *store.Server, listen string) {
 			defer wg.Done()
-			cfg := serverConfigFor(sv)
+			cfg := SSHConfigFor(sv)
 			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			client := sbstats.NewWithDialer(listen, func(dctx context.Context, _, addr string) (net.Conn, error) {

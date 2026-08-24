@@ -1,0 +1,66 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: main
+nodes_managed: true
+exported_at: "2026-08-19T08:22:38Z"
+modules:
+    "":
+        dir_name: 轻舟面板（QingZhou）单体 Go 服务与交付入口
+        title: 轻舟面板（QingZhou）单体 Go 服务与交付入口
+        scope:
+            - .gitignore
+            - .dockerignore
+            - .gitattributes
+            - Dockerfile
+            - docker-compose.yml
+            - go.mod
+            - go.sum
+            - install.sh
+            - start.ps1
+            - .claude/
+            - .github/
+            - LICENSE
+            - README.md
+            - main.go
+        source_files: []
+        children:
+            - deploy
+            - docs
+            - frontend
+        depends_on: []
+        related_to: []
+    deploy:
+        dir_name: 部署与运维脚本（systemd _ Docker _ 备份）
+        title: 部署与运维脚本（systemd / Docker / 备份）
+        scope:
+            - deploy/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: docs
+            - path: frontend
+    docs:
+        dir_name: 轻舟面板文档与演示教程
+        title: 轻舟面板文档与演示教程
+        scope:
+            - docs/
+            - 演示教程/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: deploy
+            - path: frontend
+    frontend:
+        dir_name: Vue 3 前端管理面板
+        title: Vue 3 前端管理面板
+        scope:
+            - frontend/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: deploy
+            - path: docs

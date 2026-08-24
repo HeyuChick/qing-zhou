@@ -24,9 +24,9 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/acmesh"
+	"qingzhou/internal/sbctl"
 	"qingzhou/internal/sbproc"
 	"qingzhou/internal/singbox"
-	"qingzhou/internal/sshctl"
 	"qingzhou/internal/store"
 )
 
@@ -1857,11 +1857,7 @@ func (a *API) handleAdminImportRemoteListFiles(w http.ResponseWriter, r *http.Re
 	}
 
 	rm := a.newRemoteManager(15 * time.Second)
-	cfg := &sshctl.ServerConfig{
-		ID: sv.ID, Host: sv.Host, Port: sv.Port,
-		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
-		ConfigPath: sv.ConfigPath, SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin, HostKey: sv.HostKey,
-	}
+	cfg := sbctl.SSHConfigFor(sv)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
@@ -1896,11 +1892,7 @@ func (a *API) handleAdminImportRemotePreview(w http.ResponseWriter, r *http.Requ
 	}
 
 	rm := a.newRemoteManager(15 * time.Second)
-	cfg := &sshctl.ServerConfig{
-		ID: sv.ID, Host: sv.Host, Port: sv.Port,
-		SSHUser: sv.SSHUser, SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
-		ConfigPath: sv.ConfigPath, SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin, HostKey: sv.HostKey,
-	}
+	cfg := sbctl.SSHConfigFor(sv)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()

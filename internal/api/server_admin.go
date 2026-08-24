@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"qingzhou/internal/sbctl"
 	"qingzhou/internal/sbver"
 	"qingzhou/internal/sshctl"
 	"qingzhou/internal/store"
@@ -172,17 +173,6 @@ func (a *API) newRemoteManager(timeout time.Duration) *sshctl.RemoteManager {
 	return rm
 }
 
-// sshConfigFor builds the SSH dial config for a server row. Shared so every
-// remote flow authenticates and pins host keys identically — a second, subtly
-// different copy is how one path ends up skipping host-key verification.
-func sshConfigFor(sv *store.Server) *sshctl.ServerConfig {
-	return &sshctl.ServerConfig{
-		ID: sv.ID, Host: sv.Host, Port: sv.Port, SSHUser: sv.SSHUser,
-		SSHKey: sv.SSHKey, SSHKeyPass: sv.SSHKeyPass, SSHPassword: sv.SSHPassword,
-		SingBoxBin: sv.SingBoxBin, HostKey: sv.HostKey,
-	}
-}
-
 // POST /api/admin/servers/{id}/test — attempt an SSH connection and report
 // success or failure. The SSH key/pass from DB is used (not from request body).
 func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
@@ -207,7 +197,7 @@ func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
 	// deployment, so a passing test guarantees deployment can connect too.
 	// This is also the natural place to pin the host key (trust-on-first-use).
 	rm := a.newRemoteManager(10 * time.Second)
-	cfg := sshConfigFor(sv)
+	cfg := sbctl.SSHConfigFor(sv)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	version, err := rm.TestConnection(ctx, cfg)
@@ -268,7 +258,7 @@ func (a *API) handleAdminClearServerHostKey(w http.ResponseWriter, r *http.Reque
 	rm := a.newRemoteManager(10 * time.Second)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	if _, err := rm.TestConnection(ctx, sshConfigFor(sv)); err != nil {
+	if _, err := rm.TestConnection(ctx, sbctl.SSHConfigFor(sv)); err != nil {
 		_ = a.st.UpdateServerStatus(id, "error")
 		fail(w, http.StatusBadGateway, "已清除固定的主机密钥，但重新连接失败："+err.Error())
 		return

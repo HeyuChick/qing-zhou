@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: docs
+title: 轻舟面板文档与演示教程
+scope:
+    - docs/
+    - 演示教程/
+source_files: []
+depends_on: []
+related_to:
+    - path: deploy
+    - path: frontend
