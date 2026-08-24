@@ -193,7 +193,165 @@ func TestPlanDurations_AssignPicksLength(t *testing.T) {
 	if b.DurationDays != 7 || b.TrafficLimit != 25*giB {
 		t.Errorf("granted %d天/%dGiB, want 7/25", b.DurationDays, b.TrafficLimit/giB)
 	}
-	if _, err := st.AssignPackageDuration(uid, pkg, 14, 0, noopSync); !errors.Is(err, ErrOptionNotFound) {
-		t.Errorf("granting an unlisted length: err = %v, want ErrOptionNotFound", err)
+}
+
+// Admin grants accept any positive length, not just published options — a 3-day
+// comp or a 14-day makeup shouldn't require adding a shop SKU first. Traffic
+// stays the default option's (or the matched option's); only duration changes.
+func TestPlanDurations_AssignCustomLength(t *testing.T) {
+	st := newRefundStore(t)
+	pkg := mkMultiPlan(t, st, "M",
+		PlanOption{Days: 30, PricePoints: 100, TrafficBytes: 100 * giB},
+		PlanOption{Days: 7, PricePoints: 30, TrafficBytes: 25 * giB},
+	)
+
+	uid := mkUser(t, st, "gina")
+	if _, err := st.AssignPackageDuration(uid, pkg, 14, 0, noopSync); err != nil {
+		t.Fatal(err)
+	}
+	b := boughtBucket(t, st, uid)
+	if b.DurationDays != 14 || b.TrafficLimit != 100*giB {
+		t.Errorf("custom grant %d天/%dGiB, want 14/100 (default-option traffic)", b.DurationDays, b.TrafficLimit/giB)
+	}
+
+	uid2 := mkUser(t, st, "hank")
+	single := mkPlan(t, st, "S", 100, 50, 30)
+	if _, err := st.AssignPackageDuration(uid2, single, 3, 0, noopSync); err != nil {
+		t.Fatal(err)
+	}
+	b2 := boughtBucket(t, st, uid2)
+	if b2.DurationDays != 3 || b2.TrafficLimit != 50*giB {
+		t.Errorf("single-duration custom grant %d天/%dGiB, want 3/50", b2.DurationDays, b2.TrafficLimit/giB)
+	}
+
+	// The shop still refuses unpublished lengths — only the admin path is loose.
+	if _, err := st.PurchaseDuration(uid2, single, 3, "", noopSync); !errors.Is(err, ErrOptionNotFound) {
+		t.Errorf("shop buying a custom length: err = %v, want ErrOptionNotFound", err)
+	}
+	if _, err := st.PurchaseDuration(uid, pkg, 14, "", noopSync); !errors.Is(err, ErrOptionNotFound) {
+		t.Errorf("shop buying an unlisted multi-option length: err = %v, want ErrOptionNotFound", err)
+	}
+
+	if _, err := st.AssignPackageDuration(uid, pkg, -1, 0, noopSync); !errors.Is(err, ErrInvalidAssignDays) {
+		t.Errorf("negative grant: err = %v, want ErrInvalidAssignDays", err)
+	}
+	if _, err := st.AssignPackageDuration(uid, pkg, MaxAdminAssignDays+1, 0, noopSync); !errors.Is(err, ErrInvalidAssignDays) {
+		t.Errorf("oversized grant: err = %v, want ErrInvalidAssignDays", err)
+	}
+}
+
+// Traffic packages top up the shared pool and have no per-grant expiry. A days
+// value in the request must not mint a plan bucket or rewrite the snapshot length.
+func TestPlanDurations_AssignTrafficIgnoresDays(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "ivy")
+	id, err := st.CreatePackage(Package{
+		Type: "traffic", Name: "加油包", PricePoints: 10,
+		TrafficBytes: 20 * giB, DurationDays: 30, Stock: -1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := st.GetPackage(id)
+	if err != nil || pkg == nil {
+		t.Fatalf("load traffic package: %v", err)
+	}
+	if _, err := st.AssignPackageDuration(uid, pkg, 14, 0, noopSync); err != nil {
+		t.Fatal(err)
+	}
+	bs, err := st.ListBuckets(uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pool *Bucket
+	for _, b := range bs {
+		if b.Kind == "plan" && b.PackageID == pkg.ID {
+			t.Fatalf("traffic grant minted a plan bucket (%d days) — days should have been ignored", b.DurationDays)
+		}
+		if b.Kind == "pool" {
+			pool = b
+		}
+	}
+	if pool == nil {
+		t.Fatal("no pool bucket after traffic grant")
+	}
+	if pool.TrafficLimit != 20*giB {
+		t.Errorf("pool limit = %d GiB, want 20", pool.TrafficLimit/giB)
+	}
+}
+
+func TestPackage_ForAdminDuration(t *testing.T) {
+	pkg := &Package{
+		Type: "plan", DurationDays: 30, TrafficBytes: 100 * giB, PricePoints: 100,
+		Options: []PlanOption{
+			{Days: 30, PricePoints: 100, TrafficBytes: 100 * giB},
+			{Days: 7, PricePoints: 30, TrafficBytes: 25 * giB},
+		},
+	}
+	got, err := pkg.forAdminDuration(0)
+	if err != nil {
+		t.Fatalf("default: %v", err)
+	}
+	if got.DurationDays != 30 || got.TrafficBytes != 100*giB {
+		t.Fatalf("default: %d天/%dGiB, want 30/100", got.DurationDays, got.TrafficBytes/giB)
+	}
+	got, err = pkg.forAdminDuration(7)
+	if err != nil {
+		t.Fatalf("listed: %v", err)
+	}
+	if got.DurationDays != 7 || got.TrafficBytes != 25*giB {
+		t.Fatalf("listed: %d天/%dGiB, want 7/25", got.DurationDays, got.TrafficBytes/giB)
+	}
+	got, err = pkg.forAdminDuration(14)
+	if err != nil {
+		t.Fatalf("custom: %v", err)
+	}
+	if got.DurationDays != 14 || got.TrafficBytes != 100*giB {
+		t.Fatalf("custom: %d天/%dGiB, want 14/100", got.DurationDays, got.TrafficBytes/giB)
+	}
+	if _, err = pkg.forAdminDuration(-1); !errors.Is(err, ErrInvalidAssignDays) {
+		t.Errorf("negative: err = %v, want ErrInvalidAssignDays", err)
+	}
+	if _, err = pkg.forAdminDuration(MaxAdminAssignDays + 1); !errors.Is(err, ErrInvalidAssignDays) {
+		t.Errorf("too long: err = %v, want ErrInvalidAssignDays", err)
+	}
+	got, err = pkg.forAdminDuration(MaxAdminAssignDays)
+	if err != nil {
+		t.Fatalf("cap: %v", err)
+	}
+	if got.DurationDays != MaxAdminAssignDays || got.TrafficBytes != 100*giB {
+		t.Errorf("cap: %d天/%dGiB, want %d/100", got.DurationDays, got.TrafficBytes/giB, MaxAdminAssignDays)
+	}
+	// Mutating the result must not rewrite the original default columns.
+	got.DurationDays = 1
+	if pkg.DurationDays != 30 {
+		t.Errorf("forAdminDuration mutated the source package duration to %d", pkg.DurationDays)
+	}
+
+	// A published option may exceed the custom-length cap — the admin is
+	// picking a shop SKU, not typing a free-form number.
+	long := &Package{
+		Type: "plan", DurationDays: 4000, TrafficBytes: 200 * giB, PricePoints: 200,
+		Options: []PlanOption{{Days: 4000, PricePoints: 200, TrafficBytes: 200 * giB}},
+	}
+	got, err = long.forAdminDuration(4000)
+	if err != nil {
+		t.Fatalf("listed over cap: %v", err)
+	}
+	if got.DurationDays != 4000 || got.TrafficBytes != 200*giB {
+		t.Errorf("listed over cap: %d天/%dGiB, want 4000/200", got.DurationDays, got.TrafficBytes/giB)
+	}
+	if _, err = long.forAdminDuration(4001); !errors.Is(err, ErrInvalidAssignDays) {
+		t.Errorf("custom over cap: err = %v, want ErrInvalidAssignDays", err)
+	}
+
+	// Traffic packages ignore the requested length (pool has no expiry).
+	traffic := &Package{Type: "traffic", DurationDays: 30, TrafficBytes: 10 * giB}
+	got, err = traffic.forAdminDuration(14)
+	if err != nil {
+		t.Fatalf("traffic custom: %v", err)
+	}
+	if got.DurationDays != 30 {
+		t.Errorf("traffic custom days = %d, want the package default 30 (ignored)", got.DurationDays)
 	}
 }

@@ -11,7 +11,14 @@
           <n-form-item label="注册模式">
             <n-select v-model:value="form.register_mode" :options="[{label:'开放注册',value:'open'},{label:'邀请码注册',value:'code'},{label:'关闭注册',value:'closed'}]" />
           </n-form-item>
-          <n-form-item label="邮箱验证"><n-switch v-model:value="emailVerify" /></n-form-item>
+          <n-form-item label="邮箱验证">
+            <div>
+              <n-switch v-model:value="emailVerify" />
+              <div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:4px;max-width:520px;">
+                开放注册的新用户未验证邮箱时，订阅里不会下发节点。用积分购买或管理员分配套餐后即可使用对应节点。邀请码注册和管理员开户不受影响。
+              </div>
+            </div>
+          </n-form-item>
           <n-form-item label="积分汇率（积分=1元）"><n-input-number v-model:value="pointsRate" :min="1" style="width:200px;" /></n-form-item>
           <n-form-item label="注册赠送积分"><n-input-number v-model:value="signupBonus" :min="0" style="width:200px;" /></n-form-item>
           <n-form-item label="新用户默认流量 (GB)"><n-input-number v-model:value="defaultTraffic" :min="0" style="width:200px;" /></n-form-item>
@@ -137,7 +144,7 @@
           <b>当前未配置邮件服务</b>，以下功能不可用：
           <ul>
             <li>用户「找回密码」——登录框里会直接提示去找管理员，重置只能你在「用户管理 → 编辑 → 重置密码」里做。</li>
-            <li v-if="emailVerify">开放注册后的邮箱验证——<b>「基本设置」里的「邮箱验证」是开着的，开放注册的新用户不点邮件就激不了账号</b>。邀请码注册和管理员开户不受影响。请配好 SMTP，或关掉它。</li>
+            <li v-if="emailVerify">开放注册后的邮箱验证——<b>「基本设置」里的「邮箱验证」是开着的，开放注册的新用户不点邮件就拿不到免费节点</b>。用积分购买或管理员分配套餐后仍可使用对应节点。邀请码注册和管理员开户不受影响。请配好 SMTP，或关掉它。</li>
             <li v-else>开放注册后的邮箱验证（当前「邮箱验证」是关的，不影响注册）。</li>
           </ul>
         </div>

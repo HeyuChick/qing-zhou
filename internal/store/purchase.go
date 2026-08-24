@@ -14,9 +14,9 @@ var (
 	ErrPackageDisabled   = errors.New("商品已下架")
 	ErrPackageNotAllowed = errors.New("该商品仅限指定用户组购买")
 	ErrOutOfStock        = errors.New("商品库存不足")
-	ErrUnknownPkgType  = errors.New("未知商品类型")
-	ErrOrderNotFound   = errors.New("订单不存在")
-	ErrAlreadyRefunded = errors.New("该订单已退款")
+	ErrUnknownPkgType    = errors.New("未知商品类型")
+	ErrOrderNotFound     = errors.New("订单不存在")
+	ErrAlreadyRefunded   = errors.New("该订单已退款")
 )
 
 type Order struct {
@@ -260,11 +260,13 @@ func (s *Store) AssignPackage(userID int64, pkg *Package, operatorID int64, sync
 	return s.AssignPackageDuration(userID, pkg, 0, operatorID, sync)
 }
 
-// AssignPackageDuration is AssignPackage for a multi-duration package: days picks
-// one of pkg.Options (0 = the default one), so a comp can be handed out as the
-// 7-day trial rather than always the headline length.
+// AssignPackageDuration is AssignPackage with an explicit length. days==0 is
+// the package default. A listed option is granted as published (its own
+// traffic). Any other positive length is a custom grant: default-option
+// traffic, caller-chosen days. Traffic packages ignore days (pool top-up
+// has no expiry). The shop still rejects unpublished lengths.
 func (s *Store) AssignPackageDuration(userID int64, pkg *Package, days, operatorID int64, sync func(updated *User, resetUsed bool) error) (*PurchaseResult, error) {
-	pkg, err := pkg.forDuration(days)
+	pkg, err := pkg.forAdminDuration(days)
 	if err != nil {
 		return nil, err
 	}

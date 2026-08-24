@@ -164,7 +164,7 @@
 
             <div v-if="openGroups.has(g.key)" class="grp-items">
               <plan-item v-for="p in g.items" :key="p.id" :plan="p" :removing="removingId === p.id"
-                         @remove="removePlan(p)" />
+                         @remove="removePlan(p)" @adjust="openAdjust(p)" />
             </div>
           </div>
         </template>
@@ -173,7 +173,7 @@
         <template v-else>
           <div class="flat">
             <plan-item v-for="p in visiblePlans" :key="p.id" :plan="p" :removing="removingId === p.id"
-                       @remove="removePlan(p)" />
+                       @remove="removePlan(p)" @adjust="openAdjust(p)" />
           </div>
         </template>
 
@@ -185,13 +185,19 @@
           <div class="pm-assign-title">分配套餐（不扣积分）</div>
           <div class="pm-assign-row">
             <n-select v-model:value="assignPkgId" :options="pkgOptions" placeholder="选择套餐" filterable style="flex:1;" />
-            <!-- 多时长套餐才需要挑一档；单时长的照旧不出现这个选择框 -->
-            <n-select v-if="assignDurationOptions.length" v-model:value="assignDays" :options="assignDurationOptions"
-                      placeholder="时长" style="width:130px;flex:none;" />
+            <!-- 天数只对订阅计划有意义：流量包加的是共享池，没有按份倒计时。 -->
+            <n-input-number v-if="assignIsPlan" v-model:value="assignDays" :min="1" :max="3650" :show-button="false"
+                            placeholder="天数" style="width:96px;flex:none;" />
             <n-button type="primary" :loading="saving" :disabled="!assignPkgId" @click="handleAssign">
               {{ assignWillQueue ? '分配并排队' : '分配' }}
             </n-button>
           </div>
+          <div v-if="assignDayChips.length" class="pm-assign-chips">
+            <span class="pm-assign-chips-label">快捷</span>
+            <n-button v-for="d in assignDayChips" :key="d" size="tiny" quaternary
+                      :type="assignDays === d ? 'primary' : 'default'" @click="assignDays = d">{{ d }} 天</n-button>
+          </div>
+          <div v-if="assignIsPlan" class="pm-assign-tip">可填 1–3650 天。命中套餐档位用该档流量，自定义天数按默认档流量开通。</div>
           <div v-if="assignWillQueue" class="pm-assign-hint">
             该用户已有此套餐在生效，新的一份会排队，等当前份用完或到期后自动启用。
           </div>
@@ -283,6 +289,26 @@
         <n-form-item label="说明"><n-input v-model:value="rechargeNote" placeholder="正数充值，负数扣除" /></n-form-item>
       </n-form>
       <n-button type="primary" block :loading="saving" @click="handleRecharge">确认</n-button>
+    </n-modal>
+
+    <!-- 按份调整流量：给某一份额度加减 GB，不是退款也不是新开一份 -->
+    <n-modal v-model:show="showAdjust" preset="card" title="调整流量" style="max-width:420px;">
+      <p class="modal-sub">
+        {{ plansUser?.username }} · {{ adjustPlan?.name || '份' }}
+        <template v-if="adjustPlan">
+          （当前 {{ adjustAmountText }}）
+        </template>
+      </p>
+      <n-form label-placement="left" label-width="80">
+        <n-form-item label="调整 (GB)">
+          <n-input-number v-model:value="adjustGB" :show-button="true" style="width:100%;" />
+        </n-form-item>
+      </n-form>
+      <p class="form-hint" style="margin:-4px 0 12px;">
+        正数增加、负数扣减。扣减不会低于已用流量。排队中尚未生效的份也可以改额度。
+        这不是退款：积分与订单都不动。
+      </p>
+      <n-button type="primary" block :loading="saving" :disabled="!adjustGB" @click="handleAdjust">确认</n-button>
     </n-modal>
 
     <!-- 订单历史 -->
@@ -617,14 +643,19 @@ function removePlan(p: any) {
   const u = plansUser.value
   if (!u) return
   const isPool = p.kind === 'pool'
+  const queued = p.status === 'queued'
+  const quota = p.traffic_limit > 0 ? fmtBytes(p.traffic_limit) : '不限量'
   dialog.warning({
-    title: isPool ? '确认清空流量包' : '确认移除套餐',
+    title: isPool ? '确认清空流量包' : queued ? '确认移除未生效套餐' : '确认移除套餐',
     content: isPool
       ? `清空「${u.username}」的流量包（通用流量）余额？该余额立即失效，已用记录一并移除。`
         + '这不是退款：积分不会退回，订单记录保持不变。'
-      : `移除「${u.username}」的「${p.name}」这一份？该份额度立即失效，订阅中对应的节点会被撤下；`
-        + '若同一套餐还有排队中的份，会立刻顶上来。'
-        + '这不是退款：积分不会退回，订单记录保持不变，需要退款请到「订单」里操作。',
+      : queued
+        ? `移除「${u.username}」尚未生效的「${p.name}」？这一份还没开始计量，其全部额度（${quota}）将一并收回。`
+          + '这不是退款：积分不会退回，订单记录保持不变，需要退款请到「订单」里操作。'
+        : `移除「${u.username}」的「${p.name}」这一份？该份额度（含剩余流量）立即失效，订阅中对应的节点会被撤下；`
+          + '若同一套餐还有排队中的份，会立刻顶上来。'
+          + '这不是退款：积分不会退回，订单记录保持不变，需要退款请到「订单」里操作。',
     positiveText: isPool ? '清空' : '移除',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -639,6 +670,39 @@ function removePlan(p: any) {
     },
   })
 }
+// 按份加减流量。额度写在这一份自己的桶上，所以必须指定是哪一份，
+// 不能像积分那样对着用户一个总数下手。
+const showAdjust = ref(false)
+const adjustPlan = ref<any>(null)
+const adjustGB = ref<number | null>(null)
+const GiB = 1024 * 1024 * 1024
+const adjustAmountText = computed(() => {
+  const p = adjustPlan.value
+  if (!p) return ''
+  if (p.traffic_limit > 0) return `${fmtBytes(p.used || 0)} / ${fmtBytes(p.traffic_limit)}`
+  return p.kind === 'pool' ? '流量包余额 0' : `不限量 · 已用 ${fmtBytes(p.used || 0)}`
+})
+function openAdjust(p: any) {
+  adjustPlan.value = p
+  adjustGB.value = null
+  showAdjust.value = true
+}
+async function handleAdjust() {
+  const u = plansUser.value
+  const p = adjustPlan.value
+  if (!u || !p || !adjustGB.value) return
+  saving.value = true
+  try {
+    await apiPost(`/api/admin/users/${u.id}/plans/${p.id}/traffic`, {
+      delta_bytes: Math.round(adjustGB.value * GiB),
+    })
+    message.success(adjustGB.value > 0 ? '已增加流量' : '已扣减流量')
+    showAdjust.value = false
+    await Promise.all([loadPlans(u.id), load()])
+    syncPlansUser()
+  } catch (e: any) { message.error(e.message) } finally { saving.value = false }
+}
+
 // 列表重载后，面板里的用户对象要指向新的那份，否则顶部汇总还是旧数字
 function syncPlansUser() {
   if (!plansUser.value) return
@@ -654,14 +718,23 @@ const pkgList = ref<any[]>([])
 const assignWillQueue = computed(() =>
   !!assignPkgId.value && userPlans.value.some((p: any) =>
     p.kind === 'plan' && p.package_id === assignPkgId.value && bucketOf(p) === 'active'))
-// 选中套餐若有多档时长，就让管理员挑一档（比如只送 7 天体验）；默认第一档。
-const assignDurationOptions = computed(() => {
-  const pkg = pkgList.value.find((p: any) => p.id === assignPkgId.value)
-  const opts = pkg?.options || []
-  if (opts.length < 2) return []
-  return opts.map((o: any) => ({ label: `${o.days} 天`, value: o.days }))
+// 天数输入只对订阅计划出现。流量包加的是共享池，填天数既不会到期也不会改额度。
+const assignPkg = computed(() => pkgList.value.find((p: any) => p.id === assignPkgId.value) || null)
+const assignIsPlan = computed(() => assignPkg.value?.type === 'plan')
+function defaultAssignDays(pkg: any): number | null {
+  if (!pkg || pkg.type !== 'plan') return null
+  const opts = pkg.options || []
+  if (opts.length) return opts[0].days
+  return pkg.duration_days > 0 ? pkg.duration_days : null
+}
+const assignDayChips = computed(() => {
+  const pkg = assignPkg.value
+  if (!pkg || pkg.type !== 'plan') return []
+  const opts = pkg.options || []
+  if (opts.length) return opts.map((o: any) => o.days)
+  return pkg.duration_days > 0 ? [pkg.duration_days] : []
 })
-watch(assignDurationOptions, (opts) => { assignDays.value = opts.length ? opts[0].value : null })
+watch(assignPkgId, () => { assignDays.value = defaultAssignDays(assignPkg.value) })
 async function loadPackages() {
   if (pkgOptions.value.length) return
   try {
@@ -675,7 +748,7 @@ async function handleAssign() {
   saving.value = true
   try {
     await apiPost(`/api/admin/users/${plansUser.value.id}/assign-plan`,
-      { package_id: assignPkgId.value, duration_days: assignDays.value || 0 })
+      { package_id: assignPkgId.value, duration_days: assignIsPlan.value ? (assignDays.value || 0) : 0 })
     message.success(assignWillQueue.value ? '已分配并加入队列' : '分配成功')
     assignPkgId.value = null
     await Promise.all([loadPlans(plansUser.value.id), load()])
@@ -960,6 +1033,9 @@ onMounted(load)
 .pm-assign { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
 .pm-assign-title { font-size: 12.5px; font-weight: 650; color: var(--text-2); margin-bottom: 8px; }
 .pm-assign-row { display: flex; gap: 8px; align-items: center; }
+.pm-assign-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pm-assign-chips-label { font-size: 11.5px; color: var(--text-3); }
+.pm-assign-tip { margin-top: 6px; font-size: 11.5px; color: var(--text-3); line-height: 1.5; }
 .pm-assign-hint { margin-top: 8px; font-size: 11.5px; color: var(--info); line-height: 1.5; }
 
 @media (prefers-reduced-motion: reduce) {

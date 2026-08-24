@@ -440,7 +440,10 @@ func (a *API) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 // POST /api/admin/users/{id}/assign-plan {package_id, duration_days?} — admin
 // grants a package to a user without charging points (manual activation / comp).
 // Applies the same entitlement as a purchase and pushes it to sing-box.
-// duration_days picks one of the package's selectable durations (0 = default).
+// duration_days is the grant length: 0 = package default, a published option
+// uses that option's traffic, any other 1–3650 is a custom length at the
+// default option's traffic. Traffic packages ignore days (pool top-up has
+// no expiry). The shop still rejects unpublished lengths.
 func (a *API) handleAdminAssignPlan(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 	var req struct {
@@ -488,6 +491,8 @@ func (a *API) handleAdminAssignPlan(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case err == store.ErrUnknownPkgType:
 			fail(w, http.StatusBadRequest, "未知套餐类型")
+		case errors.Is(err, store.ErrInvalidAssignDays):
+			fail(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, store.ErrOptionNotFound):
 			fail(w, http.StatusBadRequest, "所选时长不可用，请刷新套餐列表")
 		default:

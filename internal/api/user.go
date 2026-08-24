@@ -843,23 +843,29 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 
 // emailBlocksSub withholds node links from a pending-verify signup.
 //
-// v0.2.53 applied this to every unverified account. CreateUser always writes
-// email_verified=0, and before the login/sub gates existed people just signed
-// in and bought plans without clicking the mail. Flipping the gate on then
-// emptied the subscription of paying customers who still showed an active
-// plan in the panel (handleUserNodes never had this check).
+// Open-registration accounts stay gated until they verify, so a throwaway
+// signup cannot scrape free-group upstream credentials. A purchased or
+// admin-assigned plan is a real entitlement though: they already paid (or
+// an admin granted them service) and should receive the nodes that plan
+// unlocks without clicking the mail. The signup grant and the free-group
+// bucket do not count — HasLivePaidPlan excludes them — so minting the
+// welcome quota still cannot punch through.
 //
-// Only open-registration pending-verify accounts are blocked. Compatibility
-// for accounts that were already admitted before enforcement is persisted by
-// migration (and set explicitly by invite/admin admission), not inferred from
-// current plan/client state: otherwise an unverified new signup could buy a
-// package and turn that purchase into its own verification bypass.
+// Invite-code and admin-created accounts stay exempt via EmailGateExempt
+// / pre-verify, independent of later purchases. Compatibility for accounts
+// already admitted before the gate existed is the same persisted bit.
 func (a *API) emailBlocksSub(u *store.User) bool {
 	if u == nil || u.Role == "admin" || u.EmailVerified || u.EmailGateExempt {
 		return false
 	}
 	verifyReq, _ := a.st.GetSettingBool("email_verify_required")
-	return verifyReq
+	if !verifyReq {
+		return false
+	}
+	if paid, err := a.st.HasLivePaidPlan(u.ID); err == nil && paid {
+		return false
+	}
+	return true
 }
 
 // ---- Public subscription endpoint ----

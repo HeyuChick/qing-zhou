@@ -64,8 +64,46 @@ func TestDeleteBucket_PromotesQueuedHead(t *testing.T) {
 	}
 }
 
+// A queued (not-yet-active)份 has never been spendable. Removing it must take
+// its unused quota with it — otherwise "移除未生效套餐" leaves the user holding
+// traffic they were never supposed to keep (issue #29).
+func TestDeleteBucket_QueuedRemovesItsTraffic(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "quinn")
+	pkg := mkPlan(t, st, "100G/30d", 100, 100, 30)
+	buy(t, st, uid, pkg)
+	buy(t, st, uid, pkg) // queues behind the first
+
+	bs := planBuckets(t, st, uid, pkg.ID)
+	if len(bs) != 2 || bs[1].Status != "queued" {
+		t.Fatalf("setup: want active+queued, got %+v", bs)
+	}
+	var before int64
+	st.db.QueryRow(`SELECT traffic_limit FROM users WHERE id=?`, uid).Scan(&before)
+	if before != 200*giB {
+		t.Fatalf("setup: users.traffic_limit = %d GiB, want 200", before/giB)
+	}
+
+	if _, err := st.DeleteBucket(uid, bs[1].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	after := planBuckets(t, st, uid, pkg.ID)
+	if len(after) != 1 || after[0].ID != bs[0].ID {
+		t.Fatalf("want only the active head left, got %+v", after)
+	}
+	if after[0].Status != "active" {
+		t.Errorf("head status = %q after queued removal, want active", after[0].Status)
+	}
+	var agg int64
+	st.db.QueryRow(`SELECT traffic_limit FROM users WHERE id=?`, uid).Scan(&agg)
+	if agg != 100*giB {
+		t.Errorf("users.traffic_limit = %d GiB after removing queued份, want 100 (its 100G must go with it)", agg/giB)
+	}
+}
+
 // The free bucket is the account's unmetered metering identity, not a granted
-//份 — removing it would re-route free-group traffic onto the paid pool.
+// 份 — removing it would re-route free-group traffic onto the paid pool.
 func TestDeleteBucket_RefusesFreeBucket(t *testing.T) {
 	st := newRefundStore(t)
 	uid := mkUser(t, st, "eli")

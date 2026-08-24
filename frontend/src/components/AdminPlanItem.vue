@@ -16,6 +16,7 @@
     <div class="pi-foot">
       <span class="pi-when">{{ whenText }}</span>
       <span class="spacer" />
+      <n-button size="tiny" quaternary :disabled="removing" @click="$emit('adjust')">调整</n-button>
       <n-button size="tiny" type="error" quaternary :loading="removing" @click="$emit('remove')">
         {{ plan.kind === 'pool' ? '清空' : '移除' }}
       </n-button>
@@ -30,7 +31,7 @@ import { fmtBytes, fmtDate, fmtDateTime, pct } from '@/utils/format'
 import { planStatusMeta, planTimeText } from '@/utils/plan'
 
 const props = defineProps<{ plan: any; removing?: boolean }>()
-defineEmits<{ (e: 'remove'): void }>()
+defineEmits<{ (e: 'remove'): void; (e: 'adjust'): void }>()
 
 const meta = computed(() => planStatusMeta(props.plan))
 const bucket = computed<'active' | 'queued' | 'finished'>(() =>
