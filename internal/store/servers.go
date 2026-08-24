@@ -53,9 +53,21 @@ type Server struct {
 	// HostKey is the pinned SSH host key (authorized_keys line). Empty until the
 	// first successful connection pins it (TOFU). Never exposed to the client.
 	HostKey string `json:"-"`
+	// UseSudo makes the panel prefix every privileged remote command with sudo.
+	// Needed whenever SSHUser is not root: writing /etc/sing-box, installing the
+	// config and restarting the unit all require root, so without this the whole
+	// deploy path fails on a normal account.
+	UseSudo bool `json:"use_sudo"`
+	// SudoPassword feeds `sudo -S` over the session's stdin for accounts that do
+	// not have NOPASSWD. Empty means passwordless sudo (`sudo -n`).
+	SudoPassword string `json:"sudo_password"`
+	// SSHKeyPath is a file NAME (never a path) inside the panel's configured SSH
+	// key directory. Set, it takes precedence over the pasted SSHKey PEM and the
+	// key never has to travel through the browser or sit in the database.
+	SSHKeyPath string `json:"ssh_key_path"`
 }
 
-const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, provider, location, spec, price, notes, host_key, public_visible`
+const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, provider, location, spec, price, notes, host_key, public_visible, use_sudo, sudo_password, ssh_key_path`
 
 func (s *Store) ListServers() ([]*Server, error) {
 	rows, err := s.db.Query(`SELECT ` + serverCols + ` FROM servers ORDER BY id`)
@@ -110,12 +122,13 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 	// did before the flag existed. Hiding one is an explicit act, done through
 	// UpdateServer — and a bool field cannot tell "caller wants it hidden" from
 	// "caller never filled this in", which is the whole reason it isn't here.
-	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, probe_token_hash, expiry_date, provider, location, spec, price, notes)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, probe_token_hash, expiry_date, provider, location, spec, price, notes, use_sudo, sudo_password, ssh_key_path)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
 		b2i(sv.Enabled), sv.Status, sv.LastSeen, now, now,
-		b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes)
+		b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes,
+		b2i(sv.UseSudo), s.encrypt(sv.SudoPassword), sv.SSHKeyPath)
 	if err != nil {
 		return 0, err
 	}
@@ -124,10 +137,11 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 
 func (s *Store) UpdateServer(sv Server) error {
 	now := time.Now().Unix()
-	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, provider=?, location=?, spec=?, price=?, notes=?, public_visible=? WHERE id=?`,
+	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, provider=?, location=?, spec=?, price=?, notes=?, public_visible=?, use_sudo=?, sudo_password=?, ssh_key_path=? WHERE id=?`,
 		sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
-		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, b2i(sv.PublicVisible), sv.ID)
+		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, b2i(sv.PublicVisible),
+		b2i(sv.UseSudo), s.encrypt(sv.SudoPassword), sv.SSHKeyPath, sv.ID)
 	return err
 }
 
@@ -167,6 +181,14 @@ func (s *Store) GetServerByProbeToken(token string) (*Server, error) {
 	return sv, err
 }
 
+// SetServerSingBoxBin records where the node's sing-box binary actually is, as
+// resolved by a live connection. Kept separate from UpdateServer so a background
+// probe cannot clobber the twenty-odd other columns that handler writes.
+func (s *Store) SetServerSingBoxBin(id int64, bin string) error {
+	_, err := s.db.Exec(`UPDATE servers SET sing_box_bin=?, updated_at=? WHERE id=?`, bin, time.Now().Unix(), id)
+	return err
+}
+
 // SetServerHostKey pins (or updates) the SSH host key for a server. Called on
 // first successful connect (TOFU) so subsequent connects are verified against it.
 func (s *Store) SetServerHostKey(id int64, hostKey string) error {
@@ -183,12 +205,12 @@ func (s *Store) TouchProbeSeen(id int64) error {
 
 func scanServer(sc scanner) (*Server, error) {
 	var sv Server
-	var enabled, probeEnabled, publicVisible int
+	var enabled, probeEnabled, publicVisible, useSudo int
 	err := sc.Scan(&sv.ID, &sv.Name, &sv.Host, &sv.Port, &sv.SSHUser, &sv.SSHKey, &sv.SSHKeyPass, &sv.SSHPassword,
 		&sv.ConfigPath, &sv.SystemdUnit, &sv.SingBoxBin, &sv.V2rayListen,
 		&enabled, &sv.Status, &sv.LastSeen, &sv.CreatedAt, &sv.UpdatedAt,
 		&probeEnabled, &sv.ProbeToken, &sv.ExpiryDate, &sv.Provider, &sv.Location, &sv.Spec, &sv.Price, &sv.Notes, &sv.HostKey,
-		&publicVisible)
+		&publicVisible, &useSudo, &sv.SudoPassword, &sv.SSHKeyPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -198,6 +220,7 @@ func scanServer(sc scanner) (*Server, error) {
 	sv.Enabled = enabled == 1
 	sv.ProbeEnabled = probeEnabled == 1
 	sv.PublicVisible = publicVisible == 1
+	sv.UseSudo = useSudo == 1
 	return &sv, nil
 }
 
@@ -206,4 +229,8 @@ func (s *Store) decryptServer(sv *Server) {
 	sv.SSHKeyPass = s.decrypt(sv.SSHKeyPass)
 	sv.SSHPassword = s.decrypt(sv.SSHPassword)
 	sv.ProbeToken = s.decrypt(sv.ProbeToken)
+	sv.SudoPassword = s.decrypt(sv.SudoPassword)
+	// SSHKeyPath is deliberately NOT encrypted: it is a file name, not a secret,
+	// and encrypting it only means you cannot see which key a row points at when
+	// you are trying to work out why that row will not connect.
 }

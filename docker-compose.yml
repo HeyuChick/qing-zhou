@@ -28,9 +28,17 @@ services:
       # QZ_ADMIN_PASS: ""
       # 反代在最前面时填其 IP/CIDR，日志/限流才拿到真实客户端 IP
       # QZ_TRUSTED_PROXIES: "172.16.0.0/12"
+      # SSH 私钥文件目录。默认就是 /data/ssh-keys（数据库同级），一般不用改。
+      # 把私钥放进去后，服务器表单的「SSH 私钥」可以切成「从文件选择」，
+      # 私钥就不必粘进浏览器、也不入库。
+      # QZ_SSH_KEY_DIR: "/data/ssh-keys"
     volumes:
       # 命名卷持久化数据库（含账号/订单/配置）。非 root(uid 10001) 运行，命名卷可正常写入。
       - qingzhou-data:/data
+      # 想用「私钥文件」而不是把私钥粘进面板，就把私钥挂到 /data/ssh-keys 下。
+      # 容器以 uid 10001 运行：宿主机上 root 拥有的 600 私钥挂进去是读不了的，
+      # 先 chown 10001 <私钥>，否则面板的下拉框里会标成「面板读不了」。
+      # - /srv/qingzhou/ssh-keys:/data/ssh-keys:ro
 
 volumes:
   qingzhou-data:

@@ -462,7 +462,10 @@ CREATE TABLE IF NOT EXISTS servers (
   status          TEXT    NOT NULL DEFAULT 'unknown',
   last_seen       INTEGER NOT NULL DEFAULT 0,
   created_at      INTEGER NOT NULL,
-  updated_at      INTEGER NOT NULL
+  updated_at      INTEGER NOT NULL,
+  use_sudo        INTEGER NOT NULL DEFAULT 0,
+  sudo_password   TEXT    NOT NULL DEFAULT '',
+  ssh_key_path    TEXT    NOT NULL DEFAULT ''
 );
 
 -- ===== Monitor probe (轻舟探针) =====
@@ -669,6 +672,40 @@ func (s *Store) migrateEmailGateExempt() error {
 	return tx.Commit()
 }
 
+// migrateServerUseSudo adds servers.use_sudo and, in the same transaction that
+// creates it, turns it on for every row whose SSH user is not root.
+//
+// It cannot live in the best-effort additive list below, for the same reason
+// migrateEmailGateExempt cannot: those statements run on every boot, so the
+// backfill would re-enable sudo on a row an admin had deliberately turned it off
+// for, once per restart, forever.
+//
+// Backfilling to 1 rather than 0 is safe because a non-root row is already
+// broken today: every deploy on it dies on mkdir /etc/sing-box or on systemctl.
+// Turning sudo on can only move such a row from "fails" to "works".
+func (s *Store) migrateServerUseSudo() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('servers') WHERE name='use_sudo'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists > 0 {
+		return tx.Commit()
+	}
+	if _, err := tx.Exec(`ALTER TABLE servers ADD COLUMN use_sudo INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE servers SET use_sudo=1 WHERE ssh_user <> 'root' AND ssh_user <> ''`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -678,6 +715,9 @@ func (s *Store) Migrate() error {
 	// Only the transaction that actually adds the column may classify existing
 	// accounts; later purchases/provisioning must never be reclassified on restart.
 	if err := s.migrateEmailGateExempt(); err != nil {
+		return err
+	}
+	if err := s.migrateServerUseSudo(); err != nil {
 		return err
 	}
 	// Additive column migrations for DBs created before these columns existed.
@@ -710,6 +750,13 @@ func (s *Store) Migrate() error {
 		// machine. Cleared by any save of the inbound. See SbInbound.UpstreamBroken.
 		`ALTER TABLE sb_inbounds ADD COLUMN upstream_broken INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE servers ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
+		// sudo password for accounts without NOPASSWD (encrypted at rest, like the
+		// SSH password beside it), and the name of a key file in the panel's key
+		// directory for rows that do not want the PEM pasted into the browser.
+		// use_sudo is NOT here — it carries a one-time backfill, see
+		// migrateServerUseSudo.
+		`ALTER TABLE servers ADD COLUMN sudo_password TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE servers ADD COLUMN ssh_key_path TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_tls ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
 		// Certificate center: a mode=tls profile references a managed certificate
 		// by id instead of inlining its PEM, so one cert serves many inbounds and a
