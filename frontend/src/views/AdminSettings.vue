@@ -15,6 +15,11 @@
         </button>
       </aside>
       <main class="settings-main">
+      <n-alert v-if="loadError" type="error" :show-icon="true" class="settings-load-error">
+        <template #header>系统配置读取失败，未对数据库做任何修改</template>
+        {{ loadError }}。为防止空表单覆盖原配置，“保存设置”已禁用。请稍候重试；如果持续失败，请检查服务日志和数据库路径。
+        <n-button size="small" :loading="loading" class="settings-retry" @click="loadSettings">重新读取</n-button>
+      </n-alert>
     <n-spin :show="loading">
       <n-card id="settings-basic" class="settings-section" title="基本设置" size="small">
         <n-form label-placement="left" label-width="120">
@@ -364,7 +369,7 @@
       </n-card>
 
       <n-space class="settings-actions">
-        <n-button type="primary" :loading="saving" @click="handleSave">保存设置</n-button>
+        <n-button type="primary" :loading="saving" :disabled="!settingsLoaded" @click="handleSave">保存设置</n-button>
         <n-button @click="handleRebuild" :loading="rebuilding">重建 sing-box 配置</n-button>
         <span class="save-state">保存后统一生效 · sing-box 相关改动可随后手动重建</span>
       </n-space>
@@ -376,10 +381,12 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
-import { NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
+import { NAlert, NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
 import { apiGet, apiPost, apiPut, apiList, apiDownload } from '@/api'
 
 const message = useMessage()
+const settingsLoaded = ref(false)
+const loadError = ref('')
 const settingsSections = [
   { id: 'settings-basic', label: '基本设置', note: '注册与积分' },
   { id: 'settings-access', label: '访问地址', note: '面板与节点' },
@@ -542,6 +549,10 @@ async function copyInstall() {
 }
 
 async function handleSave() {
+  if (!settingsLoaded.value) {
+    message.error('系统配置尚未成功读取，已阻止保存以保护原配置')
+    return
+  }
   saving.value = true
   try {
     const body: Record<string, any> = {
@@ -615,11 +626,44 @@ async function handleRebuild() {
   try { await apiPost('/api/admin/rebuild'); message.success('重建成功') } catch (e: any) { message.error(e.message) } finally { rebuilding.value = false }
 }
 
-onMounted(async () => {
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function readSettingsWithRetry(): Promise<Record<string, string>> {
+  const retryDelays = [0, 400, 1200, 2400]
+  let lastError: any = null
+  for (const delay of retryDelays) {
+    if (delay) await sleep(delay)
+    try {
+      const data = await apiGet<Record<string, string>>('/api/admin/settings')
+      // Seed always creates several settings. A null/empty response therefore
+      // means the request did not produce a usable configuration snapshot; do
+      // not turn it into an editable empty form.
+      if (!data || typeof data !== 'object' || !Object.keys(data).length) {
+        throw new Error('服务器返回了空的配置快照')
+      }
+      return data
+    } catch (e: any) {
+      lastError = e
+      // Authentication/authorization failures are not transient. The shared
+      // API wrapper handles the login redirect; retrying would only add noise.
+      if (e?.status === 401 || e?.status === 403) break
+    }
+  }
+  throw lastError || new Error('未知读取错误')
+}
+
+async function loadSettings() {
   loading.value = true
+  settingsLoaded.value = false
+  loadError.value = ''
   try {
-    const [data, groups, defaults] = await Promise.all([
-      apiGet<Record<string, string>>('/api/admin/settings'),
+    // The settings snapshot is critical and gets a short retry window because
+    // an online update re-execs the backend. Optional metadata must not be able
+    // to turn a successful settings read into a blank page.
+    const data = await readSettingsWithRetry()
+    const [groups, defaults] = await Promise.all([
       apiList<any>('/api/admin/node-groups').catch(() => []),
       apiGet<any>('/api/admin/settings/default-templates').catch(() => null),
     ])
@@ -652,8 +696,15 @@ onMounted(async () => {
       for (const t of tgTplMeta.value) form['tg_tpl_' + t.key] ??= ''
     }
     groupOptions.value = (groups || []).map((g: any) => ({ label: g.name, value: g.id }))
-  } catch {} finally { loading.value = false }
-})
+    settingsLoaded.value = true
+  } catch (e: any) {
+    loadError.value = e?.message || '无法连接到配置接口'
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(loadSettings)
 </script>
 
 <style scoped>
@@ -668,6 +719,8 @@ onMounted(async () => {
 .settings-nav span { font-size:12.5px; font-weight:620; }
 .settings-nav small { color:var(--text-3); font-size:10px; white-space:nowrap; }
 .settings-main { min-width:0; }
+.settings-load-error { margin-bottom:16px; }
+.settings-retry { margin-left:10px; }
 .settings-section { margin-bottom:16px; scroll-margin-top:84px; }
 .settings-actions { position:sticky; bottom:14px; z-index:5; width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:12px; background:color-mix(in srgb, var(--card) 92%, transparent); box-shadow:0 12px 34px rgba(31,41,55,.12); backdrop-filter:blur(18px); }
 .save-state { align-self:center; margin-left:auto; color:var(--text-3); font-size:11.5px; }
