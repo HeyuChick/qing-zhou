@@ -1,6 +1,14 @@
 <template>
   <div>
-    <h2 class="page-title">节点管理</h2>
+    <div class="page-head">
+      <div><h2 class="page-title">节点管理</h2><p class="page-sub">节点、分组、订阅源与完整出网链路集中管理</p></div>
+    </div>
+    <div class="resource-overview">
+      <button class="resource-metric" type="button" @click="tab='nodes'"><b>{{ nodes.length }}</b><span>全部节点 · 启用 {{ nodes.filter(n => n.enabled).length }}</span></button>
+      <button class="resource-metric" type="button" @click="tab='nodes'"><b>{{ groups.length }}</b><span>节点分组 · AI 路由 {{ groups.filter(g => g.is_ai).length }}</span></button>
+      <button class="resource-metric" type="button" @click="tab='sources'"><b>{{ sources.length }}</b><span>订阅源 · 启用 {{ sources.filter(s => s.enabled).length }}</span></button>
+      <button class="resource-metric" type="button" @click="tab='topology'"><b>{{ inbounds.length }}</b><span>关联入站 · 出口 {{ egresses.length }}</span></button>
+    </div>
     <n-tabs v-model:value="tab" animated>
       <!-- 节点（按分组卡片展示，同组节点聚在一张卡片里） -->
       <n-tab-pane name="nodes" tab="节点">
@@ -584,7 +592,6 @@ async function load() {
   overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
   -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
-.page-title { font-size: 21px; margin-bottom: 16px; }
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
 .group-card { margin-bottom: 14px; }
 .group-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }

@@ -1,9 +1,9 @@
 <template>
   <div>
-    <h2 class="page-title">订单管理</h2>
+    <div class="page-head"><div><h2 class="page-title">订单管理</h2><p class="page-sub">收入、退款、套餐归属与每笔订单的完整状态轨迹</p></div></div>
 
     <div class="stat-row">
-      <div class="stat-card"><div class="s-label">总收入</div><div class="s-value" style="color:#10b981;">{{ stats.revenue }} 积分</div></div>
+      <div class="stat-card"><div class="s-label">总收入</div><div class="s-value" style="color:var(--success);">{{ stats.revenue }} 积分</div></div>
       <div class="stat-card"><div class="s-label">已退款</div><div class="s-value" style="color:var(--warn);">{{ stats.refunded }} 积分</div></div>
       <div class="stat-card"><div class="s-label">订单数</div><div class="s-value">{{ orders.length }}</div></div>
       <div class="stat-card"><div class="s-label">退款率</div><div class="s-value">{{ stats.refundRate }}%</div></div>
@@ -101,7 +101,9 @@
         </div>
       </div>
 
-      <n-empty v-if="!view.length && !loading" :description="orders.length ? '没有符合条件的订单' : '暂无订单'" style="padding:40px 0;" />
+      <n-empty v-if="!view.length && !loading" :description="orders.length ? '没有符合条件的订单' : '暂无订单'" style="padding:40px 0;">
+        <template v-if="orders.length" #extra><n-button size="small" @click="statusTab='all'; groupBy='plan'; search=''">清除筛选</n-button></template>
+      </n-empty>
     </n-spin>
 
     <refund-dialog v-model:show="refundShow" :order-id="refundId" @done="load" />
@@ -232,15 +234,15 @@ onMounted(load)
 
 <style scoped>
 /* 分段筛选 */
-.seg { display: inline-flex; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 2px; }
+.seg { display: inline-flex; background: #eef1f4; border: 1px solid rgba(28,48,70,.09); border-radius: 8px; padding: 3px; }
 .seg-btn {
   display: inline-flex; align-items: center; gap: 5px;
   border: none; background: none; cursor: pointer;
   font: inherit; font-size: 12.5px; color: var(--text-2);
-  padding: 4px 12px; border-radius: 8px; transition: background .15s, color .15s;
+  padding: 4px 12px; border-radius: 5px; transition: background .15s, color .15s, box-shadow .15s;
 }
 .seg-btn:hover { color: var(--text); }
-.seg-btn.active { background: var(--card); color: var(--text); font-weight: 600; box-shadow: var(--shadow-sm); }
+.seg-btn.active { background: #fff; color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(30,45,60,.1); }
 .seg-count { font-size: 11px; color: var(--text-3); }
 .seg-btn.active .seg-count { color: var(--text-2); }
 .seg-label { font-size: 11.5px; color: var(--text-3); padding: 0 8px 0 6px; align-self: center; }

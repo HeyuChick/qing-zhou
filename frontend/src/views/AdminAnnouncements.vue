@@ -1,9 +1,13 @@
 <template>
   <div>
-    <h2 class="page-title">公告管理</h2>
-    <div class="page-toolbar">
-      <span class="spacer" />
-      <n-button type="primary" @click="openCreate">发布公告</n-button>
+    <div class="page-head">
+      <div><h2 class="page-title">公告管理</h2><p class="page-sub">管理公告内容、展示时段、置顶与启用状态</p></div>
+      <div class="page-actions"><n-button type="primary" @click="openCreate">发布公告</n-button></div>
+    </div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ announcements.length }}</b><span>全部公告</span></div>
+      <div class="resource-metric success"><b>{{ announcements.filter(a => a.enabled).length }}</b><span>当前启用</span></div>
+      <div class="resource-metric"><b>{{ announcements.filter(a => a.pinned).length }}</b><span>置顶公告</span></div>
     </div>
     <n-spin :show="loading">
       <div v-if="announcements.length" class="card-grid">

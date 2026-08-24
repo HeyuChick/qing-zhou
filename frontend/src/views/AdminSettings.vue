@@ -1,10 +1,22 @@
 <template>
   <div>
-    <h2 class="page-title">系统设置</h2>
-    <p class="page-sub">配置站点参数</p>
+    <div class="settings-hero">
+      <div>
+        <h2 class="page-title">系统设置</h2>
+        <p class="page-sub">站点、访问、安全、通知与运维配置集中管理</p>
+      </div>
+      <div class="settings-count"><b>{{ settingsSections.length }}</b> 个配置分区</div>
+    </div>
 
+    <div class="settings-layout">
+      <aside class="settings-nav" aria-label="设置分区导航">
+        <button v-for="section in settingsSections" :key="section.id" type="button" @click="scrollSettings(section.id)">
+          <span>{{ section.label }}</span><small>{{ section.note }}</small>
+        </button>
+      </aside>
+      <main class="settings-main">
     <n-spin :show="loading">
-      <n-card title="基本设置" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-basic" class="settings-section" title="基本设置" size="small">
         <n-form label-placement="left" label-width="120">
           <n-form-item label="站点名称"><n-input v-model:value="form.site_name" /></n-form-item>
           <n-form-item label="站点描述"><n-input v-model:value="form.site_description" /></n-form-item>
@@ -39,7 +51,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="面板访问地址" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-access" class="settings-section" title="面板访问地址" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;line-height:1.7;">
           面板对外访问地址，用于订阅链接、探针安装、邮件验证/找回链接，以及下方的 sing-box 一键安装命令。
           填写完整地址，例如 <code>https://node.example.com</code> 或 <code>http://1.2.3.4:8081</code>；
@@ -100,7 +112,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="退款策略" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-refund" class="settings-section" title="退款策略" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;line-height:1.7;">
           管理员对订单退款时的默认规则。<b>按剩余比例</b>只退还未使用的部分（如 100G 用了 50G 退 50%）；
           套餐同时含流量与有效期，<b>计算基准</b>决定按哪个维度算比例，推荐 <b>min(流量,时间)</b> 取更小值以防滥用。
@@ -126,7 +138,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="首页设置" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-home" class="settings-section" title="首页设置" size="small">
         <n-form label-placement="left" label-width="120">
           <n-form-item label="首页模式">
             <n-select v-model:value="form.homepage_mode" :options="[{label:'监控大屏',value:'monitor'},{label:'自定义页面',value:'custom'}]" />
@@ -137,7 +149,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="SMTP 邮件" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-smtp" class="settings-section" title="SMTP 邮件" size="small">
         <!-- 没配 SMTP 时，依赖邮件的功能会安静地失效：面板日志里有链接，用户那边
              什么都收不到。把后果写出来，而不是留一组空输入框让人以为「可选」。 -->
         <div v-if="!smtpConfigured" class="warn-box">
@@ -165,7 +177,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="Telegram Bot" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-telegram" class="settings-section" title="Telegram Bot" size="small">
         <div v-if="!telegramConfigured" class="warn-box">
           <b>当前未配置 Telegram Bot</b>。配好后，用户可在「账户设置」里绑定，用聊天查询订阅 / 套餐 / 流量，并接收到期和流量不足通知。
         </div>
@@ -228,7 +240,7 @@
         </div>
       </n-card>
 
-      <n-card title="证书 / ACME（Cloudflare 自动证书）" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-cert" class="settings-section" title="证书 / ACME（Cloudflare 自动证书）" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           填写 Cloudflare API Token 后，「证书管理」页即可用 Cloudflare DNS 方式在面板本机一键申请 / 自动续期真实证书（DNS 验证无需节点参与，远程节点也能用）。
         </p>
@@ -252,7 +264,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="节点出口安全" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-security" class="settings-section" title="节点出口安全" size="small">
         <n-form label-placement="left" label-width="160">
           <n-form-item label="阻断内网 / 元数据">
             <div style="width:100%;">
@@ -269,7 +281,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="订阅模板" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-template" class="settings-section" title="订阅模板" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">自定义 Clash/sing-box 订阅输出模板。留空使用内置默认模板；改过之后会一直沿用你的版本（升级带来的新版内置模板不会自动生效），点「恢复内置默认」即可清空覆盖、跟随内置。</p>
         <n-form label-placement="left" label-width="120">
           <n-form-item label="Clash 模板 (YAML)">
@@ -294,7 +306,7 @@
         <p style="font-size:12px;color:var(--text-3);margin-top:4px;">改动需点下方「保存设置」后生效。</p>
       </n-card>
 
-      <n-card title="监控告警阈值" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-monitor" class="settings-section" title="监控告警阈值" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">超过以下百分比时触发告警（0-100）。修改后下次检查生效。</p>
         <n-form label-placement="left" label-width="120">
           <n-form-item label="CPU 告警 (%)"><n-input-number v-model:value="alertCpu" :min="1" :max="100" style="width:200px;" /></n-form-item>
@@ -313,7 +325,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="在线更新" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-update" class="settings-section" title="在线更新" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           「在线更新」页查版本走的是 GitHub 公开接口，匿名调用<b>按出口 IP</b> 限额（每小时 60 次）。
           与别人共用一个出口 IP（NAT / 机房 / 公司网络）时很容易撞到额度，表现为检查更新报「速率受限」。
@@ -341,7 +353,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="数据备份" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-backup" class="settings-section" title="数据备份" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           在线导出整库快照（单个 <code>.db</code> 文件，含用户 / 订单 / 节点 / 证书）。数据库跑在 WAL 模式下，
           <b>直接 <code>scp</code> 拷贝 <code>qingzhou.db</code> 拿到的是残缺副本</b>——已提交的数据可能还在 <code>-wal</code> 里。
@@ -351,11 +363,14 @@
         <n-button :loading="backingUp" @click="handleBackup">下载数据库备份</n-button>
       </n-card>
 
-      <n-space>
+      <n-space class="settings-actions">
         <n-button type="primary" :loading="saving" @click="handleSave">保存设置</n-button>
         <n-button @click="handleRebuild" :loading="rebuilding">重建 sing-box 配置</n-button>
+        <span class="save-state">保存后统一生效 · sing-box 相关改动可随后手动重建</span>
       </n-space>
     </n-spin>
+      </main>
+    </div>
   </div>
 </template>
 
@@ -365,6 +380,23 @@ import { NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NS
 import { apiGet, apiPost, apiPut, apiList, apiDownload } from '@/api'
 
 const message = useMessage()
+const settingsSections = [
+  { id: 'settings-basic', label: '基本设置', note: '注册与积分' },
+  { id: 'settings-access', label: '访问地址', note: '面板与节点' },
+  { id: 'settings-refund', label: '退款策略', note: '比例与手续费' },
+  { id: 'settings-home', label: '首页设置', note: '入口展示' },
+  { id: 'settings-smtp', label: 'SMTP 邮件', note: '验证与找回' },
+  { id: 'settings-telegram', label: 'Telegram', note: '机器人与模板' },
+  { id: 'settings-cert', label: '证书 / ACME', note: 'Cloudflare DNS' },
+  { id: 'settings-security', label: '出口安全', note: '内网访问防护' },
+  { id: 'settings-template', label: '订阅模板', note: '客户端输出' },
+  { id: 'settings-monitor', label: '监控告警', note: '阈值与通知' },
+  { id: 'settings-update', label: '在线更新', note: '版本与令牌' },
+  { id: 'settings-backup', label: '数据备份', note: '一致性快照' },
+]
+function scrollSettings(id: string) {
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
 const loading = ref(false)
 const saving = ref(false)
 const testingSmtp = ref(false)
@@ -625,7 +657,20 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.page-title { font-size: 21px; margin-bottom: 4px; }
+.settings-hero { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:20px; }
+.settings-hero .page-sub { margin-bottom:0; }
+.settings-count { flex:none; padding:8px 12px; border:1px solid var(--border); border-radius:999px; background:var(--card); color:var(--text-2); font-size:12px; box-shadow:var(--shadow-xs); }
+.settings-count b { color:var(--text); font-size:14px; }
+.settings-layout { display:grid; grid-template-columns:184px minmax(0, 1fr); align-items:start; gap:18px; }
+.settings-nav { position:sticky; top:84px; display:flex; flex-direction:column; gap:3px; padding:7px; border:1px solid var(--border); border-radius:14px; background:color-mix(in srgb, var(--card) 92%, transparent); box-shadow:var(--shadow-xs); backdrop-filter:blur(16px); }
+.settings-nav button { display:grid; grid-template-columns:1fr auto; align-items:center; gap:8px; min-height:38px; padding:7px 9px; border:0; border-radius:9px; background:transparent; color:var(--text-2); text-align:left; font:inherit; cursor:pointer; transition:background .18s ease, color .18s ease, transform .18s ease; }
+.settings-nav button:hover { color:var(--text); background:var(--bg-soft); transform:translateX(2px); }
+.settings-nav span { font-size:12.5px; font-weight:620; }
+.settings-nav small { color:var(--text-3); font-size:10px; white-space:nowrap; }
+.settings-main { min-width:0; }
+.settings-section { margin-bottom:16px; scroll-margin-top:84px; }
+.settings-actions { position:sticky; bottom:14px; z-index:5; width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:12px; background:color-mix(in srgb, var(--card) 92%, transparent); box-shadow:0 12px 34px rgba(31,41,55,.12); backdrop-filter:blur(18px); }
+.save-state { align-self:center; margin-left:auto; color:var(--text-3); font-size:11.5px; }
 .form-hint { margin-top: 4px; font-size: 12px; color: var(--text-3); line-height: 1.5; }
 .form-hint a { color: var(--accent-strong); }
 .warn-box {
@@ -679,4 +724,30 @@ onMounted(async () => {
   white-space: nowrap;
 }
 .tg-var span { font-size: 12.5px; color: var(--text-2); line-height: 1.45; }
+@media (max-width: 900px) {
+  .settings-layout { grid-template-columns:1fr; }
+  .settings-nav { position:relative; top:auto; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .settings-nav small { display:none; }
+  .settings-nav button:hover { transform:none; }
+}
+@media (max-width: 560px) {
+  .settings-hero { align-items:flex-start; }
+  .settings-count { display:none; }
+  .settings-nav { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .settings-section :deep(.n-form-item) {
+    grid-template-areas:'label' 'blank' 'feedback' !important;
+    grid-template-columns:minmax(0,1fr) !important;
+  }
+  .settings-section :deep(.n-form-item-label) {
+    width:auto !important; height:auto; justify-content:flex-start !important; padding:0 0 5px !important; text-align:left !important;
+  }
+  .settings-section :deep(.n-form-item-label__text) { width:auto !important; text-align:left !important; }
+  .settings-section :deep(.n-form-item-blank) { min-width:0; width:100%; }
+  .settings-section :deep(.n-input),
+  .settings-section :deep(.n-input-number),
+  .settings-section :deep(.n-select),
+  .settings-section :deep(.n-input-group) { width:100% !important; max-width:100% !important; }
+  .settings-actions { position:relative; bottom:auto; }
+  .save-state { flex-basis:100%; margin-left:0; line-height:1.5; }
+}
 </style>

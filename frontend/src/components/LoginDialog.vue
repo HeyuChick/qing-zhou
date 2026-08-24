@@ -1,9 +1,9 @@
 <template>
-  <n-modal :show="show" @update:show="$emit('update:show', $event)" preset="card" style="max-width: 400px;" title="">
-    <div style="text-align: center; margin-bottom: 16px;">
-      <div style="display: inline-flex; align-items: center; gap: 10px; font-weight: 750; font-size: 20px;">
-        <div style="width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent-strong)); display: grid; place-items: center; color: #fff; font-size: 18px;">舟</div>
-        轻舟
+  <n-modal :show="show" @update:show="$emit('update:show', $event)" preset="card" class="login-modal" style="max-width: 400px;" title="">
+    <div class="login-brand">
+      <div class="login-brand-inner">
+        <div class="login-logo"><BrandMark :size="42" /></div>
+        <div class="login-copy"><strong>轻舟</strong><span>安全连接，从这里开始</span></div>
       </div>
     </div>
 
@@ -63,6 +63,7 @@ import { NModal, NTabs, NTabPane, NForm, NFormItem, NInput, NButton, useMessage 
 import type { FormRules } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
+import BrandMark from './BrandMark.vue'
 import { apiPost } from '@/api'
 
 const props = defineProps<{ show: boolean }>()
@@ -155,6 +156,25 @@ watch(() => props.show, (v) => {
 </script>
 
 <style scoped>
+:global(.login-modal) {
+  overflow: hidden;
+  background: rgba(255,255,255,.93) !important;
+  backdrop-filter: blur(24px) saturate(1.12);
+  animation: loginIn .5s var(--ease-emphasized) both;
+}
+:global(.login-modal::before) {
+  content: ''; position: absolute; inset: 0 0 auto; height: 96px; pointer-events: none;
+  background: radial-gradient(circle at 18% 0, rgba(71,155,207,.11), transparent 70%);
+}
+@keyframes loginIn { from { opacity: 0; transform: translateY(10px) scale(.975); filter: blur(3px); } }
+.login-brand { position: relative; text-align: center; margin-bottom: 18px; }
+.login-brand-inner { display: inline-flex; align-items: center; gap: 11px; text-align: left; }
+.login-logo {
+  width: 42px; height: 42px; display: grid; place-items: center;
+}
+.login-copy { display: flex; flex-direction: column; line-height: 1.2; }
+.login-copy strong { color: var(--text); font-size: 19px; font-weight: 700; letter-spacing: -.02em; }
+.login-copy span { margin-top: 4px; color: var(--text-3); font-size: 10.5px; font-weight: 500; }
 .forgot-off {
   padding: 18px 14px; text-align: center; line-height: 1.8;
   font-size: 13px; color: var(--text-2);

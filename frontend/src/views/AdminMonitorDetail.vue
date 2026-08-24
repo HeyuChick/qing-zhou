@@ -8,6 +8,7 @@
       </h2>
       <n-tag v-if="server?.location" size="small" :bordered="false">{{ server.location }}</n-tag>
     </div>
+    <p class="page-sub">实时资源、资产信息与多时间范围趋势；数据随探针上报持续更新</p>
 
     <n-spin :show="loading">
       <template v-if="server">

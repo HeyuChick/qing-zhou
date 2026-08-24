@@ -79,14 +79,23 @@
           </div>
         </div>
       </div>
-      <n-empty v-else-if="!loading" description="没有符合条件的明细" style="padding:40px 0;" />
+      <n-empty v-else-if="!loading" :description="txs.length ? '没有符合条件的明细' : '还没有积分收支记录'" style="padding:40px 0;">
+        <template #extra>
+          <div class="empty-actions">
+            <span>{{ txs.length ? '当前筛选组合未命中记录，可清除条件查看全部明细。' : '充值、赠送、购买与退款都会在这里保留余额快照。' }}</span>
+            <n-button v-if="txs.length" size="small" @click="resetFilters">清除筛选</n-button>
+            <n-button v-else size="small" @click="router.push('/shop')">查看积分商城</n-button>
+          </div>
+        </template>
+      </n-empty>
     </n-spin>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import { NCard, NSpin, NEmpty, NRadioGroup, NRadioButton, NSelect, NInput } from 'naive-ui'
+import { useRouter } from 'vue-router'
+import { NCard, NSpin, NEmpty, NButton, NRadioGroup, NRadioButton, NSelect, NInput } from 'naive-ui'
 import * as echarts from 'echarts'
 import { useAuthStore } from '@/stores/auth'
 import { apiGet } from '@/api'
@@ -94,11 +103,13 @@ import { fmtDateTime, yuan } from '@/utils/format'
 import { useCountUp } from '@/utils/countup'
 
 const auth = useAuthStore()
+const router = useRouter()
 const txs = ref<any[]>([])
 const loading = ref(false)
 const typeFilter = ref('all')
 const typeSel = ref<string | null>(null)
 const kw = ref('')
+function resetFilters() { typeFilter.value = 'all'; typeSel.value = null; kw.value = '' }
 
 const typeLabel: Record<string, string> = {
   admin_recharge: '管理员充值', purchase: '购买消费', signup_bonus: '注册赠送',
@@ -323,6 +334,7 @@ onUnmounted(() => {
 .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
 .filters .spacer { flex: 1; }
 .muted { color: var(--text-3); font-size: 12px; }
+.empty-actions { display:flex; flex-direction:column; align-items:center; gap:10px; max-width:420px; color:var(--text-3); font-size:12px; line-height:1.6; }
 
 /* 明细卡片 */
 .card-grid {

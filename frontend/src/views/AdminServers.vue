@@ -1,9 +1,14 @@
 <template>
   <div>
-    <h2 class="page-title">服务器管理</h2>
-    <div class="page-toolbar">
-      <span class="spacer" />
-      <n-button type="primary" @click="openForm()">添加服务器</n-button>
+    <div class="page-head">
+      <div><h2 class="page-title">服务器管理</h2><p class="page-sub">远程机器、SSH 接管、探针与 sing-box 运行版本</p></div>
+      <div class="page-actions"><n-button type="primary" @click="openForm()">添加服务器</n-button></div>
+    </div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ servers.length }}</b><span>全部远程服务器</span></div>
+      <div class="resource-metric success"><b>{{ servers.filter(s => s.enabled).length }}</b><span>已启用</span></div>
+      <div class="resource-metric"><b>{{ servers.filter(s => s.probe_enabled).length }}</b><span>探针已开启</span></div>
+      <div class="resource-metric" :class="{ danger: versions.filter(v => v.too_old || (v.version && !v.has_v2ray_api)).length }"><b>{{ versions.filter(v => v.too_old || (v.version && !v.has_v2ray_api)).length }}</b><span>版本或统计异常</span></div>
     </div>
     <!-- 各节点实际在跑的 sing-box。数据来自面板本来就在做的能力探测，
          以前只取了「有没有 v2ray_api」，版本号被丢掉了。 -->

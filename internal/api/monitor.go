@@ -374,7 +374,7 @@ func (a *API) handleMonitorAlerts(w http.ResponseWriter, r *http.Request) {
 
 // handleMonitorHeatmap returns a server×time-bucket status matrix for the
 // availability heatmap. Y axis = servers, X axis = time buckets (48 columns).
-// Each cell value: 0=正常, 1=高负载, 2=离线/无数据.
+// Each cell value: 0=正常, 1=高负载, 2=严重负载, 3=离线/无数据.
 // Query: range=1h|6h|24h|7d (default 24h).
 func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
 	servers, buckets, matrix, rangeStr, bucketSec, good := a.buildHeatmap(w, r, false)
@@ -393,11 +393,12 @@ func (a *API) handleMonitorHeatmap(w http.ResponseWriter, r *http.Request) {
 		rows = []srvInfo{}
 	}
 	ok(w, J{
-		"servers":    rows,
-		"buckets":    buckets,
-		"matrix":     matrix,
-		"range":      rangeStr,
-		"bucket_sec": bucketSec,
+		"servers":     rows,
+		"buckets":     buckets,
+		"matrix":      matrix,
+		"state_count": 4,
+		"range":       rangeStr,
+		"bucket_sec":  bucketSec,
 	})
 }
 
@@ -419,11 +420,12 @@ func (a *API) handleMonitorPublicHeatmap(w http.ResponseWriter, r *http.Request)
 		rows = []srvInfo{}
 	}
 	ok(w, J{
-		"servers":    rows,
-		"buckets":    buckets,
-		"matrix":     matrix,
-		"range":      rangeStr,
-		"bucket_sec": bucketSec,
+		"servers":     rows,
+		"buckets":     buckets,
+		"matrix":      matrix,
+		"state_count": 4,
+		"range":       rangeStr,
+		"bucket_sec":  bucketSec,
 	})
 }
 
@@ -590,8 +592,9 @@ func (a *API) buildHeatmap(w http.ResponseWriter, r *http.Request, publicOnly bo
 		buckets[i] = startTs + int64(i)*bucketSec
 	}
 
-	// Matrix init: 3=无数据(sentinel). Real classes: 0=正常,1=高负载,2=离线级负载.
-	// At the end sentinel 3 is collapsed to 2 (离线/无数据 都显示红色).
+	// Matrix init: 3=无数据(sentinel). Real classes: 0=正常,1=高负载,2=严重负载.
+	// Keep the sentinel in the response so clients can distinguish a monitoring gap
+	// from a sampled critical load instead of painting both states red.
 	matrix = make([][]int, len(rows))
 	for i := range matrix {
 		matrix[i] = make([]int, cols)
@@ -633,14 +636,6 @@ func (a *API) buildHeatmap(w http.ResponseWriter, r *http.Request, publicOnly bo
 		cur := matrix[ri][b]
 		if cur == 3 || class > cur {
 			matrix[ri][b] = class
-		}
-	}
-	// Collapse no-data sentinel to 2 (离线/无数据 → 红).
-	for i := range matrix {
-		for j := range matrix[i] {
-			if matrix[i][j] == 3 {
-				matrix[i][j] = 2
-			}
 		}
 	}
 	return rows, buckets, matrix, rangeStr, bucketSec, true

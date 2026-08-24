@@ -1,7 +1,7 @@
 <template>
   <header class="app-header">
     <div class="header-left" @click="router.push('/')">
-      <div class="logo">舟</div>
+      <div class="logo"><BrandMark :size="38" /></div>
       <span class="brand-name">{{ config.config.site_name || '轻舟' }}</span>
     </div>
     <div class="header-right">
@@ -42,6 +42,7 @@ import { HomeOutline, SettingsOutline, PersonOutline, LogOutOutline } from '@vic
 import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
 import LoginDialog from './LoginDialog.vue'
+import BrandMark from './BrandMark.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -89,21 +90,24 @@ function handleNav(key: string) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 56px;
-  padding: 0 24px;
-  background: rgba(250, 249, 245, 0.85);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
+  height: 64px;
+  padding: 0 clamp(16px, 4vw, 48px);
+  background: rgba(245, 247, 249, .72);
+  border-bottom: 1px solid rgba(28,48,70,.06);
+  backdrop-filter: blur(22px) saturate(1.18);
   position: sticky;
   top: 0;
   z-index: 100;
 }
 .header-left { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
 .logo {
-  width: 30px; height: 30px; border-radius: 9px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-  display: grid; place-items: center; color: #fff; font-size: 16px; font-weight: 700;
+  width: 38px; height: 38px; display: grid; place-items: center;
 }
-.brand-name { font-weight: 750; font-size: 17px; letter-spacing: -0.02em; color: var(--text); }
+.brand-name { font-weight: 650; font-size: 17px; letter-spacing: -0.02em; color: var(--text); }
 .header-right { display: flex; align-items: center; gap: 8px; }
+
+@media (max-width: 640px) {
+  .app-header { padding: 0 12px; }
+  .header-right { gap: 2px; }
+}
 </style>

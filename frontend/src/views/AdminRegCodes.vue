@@ -1,6 +1,12 @@
 <template>
   <div>
-    <h2 class="page-title">注册码管理</h2>
+    <div class="page-head"><div><h2 class="page-title">注册码管理</h2><p class="page-sub">批量生成、使用次数、用户组归属与完整核销记录</p></div></div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ codes.length }}</b><span>全部注册码</span></div>
+      <div class="resource-metric success"><b>{{ codes.filter(c => c.enabled).length }}</b><span>已启用</span></div>
+      <div class="resource-metric"><b>{{ codes.reduce((sum, c) => sum + (c.used || 0), 0) }}</b><span>累计核销次数</span></div>
+      <div class="resource-metric"><b>{{ codes.filter(c => c.group_ids?.length).length }}</b><span>关联用户组</span></div>
+    </div>
 
     <!-- 生成区 -->
     <n-card size="small" style="margin-bottom:16px;">
@@ -69,7 +75,7 @@ const codes = ref<any[]>([])
 const loading = ref(false)
 const generating = ref(false)
 const genCount = ref(10)
-const genMaxUses = ref(0)
+const genMaxUses = ref(1)
 const genNote = ref('')
 const genGroupIDs = ref<number[]>([])
 const generatedCodes = ref<string[]>([])

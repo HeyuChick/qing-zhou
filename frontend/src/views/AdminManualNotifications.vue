@@ -1,7 +1,12 @@
 <template>
   <div>
-    <h2 class="page-title">手动通知</h2>
-    <p class="page-sub">通过 Telegram 向全部正常用户或指定多个用户发送通知，并保留逐用户发送结果。</p>
+    <div class="page-head"><div><h2 class="page-title">手动通知</h2><p class="page-sub">通过 Telegram 向全部正常用户或指定多个用户发送，并保留逐用户结果。</p></div></div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ users.length }}</b><span>可选接收用户</span></div>
+      <div class="resource-metric"><b>{{ history.length }}</b><span>历史发送任务</span></div>
+      <div class="resource-metric success"><b>{{ history.reduce((sum, item) => sum + (item.sent || 0), 0) }}</b><span>累计发送成功</span></div>
+      <div class="resource-metric" :class="{ danger: history.reduce((sum, item) => sum + (item.failed || 0), 0) }"><b>{{ history.reduce((sum, item) => sum + (item.failed || 0), 0) }}</b><span>累计发送失败</span></div>
+    </div>
 
     <n-card title="发送通知" size="small" style="margin-bottom:16px;">
       <n-form label-placement="left" label-width="90">

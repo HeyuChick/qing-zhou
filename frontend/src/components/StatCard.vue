@@ -36,25 +36,25 @@ defineEmits<{ (e: 'click'): void }>()
 .stat-card {
   position: relative; overflow: hidden;
   display: block; width: 100%; text-align: left; font: inherit; color: inherit;
-  background: var(--card); border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--r);
   padding: 14px 16px 12px;
-  transition: box-shadow .18s, border-color .18s, transform .18s;
-  animation: sc-rise .5s cubic-bezier(.22, 1, .36, 1) backwards;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow .34s var(--ease-standard), border-color .28s var(--ease-standard), transform .4s var(--ease-emphasized);
+  animation: sc-rise .68s var(--ease-emphasized) backwards;
 }
-@keyframes sc-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes sc-rise { from { opacity: 0; transform: translateY(10px) scale(.988); filter: blur(3px); } to { opacity: 1; transform: none; filter: none; } }
 
-/* 顶部那道高光只在可点击的卡片上滑过，作为「这里能点」的暗示 */
 .stat-card.clickable::after {
-  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 2px;
-  background: linear-gradient(90deg, transparent, var(--accent-strong), transparent);
-  transform: translateX(-100%); transition: transform .45s ease;
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(135deg, rgba(255,255,255,.6), transparent 38%);
+  opacity: 0; transition: opacity .35s var(--ease-standard);
 }
 .stat-card.clickable { cursor: pointer; }
-.stat-card.clickable:hover { box-shadow: var(--shadow); border-color: #d5d5d5; transform: translateY(-2px); }
-.stat-card.clickable:hover::after { transform: translateX(100%); }
+.stat-card.clickable:hover { box-shadow: var(--shadow); border-color: var(--border-strong); transform: translateY(-2px); }
+.stat-card.clickable:hover::after { opacity: 1; }
 .stat-card.clickable:active { transform: translateY(0); }
 .stat-card.clickable:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
-.stat-card.clickable:hover .sc-arrow { opacity: 1; transform: translateX(2px); }
+.stat-card.clickable:hover .sc-arrow { opacity: 1; transform: translateX(3px); }
 
 .sc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .sc-label { font-size: 12.5px; color: var(--text-2); font-weight: 550; }
