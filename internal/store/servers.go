@@ -181,6 +181,14 @@ func (s *Store) GetServerByProbeToken(token string) (*Server, error) {
 	return sv, err
 }
 
+// SetServerSingBoxBin records where the node's sing-box binary actually is, as
+// resolved by a live connection. Kept separate from UpdateServer so a background
+// probe cannot clobber the twenty-odd other columns that handler writes.
+func (s *Store) SetServerSingBoxBin(id int64, bin string) error {
+	_, err := s.db.Exec(`UPDATE servers SET sing_box_bin=?, updated_at=? WHERE id=?`, bin, time.Now().Unix(), id)
+	return err
+}
+
 // SetServerHostKey pins (or updates) the SSH host key for a server. Called on
 // first successful connect (TOFU) so subsequent connects are verified against it.
 func (s *Store) SetServerHostKey(id int64, hostKey string) error {

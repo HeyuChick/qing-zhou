@@ -245,6 +245,9 @@ func (a *API) upgradeRemoteSingBox(ctx context.Context, id int64) (string, error
 	}
 	// Generous timeout: the script downloads a binary of tens of megabytes.
 	rm := a.newRemoteManager(2 * time.Minute)
+	// The installer puts the binary at /usr/local/bin, which may not be where it
+	// was before; a stale cached path would then point at the old one.
+	rm.ForgetSingBoxBin(sv.ID)
 	return rm.UpgradeSingBox(ctx, sbctl.SSHConfigFor(sv), assets.InstallScript())
 }
 

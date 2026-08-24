@@ -82,7 +82,17 @@
         <n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item>
         <n-form-item label="主机"><n-input v-model:value="form.host" placeholder="IP 或域名" /></n-form-item>
         <n-form-item label="SSH 端口"><n-input-number v-model:value="form.port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
-        <n-form-item label="SSH 用户"><n-input v-model:value="form.ssh_user" placeholder="root" /></n-form-item>
+        <n-form-item label="SSH 用户"><n-input v-model:value="form.ssh_user" placeholder="root" @update:value="onSshUserInput" /></n-form-item>
+        <n-form-item label="sudo 提权">
+          <div style="width:100%;">
+            <n-switch v-model:value="form.use_sudo" />
+            <div class="hint">
+              非 root 账号必须打开：写配置、装配置、重启服务都要 root。
+              <b>需要免密 sudo（NOPASSWD），等同于把 root 交给面板</b>；填了密码则用密码提权。
+            </div>
+          </div>
+        </n-form-item>
+        <n-form-item v-if="form.use_sudo" label="sudo 密码"><n-input v-model:value="form.sudo_password" type="password" show-password-on="click" placeholder="留空 = 已配置免密 sudo" /></n-form-item>
         <n-form-item label="SSH 密码"><n-input v-model:value="form.ssh_password" type="password" show-password-on="click" placeholder="与密钥二选一" /></n-form-item>
         <n-form-item label="SSH 私钥"><n-input v-model:value="form.ssh_key" type="textarea" :rows="3" placeholder="-----BEGIN ... PRIVATE KEY-----" /></n-form-item>
         <n-form-item label="密钥密码"><n-input v-model:value="form.ssh_key_pass" type="password" show-password-on="click" /></n-form-item>
@@ -109,14 +119,21 @@ const dialog = useDialog()
 const servers = ref<any[]>([])
 const loading = ref(false); const saving = ref(false); const testing = ref(false)
 const showForm = ref(false); const editing = ref<any>(null)
-const mk = () => ({ name:'', host:'', port:22, ssh_user:'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', config_path:'/etc/sing-box/config.json', systemd_unit:'sing-box', sing_box_bin:'/usr/local/bin/sing-box', v2ray_listen:'127.0.0.1:18080', enabled:true })
+const mk = () => ({ name:'', host:'', port:22, ssh_user:'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:false, sudo_password:'', config_path:'/etc/sing-box/config.json', systemd_unit:'sing-box', sing_box_bin:'/usr/local/bin/sing-box', v2ray_listen:'127.0.0.1:18080', enabled:true })
 const form = reactive(mk())
 function openForm(s?:any){
   editing.value = s||null
-  if(s){ Object.assign(form,{ name:s.name, host:s.host, port:s.port||22, ssh_user:s.ssh_user||'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', config_path:s.config_path||'/etc/sing-box/config.json', systemd_unit:s.systemd_unit||'sing-box', sing_box_bin:s.sing_box_bin||'/usr/local/bin/sing-box', v2ray_listen:s.v2ray_listen||'127.0.0.1:18080', enabled:s.enabled??true }) }
+  if(s){ Object.assign(form,{ name:s.name, host:s.host, port:s.port||22, ssh_user:s.ssh_user||'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:s.use_sudo??false, sudo_password:'', config_path:s.config_path||'/etc/sing-box/config.json', systemd_unit:s.systemd_unit||'sing-box', sing_box_bin:s.sing_box_bin||'/usr/local/bin/sing-box', v2ray_listen:s.v2ray_listen||'127.0.0.1:18080', enabled:s.enabled??true }) }
   else { Object.assign(form, mk()) }
   showForm.value = true
 }
+// 改 SSH 用户时替管理员把 sudo 开关拨到通常正确的位置：非 root 必然要提权，
+// root 必然不要。只在「人手动改这个输入框」时触发 —— 打开已有服务器走的是
+// openForm，不经过这里，所以不会覆盖管理员自己拨过的开关。
+function onSshUserInput(v:string){
+  form.use_sudo = (v||'').trim() !== 'root' && (v||'').trim() !== ''
+}
+
 async function handleSave(){
   saving.value = true
   try{
@@ -124,6 +141,7 @@ async function handleSave(){
     if(!b.ssh_password) delete b.ssh_password
     if(!b.ssh_key) delete b.ssh_key
     if(!b.ssh_key_pass) delete b.ssh_key_pass
+    if(!b.sudo_password) delete b.sudo_password
     if(editing.value) await apiPut(`/api/admin/servers/${editing.value.id}`,b)
     else await apiPost('/api/admin/servers',b)
     message.success('保存成功'); showForm.value=false; editing.value=null; await load()
@@ -256,4 +274,5 @@ onMounted(() => { load(); loadVersions() })
   white-space:pre-wrap; word-break:break-all;
   background:var(--code-bg,rgba(128,128,128,.1)); border-radius:6px; color:var(--text-2);
 }
+.hint{ font-size:12px; line-height:1.6; color:var(--n-text-color-3,#8a8a8a); margin-top:6px; }
 </style>

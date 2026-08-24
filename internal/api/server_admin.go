@@ -35,6 +35,9 @@ func maskServerSecrets(sv *store.Server) {
 	if sv.SSHPassword != "" {
 		sv.SSHPassword = "***"
 	}
+	if sv.SudoPassword != "" {
+		sv.SudoPassword = "***"
+	}
 }
 
 func (a *API) handleAdminListServers(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +128,9 @@ func (a *API) handleAdminUpdateServer(w http.ResponseWriter, r *http.Request) {
 		if sv.ProbeToken == "***" {
 			sv.ProbeToken = stored.ProbeToken
 		}
+		if sv.SudoPassword == "***" {
+			sv.SudoPassword = stored.SudoPassword
+		}
 	}
 	if err := a.st.UpdateServer(*sv); err != nil {
 		fail(w, http.StatusInternalServerError, "更新服务器失败")
@@ -210,6 +216,18 @@ func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
 	// TestConnection runs `sing-box version`; record it rather than showing it
 	// once and forgetting, so the node version list is fresh after a test too.
 	_ = a.st.SetNodeSingbox(sv.ID, sbver.Parse(version))
+	// And record WHERE it found the binary. sing_box_bin used to be allowed to be
+	// wrong or empty because every command fell back to `sing-box` from PATH —
+	// a fallback that breaks under sudo, since sudo replaces PATH with sudoers'
+	// secure_path. Writing the resolved absolute path back makes the column
+	// self-healing instead, so nothing downstream has to guess again.
+	if bin, err := rm.ResolveSingBoxBin(ctx, cfg); err == nil && bin != "" && bin != sv.SingBoxBin {
+		if err := a.st.SetServerSingBoxBin(id, bin); err != nil {
+			log.Printf("admin: record resolved sing-box path for server %d: %v", id, err)
+		} else {
+			log.Printf("admin: server %d sing-box resolved to %s (was %q)", id, bin, sv.SingBoxBin)
+		}
+	}
 	ok(w, J{"status": "online", "message": "SSH 连接成功", "version": version})
 }
 
