@@ -77,7 +77,7 @@ func (a *API) handleAdminNodeVersions(w http.ResponseWriter, r *http.Request) {
 	for _, sv := range servers {
 		v := viewFor(sv.ID, sv.Name, sv.Host, false, sv.Enabled, observed, jobs)
 		// Without credentials there is no way in, so the button must not pretend.
-		v.Upgradable = sv.SSHKey != "" || sv.SSHPassword != ""
+		v.Upgradable = serverHasCredentials(sv)
 		rows = append(rows, v)
 	}
 	ok(w, J{
@@ -229,7 +229,7 @@ func (a *API) checkRemoteUpgradable(id int64) error {
 	if err != nil || sv == nil {
 		return errNotFound
 	}
-	if sv.SSHKey == "" && sv.SSHPassword == "" {
+	if !serverHasCredentials(sv) {
 		return errNoCreds
 	}
 	return nil
@@ -240,7 +240,7 @@ func (a *API) upgradeRemoteSingBox(ctx context.Context, id int64) (string, error
 	if err != nil || sv == nil {
 		return "", errNotFound
 	}
-	if sv.SSHKey == "" && sv.SSHPassword == "" {
+	if !serverHasCredentials(sv) {
 		return "", errNoCreds
 	}
 	// Generous timeout: the script downloads a binary of tens of megabytes.

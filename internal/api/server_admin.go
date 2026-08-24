@@ -67,6 +67,11 @@ func (a *API) handleAdminCreateServer(w http.ResponseWriter, r *http.Request) {
 	if sv.Port == 0 {
 		sv.Port = 22
 	}
+	sv.SSHKeyPath = strings.TrimSpace(sv.SSHKeyPath)
+	if err := a.checkServerKeyFile(&sv); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	sv.Enabled = true
 	sv.Status = "unknown"
 	id, err := a.st.CreateServer(sv)
@@ -110,6 +115,11 @@ func (a *API) handleAdminUpdateServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if sv.Port == 0 {
 		sv.Port = 22
+	}
+	sv.SSHKeyPath = strings.TrimSpace(sv.SSHKeyPath)
+	if err := a.checkServerKeyFile(sv); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	// The list response masks secrets as "***"; a client that echoes the masked
 	// value back must not store the literal. sv already holds the stored value
@@ -171,10 +181,63 @@ func (a *API) handleAdminDeleteServer(w http.ResponseWriter, r *http.Request) {
 	ok(w, nil)
 }
 
+// checkServerKeyFile validates a row that names a key file, at save time.
+//
+// Deliberately at save rather than at first use: the row is being edited by
+// someone who is looking at the panel right now, and a typo'd name or a wrong
+// passphrase discovered here costs a second. Discovered on the next deploy it
+// costs however long it takes someone to notice that one node stopped updating.
+//
+// The passphrase may still be masked at this point (the form echoes "***" back
+// for secrets it did not retype), in which case only the file itself is checked.
+func (a *API) checkServerKeyFile(sv *store.Server) error {
+	if sv.SSHKeyPath == "" {
+		return nil
+	}
+	pass := sv.SSHKeyPass
+	if pass == "***" {
+		pass = ""
+		if stored, _ := a.st.GetServer(sv.ID); stored != nil {
+			pass = stored.SSHKeyPass
+		}
+	}
+	return sshctl.ValidateKeyFile(a.sshKeyDir, sv.SSHKeyPath, pass)
+}
+
+// serverHasCredentials reports whether a row has any way to authenticate.
+//
+// Single definition because it gates five different flows, and a key held as a
+// FILE counts: without SSHKeyPath here, every row using one is reported as
+// "no credentials configured" and shown as un-upgradable.
+func serverHasCredentials(sv *store.Server) bool {
+	return sv != nil && (sv.SSHKey != "" || sv.SSHKeyPath != "" || sv.SSHPassword != "")
+}
+
+// GET /api/admin/ssh-keys — list the private key files the panel can offer, so
+// the server form can present a choice instead of asking for a pasted PEM.
+//
+// Names and readability only; never contents. A key that reaches the browser has
+// already lost the property this whole feature exists to provide.
+func (a *API) handleAdminListSSHKeys(w http.ResponseWriter, r *http.Request) {
+	files, err := sshctl.ListKeyFiles(a.sshKeyDir)
+	if err != nil {
+		if errors.Is(err, sshctl.ErrKeyDirUnset) {
+			ok(w, J{"dir": "", "configured": false, "files": []sshctl.KeyFile{}})
+			return
+		}
+		fail(w, http.StatusInternalServerError, "读取私钥目录失败: "+err.Error())
+		return
+	}
+	if files == nil {
+		files = []sshctl.KeyFile{}
+	}
+	ok(w, J{"dir": a.sshKeyDir, "configured": true, "files": files})
+}
+
 // newRemoteManager builds an SSH manager that verifies host keys and pins them
 // on first successful connect (trust-on-first-use), for all remote SSH flows.
 func (a *API) newRemoteManager(timeout time.Duration) *sshctl.RemoteManager {
-	rm := sshctl.New(sshctl.WithTimeout(timeout))
+	rm := sshctl.New(sshctl.WithTimeout(timeout), sshctl.WithKeyDir(a.sshKeyDir))
 	rm.SetHostKeyPersister(func(id int64, key string) error { return a.st.SetServerHostKey(id, key) })
 	return rm
 }
@@ -193,7 +256,7 @@ func (a *API) handleAdminTestServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if sv.SSHKey == "" && sv.SSHPassword == "" {
+	if !serverHasCredentials(sv) {
 		_ = a.st.UpdateServerStatus(id, "error")
 		fail(w, http.StatusBadRequest, "未配置 SSH 密钥或密码，无法连接")
 		return
@@ -265,7 +328,7 @@ func (a *API) handleAdminClearServerHostKey(w http.ResponseWriter, r *http.Reque
 	// panel keeps no other record of a pin being reset.
 	log.Printf("admin: cleared pinned SSH host key for server %d (%s)", id, sv.Host)
 
-	if sv.SSHKey == "" && sv.SSHPassword == "" {
+	if !serverHasCredentials(sv) {
 		ok(w, J{"message": "已清除固定的主机密钥；该服务器未配置 SSH 密钥或密码，无法立即重新连接"})
 		return
 	}

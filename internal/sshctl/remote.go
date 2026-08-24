@@ -101,11 +101,20 @@ type ServerConfig struct {
 	// SudoPassword feeds `sudo -S` over the session's stdin. Empty means the
 	// account has NOPASSWD and `sudo -n` is used instead.
 	SudoPassword string `json:"sudo_password"`
+	// SSHKeyPath is the NAME of a key file in the panel's key directory (never a
+	// path — see keyfile.go). Set, it takes precedence over the pasted SSHKey and
+	// the key never has to travel through the browser or sit in the database.
+	SSHKeyPath string `json:"ssh_key_path"`
 }
 
 // RemoteManager coordinates SSH operations against multiple remote servers.
 type RemoteManager struct {
 	timeout time.Duration
+
+	// keyDir is where file-based private keys live on the panel host. Empty
+	// disables them, so a row naming a key file fails loudly rather than falling
+	// back to some other credential.
+	keyDir string
 
 	// persistHostKey pins a server's SSH host key on first successful connect
 	// (TOFU). nil disables persistence (verification against an already-pinned
@@ -138,6 +147,11 @@ type Option func(*RemoteManager)
 // WithTimeout sets the dial/command timeout (default 30s).
 func WithTimeout(d time.Duration) Option {
 	return func(m *RemoteManager) { m.timeout = d }
+}
+
+// WithKeyDir sets the directory that file-based private keys are read from.
+func WithKeyDir(dir string) Option {
+	return func(m *RemoteManager) { m.keyDir = dir }
 }
 
 // New creates a RemoteManager with the given options.
@@ -207,10 +221,23 @@ func (m *RemoteManager) hostKeyCallback(cfg *ServerConfig) ssh.HostKeyCallback {
 func (m *RemoteManager) buildAuthMethods(cfg *ServerConfig) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
-	// 1) SSH private key. SSHKey holds the PEM key *content* (pasted in the
-	// admin UI and stored encrypted), not a file path.
-	if cfg.SSHKey != "" {
-		signer, err := parsePrivateKey(cfg.SSHKey, cfg.SSHKeyPass)
+	// 1) SSH private key, from a file on the panel host if the row names one and
+	// otherwise from SSHKey, which holds the PEM *content* pasted in the admin UI
+	// and stored encrypted.
+	//
+	// The file wins deliberately: a row that names one is saying "do not use what
+	// is in the database", and silently falling back to a stale pasted key would
+	// authenticate with a credential the admin believes they stopped using.
+	pem := cfg.SSHKey
+	if cfg.SSHKeyPath != "" {
+		data, err := ReadKeyFile(m.keyDir, cfg.SSHKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		pem = string(data)
+	}
+	if pem != "" {
+		signer, err := parsePrivateKey(pem, cfg.SSHKeyPass)
 		if err != nil {
 			return nil, fmt.Errorf("parse key: %w", err)
 		}

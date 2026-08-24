@@ -78,13 +78,14 @@ func main() {
 	}
 
 	app := api.New(st, []byte(secret), mail)
+	app.SetSSHKeyDir(cfg.SSHKeyDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Native sing-box controller (B2): always active; config/listen/unit
 	// are overridable via env or DB settings.
-	ctrl := buildSbController(st, app)
+	ctrl := buildSbController(st, app, cfg.SSHKeyDir)
 	log.Printf("native sing-box enabled (controller managing config + stats)")
 	// Track the controller loop so shutdown can wait for its in-flight rebuild to
 	// finish before the deferred st.Close() runs — otherwise a stats/rebuild query
@@ -172,7 +173,7 @@ func buildMailer(st *store.Store) *mailer.Mailer {
 // buildSbController wires the native sing-box orchestrator (B2). Always enabled.
 // Config/listen/unit are overridable
 // via env or settings; the base template falls back to singbox.DefaultBaseConfig.
-func buildSbController(st *store.Store, app *api.API) *sbctl.Controller {
+func buildSbController(st *store.Store, app *api.API, sshKeyDir string) *sbctl.Controller {
 	get := func(envKey, settingKey, def string) string {
 		if v := os.Getenv(envKey); v != "" {
 			return v
@@ -198,7 +199,7 @@ func buildSbController(st *store.Store, app *api.API) *sbctl.Controller {
 
 	// Remote manager for SSH-based servers. Pin each server's SSH host key on
 	// first connect (TOFU) so later connections are verified against it.
-	remoteMgr := sshctl.New()
+	remoteMgr := sshctl.New(sshctl.WithKeyDir(sshKeyDir))
 	remoteMgr.SetHostKeyPersister(func(id int64, key string) error { return st.SetServerHostKey(id, key) })
 
 	ctrl := sbctl.New(st, mgr, stats, base, v2rayListen)

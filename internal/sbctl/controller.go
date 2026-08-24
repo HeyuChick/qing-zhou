@@ -537,6 +537,7 @@ func SSHConfigFor(sv *store.Server) *sshctl.ServerConfig {
 		SystemdUnit: sv.SystemdUnit, SingBoxBin: sv.SingBoxBin,
 		V2rayListen: sv.V2rayListen, HostKey: sv.HostKey,
 		UseSudo: sv.UseSudo, SudoPassword: sv.SudoPassword,
+		SSHKeyPath: sv.SSHKeyPath,
 	}
 }
 

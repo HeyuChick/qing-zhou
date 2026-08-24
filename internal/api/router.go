@@ -51,7 +51,14 @@ type API struct {
 	// Tests replace Telegram I/O; production leaves these nil.
 	tgSendFn   func(chatID int64, html string) error
 	tgClientFn func(token string) *telegram.Client
+
+	// Where server rows may keep SSH private keys as files. Empty disables the
+	// feature; see sshctl/keyfile.go.
+	sshKeyDir string
 }
+
+// SetSSHKeyDir points the panel at the directory holding SSH private key files.
+func (a *API) SetSSHKeyDir(dir string) { a.sshKeyDir = dir }
 
 // SetSbController attaches the native sing-box controller so admin changes to
 // inbounds/TLS/users can trigger a config rebuild. Safe to leave unset.
@@ -335,6 +342,7 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/servers/{id}/rebuild", a.handleAdminRebuildServer)
 		// Recover from a legitimately changed host key (reinstalled/replaced node).
 		ar.Post("/api/admin/servers/{id}/clear-host-key", a.handleAdminClearServerHostKey)
+		ar.Get("/api/admin/ssh-keys", a.handleAdminListSSHKeys)
 		ar.Put("/api/admin/servers/{id}/monitor", a.handleUpdateServerMonitor)
 
 		// monitor probe

@@ -94,7 +94,27 @@
         </n-form-item>
         <n-form-item v-if="form.use_sudo" label="sudo 密码"><n-input v-model:value="form.sudo_password" type="password" show-password-on="click" placeholder="留空 = 已配置免密 sudo" /></n-form-item>
         <n-form-item label="SSH 密码"><n-input v-model:value="form.ssh_password" type="password" show-password-on="click" placeholder="与密钥二选一" /></n-form-item>
-        <n-form-item label="SSH 私钥"><n-input v-model:value="form.ssh_key" type="textarea" :rows="3" placeholder="-----BEGIN ... PRIVATE KEY-----" /></n-form-item>
+        <n-form-item label="SSH 私钥">
+          <div style="width:100%;">
+            <n-radio-group v-model:value="keyMode" size="small">
+              <n-radio-button value="paste">粘贴</n-radio-button>
+              <n-radio-button value="file">从文件选择</n-radio-button>
+            </n-radio-group>
+            <n-input v-if="keyMode==='paste'" v-model:value="form.ssh_key" type="textarea" :rows="3"
+                     placeholder="-----BEGIN ... PRIVATE KEY-----" style="margin-top:8px;" />
+            <template v-else>
+              <n-select v-model:value="form.ssh_key_path" :options="keyOptions" clearable
+                        :loading="keysLoading" placeholder="选择一个私钥文件" style="margin-top:8px;" />
+              <div class="hint">
+                目录：<code>{{ keyDir || '未配置' }}</code>
+                <template v-if="!keysConfigured"> —— 设置 <code>QZ_SSH_KEY_DIR</code> 后可用。</template>
+                <template v-else-if="!keyFiles.length"> —— 目录里还没有私钥文件。</template>
+                <br>私钥不经过浏览器、也不入库。容器内面板以 uid 10001 运行，挂进去的密钥要它能读（<code>chown 10001</code>）。
+                <template v-if="form.ssh_key"><br><b>已选文件时，上面粘贴过的私钥不再使用。</b></template>
+              </div>
+            </template>
+          </div>
+        </n-form-item>
         <n-form-item label="密钥密码"><n-input v-model:value="form.ssh_key_pass" type="password" show-password-on="click" /></n-form-item>
         <n-form-item label="配置路径"><n-input v-model:value="form.config_path" placeholder="/etc/sing-box/config.json" /></n-form-item>
         <n-form-item label="systemd 单元"><n-input v-model:value="form.systemd_unit" placeholder="sing-box" /></n-form-item>
@@ -110,8 +130,8 @@
   </div>
 </template>
 <script setup lang="ts">
-import { ref, reactive, onMounted, h } from 'vue'
-import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, NCard, useMessage, useDialog } from 'naive-ui'
+import { ref, reactive, computed, onMounted, h } from 'vue'
+import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, NCard, NSelect, NRadioGroup, NRadioButton, useMessage, useDialog } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete, apiGet } from '@/api'
 import { fmtDateTime } from '@/utils/format'
 const message = useMessage()
@@ -119,13 +139,36 @@ const dialog = useDialog()
 const servers = ref<any[]>([])
 const loading = ref(false); const saving = ref(false); const testing = ref(false)
 const showForm = ref(false); const editing = ref<any>(null)
-const mk = () => ({ name:'', host:'', port:22, ssh_user:'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:false, sudo_password:'', config_path:'/etc/sing-box/config.json', systemd_unit:'sing-box', sing_box_bin:'/usr/local/bin/sing-box', v2ray_listen:'127.0.0.1:18080', enabled:true })
+const mk = () => ({ name:'', host:'', port:22, ssh_user:'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:false, sudo_password:'', ssh_key_path:'', config_path:'/etc/sing-box/config.json', systemd_unit:'sing-box', sing_box_bin:'/usr/local/bin/sing-box', v2ray_listen:'127.0.0.1:18080', enabled:true })
 const form = reactive(mk())
+
+// 私钥来源二选一。粘贴走 ssh_key（加密入库），选文件走 ssh_key_path（只存文件名，
+// 内容始终留在面板机器上）。后端以文件优先。
+const keyMode = ref<'paste'|'file'>('paste')
+const keyFiles = ref<any[]>([])
+const keyDir = ref(''); const keysConfigured = ref(false); const keysLoading = ref(false)
+const keyOptions = computed(() => keyFiles.value.map((f:any) => ({
+  // 可读性直接标在选项上：容器内以 uid 10001 跑，宿主机 chmod 600 的 root 私钥
+  // 挂进去读不了，是这个功能最常见的失败方式。让人一眼看见，别保存完去猜。
+  label: f.name + (!f.readable ? '（面板读不了）' : (!f.mode_ok ? '（权限过松）' : '')),
+  value: f.name,
+  disabled: !f.readable,
+})))
+async function loadKeys(){
+  keysLoading.value = true
+  try{
+    const r:any = await apiGet('/api/admin/ssh-keys')
+    keyFiles.value = r?.files || []; keyDir.value = r?.dir || ''; keysConfigured.value = !!r?.configured
+  }catch{ keyFiles.value = []; keysConfigured.value = false }
+  finally{ keysLoading.value = false }
+}
 function openForm(s?:any){
   editing.value = s||null
-  if(s){ Object.assign(form,{ name:s.name, host:s.host, port:s.port||22, ssh_user:s.ssh_user||'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:s.use_sudo??false, sudo_password:'', config_path:s.config_path||'/etc/sing-box/config.json', systemd_unit:s.systemd_unit||'sing-box', sing_box_bin:s.sing_box_bin||'/usr/local/bin/sing-box', v2ray_listen:s.v2ray_listen||'127.0.0.1:18080', enabled:s.enabled??true }) }
+  if(s){ Object.assign(form,{ name:s.name, host:s.host, port:s.port||22, ssh_user:s.ssh_user||'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:s.use_sudo??false, sudo_password:'', ssh_key_path:s.ssh_key_path||'', config_path:s.config_path||'/etc/sing-box/config.json', systemd_unit:s.systemd_unit||'sing-box', sing_box_bin:s.sing_box_bin||'/usr/local/bin/sing-box', v2ray_listen:s.v2ray_listen||'127.0.0.1:18080', enabled:s.enabled??true }) }
   else { Object.assign(form, mk()) }
+  keyMode.value = form.ssh_key_path ? 'file' : 'paste'
   showForm.value = true
+  loadKeys()
 }
 // 改 SSH 用户时替管理员把 sudo 开关拨到通常正确的位置：非 root 必然要提权，
 // root 必然不要。只在「人手动改这个输入框」时触发 —— 打开已有服务器走的是
@@ -142,6 +185,11 @@ async function handleSave(){
     if(!b.ssh_key) delete b.ssh_key
     if(!b.ssh_key_pass) delete b.ssh_key_pass
     if(!b.sudo_password) delete b.sudo_password
+    // 切回粘贴就是明确不要文件了，所以显式送空把它清掉（更新接口是「没送的字段
+    // 保留原值」，delete 会让旧的文件名留在库里继续生效）。反过来选了文件时不动
+    // ssh_key：后端本来就文件优先，而空的 ssh_key 会被下面删掉以免误清密钥。
+    if(keyMode.value === 'paste'){ b.ssh_key_path = '' }
+    else { delete b.ssh_key }
     if(editing.value) await apiPut(`/api/admin/servers/${editing.value.id}`,b)
     else await apiPost('/api/admin/servers',b)
     message.success('保存成功'); showForm.value=false; editing.value=null; await load()
