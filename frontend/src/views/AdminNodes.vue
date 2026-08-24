@@ -354,11 +354,44 @@ const routeLandingTypes = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'h
 const routeLandingOptions = computed(() => {
   const entry = inboundMap.value.get(nodeForm.inbound_tag)
   if (entry?.type === 'mixed') return [{ label: '沿用入站原有链路（Mixed 暂不支持分流）', value: 0 }]
+
+  const eligible = inbounds.value.filter(i =>
+    i.enabled
+    && chainEnabled(i.id)
+    && i.id !== entry?.id
+    && routeLandingTypes.has(i.type)
+    && !(entry && chainReaches(i.id, entry.id)),
+  )
+  const byServer = new Map<number, any[]>()
+  for (const inbound of eligible) {
+    const serverID = inbound.server_id || 0
+    const list = byServer.get(serverID) || []
+    list.push(inbound)
+    byServer.set(serverID, list)
+  }
+  // 本机排最前，远程机器沿服务器列表的现有顺序排列；异常的未知 server_id
+  // 仍保留在最后，避免一个暂时缺失的服务器记录让已有落地选项凭空消失。
+  const serverOrder = new Map<number, number>(servers.value.map((s, index) => [s.id, index + 1]))
+  const serverIDs = [...byServer.keys()].sort((a, b) =>
+    (a === 0 ? 0 : (serverOrder.get(a) ?? Number.MAX_SAFE_INTEGER))
+    - (b === 0 ? 0 : (serverOrder.get(b) ?? Number.MAX_SAFE_INTEGER))
+    || a - b,
+  )
   return [
     { label: '沿用入站原有链路（兼容模式）', value: 0 },
-    ...inbounds.value
-      .filter(i => i.enabled && chainEnabled(i.id) && i.id !== entry?.id && routeLandingTypes.has(i.type) && !(entry && chainReaches(i.id, entry.id)))
-      .map(i => ({ label: `${i.tag} · ${(i.type || '').toUpperCase()} @ ${serverName(i.server_id)}`, value: i.id })),
+    ...serverIDs.map(serverID => {
+      const children = byServer.get(serverID) || []
+      return {
+        type: 'group' as const,
+        label: `${serverName(serverID)} · ${children.length} 个入站`,
+        key: `landing-server-${serverID}`,
+        children: children.map(i => ({
+          // 折叠后的已选值也要带机器名，不能只依赖下拉菜单里的分组标题。
+          label: `${i.tag} · ${(i.type || '').toUpperCase()} @ ${serverName(serverID)}`,
+          value: i.id,
+        })),
+      }
+    }),
   ]
 })
 
