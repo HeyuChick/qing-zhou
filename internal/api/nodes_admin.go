@@ -55,6 +55,10 @@ func (a *API) handleAdminCreateNode(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "节点类型必须为 self_built / external")
 		return
 	}
+	if msg := a.validateNodeRoute(&n); msg != "" {
+		fail(w, http.StatusBadRequest, msg)
+		return
+	}
 	if n.Type == "external" && n.ShareLink != "" {
 		if p, err := subconv.ParseLink(n.ShareLink); err == nil {
 			if n.Protocol == "" {
@@ -91,12 +95,78 @@ func (a *API) handleAdminUpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.ID = int64(id)
+	if msg := a.validateNodeRoute(n); msg != "" {
+		fail(w, http.StatusBadRequest, msg)
+		return
+	}
 	if err := a.st.UpdateNode(*n); err != nil {
 		fail(w, http.StatusInternalServerError, "更新节点失败")
 		return
 	}
 	a.sbRebuildLog()
 	ok(w, nil)
+}
+
+// validateNodeRoute turns a self-built node into a safe logical route. The
+// physical inbound remains the listener; a positive override selects the first
+// landing hop and must not create a cycle with the landing's existing chain.
+func (a *API) validateNodeRoute(n *store.Node) string {
+	if n.Type != "self_built" {
+		n.RouteUpstreamInboundID = 0
+		n.RouteUpstreamBroken = false
+		return ""
+	}
+	if n.InboundTag == "" {
+		return "请选择入口入站"
+	}
+	entry, err := a.st.GetSbInboundByTag(n.InboundTag)
+	if err != nil || entry == nil {
+		return "所选入口入站不存在"
+	}
+	if n.Protocol == "" {
+		n.Protocol = entry.Type
+	}
+	if n.RouteUpstreamInboundID == 0 {
+		n.RouteUpstreamBroken = false
+		return ""
+	}
+	if entry.Type == "mixed" {
+		return "Mixed 入站暂不支持按逻辑线路分流，请使用独立入站"
+	}
+	target, err := a.st.GetSbInbound(n.RouteUpstreamInboundID)
+	if err != nil || target == nil {
+		return "所选落地入站不存在"
+	}
+	if !target.Enabled {
+		return "所选落地入站已停用"
+	}
+	allowed := map[string]bool{"vless": true, "vmess": true, "trojan": true, "shadowsocks": true, "hysteria2": true, "tuic": true}
+	if !allowed[target.Type] {
+		return "该落地协议暂不支持由线路机拨号"
+	}
+	seen := map[int64]bool{entry.ID: true}
+	cur := target
+	for cur != nil {
+		if len(seen) > 16 {
+			return "固定落地链路层级过深（最多 16 跳）"
+		}
+		if seen[cur.ID] {
+			return "逻辑线路存在环路，流量会在机器间循环"
+		}
+		seen[cur.ID] = true
+		if cur.UpstreamInboundID == 0 {
+			break
+		}
+		cur, _ = a.st.GetSbInbound(cur.UpstreamInboundID)
+		if cur == nil {
+			return "固定落地的后续链路包含已失效入站"
+		}
+		if !cur.Enabled {
+			return "固定落地的后续链路包含已停用入站"
+		}
+	}
+	n.RouteUpstreamBroken = false
+	return ""
 }
 
 func (a *API) handleAdminDeleteNode(w http.ResponseWriter, r *http.Request) {

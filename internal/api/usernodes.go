@@ -82,7 +82,7 @@ func (a *API) handleUserNodes(w http.ResponseWriter, r *http.Request) {
 		row := J{"name": p.Name, "protocol": p.Protocol, "server": p.Server, "port": p.Port,
 			"key": subconv.NodeKey(e.Link), "disabled": subconv.NodeDisabled(disabled, e.Link), "group": e.GroupName,
 			"plans": plansOf(e)}
-		if t := ix.topoFor(e.Tag); t != nil {
+		if t := ix.topoFor(e.Tag, e.RouteUpstream, e.RouteBroken); t != nil {
 			row["topo"] = t
 		}
 		out = append(out, row)

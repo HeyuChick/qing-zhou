@@ -94,7 +94,7 @@ func (ix *topoIndex) serverName(id int64) (name, location string) {
 // topoFor walks a self-built node's upstream chain to its exit. Returns nil for
 // an external node (imported share link — we host nothing along its path and
 // know nothing about it beyond the link itself).
-func (ix *topoIndex) topoFor(tag string) *nodeTopo {
+func (ix *topoIndex) topoFor(tag string, routeUpstream int64, routeBroken bool) *nodeTopo {
 	ib := ix.byTag[tag]
 	if ib == nil {
 		return nil
@@ -106,6 +106,19 @@ func (ix *topoIndex) topoFor(tag string) *nodeTopo {
 	// chain that loops would otherwise hang this request.
 	seen := map[int64]bool{ib.ID: true}
 	cur := ib
+	// A logical node may replace only the first hop; the selected landing's own
+	// upstream/egress chain is then followed normally.
+	if routeUpstream != 0 {
+		next := ix.byID[routeUpstream]
+		if next == nil {
+			t.Warn = "landing"
+			return t
+		}
+		n, l := ix.serverName(next.ServerID)
+		t.Hops = append(t.Hops, nodeHop{Kind: "relay", Name: n, Location: l, Protocol: next.Type})
+		seen[next.ID] = true
+		cur = next
+	}
 	for cur.UpstreamInboundID != 0 {
 		next := ix.byID[cur.UpstreamInboundID]
 		if next == nil || seen[next.ID] {
@@ -127,7 +140,7 @@ func (ix *topoIndex) topoFor(tag string) *nodeTopo {
 	// UpstreamBroken survives a landing being deleted out from under a relay:
 	// the stored upstream_inbound_id was cleared, so the walk above sees a clean
 	// direct exit and would report the downgrade as normal.
-	if t.Warn == "" && ib.UpstreamBroken {
+	if t.Warn == "" && (routeBroken || (routeUpstream == 0 && ib.UpstreamBroken)) {
 		t.Warn = "landing"
 	}
 	return t

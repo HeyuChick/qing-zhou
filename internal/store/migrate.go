@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   name            TEXT    NOT NULL,
   protocol        TEXT    NOT NULL DEFAULT '',
   inbound_tag TEXT    NOT NULL DEFAULT '', -- self_built: matches sing-box inbound tag
+  route_upstream_inbound_id INTEGER NOT NULL DEFAULT 0, -- self_built logical route override; 0 = inherit inbound chain
+  route_upstream_broken INTEGER NOT NULL DEFAULT 0, -- selected landing was deleted; route stays fail-closed until acknowledged
   share_link      TEXT    NOT NULL DEFAULT '', -- external: raw share URI
   source_id       INTEGER NOT NULL DEFAULT 0,
   enabled         INTEGER NOT NULL DEFAULT 1,
@@ -749,6 +751,11 @@ func (s *Store) Migrate() error {
 		// deleted, so 链路拓扑 can keep showing that the exit silently moved to this
 		// machine. Cleared by any save of the inbound. See SbInbound.UpstreamBroken.
 		`ALTER TABLE sb_inbounds ADD COLUMN upstream_broken INTEGER NOT NULL DEFAULT 0`,
+		// A self-built node is the user-facing logical route. Several nodes may now
+		// share one physical inbound and select different landing inbounds; 0 keeps
+		// the legacy behaviour of inheriting the physical inbound's own chain.
+		`ALTER TABLE nodes ADD COLUMN route_upstream_inbound_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE nodes ADD COLUMN route_upstream_broken INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE servers ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
 		// sudo password for accounts without NOPASSWD (encrypted at rest, like the
 		// SSH password beside it), and the name of a key file in the panel's key
@@ -900,6 +907,9 @@ func (s *Store) Migrate() error {
 		`UPDATE sb_inbounds SET upstream_inbound_id=0, upstream_broken=1
 		 WHERE upstream_inbound_id<>0
 		   AND upstream_inbound_id NOT IN (SELECT id FROM sb_inbounds)`,
+		`UPDATE nodes SET route_upstream_inbound_id=0, route_upstream_broken=1
+		 WHERE route_upstream_inbound_id<>0
+		   AND route_upstream_inbound_id NOT IN (SELECT id FROM sb_inbounds)`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			// Benign on an up-to-date DB: the column already exists (ADD COLUMN) or

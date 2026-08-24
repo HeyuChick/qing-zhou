@@ -43,6 +43,7 @@
                     <!-- 节点跑在哪台机器上。外部节点不在我们的机器上，自建但入站失踪时
                          也没有答案——那两种情况下面的链路行会说明，这里就不占位了。 -->
                     <span v-if="nodeServer(r)" class="kv">机器 <b>{{ nodeServer(r) }}</b></span>
+                    <span v-if="inboundReuse(r) > 1" class="kv"><n-tag size="tiny" type="success" :bordered="false">入口复用 ×{{ inboundReuse(r) }}</n-tag></span>
                   </div>
                   <div v-if="(r.group_ids || []).length > 1" class="lc-meta"><span class="kv">分组 <b>{{ groupNames(r.group_ids) }}</b></span></div>
                   <div v-if="chainSummary(r)" class="lc-chain" :class="{ warn: chainSummary(r)!.broken }">
@@ -52,6 +53,7 @@
                     <n-button size="tiny" :disabled="idx === 0 || reordering" title="前移（订阅/列表更靠前）" @click="moveNodeInGroup(gv, idx, -1)">←</n-button>
                     <n-button size="tiny" :disabled="idx === gv.nodes.length - 1 || reordering" title="后移" @click="moveNodeInGroup(gv, idx, 1)">→</n-button>
                     <n-button size="tiny" @click="openNode(r)">编辑</n-button>
+                    <n-button v-if="r.type === 'self_built'" size="tiny" type="primary" quaternary @click="cloneRouteNode(r)">复用入口</n-button>
                     <n-button size="tiny" type="error" @click="handleDeleteNode(r.id)">删除</n-button>
                   </div>
                 </div>
@@ -119,6 +121,8 @@
                   <span v-else-if="seg.kind === 'broken-landing'" class="topo-arrow relay warn">⇢ 落地已失效 ⇢</span>
                   <span v-else-if="seg.kind === 'broken-egress'" class="topo-arrow relay warn">⇢ 出口已失效 ⇢</span>
                   <span v-else-if="seg.kind === 'loop'" class="topo-arrow relay warn">⇢ 链路成环 ⇢</span>
+                  <span v-else-if="seg.kind === 'route-broken'" class="topo-arrow relay warn">⇢ 固定落地已删除 ⇢</span>
+                  <span v-else-if="seg.kind === 'route-disabled'" class="topo-arrow relay warn">⇢ 落地链路已停用 ⇢</span>
                   <!-- 原本该走中转，落地被删后降级成本机直连；出口 IP 已经变了。 -->
                   <span v-else-if="seg.kind === 'downgraded'" class="topo-arrow relay warn"
                         title="原落地入站已被删除，此中转已降级为从本机直连出网；编辑并保存该入站可消除此提示">
@@ -126,19 +130,25 @@
                   </span>
                 </template>
                 </template>
-                <span class="topo-arrow">→</span>
-                <span class="topo-node inet">🌐 互联网</span>
+                <template v-if="routeStopped(row)">
+                  <span class="topo-node inet">⛔ 线路已停用</span>
+                </template>
+                <template v-else>
+                  <span class="topo-arrow">→</span>
+                  <span class="topo-node inet">🌐 互联网</span>
+                </template>
                 <span class="topo-actions">
                   <!-- 降级提示要么靠重新指定落地/出口来消除，要么在这里明确「就这样」。
                        不给出口就成了一条永远消不掉的红字，久了没人再看。 -->
                   <n-button v-if="row.ib?.upstream_broken" size="tiny" quaternary
                             :loading="acking === row.ib.id" @click="ackUpstream(row.ib)">已知晓</n-button>
-                  <n-button size="tiny" quaternary @click="openNode(row.node)">编辑节点</n-button>
+                  <n-button size="tiny" quaternary type="primary" @click="openNode(row.node)">配置线路</n-button>
+                  <n-button v-if="row.ib" size="tiny" quaternary @click="cloneRouteNode(row.node)">＋ 复用入口</n-button>
                 </span>
               </div>
             </div>
             <p class="topo-tip">
-              节点的中转 / 代理出口在「sing-box 配置」页的入站上配置，这里只做展示；外部节点的后续链路由对方线路决定，面板不可见。
+              在节点编辑中选择「固定落地」，即可让多条逻辑节点复用同一个入口 IP、端口、TLS 和协议；未指定时继续沿用 sing-box 入站原有链路。外部节点的后续链路由对方线路决定，面板不可见。
             </p>
           </div>
           <n-empty v-else-if="!loading" description="暂无节点，无法展示链路" style="padding:40px 0;" />
@@ -196,6 +206,13 @@
           </n-form-item>
           <n-form-item v-if="nodeForm.type === 'self_built'" label="入站 Tag">
             <n-select v-model:value="nodeForm.inbound_tag" :options="inboundOptions" placeholder="选择入站" />
+          </n-form-item>
+          <n-form-item v-if="nodeForm.type === 'self_built'" label="固定落地">
+            <div style="width:100%;">
+              <n-select v-model:value="nodeForm.route_upstream_inbound_id" :options="routeLandingOptions" placeholder="沿用入站链路" />
+              <div class="form-tip">选择后，本节点使用独立派生凭据，并按认证身份从共享入口转发到该落地；可重复添加节点来复用同一入口。</div>
+              <n-alert v-if="nodeForm.route_upstream_broken" type="warning" :show-icon="false" style="margin-top:8px;">原固定落地已被删除，本逻辑线路已停止认证并从订阅隐藏，避免出口 IP 意外变成线路机；请重新选择落地，或明确改为沿用入站链路后保存。</n-alert>
+            </div>
           </n-form-item>
           <n-form-item v-if="nodeForm.type === 'external'" label="分享链接">
             <n-input v-model:value="nodeForm.share_link" type="textarea" :rows="3" placeholder="vless://... 或订阅链接" />
@@ -295,6 +312,17 @@ const groupMap = computed(() => new Map(groups.value.map(g => [g.id, g.name])))
 const inboundMap = computed(() => new Map(inbounds.value.map(i => [i.tag, i])))
 const groupOptions = computed(() => groups.value.map(g => ({ label: g.name, value: g.id })))
 const inboundOptions = computed(() => inbounds.value.map(i => ({ label: `${i.tag} (${i.type}:${i.listen_port})`, value: i.tag })))
+const routeLandingTypes = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic'])
+const routeLandingOptions = computed(() => {
+  const entry = inboundMap.value.get(nodeForm.inbound_tag)
+  if (entry?.type === 'mixed') return [{ label: '沿用入站原有链路（Mixed 暂不支持分流）', value: 0 }]
+  return [
+    { label: '沿用入站原有链路（兼容模式）', value: 0 },
+    ...inbounds.value
+      .filter(i => i.enabled && chainEnabled(i.id) && i.id !== entry?.id && routeLandingTypes.has(i.type) && !(entry && chainReaches(i.id, entry.id)))
+      .map(i => ({ label: `${i.tag} · ${(i.type || '').toUpperCase()} @ ${serverName(i.server_id)}`, value: i.id })),
+  ]
+})
 
 function nodeProtocol(r: any): string {
   if (r.protocol) return r.protocol.toUpperCase()
@@ -307,6 +335,10 @@ function nodeProtocol(r: any): string {
 function groupNames(ids: number[] | undefined): string {
   if (!ids || !ids.length) return '—'
   return ids.map(id => groupMap.value.get(id) || '#' + id).join(', ')
+}
+function inboundReuse(n: any): number {
+  if (!n?.inbound_tag) return 0
+  return nodes.value.filter(x => x.type === 'self_built' && x.inbound_tag === n.inbound_tag).length
 }
 
 // 统一视图：每个分组一张卡片，卡片内是该组的节点；未归任何分组的节点放到「未分组」卡片。
@@ -353,10 +385,42 @@ function inboundOfNode(n: any): any | null {
 }
 
 // 从某入站沿 upstream 链走到头，返回拓扑段列表（多级中转 + 末端出口），防环。
-function chainOf(ib: any) {
+function chainReaches(startID: number, targetID: number): boolean {
+  const seen = new Set<number>()
+  let cur = inboundById.value.get(startID)
+  while (cur && !seen.has(cur.id)) {
+    if (cur.id === targetID) return true
+    seen.add(cur.id)
+    cur = cur.upstream_inbound_id ? inboundById.value.get(cur.upstream_inbound_id) : null
+  }
+  return false
+}
+
+function chainEnabled(startID: number): boolean {
+  const seen = new Set<number>()
+  let cur = inboundById.value.get(startID)
+  while (cur && !seen.has(cur.id)) {
+    if (!cur.enabled) return false
+    seen.add(cur.id)
+    if (!cur.upstream_inbound_id) return true
+    cur = inboundById.value.get(cur.upstream_inbound_id)
+  }
+  return false
+}
+
+function chainOf(ib: any, node?: any) {
   const segs: any[] = []
+  if (node?.route_upstream_broken) return [{ kind: 'route-broken' }]
   const seen = new Set<number>([ib.id])
   let cur = ib
+  if (node?.route_upstream_inbound_id) {
+    const selected = inboundById.value.get(node.route_upstream_inbound_id)
+    if (!selected) { segs.push({ kind: 'broken-landing' }); return segs }
+    seen.add(selected.id)
+    segs.push({ kind: 'landing', ib: selected, off: !selected.enabled, logical: true })
+    if (!selected.enabled) { segs.push({ kind: 'route-disabled' }); return segs }
+    cur = selected
+  }
   while (cur.upstream_inbound_id) {
     const next = inboundById.value.get(cur.upstream_inbound_id)
     // 成环和落地被删是两种完全不同的配置错误，分开报，不要都说成「落地已失效」。
@@ -364,11 +428,12 @@ function chainOf(ib: any) {
     if (!next) { segs.push({ kind: 'broken-landing' }); return segs }
     seen.add(next.id)
     segs.push({ kind: 'landing', ib: next, off: !next.enabled })
+    if (!next.enabled && node?.route_upstream_inbound_id) { segs.push({ kind: 'route-disabled' }); return segs }
     cur = next
   }
   // 落地被删时后端会清掉 upstream 并置 upstream_broken：链路看着是直连，
   // 实际是「本该走中转，现在从本机出网」，这行提示是它唯一的痕迹。
-  if (cur.upstream_broken) segs.push({ kind: 'downgraded' })
+  if (!node?.route_upstream_inbound_id && cur.upstream_broken) segs.push({ kind: 'downgraded' })
   if (cur.egress_id) {
     const e = egressById.value.get(cur.egress_id)
     // 出口列表没加载出来时不要报「已失效」——那是个假告警。load() 会另外提示。
@@ -384,7 +449,10 @@ function topoRow(n: any) {
   const ib = inboundOfNode(n)
   if (!ib) return { node: n, ib: null, kind: 'broken', segs: [] as any[] }
   // 入站自己被停用时整行置灰：链路画得再完整，这条也是不通的。
-  return { node: n, ib, kind: 'ok', off: !n.enabled || !ib.enabled, segs: chainOf(ib) }
+  return { node: n, ib, kind: 'ok', off: !n.enabled || !ib.enabled, segs: chainOf(ib, n) }
+}
+function routeStopped(row: any): boolean {
+  return (row?.segs || []).some((s: any) => s.kind === 'route-broken' || s.kind === 'route-disabled')
 }
 const topoGroups = computed(() => groupedView.value.map(gv => ({
   key: gv.key, name: gv.name, isUngrouped: gv.isUngrouped, rows: gv.nodes.map(topoRow),
@@ -440,6 +508,8 @@ function summarize(row: any): { text: string; broken: boolean } | null {
       case 'landing': parts.push(`中转 ${seg.ib.tag} @ ${serverName(seg.ib.server_id)}${seg.off ? '（已停用）' : ''}`); break
       case 'egress': parts.push(`出口 ${seg.eg.name}`); break
       case 'downgraded': parts.push('原落地已删除 · 现本机直连'); broken = true; break
+      case 'route-broken': parts.push('固定落地已删除 · 线路已停用'); broken = true; break
+      case 'route-disabled': parts.push('落地链路已停用 · 线路已关闭'); broken = true; break
       case 'loop': parts.push('链路成环'); broken = true; break
       case 'broken-egress': parts.push('出口已失效'); broken = true; break
       default: parts.push('落地已失效'); broken = true
@@ -454,15 +524,22 @@ const editingNode = ref<any>(null)
 // share_link must match store.Node's JSON tag — it was `link`, so the field was
 // never sent: created external nodes had no link at all, and saving an existing
 // one blanked its stored link.
-const nodeForm = reactive({ name: '', type: 'self_built', inbound_tag: '', share_link: '', group_ids: [] as number[], enabled: true })
+const nodeForm = reactive({ name: '', type: 'self_built', inbound_tag: '', route_upstream_inbound_id: 0, route_upstream_broken: false, share_link: '', group_ids: [] as number[], enabled: true })
 function openNode(n?: any) {
   editingNode.value = n || null
   if (n) {
-    Object.assign(nodeForm, { name: n.name, type: n.type || 'self_built', inbound_tag: n.inbound_tag || '', share_link: n.share_link || '', group_ids: n.group_ids || [], enabled: n.enabled })
+    Object.assign(nodeForm, { name: n.name, type: n.type || 'self_built', inbound_tag: n.inbound_tag || '', route_upstream_inbound_id: n.route_upstream_inbound_id || 0, route_upstream_broken: !!n.route_upstream_broken, share_link: n.share_link || '', group_ids: n.group_ids || [], enabled: n.enabled })
   } else {
-    Object.assign(nodeForm, { name: '', type: 'self_built', inbound_tag: '', share_link: '', group_ids: [], enabled: true })
+    Object.assign(nodeForm, { name: '', type: 'self_built', inbound_tag: '', route_upstream_inbound_id: 0, route_upstream_broken: false, share_link: '', group_ids: [], enabled: true })
   }
   showNode.value = true
+}
+function cloneRouteNode(n: any) {
+  openNode()
+  Object.assign(nodeForm, {
+    name: n.name ? `${n.name} · 新落地` : '', type: 'self_built', inbound_tag: n.inbound_tag || '',
+    route_upstream_inbound_id: 0, route_upstream_broken: false, group_ids: [...(n.group_ids || [])], enabled: true,
+  })
 }
 // 从分组卡片直接添加节点，预选该分组。
 function openNodeInGroup(g: any | null) {

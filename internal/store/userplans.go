@@ -940,6 +940,9 @@ func (s *Store) AdjustBucketTraffic(userID, bucketID, delta int64) (*Bucket, err
 // resolveStatsIdentity would — the one in service — rather than whichever row the
 // query happened to return first.
 func (s *Store) BucketByClientName(name string) (*Bucket, error) {
+	if base, ok := baseRouteIdentity(name); ok {
+		name = base
+	}
 	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+bucketFrom+`
 		WHERE COALESCE(i.client_name, p.client_name)=?
 		ORDER BY `+usableExpr("p")+` DESC, p.id DESC
@@ -1076,6 +1079,9 @@ func (s *Store) AddBucketUsage(statName string, up, down int64) error {
 	if statName == "" || (up == 0 && down == 0) {
 		return nil
 	}
+	if base, ok := baseRouteIdentity(statName); ok {
+		statName = base
+	}
 	now := time.Now().Unix()
 	// One transaction: the bucket counter, the mirrored user aggregate, and the
 	// time-series sample must all land together (they may otherwise run on
@@ -1133,6 +1139,20 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 	if len(deltas) == 0 {
 		return 0, nil
 	}
+	// Several logical routes can share one physical inbound. Their auth_user
+	// names carry a reversible node suffix; merge them back into the underlying
+	// bucket/account identity before resolving and writing usage.
+	canonical := make(map[string]UsageDelta, len(deltas))
+	for name, d := range deltas {
+		if base, ok := baseRouteIdentity(name); ok {
+			name = base
+		}
+		cur := canonical[name]
+		cur.Up += d.Up
+		cur.Down += d.Down
+		canonical[name] = cur
+	}
+	deltas = canonical
 	// Before the write lock, not under it: account-level identities need the
 	// owner's whole bucket order to know which份 they spend.
 	acctTargets, acctErr := s.accountTargets(deltas)

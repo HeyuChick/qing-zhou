@@ -1035,6 +1035,10 @@ type nodeEntry struct {
 	// (imported share-link) one. It is the join key to the inbound row, and so to
 	// the relay/egress chain behind the node.
 	Tag string
+	// RouteUpstream overrides the physical inbound's first hop for a logical
+	// node. Zero keeps the legacy/inherited chain.
+	RouteUpstream int64
+	RouteBroken   bool
 }
 
 // computeNodeEntries builds the user's nodes with group attribution: external
@@ -1044,7 +1048,7 @@ type nodeEntry struct {
 func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	var out []nodeEntry
 	seen := map[string]int{}
-	add := func(l string, gid int64, gname, tag string, isAI bool) {
+	add := func(l string, gid int64, gname, tag string, routeUpstream int64, routeBroken, isAI bool) {
 		if l == "" {
 			return
 		}
@@ -1053,7 +1057,8 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 			return
 		}
 		seen[l] = len(out)
-		out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname, IsAI: isAI, Tag: tag})
+		out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname, IsAI: isAI, Tag: tag,
+			RouteUpstream: routeUpstream, RouteBroken: routeBroken})
 	}
 
 	groupIDs, _ := a.st.AccessibleGroupIDs(u)
@@ -1070,30 +1075,51 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	}
 
 	nodes, _ := a.st.NodesInGroupsTagged(groupIDs)
-	type tagMeta struct {
-		groupID int64
-		isAI    bool
+	type nodeMeta struct {
+		groupID       int64
+		isAI          bool
+		routeUpstream int64
+		routeBroken   bool
 	}
-	tagGroup := map[string]tagMeta{} // self-built inbound tag → accessible metadata
+	nodeGroup := map[int64]nodeMeta{} // routed logical node id → accessible metadata
+	tagGroup := map[string]nodeMeta{} // legacy nodes still collapse by physical tag
 	for _, n := range nodes {
 		switch n.Type {
 		case "external":
-			add(n.ShareLink, n.GroupID, gname[n.GroupID], "", n.IsAI)
+			add(n.ShareLink, n.GroupID, gname[n.GroupID], "", 0, false, n.IsAI)
 		case "self_built":
 			if n.InboundTag != "" {
-				meta, exists := tagGroup[n.InboundTag]
+				if n.RouteUpstreamInboundID == 0 {
+					meta, exists := tagGroup[n.InboundTag]
+					if !exists || n.GroupID < meta.groupID {
+						meta.groupID = n.GroupID
+					}
+					meta.isAI = meta.isAI || n.IsAI
+					meta.routeBroken = n.RouteUpstreamBroken
+					tagGroup[n.InboundTag] = meta
+					continue
+				}
+				meta, exists := nodeGroup[n.ID]
 				if !exists || n.GroupID < meta.groupID {
 					meta.groupID = n.GroupID
 				}
 				meta.isAI = meta.isAI || n.IsAI
-				tagGroup[n.InboundTag] = meta
+				meta.routeUpstream = n.RouteUpstreamInboundID
+				meta.routeBroken = n.RouteUpstreamBroken
+				nodeGroup[n.ID] = meta
 			}
 		}
 	}
-	if len(tagGroup) > 0 {
+	if len(nodeGroup) > 0 || len(tagGroup) > 0 {
 		for _, l := range a.selfBuiltLinks(u) {
-			if meta, ok := tagGroup[l.Tag]; ok {
-				add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, meta.isAI)
+			if l.NodeID == 0 {
+				if meta, ok := tagGroup[l.Tag]; ok {
+					add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, 0, meta.routeBroken, meta.isAI)
+				}
+				continue
+			}
+			if meta, ok := nodeGroup[l.NodeID]; ok {
+				add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, meta.routeUpstream, meta.routeBroken, meta.isAI)
 			}
 		}
 	}
