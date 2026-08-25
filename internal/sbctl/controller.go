@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -201,6 +202,53 @@ func resolveSingBoxBin(configured string) (string, error) {
 	return "", fmt.Errorf("sing-box binary not found; set sing_box_bin or install sing-box in PATH")
 }
 
+// localConfigPath is the file the panel's own sing-box config is installed at,
+// or "" when the applier does not expose one (the fakes in tests).
+func (c *Controller) localConfigPath() string {
+	if p, ok := c.mgr.(interface{ ConfigPath() string }); ok {
+		return p.ConfigPath()
+	}
+	return ""
+}
+
+// serverConfigPath is where a server row's config is installed, applying the
+// same default the row itself leaves implicit.
+func serverConfigPath(sv *store.Server) string {
+	if sv.ConfigPath == "" {
+		return "/etc/sing-box/config.json"
+	}
+	return sv.ConfigPath
+}
+
+// panelPathConflict rejects a server row that would fight the panel over one
+// file.
+//
+// Rebuild always installs the panel's own config (server_id 0, every inbound)
+// at the applier's path. A row that resolves to this same machine and points at
+// that same file is a second writer with different content: each pass finds the
+// other's bytes, calls that a change, rewrites and restarts sing-box. Both
+// applies report success, the config on disk is valid either way, and nothing
+// in the logs distinguishes it from ordinary deploys — while every connection on
+// the box is cut twice a minute, forever.
+//
+// Identical bytes are fine and are the tidy shape of this setup (every inbound
+// moved onto the row, nothing left at server_id 0), so this compares content
+// rather than banning the path outright.
+func panelPathConflict(panelPath string, sv *store.Server, serverCfg, panelCfg []byte) error {
+	if panelPath == "" || panelCfg == nil {
+		return nil
+	}
+	if filepath.Clean(serverConfigPath(sv)) != filepath.Clean(panelPath) {
+		return nil
+	}
+	if bytes.Equal(serverCfg, panelCfg) {
+		return nil
+	}
+	return fmt.Errorf("配置路径 %s 和面板本机（server_id=0）是同一个文件，但两边生成的配置不一样："+
+		"下发后会互相覆盖，sing-box 每轮同步都要重启一次，这台机器上的连接会反复中断。"+
+		"请把该机器的入站全部挂到这个节点下，或者给这个节点换一个 config_path", serverConfigPath(sv))
+}
+
 // applyLocal writes, validates, and applies a sing-box config on the local
 // machine for a server entry that is on the local host (avoiding SSH to self).
 // It mirrors sbproc.Manager.Apply but uses the server entry's own config_path
@@ -210,10 +258,7 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 	if err != nil {
 		return err
 	}
-	configPath := sv.ConfigPath
-	if configPath == "" {
-		configPath = "/etc/sing-box/config.json"
-	}
+	configPath := serverConfigPath(sv)
 	unit := sv.SystemdUnit
 	if unit == "" {
 		unit = "sing-box"
@@ -261,6 +306,10 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 	if err := sbproc.WriteConfig(configPath, cfg); err != nil {
 		return fmt.Errorf("install config: %w", err)
 	}
+
+	// Same reason as the SSH path: a restart is the one thing users feel, so it
+	// leaves a trace even when it succeeds.
+	log.Printf("sbctl: server %d (%s) 配置有变化，已写入 %s 并重启 %s（该节点的连接会断一次）", sv.ID, sv.Name, configPath, unit)
 
 	// Restart the systemd unit.
 	rctx, rcancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -386,16 +435,23 @@ func (c *Controller) Rebuild() error {
 		}
 		c.setStatus(id, "ok", "")
 	}
+	// Kept for the conflict check below: a server row that lands on this machine
+	// and shares this file is a second writer, and the two only coexist while
+	// they generate the same bytes.
+	var panelCfg []byte
 	if cfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag); err != nil {
 		lastErr = fmt.Errorf("local build config: %w", err)
 		log.Printf("sbctl: local rebuild error: %v", err)
 		record(0, lastErr)
-	} else if err := c.mgr.Apply(cfg); err != nil {
-		lastErr = fmt.Errorf("local apply: %w", err)
-		log.Printf("sbctl: local apply error: %v", err)
-		record(0, lastErr)
 	} else {
-		record(0, nil)
+		panelCfg = cfg
+		if err := c.mgr.Apply(cfg); err != nil {
+			lastErr = fmt.Errorf("local apply: %w", err)
+			log.Printf("sbctl: local apply error: %v", err)
+			record(0, lastErr)
+		} else {
+			record(0, nil)
+		}
 	}
 
 	// Apply to each enabled server. Servers whose host is the local machine
@@ -427,6 +483,12 @@ func (c *Controller) Rebuild() error {
 		}
 		// Local server entry — apply directly without SSH.
 		if isLocalHost(sv.Host) {
+			if err := panelPathConflict(c.localConfigPath(), sv, cfg, panelCfg); err != nil {
+				log.Printf("sbctl: server %d (%s) %v", sv.ID, sv.Name, err)
+				setErr(fmt.Errorf("server %d apply: %w", sv.ID, err))
+				record(sv.ID, err)
+				continue
+			}
 			if err := c.applyLocal(sv, cfg); err != nil {
 				log.Printf("sbctl: server %d (%s) local apply error: %v", sv.ID, sv.Name, err)
 				setErr(fmt.Errorf("server %d apply: %w", sv.ID, err))
@@ -450,7 +512,15 @@ func (c *Controller) Rebuild() error {
 			// session.Wait() indefinitely and wedge Rebuild (which holds c.mu).
 			applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
-			if err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg); err != nil {
+			restarted, err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg)
+			if restarted {
+				// Every connection on this node was just cut. Say so, once per
+				// occurrence: a line that shows up on every pass is a restart loop,
+				// and a silent one is how a node ends up cycling for a day before
+				// anyone connects the disconnects to the panel.
+				log.Printf("sbctl: server %d (%s) 配置有变化，已下发并重启 sing-box（该节点的连接会断一次）", sv.ID, sv.Name)
+			}
+			if err != nil {
 				log.Printf("sbctl: server %d (%s) apply error: %v", sv.ID, sv.Name, err)
 				setErr(fmt.Errorf("server %d apply: %w", sv.ID, err))
 				record(sv.ID, fmt.Errorf("SSH 下发失败: %w", err))
@@ -512,6 +582,13 @@ func (c *Controller) RebuildServer(serverID int64) error {
 
 	// If the server is on the local machine, apply directly (no SSH).
 	if isLocalHost(sv.Host) {
+		panelCfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag)
+		if err != nil {
+			return fmt.Errorf("local build config: %w", err)
+		}
+		if err := panelPathConflict(c.localConfigPath(), sv, cfg, panelCfg); err != nil {
+			return err
+		}
 		if err := c.applyLocal(sv, cfg); err != nil {
 			return fmt.Errorf("server %d apply: %w", sv.ID, err)
 		}
@@ -525,7 +602,11 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	serverCfg := SSHConfigFor(sv)
 	applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	if err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg); err != nil {
+	restarted, err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg)
+	if restarted {
+		log.Printf("sbctl: server %d (%s) 配置有变化，已下发并重启 sing-box（该节点的连接会断一次）", sv.ID, sv.Name)
+	}
+	if err != nil {
 		return fmt.Errorf("server %d apply: %w", sv.ID, err)
 	}
 	return nil

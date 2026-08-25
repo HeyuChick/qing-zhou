@@ -67,8 +67,10 @@ func TestApplyConfigDoesNotRestartANodeThatAlreadyHasTheConfig(t *testing.T) {
 			defer cancel()
 
 			// First pass: the node has nothing, so it gets the config and a restart.
-			if err := m.ApplyConfig(ctx, &cfg, configJSON); err != nil {
+			if restarted, err := m.ApplyConfig(ctx, &cfg, configJSON); err != nil {
 				t.Fatalf("first apply: %v", err)
+			} else if !restarted {
+				t.Fatal("installing a config on a bare node was not reported as a restart")
 			}
 			if got := node.restartCount(); got != 1 {
 				t.Fatalf("first apply restarted %d time(s), want 1", got)
@@ -79,8 +81,10 @@ func TestApplyConfigDoesNotRestartANodeThatAlreadyHasTheConfig(t *testing.T) {
 
 			// Second pass with the identical config: the node is already serving
 			// these bytes and its unit is up, so it must not be touched at all.
-			if err := m.ApplyConfig(ctx, &cfg, configJSON); err != nil {
+			if restarted, err := m.ApplyConfig(ctx, &cfg, configJSON); err != nil {
 				t.Fatalf("second apply: %v", err)
+			} else if restarted {
+				t.Fatal("an unchanged config was reported as a restart")
 			}
 			if got := node.restartCount(); got != 1 {
 				t.Fatalf("unchanged config restarted the node %d time(s), want 1", got)
@@ -89,7 +93,7 @@ func TestApplyConfigDoesNotRestartANodeThatAlreadyHasTheConfig(t *testing.T) {
 			// And a real change still lands.
 			changed := append([]byte(nil), configJSON...)
 			changed = append(changed, ' ')
-			if err := m.ApplyConfig(ctx, &cfg, changed); err != nil {
+			if _, err := m.ApplyConfig(ctx, &cfg, changed); err != nil {
 				t.Fatalf("apply after change: %v", err)
 			}
 			if got := node.restartCount(); got != 2 {

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,6 +248,10 @@ func (m *Manager) Validate(config []byte) error {
 // Apply validates the config, then (only on success) atomically replaces the
 // live config file and reloads sing-box. Serialized so concurrent applies can't
 // interleave a half-written file with a reload.
+// ConfigPath is the file Apply installs to. The controller reads it to catch a
+// server row that points at the very same file (see sbctl.panelPathConflict).
+func (m *Manager) ConfigPath() string { return m.configPath }
+
 func (m *Manager) Apply(config []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -271,6 +276,11 @@ func (m *Manager) Apply(config []byte) error {
 	if err := m.swap(config); err != nil {
 		return err
 	}
+
+	// The reload below cuts every connection on this machine. It only happens
+	// when the config genuinely changed, and saying so is what makes an
+	// unexpected reload every minute visible instead of invisible.
+	log.Printf("sbproc: 本机 sing-box 配置有变化，已写入 %s 并重载（本机连接会断一次）", m.configPath)
 
 	if m.reload != nil {
 		if err := m.reload(); err != nil {

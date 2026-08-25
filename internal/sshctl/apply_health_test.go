@@ -62,8 +62,10 @@ func TestApplyConfigRechecksServiceAfterAnEarlierNoOp(t *testing.T) {
 	defer cancel()
 
 	// The first pass sees matching bytes and an active unit, so it is a no-op.
-	if err := m.ApplyConfig(ctx, cfg, configJSON); err != nil {
+	if restarted, err := m.ApplyConfig(ctx, cfg, configJSON); err != nil {
 		t.Fatalf("initial no-op apply: %v", err)
+	} else if restarted {
+		t.Fatal("a healthy node was reported as restarted")
 	}
 	mu.Lock()
 	if restarts != 0 {
@@ -74,8 +76,10 @@ func TestApplyConfigRechecksServiceAfterAnEarlierNoOp(t *testing.T) {
 
 	// The same manager and same config must still re-check the node. The removed
 	// in-memory fast path returned before dialling here and left the node down.
-	if err := m.ApplyConfig(ctx, cfg, configJSON); err != nil {
+	if restarted, err := m.ApplyConfig(ctx, cfg, configJSON); err != nil {
 		t.Fatalf("apply after service stopped: %v", err)
+	} else if !restarted {
+		t.Fatal("bringing a stopped node back up was not reported as a restart")
 	}
 	mu.Lock()
 	defer mu.Unlock()

@@ -307,7 +307,13 @@ func (m *RemoteManager) dial(ctx context.Context, cfg *ServerConfig) (*ssh.Clien
 // Skips the write+restart when the remote config is byte-identical and the
 // service is active, preventing needless restarts without mistaking a stopped
 // node for a healthy one.
-func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, configJSON []byte) error {
+//
+// The bool reports whether the node was actually touched, i.e. whether every
+// connection on it was just cut by the restart. The caller logs that: a restart
+// is the single most user-visible thing the panel does, and without a record of
+// it a bug that restarts a healthy node on every pass looks exactly like a
+// successful deploy from the outside.
+func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, configJSON []byte) (bool, error) {
 	// Do not skip the remote check from an in-memory hash. The node can reboot or
 	// sing-box can crash while the panel process (and such a cache) stays alive;
 	// treating the old hash as proof of health would then report a dead node as
@@ -315,7 +321,7 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	// and systemd state without rewriting or restarting a healthy node.
 	client, err := m.dial(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("ssh connect %s: %w", cfg.Host, err)
+		return false, fmt.Errorf("ssh connect %s: %w", cfg.Host, err)
 	}
 	defer client.Close()
 
@@ -328,7 +334,7 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	// compared the on-disk bytes for exactly this reason all along; the remote
 	// path never did.
 	if same, err := m.nodeAlreadyHas(ctx, client, cfg, configJSON); err == nil && same {
-		return nil
+		return false, nil
 	}
 
 	// Write to a staging file first, validate it, and only then move it into
@@ -339,7 +345,7 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	// write/validate/mv and publish each other's config.
 	stage, err := m.createStageFile(ctx, client, cfg)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() {
 		// Only the /tmp staging file needs sweeping; the root path stages next to
@@ -351,16 +357,16 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 		}
 	}()
 	if err := m.writeFile(ctx, client, stage, configJSON); err != nil {
-		return fmt.Errorf("write config: %w", err)
+		return false, fmt.Errorf("write config: %w", err)
 	}
 	if err := m.validateConfigPath(ctx, client, cfg, stage); err != nil {
 		if !cfg.UseSudo {
 			_, _ = m.run(ctx, client, "rm -f "+shellQuote(stage))
 		}
-		return fmt.Errorf("validate config: %w", err)
+		return false, fmt.Errorf("validate config: %w", err)
 	}
 	if err := m.installConfig(ctx, client, cfg, stage); err != nil {
-		return err
+		return false, err
 	}
 
 	if err := m.restartService(ctx, client, cfg); err != nil {
@@ -373,13 +379,13 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 		}
 		m.restartPending[cfg.ID] = true
 		m.mu.Unlock()
-		return fmt.Errorf("restart service: %w", err)
+		return true, fmt.Errorf("restart service: %w", err)
 	}
 	m.mu.Lock()
 	delete(m.restartPending, cfg.ID)
 	m.mu.Unlock()
 
-	return nil
+	return true, nil
 }
 
 // rootStagePath is where a root login writes the new config before installing
