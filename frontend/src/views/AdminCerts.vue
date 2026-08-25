@@ -1,6 +1,12 @@
 <template>
   <div>
-    <h2 class="page-title">证书管理</h2>
+    <div class="page-head"><div><h2 class="page-title">证书管理</h2><p class="page-sub">证书签发、导入、续期、指纹与节点 TLS 引用</p></div></div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ certs.length }}</b><span>全部证书</span></div>
+      <div class="resource-metric success"><b>{{ certs.filter(c => c.source === 'acme').length }}</b><span>ACME 真实证书</span></div>
+      <div class="resource-metric"><b>{{ certs.filter(c => c.self_signed).length }}</b><span>自签证书</span></div>
+      <div class="resource-metric" :class="{ warn: certs.filter(c => c.days_left >= 0 && c.days_left <= 30).length }"><b>{{ certs.filter(c => c.days_left >= 0 && c.days_left <= 30).length }}</b><span>30 天内到期</span></div>
+    </div>
 
     <n-card size="small" style="margin-bottom:16px;">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">

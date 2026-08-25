@@ -1,17 +1,41 @@
 <template>
   <div>
-    <h2 class="page-title">系统设置</h2>
-    <p class="page-sub">配置站点参数</p>
+    <div class="settings-hero">
+      <div>
+        <h2 class="page-title">系统设置</h2>
+        <p class="page-sub">站点、访问、安全、通知与运维配置集中管理</p>
+      </div>
+      <div class="settings-count"><b>{{ settingsSections.length }}</b> 个配置分区</div>
+    </div>
 
+    <div class="settings-layout">
+      <aside class="settings-nav" aria-label="设置分区导航">
+        <button v-for="section in settingsSections" :key="section.id" type="button" @click="scrollSettings(section.id)">
+          <span>{{ section.label }}</span><small>{{ section.note }}</small>
+        </button>
+      </aside>
+      <main class="settings-main">
+      <n-alert v-if="loadError" type="error" :show-icon="true" class="settings-load-error">
+        <template #header>系统配置读取失败，未对数据库做任何修改</template>
+        {{ loadError }}。为防止空表单覆盖原配置，“保存设置”已禁用。请稍候重试；如果持续失败，请检查服务日志和数据库路径。
+        <n-button size="small" :loading="loading" class="settings-retry" @click="loadSettings">重新读取</n-button>
+      </n-alert>
     <n-spin :show="loading">
-      <n-card title="基本设置" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-basic" class="settings-section" title="基本设置" size="small">
         <n-form label-placement="left" label-width="120">
           <n-form-item label="站点名称"><n-input v-model:value="form.site_name" /></n-form-item>
           <n-form-item label="站点描述"><n-input v-model:value="form.site_description" /></n-form-item>
           <n-form-item label="注册模式">
             <n-select v-model:value="form.register_mode" :options="[{label:'开放注册',value:'open'},{label:'邀请码注册',value:'code'},{label:'关闭注册',value:'closed'}]" />
           </n-form-item>
-          <n-form-item label="邮箱验证"><n-switch v-model:value="emailVerify" /></n-form-item>
+          <n-form-item label="邮箱验证">
+            <div>
+              <n-switch v-model:value="emailVerify" />
+              <div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:4px;max-width:520px;">
+                开放注册的新用户未验证邮箱时，订阅里不会下发节点。用积分购买或管理员分配套餐后即可使用对应节点。邀请码注册和管理员开户不受影响。
+              </div>
+            </div>
+          </n-form-item>
           <n-form-item label="积分汇率（积分=1元）"><n-input-number v-model:value="pointsRate" :min="1" style="width:200px;" /></n-form-item>
           <n-form-item label="注册赠送积分"><n-input-number v-model:value="signupBonus" :min="0" style="width:200px;" /></n-form-item>
           <n-form-item label="新用户默认流量 (GB)"><n-input-number v-model:value="defaultTraffic" :min="0" style="width:200px;" /></n-form-item>
@@ -32,7 +56,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="面板访问地址" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-access" class="settings-section" title="面板访问地址" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;line-height:1.7;">
           面板对外访问地址，用于订阅链接、探针安装、邮件验证/找回链接，以及下方的 sing-box 一键安装命令。
           填写完整地址，例如 <code>https://node.example.com</code> 或 <code>http://1.2.3.4:8081</code>；
@@ -93,7 +117,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="退款策略" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-refund" class="settings-section" title="退款策略" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;line-height:1.7;">
           管理员对订单退款时的默认规则。<b>按剩余比例</b>只退还未使用的部分（如 100G 用了 50G 退 50%）；
           套餐同时含流量与有效期，<b>计算基准</b>决定按哪个维度算比例，推荐 <b>min(流量,时间)</b> 取更小值以防滥用。
@@ -119,7 +143,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="首页设置" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-home" class="settings-section" title="首页设置" size="small">
         <n-form label-placement="left" label-width="120">
           <n-form-item label="首页模式">
             <n-select v-model:value="form.homepage_mode" :options="[{label:'监控大屏',value:'monitor'},{label:'自定义页面',value:'custom'}]" />
@@ -130,14 +154,14 @@
         </n-form>
       </n-card>
 
-      <n-card title="SMTP 邮件" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-smtp" class="settings-section" title="SMTP 邮件" size="small">
         <!-- 没配 SMTP 时，依赖邮件的功能会安静地失效：面板日志里有链接，用户那边
              什么都收不到。把后果写出来，而不是留一组空输入框让人以为「可选」。 -->
         <div v-if="!smtpConfigured" class="warn-box">
           <b>当前未配置邮件服务</b>，以下功能不可用：
           <ul>
             <li>用户「找回密码」——登录框里会直接提示去找管理员，重置只能你在「用户管理 → 编辑 → 重置密码」里做。</li>
-            <li v-if="emailVerify">开放注册后的邮箱验证——<b>「基本设置」里的「邮箱验证」是开着的，开放注册的新用户不点邮件就激不了账号</b>。邀请码注册和管理员开户不受影响。请配好 SMTP，或关掉它。</li>
+            <li v-if="emailVerify">开放注册后的邮箱验证——<b>「基本设置」里的「邮箱验证」是开着的，开放注册的新用户不点邮件就拿不到免费节点</b>。用积分购买或管理员分配套餐后仍可使用对应节点。邀请码注册和管理员开户不受影响。请配好 SMTP，或关掉它。</li>
             <li v-else>开放注册后的邮箱验证（当前「邮箱验证」是关的，不影响注册）。</li>
           </ul>
         </div>
@@ -158,7 +182,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="Telegram Bot" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-telegram" class="settings-section" title="Telegram Bot" size="small">
         <div v-if="!telegramConfigured" class="warn-box">
           <b>当前未配置 Telegram Bot</b>。配好后，用户可在「账户设置」里绑定，用聊天查询订阅 / 套餐 / 流量，并接收到期和流量不足通知。
         </div>
@@ -192,6 +216,50 @@
         </n-form>
 
         <div class="tg-tpl">
+          <div class="tg-tpl-h">运维保护 · 节点反复重启熔断</div>
+          <p class="form-hint" style="margin:0 0 10px;">
+            节点每重启一次，它上面所有人的连接都会断一次。改配置引起的重启是正常的，
+            这里只统计<b>没有任何后台操作时</b>自动发生的重启：超过阈值后暂停该节点的周期性自动下发，
+            在监控页告警并推送给下面选中的接收人。流量统计和探针上报不受影响，人工重新下发成功后自动解除。
+          </p>
+          <n-form label-placement="left" label-width="140">
+            <n-form-item label="启用">
+              <n-switch v-model:value="restartAlertOn" />
+            </n-form-item>
+            <n-form-item label="判定条件">
+              <n-input-number v-model:value="restartWindowMin" :min="5" :max="360" style="width:120px;" />
+              <span class="form-hint" style="margin:0 8px;">分钟内自动重启达</span>
+              <n-input-number v-model:value="restartCount" :min="2" :max="50" style="width:110px;" />
+              <span class="form-hint" style="margin-left:8px;">次</span>
+            </n-form-item>
+            <n-form-item label="接收人">
+              <div style="width:100%;">
+                <div v-if="!opsCandidates.length" class="form-hint">
+                  还没有账号绑定 Telegram。接收人不必是管理员 —— 让对方在「账户设置」里绑定后，这里就能勾选。
+                </div>
+                <n-space v-else vertical size="small">
+                  <n-checkbox v-for="c in opsCandidates" :key="c.user_id" :checked="c.on"
+                              @update:checked="(v: boolean) => toggleOpsRecipient(c, v)">
+                    {{ c.username }}
+                    <span class="form-hint" style="margin-left:6px;">{{ c.is_admin ? '管理员' : '普通用户' }} · @{{ c.tg_name }}</span>
+                  </n-checkbox>
+                </n-space>
+                <div class="form-hint" style="margin-top:6px;">勾选即时生效，无需保存。告警里会出现节点名和重启次数，选你愿意让对方看到这些的人。</div>
+              </div>
+            </n-form-item>
+            <n-form-item label="额外 chat ID">
+              <n-input v-model:value="form.alert_ops_extra_chats" type="textarea" :autosize="{ minRows: 1, maxRows: 3 }"
+                       placeholder="推到群/频道：把 Bot 拉进去，填该会话的 chat_id，多个用逗号分隔" />
+            </n-form-item>
+            <n-form-item label=" ">
+              <n-button size="small" :loading="testingOps" :disabled="!opsEffective" @click="handleTestOpsAlert">发送测试告警</n-button>
+              <span v-if="opsEffective" class="form-hint" style="margin-left:8px;">当前 {{ opsEffective }} 个聊天会收到告警</span>
+              <span v-else style="margin-left:8px;color:#dc2626;font-size:12px;">当前没有人会收到告警</span>
+            </n-form-item>
+          </n-form>
+        </div>
+
+        <div class="tg-tpl">
           <div class="tg-tpl-h">消息排版</div>
           <p class="form-hint" style="margin:0 0 10px;">
             发给用户的查询结果和通知都走模板。支持 Telegram HTML（<code>&lt;b&gt;</code> <code>&lt;i&gt;</code> <code>&lt;code&gt;</code> <code>&lt;a href&gt;</code>）和占位符 <code v-pre>{{name}}</code>。
@@ -221,7 +289,7 @@
         </div>
       </n-card>
 
-      <n-card title="证书 / ACME（Cloudflare 自动证书）" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-cert" class="settings-section" title="证书 / ACME（Cloudflare 自动证书）" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           填写 Cloudflare API Token 后，「证书管理」页即可用 Cloudflare DNS 方式在面板本机一键申请 / 自动续期真实证书（DNS 验证无需节点参与，远程节点也能用）。
         </p>
@@ -245,7 +313,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="节点出口安全" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-security" class="settings-section" title="节点出口安全" size="small">
         <n-form label-placement="left" label-width="160">
           <n-form-item label="阻断内网 / 元数据">
             <div style="width:100%;">
@@ -262,7 +330,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="订阅模板" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-template" class="settings-section" title="订阅模板" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">自定义 Clash/sing-box 订阅输出模板。留空使用内置默认模板；改过之后会一直沿用你的版本（升级带来的新版内置模板不会自动生效），点「恢复内置默认」即可清空覆盖、跟随内置。</p>
         <n-form label-placement="left" label-width="120">
           <n-form-item label="Clash 模板 (YAML)">
@@ -287,7 +355,7 @@
         <p style="font-size:12px;color:var(--text-3);margin-top:4px;">改动需点下方「保存设置」后生效。</p>
       </n-card>
 
-      <n-card title="监控告警阈值" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-monitor" class="settings-section" title="监控告警阈值" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">超过以下百分比时触发告警（0-100）。修改后下次检查生效。</p>
         <n-form label-placement="left" label-width="120">
           <n-form-item label="CPU 告警 (%)"><n-input-number v-model:value="alertCpu" :min="1" :max="100" style="width:200px;" /></n-form-item>
@@ -306,7 +374,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="在线更新" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-update" class="settings-section" title="在线更新" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           「在线更新」页查版本走的是 GitHub 公开接口，匿名调用<b>按出口 IP</b> 限额（每小时 60 次）。
           与别人共用一个出口 IP（NAT / 机房 / 公司网络）时很容易撞到额度，表现为检查更新报「速率受限」。
@@ -334,7 +402,7 @@
         </n-form>
       </n-card>
 
-      <n-card title="数据备份" size="small" style="margin-bottom:16px;">
+      <n-card id="settings-backup" class="settings-section" title="数据备份" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           在线导出整库快照（单个 <code>.db</code> 文件，含用户 / 订单 / 节点 / 证书）。数据库跑在 WAL 模式下，
           <b>直接 <code>scp</code> 拷贝 <code>qingzhou.db</code> 拿到的是残缺副本</b>——已提交的数据可能还在 <code>-wal</code> 里。
@@ -344,26 +412,56 @@
         <n-button :loading="backingUp" @click="handleBackup">下载数据库备份</n-button>
       </n-card>
 
-      <n-space>
-        <n-button type="primary" :loading="saving" @click="handleSave">保存设置</n-button>
+      <n-space class="settings-actions">
+        <n-button type="primary" :loading="saving" :disabled="!settingsLoaded" @click="handleSave">保存设置</n-button>
         <n-button @click="handleRebuild" :loading="rebuilding">重建 sing-box 配置</n-button>
+        <span class="save-state">保存后统一生效 · sing-box 相关改动可随后手动重建</span>
       </n-space>
     </n-spin>
+      </main>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
-import { NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
+import { NAlert, NCard, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
 import { apiGet, apiPost, apiPut, apiList, apiDownload } from '@/api'
 
 const message = useMessage()
+const settingsLoaded = ref(false)
+const loadError = ref('')
+const settingsSections = [
+  { id: 'settings-basic', label: '基本设置', note: '注册与积分' },
+  { id: 'settings-access', label: '访问地址', note: '面板与节点' },
+  { id: 'settings-refund', label: '退款策略', note: '比例与手续费' },
+  { id: 'settings-home', label: '首页设置', note: '入口展示' },
+  { id: 'settings-smtp', label: 'SMTP 邮件', note: '验证与找回' },
+  { id: 'settings-telegram', label: 'Telegram', note: '机器人与模板' },
+  { id: 'settings-cert', label: '证书 / ACME', note: 'Cloudflare DNS' },
+  { id: 'settings-security', label: '出口安全', note: '内网访问防护' },
+  { id: 'settings-template', label: '订阅模板', note: '客户端输出' },
+  { id: 'settings-monitor', label: '监控告警', note: '阈值与通知' },
+  { id: 'settings-update', label: '在线更新', note: '版本与令牌' },
+  { id: 'settings-backup', label: '数据备份', note: '一致性快照' },
+]
+function scrollSettings(id: string) {
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
 const loading = ref(false)
 const saving = ref(false)
 const testingSmtp = ref(false)
 const testingTg = ref(false)
 const notifyExpiryDays = ref(3)
 const notifyTrafficPct = ref(20)
+// 运维告警（节点反复重启）。接收人不限角色，故意用「已绑定 Telegram 的账号」
+// 而不是「管理员」来列候选：跑机器的人未必有面板管理员账号。
+const restartAlertOn = ref(true)
+const restartWindowMin = ref(30)
+const restartCount = ref(5)
+const opsCandidates = ref<any[]>([])
+const opsEffective = ref(0)
+const testingOps = ref(false)
 type TgTplVar = { key: string; desc: string }
 type TgTplMeta = { key: string; name: string; body: string; vars?: TgTplVar[] }
 const tgTplMeta = ref<TgTplMeta[]>([])
@@ -503,6 +601,10 @@ async function copyInstall() {
 }
 
 async function handleSave() {
+  if (!settingsLoaded.value) {
+    message.error('系统配置尚未成功读取，已阻止保存以保护原配置')
+    return
+  }
   saving.value = true
   try {
     const body: Record<string, any> = {
@@ -524,6 +626,9 @@ async function handleSave() {
       refund_fee_percent: String(refundFee.value),
       notify_expiry_days: String(notifyExpiryDays.value),
       notify_traffic_percent: String(notifyTrafficPct.value),
+      alert_restart_enabled: restartAlertOn.value ? 'true' : 'false',
+      alert_restart_window_min: String(restartWindowMin.value),
+      alert_restart_count: String(restartCount.value),
     }
     await apiPut('/api/admin/settings', body)
     message.success('保存成功')
@@ -551,6 +656,36 @@ async function handleTestSMTP() {
   try { await apiPost('/api/admin/settings/test-smtp', { to: testEmail.value }); message.success('测试邮件已发送') } catch (e: any) { message.error(e.message) } finally { testingSmtp.value = false }
 }
 
+// 接收人列表与「实际能收到的聊天数」都由后端算：解绑、封禁、chat id 写错都会
+// 让名单悄悄变空，而这个数字是唯一能看出来的地方。
+function applyOpsRecipients(d: any) {
+  if (!d) return
+  opsCandidates.value = d.candidates || []
+  opsEffective.value = d.effective || 0
+  if (form.alert_ops_extra_chats === undefined) form.alert_ops_extra_chats = d.extra_chats || ''
+}
+
+async function reloadOpsRecipients() {
+  applyOpsRecipients(await apiGet<any>('/api/admin/ops-recipients').catch(() => null))
+}
+
+async function toggleOpsRecipient(c: any, on: boolean) {
+  try {
+    await apiPut(`/api/admin/ops-recipients/${c.user_id}`, { on })
+    c.on = on
+    await reloadOpsRecipients()
+  } catch (e: any) { message.error(e.message) }
+}
+
+async function handleTestOpsAlert() {
+  testingOps.value = true
+  try {
+    const d = await apiPost<{ sent?: number; failed?: string[] }>('/api/admin/ops-recipients/test', {})
+    if (d?.failed?.length) message.warning(`已发送 ${d.sent || 0} 个，失败 ${d.failed.length} 个：${d.failed[0]}`)
+    else message.success(`测试告警已发送给 ${d?.sent || 0} 个聊天`)
+  } catch (e: any) { message.error(e.message) } finally { testingOps.value = false }
+}
+
 async function handleTestTelegram() {
   testingTg.value = true
   try {
@@ -576,14 +711,49 @@ async function handleRebuild() {
   try { await apiPost('/api/admin/rebuild'); message.success('重建成功') } catch (e: any) { message.error(e.message) } finally { rebuilding.value = false }
 }
 
-onMounted(async () => {
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function readSettingsWithRetry(): Promise<Record<string, string>> {
+  const retryDelays = [0, 400, 1200, 2400]
+  let lastError: any = null
+  for (const delay of retryDelays) {
+    if (delay) await sleep(delay)
+    try {
+      const data = await apiGet<Record<string, string>>('/api/admin/settings')
+      // Seed always creates several settings. A null/empty response therefore
+      // means the request did not produce a usable configuration snapshot; do
+      // not turn it into an editable empty form.
+      if (!data || typeof data !== 'object' || !Object.keys(data).length) {
+        throw new Error('服务器返回了空的配置快照')
+      }
+      return data
+    } catch (e: any) {
+      lastError = e
+      // Authentication/authorization failures are not transient. The shared
+      // API wrapper handles the login redirect; retrying would only add noise.
+      if (e?.status === 401 || e?.status === 403) break
+    }
+  }
+  throw lastError || new Error('未知读取错误')
+}
+
+async function loadSettings() {
   loading.value = true
+  settingsLoaded.value = false
+  loadError.value = ''
   try {
-    const [data, groups, defaults] = await Promise.all([
-      apiGet<Record<string, string>>('/api/admin/settings'),
+    // The settings snapshot is critical and gets a short retry window because
+    // an online update re-execs the backend. Optional metadata must not be able
+    // to turn a successful settings read into a blank page.
+    const data = await readSettingsWithRetry()
+    const [groups, defaults, ops] = await Promise.all([
       apiList<any>('/api/admin/node-groups').catch(() => []),
       apiGet<any>('/api/admin/settings/default-templates').catch(() => null),
+      apiGet<any>('/api/admin/ops-recipients').catch(() => null),
     ])
+    applyOpsRecipients(ops)
     if (Array.isArray(defaults?.telegram)) tgTplMeta.value = defaults.telegram
     defaultTemplates = defaults
     if (data) {
@@ -608,17 +778,43 @@ onMounted(async () => {
       refundFee.value = parseFloat(data.refund_fee_percent) || 0
       notifyExpiryDays.value = parseInt(data.notify_expiry_days) || 3
       notifyTrafficPct.value = parseInt(data.notify_traffic_percent) || 20
+      restartAlertOn.value = data.alert_restart_enabled !== 'false'
+      restartWindowMin.value = parseInt(data.alert_restart_window_min) || 30
+      restartCount.value = parseInt(data.alert_restart_count) || 5
+      form.alert_ops_extra_chats ??= ''
       form.telegram_bot_token ??= ''
       form.telegram_bot_username ??= ''
       for (const t of tgTplMeta.value) form['tg_tpl_' + t.key] ??= ''
     }
     groupOptions.value = (groups || []).map((g: any) => ({ label: g.name, value: g.id }))
-  } catch {} finally { loading.value = false }
-})
+    settingsLoaded.value = true
+  } catch (e: any) {
+    loadError.value = e?.message || '无法连接到配置接口'
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(loadSettings)
 </script>
 
 <style scoped>
-.page-title { font-size: 21px; margin-bottom: 4px; }
+.settings-hero { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:20px; }
+.settings-hero .page-sub { margin-bottom:0; }
+.settings-count { flex:none; padding:8px 12px; border:1px solid var(--border); border-radius:999px; background:var(--card); color:var(--text-2); font-size:12px; box-shadow:var(--shadow-xs); }
+.settings-count b { color:var(--text); font-size:14px; }
+.settings-layout { display:grid; grid-template-columns:184px minmax(0, 1fr); align-items:start; gap:18px; }
+.settings-nav { position:sticky; top:84px; display:flex; flex-direction:column; gap:3px; padding:7px; border:1px solid var(--border); border-radius:14px; background:color-mix(in srgb, var(--card) 92%, transparent); box-shadow:var(--shadow-xs); backdrop-filter:blur(16px); }
+.settings-nav button { display:grid; grid-template-columns:1fr auto; align-items:center; gap:8px; min-height:38px; padding:7px 9px; border:0; border-radius:9px; background:transparent; color:var(--text-2); text-align:left; font:inherit; cursor:pointer; transition:background .18s ease, color .18s ease, transform .18s ease; }
+.settings-nav button:hover { color:var(--text); background:var(--bg-soft); transform:translateX(2px); }
+.settings-nav span { font-size:12.5px; font-weight:620; }
+.settings-nav small { color:var(--text-3); font-size:10px; white-space:nowrap; }
+.settings-main { min-width:0; }
+.settings-load-error { margin-bottom:16px; }
+.settings-retry { margin-left:10px; }
+.settings-section { margin-bottom:16px; scroll-margin-top:84px; }
+.settings-actions { position:sticky; bottom:14px; z-index:5; width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:12px; background:color-mix(in srgb, var(--card) 92%, transparent); box-shadow:0 12px 34px rgba(31,41,55,.12); backdrop-filter:blur(18px); }
+.save-state { align-self:center; margin-left:auto; color:var(--text-3); font-size:11.5px; }
 .form-hint { margin-top: 4px; font-size: 12px; color: var(--text-3); line-height: 1.5; }
 .form-hint a { color: var(--accent-strong); }
 .warn-box {
@@ -672,4 +868,30 @@ onMounted(async () => {
   white-space: nowrap;
 }
 .tg-var span { font-size: 12.5px; color: var(--text-2); line-height: 1.45; }
+@media (max-width: 900px) {
+  .settings-layout { grid-template-columns:1fr; }
+  .settings-nav { position:relative; top:auto; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .settings-nav small { display:none; }
+  .settings-nav button:hover { transform:none; }
+}
+@media (max-width: 560px) {
+  .settings-hero { align-items:flex-start; }
+  .settings-count { display:none; }
+  .settings-nav { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .settings-section :deep(.n-form-item) {
+    grid-template-areas:'label' 'blank' 'feedback' !important;
+    grid-template-columns:minmax(0,1fr) !important;
+  }
+  .settings-section :deep(.n-form-item-label) {
+    width:auto !important; height:auto; justify-content:flex-start !important; padding:0 0 5px !important; text-align:left !important;
+  }
+  .settings-section :deep(.n-form-item-label__text) { width:auto !important; text-align:left !important; }
+  .settings-section :deep(.n-form-item-blank) { min-width:0; width:100%; }
+  .settings-section :deep(.n-input),
+  .settings-section :deep(.n-input-number),
+  .settings-section :deep(.n-select),
+  .settings-section :deep(.n-input-group) { width:100% !important; max-width:100% !important; }
+  .settings-actions { position:relative; bottom:auto; }
+  .save-state { flex-basis:100%; margin-left:0; line-height:1.5; }
+}
 </style>

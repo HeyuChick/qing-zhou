@@ -143,13 +143,96 @@ func TestUnverified_SubWithholdsExternalLinks(t *testing.T) {
 	}
 }
 
-// Buying after the verification gate is enabled must not verify the buyer by
-// proxy. Legacy paid accounts are handled by a one-time migration bit instead.
-func TestUnverified_NewPurchaseDoesNotLiftGate(t *testing.T) {
-	a, st, uid := unverifiedFixture(t)
+// Valid ss:// so /nodes and /sub?format=base64 can actually parse it. The
+// distinctive host is the leak marker — the info page only shows a count.
+const paidLink = "ss://YWVzLTI1Ni1nY206cGFpZA@paid.example:8388#paid"
+
+// grantPaidPlan binds a distinct paid-group node to a plan and grants it,
+// matching the two ways an unverified account gets a real entitlement:
+// admin assign, or a points purchase.
+func grantPaidPlan(t *testing.T, st *store.Store, uid int64, viaPurchase bool) {
+	t.Helper()
+	gid, err := st.CreateGroup(store.NodeGroup{Name: "付费"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateNode(store.Node{
+		Type: "external", Name: "付费节点", Protocol: "ss",
+		ShareLink: paidLink, Enabled: true, GroupIDs: []int64{gid},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	pkgID, err := st.CreatePackage(store.Package{
 		Type: "plan", Name: "月付", PricePoints: 100,
 		TrafficBytes: 100 << 30, DurationDays: 30, Stock: -1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetPlanGroups(pkgID, []int64{gid}); err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := st.GetPackage(pkgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaPurchase {
+		if _, err := st.AdjustPoints(uid, 100, "admin_recharge", 0, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Purchase(uid, pkg, "", func(*store.User, bool) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if _, err := st.AssignPackage(uid, pkg, 0, func(*store.User, bool) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSubHasPaidNode(t *testing.T, a *API) {
+	t.Helper()
+	w := getSub(a, "tok-unverified")
+	if w.Code != http.StatusOK {
+		t.Fatalf("sub = %d", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "可用节点</span><b>0</b>") {
+		t.Fatalf("paid plan should release nodes without email verify:\n%s", w.Body.String())
+	}
+	// The info page only shows a count. Fetch a renderable format so we can
+	// see the paid-group host itself, not just "some nodes came back".
+	raw := httptest.NewRecorder()
+	a.Router().ServeHTTP(raw, httptest.NewRequest("GET", "/sub/tok-unverified?format=clash", nil))
+	if raw.Code != http.StatusOK {
+		t.Fatalf("sub clash = %d", raw.Code)
+	}
+	if !strings.Contains(raw.Body.String(), "paid.example") {
+		t.Fatalf("subscription should include the paid-plan node:\n%s", raw.Body.String())
+	}
+}
+
+// An admin-assigned plan is a real entitlement: the user must receive that
+// plan's nodes even if they never clicked the verify mail.
+func TestUnverified_AdminAssignedPlanLiftsGate(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	grantPaidPlan(t, st, uid, false)
+	assertSubHasPaidNode(t, a)
+}
+
+// Spending points on a plan is the same admission decision as an admin grant.
+func TestUnverified_PointsPurchaseLiftsGate(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	grantPaidPlan(t, st, uid, true)
+	assertSubHasPaidNode(t, a)
+}
+
+// A traffic top-up is not a plan. It must not turn an unverified signup into
+// a free-group credential scrape.
+func TestUnverified_TrafficPackageDoesNotLiftGate(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	pkgID, err := st.CreatePackage(store.Package{
+		Type: "traffic", Name: "流量包", PricePoints: 50,
+		TrafficBytes: 10 << 30, Stock: -1, Enabled: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +250,7 @@ func TestUnverified_NewPurchaseDoesNotLiftGate(t *testing.T) {
 		t.Fatalf("sub = %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "可用节点</span><b>0</b>") {
-		t.Fatalf("a new purchase must not bypass email verification:\n%s", w.Body.String())
+		t.Fatalf("a traffic top-up must not bypass email verification:\n%s", w.Body.String())
 	}
 }
 
@@ -189,9 +272,9 @@ func TestUnverified_NewProvisioningDoesNotLiftGate(t *testing.T) {
 	}
 }
 
-// The signup grant is minted for every provisioned account and must not be
-// mistaken for a paid plan — otherwise a brand-new unverified signup that
-// somehow got a welcome bucket would punch through the leak gate.
+// /nodes and /nodes/ping stay closed for a pending-verify signup with no
+// paid plan, so they cannot be used to learn upstream hosts while /sub is
+// empty. A live paid plan unlocks them the same way it unlocks /sub.
 func TestUnverified_NodeInventoryAndPingRoutesAreGated(t *testing.T) {
 	a, _, _ := unverifiedFixture(t)
 	login := loginAs(a, "unverified", "secret1")
@@ -220,6 +303,38 @@ func TestUnverified_NodeInventoryAndPingRoutesAreGated(t *testing.T) {
 			}
 			if strings.Contains(w.Body.String(), "upstream.example") {
 				t.Fatalf("%s leaked node coordinates: %s", path, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestUnverified_PaidPlanUnlocksNodeRoutes(t *testing.T) {
+	a, st, uid := unverifiedFixture(t)
+	grantPaidPlan(t, st, uid, false)
+	login := loginAs(a, "unverified", "secret1")
+	if login.Code != http.StatusOK {
+		t.Fatalf("login = %d %s", login.Code, login.Body.String())
+	}
+	var authResp struct {
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(login.Body.Bytes(), &authResp); err != nil || authResp.Data.Token == "" {
+		t.Fatalf("decode login token: %v %s", err, login.Body.String())
+	}
+
+	for _, path := range []string{"/api/user/nodes", "/api/user/nodes/ping"} {
+		t.Run(path, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", path, nil)
+			r.Header.Set("Authorization", "Bearer "+authResp.Data.Token)
+			a.Router().ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("%s = %d %s, want 200 after paid plan", path, w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "paid.example") {
+				t.Fatalf("%s missing paid-plan node: %s", path, w.Body.String())
 			}
 		})
 	}

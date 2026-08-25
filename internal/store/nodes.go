@@ -9,31 +9,35 @@ import (
 )
 
 type Node struct {
-	ID         int64   `json:"id"`
-	Type       string  `json:"type"` // self_built | external
-	Name       string  `json:"name"`
-	Protocol   string  `json:"protocol"`
-	InboundTag string  `json:"inbound_tag"`
-	ShareLink  string  `json:"share_link"`
-	SourceID   int64   `json:"source_id"`
-	Enabled    bool    `json:"enabled"`
-	SortOrder  int64   `json:"sort_order"`
-	CreatedAt  int64   `json:"created_at"`
-	GroupIDs   []int64 `json:"group_ids,omitempty"`
+	ID                     int64   `json:"id"`
+	Type                   string  `json:"type"` // self_built | external
+	Name                   string  `json:"name"`
+	Protocol               string  `json:"protocol"`
+	InboundTag             string  `json:"inbound_tag"`
+	RouteUpstreamInboundID int64   `json:"route_upstream_inbound_id"`
+	RouteUpstreamBroken    bool    `json:"route_upstream_broken"`
+	ShareLink              string  `json:"share_link"`
+	SourceID               int64   `json:"source_id"`
+	Enabled                bool    `json:"enabled"`
+	SortOrder              int64   `json:"sort_order"`
+	CreatedAt              int64   `json:"created_at"`
+	GroupIDs               []int64 `json:"group_ids,omitempty"`
 }
 
-const nodeCols = `id, type, name, protocol, inbound_tag, share_link, source_id, enabled, sort_order, created_at`
+const nodeCols = `id, type, name, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at`
 
 func scanNode(sc scanner) (*Node, error) {
 	var n Node
-	err := sc.Scan(&n.ID, &n.Type, &n.Name, &n.Protocol, &n.InboundTag, &n.ShareLink,
-		&n.SourceID, &n.Enabled, &n.SortOrder, &n.CreatedAt)
+	var routeBroken int
+	err := sc.Scan(&n.ID, &n.Type, &n.Name, &n.Protocol, &n.InboundTag,
+		&n.RouteUpstreamInboundID, &routeBroken, &n.ShareLink, &n.SourceID, &n.Enabled, &n.SortOrder, &n.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	n.RouteUpstreamBroken = routeBroken == 1
 	return &n, nil
 }
 
@@ -77,6 +81,7 @@ func (s *Store) ListNodes() ([]*Node, error) {
 func (s *Store) SelfBuiltNodeNames() (map[string]string, error) {
 	rows, err := s.db.Query(`SELECT inbound_tag, name FROM nodes
 		WHERE type='self_built' AND inbound_tag != '' AND name != ''
+		  AND route_upstream_inbound_id=0 AND route_upstream_broken=0
 		ORDER BY sort_order, id`)
 	if err != nil {
 		return nil, err
@@ -97,9 +102,9 @@ func (s *Store) SelfBuiltNodeNames() (map[string]string, error) {
 
 func (s *Store) CreateNode(n Node) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO nodes
-		(type, name, protocol, inbound_tag, share_link, source_id, enabled, sort_order, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?)`,
-		n.Type, n.Name, n.Protocol, n.InboundTag, n.ShareLink, n.SourceID,
+		(type, name, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		n.Type, n.Name, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, n.SourceID,
 		boolToInt(n.Enabled), n.SortOrder, time.Now().Unix())
 	if err != nil {
 		return 0, err
@@ -115,8 +120,8 @@ func (s *Store) CreateNode(n Node) (int64, error) {
 
 func (s *Store) UpdateNode(n Node) error {
 	_, err := s.db.Exec(`UPDATE nodes SET
-		type=?, name=?, protocol=?, inbound_tag=?, share_link=?, enabled=?, sort_order=? WHERE id=?`,
-		n.Type, n.Name, n.Protocol, n.InboundTag, n.ShareLink, boolToInt(n.Enabled), n.SortOrder, n.ID)
+		type=?, name=?, protocol=?, inbound_tag=?, route_upstream_inbound_id=?, route_upstream_broken=?, share_link=?, enabled=?, sort_order=? WHERE id=?`,
+		n.Type, n.Name, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, boolToInt(n.Enabled), n.SortOrder, n.ID)
 	if err != nil {
 		return err
 	}
@@ -165,6 +170,7 @@ type NodeGroup struct {
 	ID          int64  `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	IsAI        bool   `json:"is_ai"`
 	SortOrder   int64  `json:"sort_order"`
 	CreatedAt   int64  `json:"created_at"`
 }
@@ -178,7 +184,7 @@ func (s *Store) GroupCount() (int, error) {
 }
 
 func (s *Store) ListGroups() ([]*NodeGroup, error) {
-	rows, err := s.db.Query(`SELECT id, name, description, sort_order, created_at FROM node_groups ORDER BY sort_order, id`)
+	rows, err := s.db.Query(`SELECT id, name, description, is_ai, sort_order, created_at FROM node_groups ORDER BY sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +192,7 @@ func (s *Store) ListGroups() ([]*NodeGroup, error) {
 	var out []*NodeGroup
 	for rows.Next() {
 		var g NodeGroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.SortOrder, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.IsAI, &g.SortOrder, &g.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &g)
@@ -195,8 +201,8 @@ func (s *Store) ListGroups() ([]*NodeGroup, error) {
 }
 
 func (s *Store) CreateGroup(g NodeGroup) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO node_groups (name, description, sort_order, created_at) VALUES (?,?,?,?)`,
-		g.Name, g.Description, g.SortOrder, time.Now().Unix())
+	res, err := s.db.Exec(`INSERT INTO node_groups (name, description, is_ai, sort_order, created_at) VALUES (?,?,?,?,?)`,
+		g.Name, g.Description, g.IsAI, g.SortOrder, time.Now().Unix())
 	if err != nil {
 		return 0, err
 	}
@@ -204,8 +210,8 @@ func (s *Store) CreateGroup(g NodeGroup) (int64, error) {
 }
 
 func (s *Store) UpdateGroup(g NodeGroup) error {
-	_, err := s.db.Exec(`UPDATE node_groups SET name=?, description=?, sort_order=? WHERE id=?`,
-		g.Name, g.Description, g.SortOrder, g.ID)
+	_, err := s.db.Exec(`UPDATE node_groups SET name=?, description=?, is_ai=?, sort_order=? WHERE id=?`,
+		g.Name, g.Description, g.IsAI, g.SortOrder, g.ID)
 	return err
 }
 
@@ -263,7 +269,8 @@ func (s *Store) NodeGroupIDs(nodeID int64) ([]int64, error) {
 func (s *Store) SelfBuiltNodeGroupIDs(tag string) ([]int64, error) {
 	return queryInts(s.db, `SELECT m.group_id FROM nodes n
 		JOIN node_group_members m ON m.node_id = n.id
-		WHERE n.type='self_built' AND n.inbound_tag=?`, tag)
+		WHERE n.type='self_built' AND n.inbound_tag=?
+		  AND n.route_upstream_inbound_id=0 AND n.route_upstream_broken=0`, tag)
 }
 
 // ---- plan ↔ groups ----
@@ -330,10 +337,12 @@ func (s *Store) AccessibleGroupIDs(u *User) ([]int64, error) {
 type GroupedNode struct {
 	*Node
 	GroupID int64 `json:"group_id"`
+	IsAI    bool  `json:"is_ai"`
 }
 
 // NodesInGroupsTagged returns enabled nodes in any of groupIDs, each tagged with
-// the smallest matching group id (one row per node, deduped).
+// the smallest matching group id and whether any matching group is AI-marked
+// (one row per node, deduped).
 func (s *Store) NodesInGroupsTagged(groupIDs []int64) ([]GroupedNode, error) {
 	if len(groupIDs) == 0 {
 		return nil, nil
@@ -345,8 +354,9 @@ func (s *Store) NodesInGroupsTagged(groupIDs []int64) ([]GroupedNode, error) {
 		args[i] = g
 	}
 	in := strings.Join(ph, ",")
-	q := `SELECT ` + nodeColsPrefixed("n") + `, MIN(m.group_id) FROM nodes n
+	q := `SELECT ` + nodeColsPrefixed("n") + `, MIN(m.group_id), MAX(g.is_ai) FROM nodes n
 		JOIN node_group_members m ON m.node_id = n.id
+		JOIN node_groups g ON g.id = m.group_id
 		WHERE n.enabled = 1 AND m.group_id IN (` + in + `)
 		GROUP BY n.id
 		ORDER BY n.sort_order, n.id`
@@ -359,12 +369,15 @@ func (s *Store) NodesInGroupsTagged(groupIDs []int64) ([]GroupedNode, error) {
 	for rows.Next() {
 		var n Node
 		var gid int64
-		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.Protocol, &n.InboundTag, &n.ShareLink,
-			&n.SourceID, &n.Enabled, &n.SortOrder, &n.CreatedAt, &gid); err != nil {
+		var isAI bool
+		var routeBroken int
+		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.Protocol, &n.InboundTag, &n.RouteUpstreamInboundID, &routeBroken, &n.ShareLink,
+			&n.SourceID, &n.Enabled, &n.SortOrder, &n.CreatedAt, &gid, &isAI); err != nil {
 			return nil, err
 		}
+		n.RouteUpstreamBroken = routeBroken == 1
 		nn := n
-		out = append(out, GroupedNode{Node: &nn, GroupID: gid})
+		out = append(out, GroupedNode{Node: &nn, GroupID: gid, IsAI: isAI})
 	}
 	return out, rows.Err()
 }

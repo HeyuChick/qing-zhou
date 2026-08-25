@@ -46,6 +46,18 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		// these only decide when a bound user is nudged.
 		"notify_expiry_days":     "3",
 		"notify_traffic_percent": "20",
+		// Node restart-loop alert. A node that keeps restarting cuts every
+		// connection on it each time, so this watches for restarts nobody asked
+		// for: 5 within 30 minutes on one node, counting only the periodic sync
+		// pass (an admin editing config restarts nodes on purpose and is not
+		// counted). Recipients are the telegram_binds rows with notify_ops.
+		"alert_restart_enabled":    "true",
+		"alert_restart_window_min": "30",
+		"alert_restart_count":      "5",
+		// Extra Telegram chats for ops alerts (groups/channels the bot was added
+		// to), comma or newline separated. Unlike a bound account these are not
+		// verified, hence the test-message button beside the field.
+		"alert_ops_extra_chats": "",
 	}
 	for k, v := range defaults {
 		if err := s.setSettingIfAbsent(k, v); err != nil {

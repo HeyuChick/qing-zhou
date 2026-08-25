@@ -1,7 +1,12 @@
 <template>
   <div>
-    <h2 class="page-title">账户设置</h2>
-    <p class="page-sub">管理你的账户信息和安全</p>
+    <div class="page-head"><div><h2 class="page-title">账户设置</h2><p class="page-sub">身份信息、通知渠道、密码与登录设备集中管理</p></div></div>
+    <div class="resource-overview account-overview">
+      <div class="resource-metric"><b>{{ auth.user?.points || 0 }}</b><span>可用积分 · {{ yuan(auth.user?.points || 0) }}</span></div>
+      <div class="resource-metric" :class="auth.user?.email_verified ? 'success' : 'warn'"><b>{{ auth.user?.email_verified ? '已验证' : auth.user?.email ? '待验证' : '未绑定' }}</b><span>账户邮箱</span></div>
+      <div class="resource-metric" :class="tg.bound ? 'success' : ''"><b>{{ tg.bound ? '已绑定' : tg.enabled ? '可绑定' : '未启用' }}</b><span>Telegram 通知</span></div>
+      <div class="resource-metric"><b>{{ sessions.length }}</b><span>登录会话 · 可逐个退出</span></div>
+    </div>
 
     <!-- 基本信息 -->
     <n-card title="基本信息" size="small" style="margin-bottom:16px;">
@@ -244,6 +249,10 @@ onMounted(async () => {
 })
 onUnmounted(stopTgPoll)
 </script>
+
+<style scoped>
+.account-overview .resource-metric b { font-size:17px; }
+</style>
 
 <style scoped>
 .page-title { font-size: 21px; margin-bottom: 4px; }

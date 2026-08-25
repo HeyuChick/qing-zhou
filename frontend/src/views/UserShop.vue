@@ -1,7 +1,19 @@
 <template>
   <div>
-    <h2 class="page-title">积分商城</h2>
-    <p class="page-sub">当前积分：<strong>{{ auth.user?.points || 0 }}</strong> ({{ yuan(auth.user?.points || 0) }})</p>
+    <div class="shop-head">
+      <div>
+        <h2 class="page-title">积分商城</h2>
+        <p class="page-sub">套餐、流量与时长逐项对比，购买前明确知道所得内容</p>
+      </div>
+      <div class="balance-pill"><small>可用积分</small><b>{{ auth.user?.points || 0 }}</b><span>{{ yuan(auth.user?.points || 0) }}</span></div>
+    </div>
+    <div class="shop-summary">
+      <span><b>{{ packages.length }}</b> 件在售商品</span>
+      <span><b>{{ planCount }}</b> 个订阅计划</span>
+      <span><b>{{ trafficCount }}</b> 个流量包</span>
+      <span><b>{{ affordableCount }}</b> 件当前可购买</span>
+    </div>
+    <n-spin :show="loading">
     <div class="shop-grid">
       <div v-for="pkg in packages" :key="pkg.id" class="shop-card" :class="{ dim: !canAfford(pkg) }">
         <div class="sc-head">
@@ -54,12 +66,22 @@
         </div>
       </div>
     </div>
-    <n-empty v-if="packages.length===0" description="暂无可购买的商品" style="padding:60px 0;" />
+    <div v-if="!loading && packages.length===0" class="shop-empty">
+      <n-empty description="暂无可购买的商品">
+        <template #extra><n-button size="small" @click="loadPackages">重新加载</n-button></template>
+      </n-empty>
+      <div class="empty-guide">
+        <span><b>套餐</b><small>同时包含流量与有效期</small></span>
+        <span><b>流量包</b><small>为账户追加独立流量额度</small></span>
+        <span><b>购买记录</b><small>商品上架后会在这里逐项对比</small></span>
+      </div>
+    </div>
+    </n-spin>
   </div>
 </template>
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { NButton, NEmpty, useMessage, useDialog } from 'naive-ui'
+import { ref, computed, onMounted } from 'vue'
+import { NButton, NEmpty, NSpin, useMessage, useDialog } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { apiList, apiPost } from '@/api'
 import { fmtTotal, yuan } from '@/utils/format'
@@ -67,7 +89,11 @@ const auth = useAuthStore()
 const message = useMessage()
 const dialog = useDialog()
 const packages = ref<any[]>([])
+const loading = ref(false)
 const buying = ref<number|null>(null)
+const planCount = computed(() => packages.value.filter(p => p.type === 'plan').length)
+const trafficCount = computed(() => packages.value.filter(p => p.type === 'traffic').length)
+const affordableCount = computed(() => packages.value.filter(p => canAfford(p) && p.stock !== 0).length)
 // Package ids the user already has an ACTIVE plan bucket for — buying one of
 // these again queues behind the current份 instead of stacking, so we set that
 // expectation on the card and in the confirm/success copy.
@@ -161,18 +187,35 @@ function handleBuy(pkg: any) {
       catch (e: any) { message.error(e.message) } finally { buying.value = null }
     } })
 }
-onMounted(async () => {
+async function loadPackages() {
+  loading.value = true
   try {
     packages.value = await apiList('/api/user/packages')
     // 默认选中第一档，卡片一进来就有一档是高亮的
     for (const p of packages.value) if (p.options?.length) chosenDays.value[p.id] = p.options[0].days
-  } catch {}
+  } catch (e: any) { message.error(e.message || '商品加载失败') }
+  finally { loading.value = false }
+}
+onMounted(async () => {
+  await loadPackages()
   loadHeld()
 })
 </script>
 <style scoped>
-.page-title { font-size: 21px; margin-bottom: 4px; }
-.page-sub { color: var(--text-2); margin-bottom: 22px; }
+.shop-head { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:16px; }
+.shop-head .page-sub { margin-bottom:0; }
+.balance-pill { display:grid; grid-template-columns:auto auto; align-items:baseline; gap:0 8px; min-width:156px; padding:10px 13px; border:1px solid var(--border); border-radius:12px; background:var(--card); box-shadow:var(--shadow-xs); text-align:right; }
+.balance-pill small { grid-column:1 / -1; color:var(--text-3); font-size:10.5px; }
+.balance-pill b { color:var(--text); font-size:20px; font-variant-numeric:tabular-nums; }
+.balance-pill span { color:var(--text-3); font-size:11.5px; }
+.shop-summary { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+.shop-summary span { padding:6px 10px; border:1px solid var(--border); border-radius:999px; background:var(--bg-soft); color:var(--text-3); font-size:11.5px; }
+.shop-summary b { color:var(--text-2); }
+.shop-empty { max-width:760px; margin:54px auto 0; padding:34px 30px 22px; border:1px solid var(--border); border-radius:16px; background:var(--card); box-shadow:var(--shadow-sm); }
+.empty-guide { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:24px; padding-top:16px; border-top:1px solid var(--border); }
+.empty-guide span { display:flex; flex-direction:column; padding:6px 9px; }
+.empty-guide b { color:var(--text-2); font-size:12px; }
+.empty-guide small { margin-top:2px; color:var(--text-3); font-size:10.5px; line-height:1.5; }
 
 .shop-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
 
@@ -268,6 +311,12 @@ onMounted(async () => {
   border-radius: 999px;
   color: #fff;
   background: var(--accent-strong);
+}
+@media (max-width: 560px) {
+  .shop-head { align-items:stretch; flex-direction:column; }
+  .balance-pill { text-align:left; align-self:flex-start; }
+  .shop-empty { margin-top:26px; padding:28px 18px 18px; }
+  .empty-guide { grid-template-columns:1fr; }
 }
 
 .sc-specs {

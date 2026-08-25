@@ -385,6 +385,59 @@ func (a *API) handleAdminDeleteUserPlan(w http.ResponseWriter, r *http.Request) 
 	ok(w, J{"deleted": pid, "name": b.Name, "kind": b.Kind})
 }
 
+// POST /api/admin/users/{id}/plans/{planID}/traffic {delta_bytes} — add or
+// subtract quota on one of a user's份. Not a refund and not a purchase: the
+// order row and the points ledger stay put. Use this to correct a mis-grant or
+// to gift extra traffic on an existing份; to take a queued/unused份 back
+// wholesale, DELETE the plan instead (its unused quota goes with it).
+func (a *API) handleAdminAdjustUserPlanTraffic(w http.ResponseWriter, r *http.Request) {
+	uid := atoi(chi.URLParam(r, "id"))
+	pid := atoi(chi.URLParam(r, "planID"))
+	if uid <= 0 || pid <= 0 {
+		fail(w, http.StatusBadRequest, "无效的参数")
+		return
+	}
+	var req struct {
+		DeltaBytes int64 `json:"delta_bytes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if !a.st.UserExists(uid) {
+		fail(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	b, err := a.st.AdjustBucketTraffic(uid, pid, req.DeltaBytes)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrBucketNotFound):
+			fail(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, store.ErrBucketProtected),
+			errors.Is(err, store.ErrZeroDelta),
+			errors.Is(err, store.ErrBucketUnlimited),
+			errors.Is(err, store.ErrTrafficFloor),
+			errors.Is(err, store.ErrBucketFinished):
+			fail(w, http.StatusBadRequest, err.Error())
+		default:
+			fail(w, http.StatusInternalServerError, "调整失败")
+		}
+		return
+	}
+	// Adding traffic can bring an exhausted份 back online; subtracting can
+	// exhaust the head and promote the next queued one. Either way the cached
+	// link list and the node config have to catch up.
+	a.invalidateLinks(uid)
+	a.sbRebuildLog()
+	ok(w, J{
+		"id":            b.ID,
+		"name":          b.Name,
+		"kind":          b.Kind,
+		"traffic_limit": b.TrafficLimit,
+		"used":          b.Used(),
+	})
+}
+
 // DELETE /api/admin/orders/{id} — purge an order record. Only allowed for
 // orphaned orders (the user has been deleted); active users' orders should be
 // refunded, not silently dropped.

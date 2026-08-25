@@ -16,23 +16,37 @@
       </n-space>
     </div>
 
+    <div class="sub-summary" aria-label="订阅状态摘要">
+      <div class="sub-stat"><span>生效套餐</span><b>{{ activePlanCount }}</b><small>排队 {{ queuedPlanCount }} 份</small></div>
+      <div class="sub-stat"><span>可用节点</span><b>{{ enabledNodeCount }} / {{ nodes.length }}</b><small>禁用 {{ disabledNodeCount }} 个</small></div>
+      <div class="sub-stat"><span>代理入口</span><b>{{ proxies.length }}</b><small>HTTP / SOCKS5 / HTTPS</small></div>
+      <div class="sub-stat"><span>订阅状态</span><b>{{ sub.url ? '已就绪' : '未生成' }}</b><small>{{ sub.url ? '支持 4 种导入格式' : '购买或分配套餐后生成' }}</small></div>
+    </div>
+
     <!-- 订阅链接 -->
-    <n-card size="small" class="sec">
-      <template #header><span class="sec-title">订阅链接</span></template>
+    <n-card size="small" class="sec sub-link-card">
+      <template #header>
+        <span class="sec-title">订阅链接</span>
+        <span class="sec-caption">复制后导入客户端，地址包含访问凭据，请勿公开分享</span>
+      </template>
       <n-input-group>
         <n-input :value="sub.url" readonly placeholder="暂无订阅" />
         <n-button type="primary" @click="copy(sub.url)">复制</n-button>
       </n-input-group>
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
-        <n-button size="small" @click="copy(sub.formats?.clash)">Clash</n-button>
-        <n-button size="small" @click="copy(sub.formats?.singbox)">sing-box</n-button>
-        <n-button size="small" @click="copy(sub.formats?.surge)">Surge</n-button>
+      <div class="sub-action-row">
+        <span class="sub-action-label">导入格式</span>
+        <n-button size="small" secondary @click="copy(sub.formats?.clash)">Clash</n-button>
+        <n-button size="small" secondary @click="copy(sub.formats?.singbox)">sing-box</n-button>
+        <n-button size="small" secondary @click="copy(sub.formats?.surge)">Surge</n-button>
         <!-- formats.base64, not formats.default: default has no ?format= and so
              picks its output from the client's User-Agent, which silently hands
              YAML to anything whose UA contains "clash". This button is for
              v2rayN / NekoBox / Shadowrocket, so it must pin the link list. -->
-        <n-button size="small" @click="copy(sub.formats?.base64 || sub.formats?.default)">通用 / v2rayN</n-button>
+        <n-button size="small" secondary @click="copy(sub.formats?.base64 || sub.formats?.default)">通用 / v2rayN</n-button>
         <n-button size="small" @click="showQr=!showQr">{{ showQr?'隐藏':'显示' }}二维码</n-button>
+      </div>
+      <div class="sub-action-row safety">
+        <span class="sub-action-label">安全操作</span>
         <!-- 两个按钮代价完全不同，分开呈现：换地址是纯面板操作、立即生效、不影响
              任何人；换凭据要同步到每个节点才生效，因此默认禁用 + 30 天冷却。 -->
         <n-button size="small" type="warning" @click="handleResetSub">更换订阅地址</n-button>
@@ -46,7 +60,7 @@
           该功能暂时禁用，有需要请联系管理员
         </n-tooltip>
       </div>
-      <div style="margin-top:8px;font-size:11px;color:var(--text-3);line-height:1.6;">
+      <div class="sub-security-note">
         订阅地址泄露时用「更换订阅地址」：旧地址立即失效，无需重启节点。
         注意它不会使已经导出的节点失效——那需要「重置节点凭据」。
       </div>
@@ -72,7 +86,7 @@
               <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ line.name }}</span>
               <n-tag :type="planStatus(line.segs[0]).type" size="small" bordered>{{ planStatus(line.segs[0]).label }}</n-tag>
             </div>
-            <n-progress v-if="line.segs[0].status !== 'queued'" type="line" :percentage="planPct(line.segs[0])" :color="planPct(line.segs[0])>90?'#c2685c':'#6f8f76'" />
+            <n-progress v-if="line.segs[0].status !== 'queued'" type="line" :percentage="planPct(line.segs[0])" :color="planPct(line.segs[0])>90?'#b6413a':'#4f8366'" />
             <div v-else class="pl-stripe"></div>
             <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-3);margin-top:4px;gap:8px;">
               <span>{{ segUsage(line.segs[0]) }}</span>
@@ -103,7 +117,7 @@
                   <n-tag :type="planStatus(p).type" size="tiny" bordered>{{ planStatus(p).label }}</n-tag>
                 </div>
                 <n-progress v-if="p.status !== 'queued'" type="line" :percentage="planPct(p)" :height="5"
-                            :color="planPct(p)>90?'#c2685c':'#6f8f76'" />
+                            :color="planPct(p)>90?'#b6413a':'#4f8366'" />
                 <div v-else class="pl-stripe"></div>
                 <div class="pl-use">{{ segUsage(p) }}</div>
               </div>
@@ -315,7 +329,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NInput, NInputGroup, NButton, NDataTable, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, NProgress, NIcon, useMessage, useDialog } from 'naive-ui'
+import { NCard, NInput, NInputGroup, NButton, NDataTable, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, NProgress, NIcon, NEmpty, useMessage, useDialog } from 'naive-ui'
 import { SpeedometerOutline } from '@vicons/ionicons5'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { useAuthStore } from '@/stores/auth'
@@ -333,6 +347,10 @@ const proxies = ref<any[]>([])
 const nodes = ref<any[]>([])
 // 我的套餐：后端按套餐独立计量（可能多份并存、含排队份），全部列出，不合并
 const plans = ref<any[]>([])
+const activePlanCount = computed(() => plans.value.filter(p => p.status === 'active').length)
+const queuedPlanCount = computed(() => plans.value.filter(p => p.status === 'queued').length)
+const enabledNodeCount = computed(() => nodes.value.filter(n => !n.disabled).length)
+const disabledNodeCount = computed(() => nodes.value.filter(n => n.disabled).length)
 // Read: 使用中 first, then 排队中 (by soonest activation), then finished — so the
 // current份 and what's next are always at the top.
 const sortedPlans = computed<any[]>(() => {
@@ -759,6 +777,15 @@ onMounted(async () => {
 .sub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
 .sec { margin-bottom: 16px; border-radius: var(--r-sm); }
 .sec-title { font-weight: 650; font-size: 14px; }
+.sec-caption { margin-left: 10px; color: var(--text-3); font-size: 11.5px; font-weight: 400; }
+.sub-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.sub-stat { min-width: 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--shadow-sm); }
+.sub-stat span, .sub-stat small { display: block; color: var(--text-3); font-size: 11px; }
+.sub-stat b { display: block; margin: 3px 0 2px; color: var(--text); font-size: 18px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.sub-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
+.sub-action-row.safety { padding-top: 10px; border-top: 1px solid var(--border); }
+.sub-action-label { width: 58px; flex: 0 0 58px; color: var(--text-3); font-size: 11px; }
+.sub-security-note { margin: 8px 0 0 65px; color: var(--text-3); font-size: 11px; line-height: 1.65; }
 .plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
 .plan-row { padding: 12px; background: var(--bg-soft); border-radius: 10px; min-width: 0; }
 .plan-row.queued { opacity: .72; border: 1px dashed var(--border); background: transparent; }
@@ -825,6 +852,13 @@ onMounted(async () => {
 .ngrp-head { display: flex; align-items: center; gap: 8px; padding: 0 2px 6px; }
 .ngrp-name { font-weight: 650; font-size: 13px; }
 .ngrp-meta { font-size: 11px; color: var(--text-3); }
+@media (max-width: 900px) { .sub-summary { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) {
+  .sub-summary { grid-template-columns: 1fr; }
+  .sub-action-label { width: 100%; flex-basis: 100%; }
+  .sub-security-note { margin-left: 0; }
+  .sec-caption { display: block; margin: 3px 0 0; }
+}
 </style>
 
 <!--

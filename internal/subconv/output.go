@@ -42,7 +42,7 @@ func NormalizeFormat(f string) string {
 // Matching only the string "sing-box" therefore missed the entire first-party
 // client family: they were served the base64 link list, so they got working
 // nodes but none of the config that makes the sing-box format worth choosing —
-// no fake-ip DNS, no CN/ads rule-sets, no url-test groups. Since the panel
+// no fake-ip DNS, no CN/ads rule-sets, and no generated policy groups. Since the panel
 // advertises UA-based format selection, that read as the feature not working.
 //
 // Matched as a prefix, not a substring: "SFI" is three letters and would
@@ -81,31 +81,30 @@ func Base64(links []string) string {
 }
 
 // Render produces a subscription body for the given format. clashTpl/singboxTpl
-// may be empty to use the built-in anti-leak templates. groups maps a share link
-// to the panel node-group it belongs to (drives the per-group auto-select
-// groups); may be nil. subURL, if set, is the subscription's own URL (used by
-// Surge's MANAGED-CONFIG auto-update header).
-func Render(format string, links []string, groups map[string]string, clashTpl, singboxTpl, subURL string) (body string, contentType string, err error) {
+// may be empty to use the built-in anti-leak templates. aiNodes marks links
+// belonging to at least one accessible admin-marked AI group; it may be nil.
+// subURL, if set, is the subscription's own URL (used by Surge's MANAGED-CONFIG
+// auto-update header).
+func Render(format string, links []string, aiNodes map[string]bool, clashTpl, singboxTpl, subURL string) (body string, contentType string, err error) {
 	switch NormalizeFormat(format) {
 	case FormatClash:
-		out, e := Clash(parseWithGroups(links, groups), clashTpl)
+		out, e := Clash(parseWithAI(links, aiNodes), clashTpl)
 		return out, "text/yaml; charset=utf-8", e
 	case FormatSingbox:
-		out, e := Singbox(parseWithGroups(links, groups), singboxTpl)
+		out, e := Singbox(parseWithAI(links, aiNodes), singboxTpl)
 		return out, "application/json; charset=utf-8", e
 	case FormatSurge:
-		return Surge(parseWithGroups(links, groups), subURL), "text/plain; charset=utf-8", nil
+		return Surge(parseWithAI(links, aiNodes), subURL), "text/plain; charset=utf-8", nil
 	default:
 		return Base64(links), "text/plain; charset=utf-8", nil
 	}
 }
 
-// parseWithGroups parses links and tags each proxy with its panel node-group.
-func parseWithGroups(links []string, groups map[string]string) []*Proxy {
+func parseWithAI(links []string, aiNodes map[string]bool) []*Proxy {
 	ps := ParseLinks(links)
-	if len(groups) > 0 {
+	if len(aiNodes) > 0 {
 		for _, p := range ps {
-			p.Group = groups[p.Raw]
+			p.AI = aiNodes[p.Raw]
 		}
 	}
 	return ps
@@ -145,9 +144,9 @@ ipv6: true
 profile:
   store-selected: true
   store-fake-ip: true
-# Measure latency consistently (excluding the initial handshake) so the url-test
-# groups compare nodes on equal terms. Only matters because the rendered config
-# has url-test auto-groups; a single-node user gains nothing.
+# Measure health checks consistently (excluding the initial handshake) so the
+# generated fallback policies compare nodes on equal terms. A single-node user
+# gains nothing.
 #
 # Deliberately NOT setting tcp-concurrent here, though it is commonly paired
 # with the above: it races connections across the several IPs a hostname
@@ -364,10 +363,10 @@ rules:
   - GEOIP,private,DIRECT,no-resolve
 `
 
-// DefaultSingboxTemplate carries the sing-box anti-leak dns+route with built-in
-// routing: CN domains resolve via local DNS and go direct, ads are rejected,
-// everything else is fake-ip'd through the proxy. Rule-sets are fetched once and
-// cached.
+// DefaultSingboxTemplate carries the sing-box anti-leak dns+route. Ads are
+// rejected and LAN traffic stays direct; all public traffic, including CN
+// destinations, otherwise falls through to the proxy. Rule-sets are fetched
+// once and cached.
 //
 // Targets sing-box ≥1.12. The DNS block uses the typed server format that 1.12
 // introduced and that 1.14 makes mandatory — the legacy `address` strings this
@@ -389,7 +388,6 @@ const DefaultSingboxTemplate = `{
       {"tag": "fake", "type": "fakeip", "inet4_range": "198.18.0.0/15", "inet6_range": "fc00::/18"}
     ],
     "rules": [
-      {"rule_set": "geosite-cn", "server": "local"},
       {"query_type": ["A", "AAAA"], "server": "fake"}
     ],
     "independent_cache": true,
@@ -403,16 +401,11 @@ const DefaultSingboxTemplate = `{
       {"action": "sniff"},
       {"protocol": "dns", "action": "hijack-dns"},
       {"rule_set": "geosite-ads", "action": "reject"},
-      {"ip_is_private": true, "outbound": "direct"},
-      {"rule_set": ["geoip-cn", "geosite-cn"], "outbound": "direct"}
+      {"ip_is_private": true, "outbound": "direct"}
     ],
     "rule_set": [
       {"type": "remote", "tag": "geosite-ads", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs"},
-      {"type": "remote", "tag": "geosite-cn", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs"},
-      {"type": "remote", "tag": "geoip-cn", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"}
+       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs"}
     ]
   },
   "experimental": {

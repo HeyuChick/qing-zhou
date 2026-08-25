@@ -477,10 +477,12 @@ const KindFree = "free"
 const WelcomePackageID = -1
 
 // HasLivePaidPlan reports whether the user holds a purchased or admin-assigned
-// plan that is still in play (active or queued). The signup grant
-// (WelcomePackageID = -1) and the free-group bucket do not count — those are
-// minted for every provisioned account and must not punch a hole in the
-// email-verify subscription gate.
+// plan that is still in play (active or queued). Used by the email-verify
+// subscription gate: a live paid plan is a real entitlement and must release
+// the nodes that plan unlocks, even if the verify mail is unclicked. The
+// signup grant (WelcomePackageID = -1) and the free-group bucket do not
+// count — those are minted for every provisioned account and must not punch
+// a hole in the gate by themselves.
 func (s *Store) HasLivePaidPlan(userID int64) (bool, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM user_plans
@@ -777,15 +779,33 @@ var (
 	// re-route free-group traffic onto the paid pool (the very coupling it exists
 	// to break), so it is not removable.
 	ErrBucketProtected = errors.New("该额度是系统内部计量身份，不能移除")
+	// ErrZeroDelta — an adjust of 0 bytes is a no-op the admin almost certainly
+	// did not mean to submit.
+	ErrZeroDelta = errors.New("调整量不能为 0")
+	// ErrBucketUnlimited — a plan bucket with traffic_limit=0 is uncapped; there
+	// is no finite number to grow or shrink. (An empty pool is different: its 0
+	// is "no balance", and adding is how it gets one.)
+	ErrBucketUnlimited = errors.New("不限量套餐无法按字节调整")
+	// ErrTrafficFloor — subtracting would drop the limit below what has already
+	// been used (or below zero). Used bytes cannot be un-spent this way; reset
+	// the counters first if that is the intent.
+	ErrTrafficFloor = errors.New("扣减后额度会低于已用流量")
+	// ErrBucketFinished — a retired or time-expired份 will never spend again.
+	// Growing its limit would inflate the users.* mirror without giving the user
+	// anything they can actually use. Top up the live/queued份, or grant a new one.
+	ErrBucketFinished = errors.New("已结束的套餐无法调整流量，请调整使用中或排队中的份")
 )
 
 // DeleteBucket removes one of a user's buckets — an admin pulling back a plan份
 // or the traffic pool. Returns the removed bucket so the caller can report what
 // went.
 //
-// This is a revocation, not a refund: no points are returned and the order row
-// (if any) stays as it was. Refunding is ListOrders → RefundOrder, which reverses
-// exactly one order's entitlement and gives the points back.
+// The bucket's quota goes with it. A queued (not-yet-active)份 has never been
+// spendable, so deleting it is a full claw-back of that purchase's traffic; an
+// active份 takes its remaining unused quota with it. This is a revocation, not a
+// refund: no points are returned and the order row (if any) stays as it was.
+// Refunding is ListOrders → RefundOrder, which reverses exactly one order's
+// entitlement and gives the points back.
 //
 // Removing the active head of a package queue frees the slot, so advanceUserQueues
 // promotes the next queued份 in the same transaction — otherwise a user whose
@@ -832,12 +852,97 @@ func (s *Store) DeleteBucket(userID, bucketID int64) (*Bucket, error) {
 	return b, nil
 }
 
+// AdjustBucketTraffic adds (delta>0) or subtracts (delta<0) bytes from one
+// bucket's traffic_limit. Returns the bucket after the change.
+//
+// This is the admin "流量调整" counterpart of AdjustPoints: a gift or a claw-back
+// that does not touch the order row or the points ledger. The free bucket is
+// protected (same reason as DeleteBucket). An uncapped plan (limit==0) has no
+// finite number to grow or shrink; an empty pool does, and adding is how it
+// gets a balance. The new limit is never allowed below what has already been
+// used — spent traffic cannot be un-spent here.
+//
+// Shrinking an active head onto (or below) its used bytes exhausts it, so
+// advanceUserQueues runs in the same transaction and promotes the next queued
+// same-package份 — otherwise the user would sit over-quota with a paid份 waiting
+// until the periodic ticker noticed.
+func (s *Store) AdjustBucketTraffic(userID, bucketID, delta int64) (*Bucket, error) {
+	if delta == 0 {
+		return nil, ErrZeroDelta
+	}
+	now := time.Now().Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	b, err := scanBucket(tx.QueryRow(`SELECT `+bucketCols+bucketFrom+` WHERE p.id=? AND p.user_id=?`, bucketID, userID))
+	if err != nil {
+		return nil, err
+	}
+	if b == nil {
+		return nil, ErrBucketNotFound
+	}
+	if b.Kind == KindFree {
+		return nil, ErrBucketProtected
+	}
+	// Retired heads have already handed the slot to the next份. Time-expired
+	// plans will not come back online just because the number got bigger.
+	// A still-active exhausted head is different: adding quota is how it
+	// returns to service when nothing is queued behind it.
+	if b.Status == StatusRetired || (b.Kind == "plan" && !b.NotExpired(now)) {
+		return nil, ErrBucketFinished
+	}
+	// A plan with limit 0 is uncapped. A pool with limit 0 is empty — adding
+	// is the whole point of adjusting it.
+	if b.TrafficLimit == 0 && b.Kind != "pool" {
+		return nil, ErrBucketUnlimited
+	}
+	newLimit := b.TrafficLimit + delta
+	if newLimit < b.Used() || newLimit < 0 {
+		return nil, ErrTrafficFloor
+	}
+	if _, err := tx.Exec(`UPDATE user_plans SET traffic_limit=?, updated_at=? WHERE id=? AND user_id=?`,
+		newLimit, now, bucketID, userID); err != nil {
+		return nil, err
+	}
+	if _, err := advanceUserQueues(tx, userID, now); err != nil {
+		return nil, err
+	}
+	if _, _, _, _, err := recomputeUserAggregate(tx, userID, now); err != nil {
+		return nil, err
+	}
+	updated, err := scanBucket(tx.QueryRow(`SELECT `+bucketCols+bucketFrom+` WHERE p.id=? AND p.user_id=?`, bucketID, userID))
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		// Promotion of a different份 does not delete this one; a missing row here
+		// means the UPDATE targeted nothing, which the earlier read already ruled out.
+		return nil, ErrBucketNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
+	return updated, nil
+}
+
 // BucketByClientName resolves a sing-box stats identity to its bucket.
 //
 // A whole subscription line shares one name, so this has to pick the same份
 // resolveStatsIdentity would — the one in service — rather than whichever row the
 // query happened to return first.
 func (s *Store) BucketByClientName(name string) (*Bucket, error) {
+	if base, ok := baseRouteIdentity(name); ok {
+		name = base
+	}
 	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+bucketFrom+`
 		WHERE COALESCE(i.client_name, p.client_name)=?
 		ORDER BY `+usableExpr("p")+` DESC, p.id DESC
@@ -974,6 +1079,9 @@ func (s *Store) AddBucketUsage(statName string, up, down int64) error {
 	if statName == "" || (up == 0 && down == 0) {
 		return nil
 	}
+	if base, ok := baseRouteIdentity(statName); ok {
+		statName = base
+	}
 	now := time.Now().Unix()
 	// One transaction: the bucket counter, the mirrored user aggregate, and the
 	// time-series sample must all land together (they may otherwise run on
@@ -1031,6 +1139,20 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 	if len(deltas) == 0 {
 		return 0, nil
 	}
+	// Several logical routes can share one physical inbound. Their auth_user
+	// names carry a reversible node suffix; merge them back into the underlying
+	// bucket/account identity before resolving and writing usage.
+	canonical := make(map[string]UsageDelta, len(deltas))
+	for name, d := range deltas {
+		if base, ok := baseRouteIdentity(name); ok {
+			name = base
+		}
+		cur := canonical[name]
+		cur.Up += d.Up
+		cur.Down += d.Down
+		canonical[name] = cur
+	}
+	deltas = canonical
 	// Before the write lock, not under it: account-level identities need the
 	// owner's whole bucket order to know which份 they spend.
 	acctTargets, acctErr := s.accountTargets(deltas)

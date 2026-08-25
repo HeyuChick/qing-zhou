@@ -1,6 +1,7 @@
 <template>
   <div>
     <h2 class="page-title">在线更新</h2>
+    <p class="page-sub">检查版本、查看发布说明、安装指定版本与离线回滚</p>
 
     <n-spin :show="loading">
       <!-- 版本概览 -->

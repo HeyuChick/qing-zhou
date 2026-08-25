@@ -20,18 +20,24 @@ type TelegramBind struct {
 	FirstName     string
 	NotifyExpiry  bool
 	NotifyTraffic bool
-	BoundAt       int64
-	LastChatAt    int64
+	// NotifyOps receives operations alerts (a node restarting in a loop). Any
+	// account may hold it, admin or not — the extra-chats setting can reach any
+	// chat anyway, so restricting this one to admins would only be for show. It
+	// is set by an admin though, never by the recipient: the messages name nodes
+	// and how badly they are failing.
+	NotifyOps  bool
+	BoundAt    int64
+	LastChatAt int64
 }
 
 const telegramBindCols = `user_id, telegram_id, chat_id, username, first_name,
-	notify_expiry, notify_traffic, bound_at, last_chat_at`
+	notify_expiry, notify_traffic, notify_ops, bound_at, last_chat_at`
 
 func scanTelegramBind(sc scanner) (*TelegramBind, error) {
 	var b TelegramBind
-	var expiry, traffic int
+	var expiry, traffic, ops int
 	err := sc.Scan(&b.UserID, &b.TelegramID, &b.ChatID, &b.Username, &b.FirstName,
-		&expiry, &traffic, &b.BoundAt, &b.LastChatAt)
+		&expiry, &traffic, &ops, &b.BoundAt, &b.LastChatAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -40,6 +46,7 @@ func scanTelegramBind(sc scanner) (*TelegramBind, error) {
 	}
 	b.NotifyExpiry = expiry != 0
 	b.NotifyTraffic = traffic != 0
+	b.NotifyOps = ops != 0
 	return &b, nil
 }
 
@@ -251,4 +258,99 @@ func (s *Store) ClearNotify(userID int64, kind, subject string) error {
 	_, err := s.db.Exec(`DELETE FROM user_notify_log WHERE user_id=? AND kind=? AND subject=?`,
 		userID, kind, subject)
 	return err
+}
+
+// SetTelegramNotifyOps turns ops alerts on or off for one bound account.
+// Returns false when the user has no binding, which is the only way to say
+// "this recipient cannot be reached" without inventing a row for them.
+func (s *Store) SetTelegramNotifyOps(userID int64, on bool) (bool, error) {
+	v := 0
+	if on {
+		v = 1
+	}
+	res, err := s.db.Exec(`UPDATE telegram_binds SET notify_ops=? WHERE user_id=?`, v, userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// OpsRecipient is one account that receives operations alerts.
+type OpsRecipient struct {
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username"`
+	IsAdmin  bool   `json:"is_admin"`
+	ChatID   int64  `json:"chat_id"`
+	TGName   string `json:"tg_name"`
+}
+
+// ListOpsRecipients returns the bound accounts flagged for ops alerts, joined to
+// their panel user so the settings page can show who they are.
+//
+// Banned accounts are excluded: whatever got them banned, they should not keep
+// receiving a live feed of which nodes are failing.
+func (s *Store) ListOpsRecipients() ([]OpsRecipient, error) {
+	rows, err := s.db.Query(`SELECT b.user_id, u.username, u.role, b.chat_id, b.username, b.first_name
+		FROM telegram_binds b JOIN users u ON u.id=b.user_id
+		WHERE b.notify_ops=1 AND u.status!='banned'
+		ORDER BY u.username`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OpsRecipient
+	for rows.Next() {
+		var r OpsRecipient
+		var role, tgUser, tgFirst string
+		if err := rows.Scan(&r.UserID, &r.Username, &role, &r.ChatID, &tgUser, &tgFirst); err != nil {
+			return nil, err
+		}
+		r.IsAdmin = role == "admin"
+		r.TGName = tgUser
+		if r.TGName == "" {
+			r.TGName = tgFirst
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// OpsCandidate is one bound account the admin may pick as an ops recipient,
+// with whether it is currently picked.
+type OpsCandidate struct {
+	OpsRecipient
+	On bool `json:"on"`
+}
+
+// ListOpsCandidates returns every bound, non-banned account. The picker offers
+// all of them, not only administrators: the recipient of a "node X is flapping"
+// message may well be someone who runs the servers without holding a panel
+// login, and the extra-chats field can reach any chat regardless.
+func (s *Store) ListOpsCandidates() ([]OpsCandidate, error) {
+	rows, err := s.db.Query(`SELECT b.user_id, u.username, u.role, b.chat_id, b.username, b.first_name, b.notify_ops
+		FROM telegram_binds b JOIN users u ON u.id=b.user_id
+		WHERE u.status!='banned'
+		ORDER BY b.notify_ops DESC, u.username`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OpsCandidate
+	for rows.Next() {
+		var c OpsCandidate
+		var role, tgUser, tgFirst string
+		var on int
+		if err := rows.Scan(&c.UserID, &c.Username, &role, &c.ChatID, &tgUser, &tgFirst, &on); err != nil {
+			return nil, err
+		}
+		c.IsAdmin = role == "admin"
+		c.TGName = tgUser
+		if c.TGName == "" {
+			c.TGName = tgFirst
+		}
+		c.On = on != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }

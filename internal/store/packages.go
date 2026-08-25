@@ -109,6 +109,15 @@ func (p *Package) applyDefaultOption() {
 // for this package — an edited package, or a client posting an arbitrary length.
 var ErrOptionNotFound = errors.New("所选时长不可用")
 
+// MaxAdminAssignDays bounds a free-form admin grant. Shop purchases stay limited
+// to published options; this only stops a typo minting a multi-millennium bucket.
+// A listed option may still exceed it — the admin is picking a published length.
+const MaxAdminAssignDays int64 = 3650
+
+// ErrInvalidAssignDays is a negative or too-large custom duration on an admin
+// grant. 0 still means "the package default" and is not this error.
+var ErrInvalidAssignDays = errors.New("分配天数须在 1–3650 之间")
+
 // forDuration returns the package as it should be charged and granted for the
 // chosen duration: a copy whose price/traffic/duration are the selected option's.
 // days == 0 means "the default" (the first option, or the package itself when it
@@ -135,6 +144,34 @@ func (p *Package) forDuration(days int64) (*Package, error) {
 		}
 	}
 	return nil, ErrOptionNotFound
+}
+
+// forAdminDuration is the admin-grant counterpart of forDuration. A listed
+// length still carries that option's traffic; any other positive length clones
+// the default option and only overrides DurationDays. Traffic packages have no
+// duration (they top up the pool), so any days value collapses to the default.
+// The shop must keep using forDuration — selling an unpublished length would
+// bypass the price table.
+func (p *Package) forAdminDuration(days int64) (*Package, error) {
+	if days < 0 {
+		return nil, ErrInvalidAssignDays
+	}
+	if p.Type != "plan" {
+		return p.forDuration(0)
+	}
+	if eff, err := p.forDuration(days); err == nil {
+		return eff, nil
+	}
+	if days > MaxAdminAssignDays {
+		return nil, ErrInvalidAssignDays
+	}
+	base, err := p.forDuration(0)
+	if err != nil {
+		return nil, err
+	}
+	eff := *base
+	eff.DurationDays = days
+	return &eff, nil
 }
 
 // decodeHighlights parses the stored JSON array of selling points. A blank value

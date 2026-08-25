@@ -43,7 +43,7 @@ func TestNodeNameCannotTakeReservedTag(t *testing.T) {
 // into its proxy map, and the selector names are built by the renderer itself —
 // a node claiming one is a duplicate-name error on the whole YAML.
 func TestClashNodeNameCannotTakeReservedTag(t *testing.T) {
-	for _, name := range []string{"DIRECT", "REJECT", grpSelectClash, grpAutoClash} {
+	for _, name := range []string{"DIRECT", "REJECT", grpSelectClash, grpFixedClash, grpFallbackClash, grpAIClash} {
 		y, err := Clash(ParseLinks([]string{"trojan://pw@1.2.3.4:443?sni=a.com#" + name}), "")
 		if err != nil {
 			t.Fatalf("name=%q: %v", name, err)

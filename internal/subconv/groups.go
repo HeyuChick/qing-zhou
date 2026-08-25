@@ -2,54 +2,86 @@ package subconv
 
 import "fmt"
 
-// Outbound-group naming. These are referenced by both the Clash and sing-box
-// renderers and by the default templates' routing rules, so they must stay in
-// sync. The primary group is what routing rules ultimately point traffic at.
-// Note: group names use BMP symbols (✈️ ♻️ ⚡), not supplementary-plane emoji
-// like 🚀/🔒 — yaml.v3 escapes the latter to \U0001F680, which is ugly and may
-// trip non-mihomo Clash parsers.
+// Built-in policy names. The top-level selector is the stable target used by
+// routing rules. Fixed keeps the user's explicit node choice; fallback follows
+// node order and changes only when the current node is unavailable; AI contains
+// only nodes that belong to an admin-marked AI group.
 const (
-	grpSelectClash = "✈️ 节点选择" // Clash primary selector (rules MATCH this)
-	grpAutoClash   = "♻️ 自动选择" // Clash global url-test (best IP + protocol)
-	tagProxy       = "proxy"    // sing-box primary selector (route.final points here)
-	tagAuto        = "auto"     // sing-box global url-test
+	grpSelectClash   = "✈️ 节点选择"
+	grpFixedClash    = "◎ 固定节点"
+	grpFallbackClash = "⚡ 故障转移"
+	grpAIClash       = "★ AI 节点"
+	legacyAutoClash  = "♻️ 自动选择"
+
+	tagProxy    = "proxy" // sing-box route.final points here
+	tagFixed    = "fixed"
+	tagFallback = "fallback"
+	tagAI       = "ai"
 )
 
 const urltestURL = "http://www.gstatic.com/generate_204"
 
-// nodeGroup is a per-panel-group auto-select (url-test) group. Its name is the
-// admin's own node-group name (reused verbatim), so the client shows the same
-// groups the admin organised in the panel instead of a raw server IP.
-type nodeGroup struct {
-	name  string   // panel node-group name (displayed)
-	names []string // node names in this group, in order
+const (
+	clashAIRuleURL   = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-chat-!cn.mrs"
+	singboxAIRuleURL = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ai-chat-!cn.srs"
+	surgeAIRuleURL   = "https://raw.githubusercontent.com/Coldvvater/Mononoke/master/Surge/Rules/AI.list"
+)
+
+type strategyGroups struct {
+	all []string
+	ai  []string
 }
 
-// autoGroups is the analysis of a node set used to build url-test groups.
-type autoGroups struct {
-	all     []string    // every node name, unique, in order
-	byGroup []nodeGroup // panel groups worth their own auto-select group
+func buildStrategyGroups(ps []*Proxy) strategyGroups {
+	var groups strategyGroups
+	for _, p := range ps {
+		groups.all = append(groups.all, p.Name)
+		if p.AI {
+			groups.ai = append(groups.ai, p.Name)
+		}
+	}
+	return groups
 }
 
-// reservedTags are the outbound tags the renderers emit unconditionally: the
-// two selectors plus the built-in direct outbound each client defines. Nothing
-// derived from a link may take one of these — a node named "direct" would give
-// sing-box two outbounds tagged "direct", and it rejects the *whole* config on a
-// duplicate tag rather than dropping the one node. Node names come from the
-// #fragment, so a remote subscription can carry one without the admin's help.
+// aiFallbackOrder prefers explicitly AI-capable nodes, then retains every
+// other accessible node as a last-resort proxy. It never adds DIRECT: the guard
+// exists specifically to prevent AI traffic from leaking onto a direct route.
+func (g strategyGroups) aiFallbackOrder() []string {
+	out := append([]string(nil), g.ai...)
+	ai := make(map[string]bool, len(g.ai))
+	for _, name := range g.ai {
+		ai[name] = true
+	}
+	for _, name := range g.all {
+		if !ai[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// reservedTags contains every generated policy/outbound name. A share-link
+// fragment may be attacker-controlled, so a colliding node is renamed instead
+// of making the whole client configuration invalid or self-referential.
 func reservedTags() map[string]bool {
 	return map[string]bool{
-		tagProxy: true, tagAuto: true, grpSelectClash: true, grpAutoClash: true,
-		"direct": true, "DIRECT": true, "GLOBAL": true, "REJECT": true, "PASS": true,
+		tagProxy: true, tagFixed: true, tagFallback: true, tagAI: true,
+		grpSelectClash: true, grpFixedClash: true, grpFallbackClash: true, grpAIClash: true,
+		legacyAutoClash: true,
+		"direct":        true, "DIRECT": true, "GLOBAL": true, "REJECT": true, "PASS": true,
 	}
 }
 
-// dedupeNames mutates each proxy's Name so the whole set is unique and free of
-// reserved tags. Url-test and selector groups reference nodes by name/tag, so
-// duplicates would silently drop or alias nodes. Collisions get a " #N" suffix;
-// empties fall back to server.
 func dedupeNames(ps []*Proxy) {
+	dedupeNamesWithReserved(ps, nil)
+}
+
+// dedupeNamesWithReserved additionally protects template-defined selector tags.
+func dedupeNamesWithReserved(ps []*Proxy, extra map[string]bool) {
 	seen := reservedTags()
+	for name := range extra {
+		seen[name] = true
+	}
 	for _, p := range ps {
 		n := p.Name
 		if n == "" {
@@ -63,9 +95,6 @@ func dedupeNames(ps []*Proxy) {
 	}
 }
 
-// uniqueName returns base if unused, else the first free " #k" (k≥2) suffix. The
-// suffixed candidate is re-checked against used, so it can't collide with a node
-// that is literally already named "X #2".
 func uniqueName(base string, used map[string]bool) string {
 	if base == "" {
 		base = "节点"
@@ -79,39 +108,4 @@ func uniqueName(base string, used map[string]bool) string {
 			return cand
 		}
 	}
-}
-
-// buildAutoGroups analyses an already-deduped proxy set: collects all names and
-// the per-panel-group subsets. A group becomes its own auto-select group when it
-// has ≥2 nodes and isn't the whole set (which the global "auto" already covers).
-func buildAutoGroups(ps []*Proxy) autoGroups {
-	var ag autoGroups
-	order := []string{}
-	by := map[string][]string{}
-	for _, p := range ps {
-		ag.all = append(ag.all, p.Name)
-		if p.Group == "" {
-			continue // ungrouped nodes live only in the global auto group
-		}
-		if _, ok := by[p.Group]; !ok {
-			order = append(order, p.Group)
-		}
-		by[p.Group] = append(by[p.Group], p.Name)
-	}
-	// A panel group name is reused verbatim as a proxy-group / url-test tag, so it
-	// must not collide with a reserved selector tag, DIRECT, or a node name — else
-	// the client sees two different things under one tag (duplicate/omitted proxy
-	// or a self-referencing selector). Suffix any colliding group name.
-	used := reservedTags()
-	for _, n := range ag.all {
-		used[n] = true
-	}
-	for _, g := range order {
-		if len(by[g]) >= 2 && len(by[g]) < len(ag.all) {
-			name := uniqueName(g, used)
-			used[name] = true
-			ag.byGroup = append(ag.byGroup, nodeGroup{name: name, names: by[g]})
-		}
-	}
-	return ag
 }

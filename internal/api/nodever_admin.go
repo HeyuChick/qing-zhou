@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/assets"
+	"qingzhou/internal/sbctl"
 	"qingzhou/internal/sbver"
 	"qingzhou/internal/store"
 )
@@ -76,7 +77,7 @@ func (a *API) handleAdminNodeVersions(w http.ResponseWriter, r *http.Request) {
 	for _, sv := range servers {
 		v := viewFor(sv.ID, sv.Name, sv.Host, false, sv.Enabled, observed, jobs)
 		// Without credentials there is no way in, so the button must not pretend.
-		v.Upgradable = sv.SSHKey != "" || sv.SSHPassword != ""
+		v.Upgradable = serverHasCredentials(sv)
 		rows = append(rows, v)
 	}
 	ok(w, J{
@@ -228,7 +229,7 @@ func (a *API) checkRemoteUpgradable(id int64) error {
 	if err != nil || sv == nil {
 		return errNotFound
 	}
-	if sv.SSHKey == "" && sv.SSHPassword == "" {
+	if !serverHasCredentials(sv) {
 		return errNoCreds
 	}
 	return nil
@@ -239,12 +240,14 @@ func (a *API) upgradeRemoteSingBox(ctx context.Context, id int64) (string, error
 	if err != nil || sv == nil {
 		return "", errNotFound
 	}
-	if sv.SSHKey == "" && sv.SSHPassword == "" {
+	if !serverHasCredentials(sv) {
 		return "", errNoCreds
 	}
 	// Generous timeout: the script downloads a binary of tens of megabytes.
 	rm := a.newRemoteManager(2 * time.Minute)
-	return rm.UpgradeSingBox(ctx, sshConfigFor(sv), assets.InstallScript())
+	// RefreshVersions invalidates the controller's long-lived binary cache after
+	// a successful job. This per-request manager starts with no cache of its own.
+	return rm.UpgradeSingBox(ctx, sbctl.SSHConfigFor(sv), assets.InstallScript())
 }
 
 // localSingboxBinDir is where the install script puts the binary — it must stay

@@ -41,6 +41,7 @@ const router = createRouter({
         { path: 'admin/settings', name: 'admin-settings', component: () => import('@/views/AdminSettings.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/reg-codes', name: 'admin-regcodes', component: () => import('@/views/AdminRegCodes.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/announcements', name: 'admin-announcements', component: () => import('@/views/AdminAnnouncements.vue'), meta: { requiresAdmin: true } },
+        { path: 'admin/manual-notifications', name: 'admin-manual-notifications', component: () => import('@/views/AdminManualNotifications.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/help', name: 'admin-help', component: () => import('@/views/AdminHelp.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/update', name: 'admin-update', component: () => import('@/views/AdminUpdate.vue'), meta: { requiresAdmin: true } },
       ],

@@ -127,6 +127,9 @@ func DeriveSSKey(secret, method string) string {
 type Relay struct {
 	Outbound    map[string]interface{} // sing-box outbound object; must carry "tag"
 	InboundTags []string               // local relay inbound tags routed to Outbound
+	// AuthUsers narrows the rule to authenticated users on a shared physical
+	// inbound. Empty preserves the legacy whole-inbound steering behaviour.
+	AuthUsers []string
 	// RejectUDP drops UDP from InboundTags instead of handing it to Outbound,
 	// for a third-party proxy egress that cannot carry UDP reliably. Note this
 	// is a drop from the client's point of view, not a refusal it can react to —
@@ -225,7 +228,8 @@ func GenerateConfigWithOptions(base json.RawMessage, inbounds []Inbound, opt Opt
 	// Must run before the relay rules are appended so the reject sits ahead of
 	// every steering rule, including a relay's.
 	if opt.BlockPrivate {
-		injectPrivateBlock(cfg, directExitTags(emittedTags, relays))
+		direct, exclude := directResolveScopes(emittedTags, relays)
+		injectPrivateBlock(cfg, direct, exclude)
 	}
 
 	// Relay wiring: append each landing outbound and a route rule steering the
@@ -268,10 +272,11 @@ func GenerateConfigWithOptions(base json.RawMessage, inbounds []Inbound, opt Opt
 					"action":  "reject",
 				})
 			}
-			rules = append(rules, map[string]interface{}{
-				"inbound":  r.InboundTags,
-				"outbound": tag,
-			})
+			rule := map[string]interface{}{"inbound": r.InboundTags, "outbound": tag}
+			if len(r.AuthUsers) > 0 {
+				rule["auth_user"] = r.AuthUsers
+			}
+			rules = append(rules, rule)
 		}
 		cfg["outbounds"] = obs
 		route["rules"] = rules
@@ -380,28 +385,46 @@ func privateBlockRule() map[string]interface{} {
 	}
 }
 
-// directExitTags returns the inbounds whose traffic leaves the internet from
-// THIS machine, i.e. everything not steered into a relay or a third-party
-// egress. Only those can reach this machine's own private network, and only
-// those may have their destinations resolved here — see injectPrivateBlock.
+// directResolveScopes returns the inbounds whose traffic can leave from THIS
+// machine. A shared inbound needs a scoped resolve rule: resolve ordinary users
+// here, but exclude auth users whose logical route exits through a landing.
 // emittedTags must be the tags actually present in the generated config, not
 // the ones asked for: an inbound dropped during assembly (a userless mixed one)
 // would otherwise be named by a rule that has nothing to match.
-func directExitTags(emittedTags []string, relays []Relay) []string {
-	steered := map[string]bool{}
+func directResolveScopes(emittedTags []string, relays []Relay) ([]string, map[string][]string) {
+	fullySteered := map[string]bool{}
+	scoped := map[string]map[string]bool{}
 	for _, r := range relays {
 		for _, t := range r.InboundTags {
-			steered[t] = true
+			if len(r.AuthUsers) == 0 {
+				fullySteered[t] = true
+				continue
+			}
+			if scoped[t] == nil {
+				scoped[t] = map[string]bool{}
+			}
+			for _, name := range r.AuthUsers {
+				scoped[t][name] = true
+			}
 		}
 	}
 	var out []string
+	exclude := map[string][]string{}
 	for _, tag := range emittedTags {
-		if !steered[tag] {
-			out = append(out, tag)
+		if fullySteered[tag] {
+			continue
 		}
+		if users := scoped[tag]; len(users) > 0 {
+			for name := range users {
+				exclude[tag] = append(exclude[tag], name)
+			}
+			sort.Strings(exclude[tag])
+			continue
+		}
+		out = append(out, tag)
 	}
 	sort.Strings(out) // deterministic config → no spurious reloads
-	return out
+	return out, exclude
 }
 
 // injectPrivateBlock prepends the rules that keep proxied traffic on the public
@@ -433,7 +456,7 @@ func directExitTags(emittedTags []string, relays []Relay) []string {
 //
 // Rules are prepended because route rules are first-match: behind any existing
 // steering rule they would never be consulted.
-func injectPrivateBlock(cfg map[string]interface{}, directTags []string) {
+func injectPrivateBlock(cfg map[string]interface{}, directTags []string, excludeAuth map[string][]string) {
 	route, _ := cfg["route"].(map[string]interface{})
 	if route == nil {
 		route = map[string]interface{}{}
@@ -455,14 +478,29 @@ func injectPrivateBlock(cfg map[string]interface{}, directTags []string) {
 	// The resolve needs a DNS server to resolve *with*. When the base config has
 	// no referenceable one, emit the reject alone rather than a config sing-box
 	// would refuse: partial protection beats a node that cannot start.
-	if resolver := dnsResolverTag(cfg); resolver != "" && len(directTags) > 0 {
+	if resolver := dnsResolverTag(cfg); resolver != "" && (len(directTags) > 0 || len(excludeAuth) > 0) {
 		if _, set := route["default_domain_resolver"]; !set {
 			route["default_domain_resolver"] = resolver
 		}
-		head = []interface{}{
-			map[string]interface{}{"inbound": directTags, "action": "resolve"},
-			privateBlockRule(),
+		head = []interface{}{}
+		if len(directTags) > 0 {
+			head = append(head, map[string]interface{}{"inbound": directTags, "action": "resolve"})
 		}
+		var tags []string
+		for tag := range excludeAuth {
+			tags = append(tags, tag)
+		}
+		sort.Strings(tags)
+		for _, tag := range tags {
+			head = append(head, map[string]interface{}{
+				"type": "logical", "mode": "and", "action": "resolve",
+				"rules": []interface{}{
+					map[string]interface{}{"inbound": []string{tag}},
+					map[string]interface{}{"auth_user": excludeAuth[tag], "invert": true},
+				},
+			})
+		}
+		head = append(head, privateBlockRule())
 	}
 	route["rules"] = append(head, rules...)
 }

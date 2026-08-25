@@ -101,8 +101,12 @@
         </template>
       </div>
       <n-empty v-else-if="!loading" :description="orders.length ? '没有符合条件的订单' : '暂无订单'" style="padding:40px 0;">
-        <template #extra v-if="!orders.length">
-          <n-button size="small" @click="router.push('/shop')">去商城看看</n-button>
+        <template #extra>
+          <div class="empty-actions">
+            <span>{{ orders.length ? '当前状态、类型或关键词组合没有命中订单。' : '购买套餐或流量包后，会在这里记录价格、状态和退款明细。' }}</span>
+            <n-button v-if="orders.length" size="small" @click="resetFilters">清除筛选</n-button>
+            <n-button v-else size="small" @click="router.push('/shop')">去商城看看</n-button>
+          </div>
         </template>
       </n-empty>
     </n-spin>
@@ -125,6 +129,7 @@ const loading = ref(false)
 const statusFilter = ref('all')
 const typeSel = ref<string | null>(null)
 const kw = ref('')
+function resetFilters() { statusFilter.value = 'all'; typeSel.value = null; kw.value = '' }
 
 // ---- 类型元信息 ----
 const typeMeta: Record<string, { label: string; cls: string; ch: string }> = {
@@ -364,6 +369,7 @@ onUnmounted(() => {
 .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
 .filters .spacer { flex: 1; }
 .muted { color: var(--text-3); font-size: 12px; }
+.empty-actions { display:flex; flex-direction:column; align-items:center; gap:10px; max-width:420px; color:var(--text-3); font-size:12px; line-height:1.6; }
 
 /* ---- 订单时间线 ---- */
 .order-list { display: flex; flex-direction: column; }

@@ -5,10 +5,30 @@
          页签栏里吃掉几十像素，375px 的手机上本来就装不下 5 个页签（可视 351px /
          需要 395px，且 overflow:hidden 滚不动），再挤就直接够不着最后一个了。 -->
     <div class="page-head">
-      <h2 class="page-title">sing-box 配置</h2>
+      <div>
+        <h2 class="page-title">sing-box 配置</h2>
+        <p class="page-sub">统一管理机器、TLS、入站、代理出口与下发状态</p>
+      </div>
       <n-button size="tiny" quaternary :type="showIp ? 'warning' : 'default'" @click="toggleIp">
         {{ showIp ? '🙈 隐藏 IP' : '👁 显示 IP' }}
       </n-button>
+    </div>
+    <div class="sb-overview" aria-label="sing-box 配置总览">
+      <button type="button" @click="tab = 'topology'">
+        <span class="sb-icon">机</span><span><b>{{ machines.length }}</b><small>运行机器 · 本机 {{ servers.length ? '+ 远程' : '' }}</small></span>
+      </button>
+      <button type="button" @click="tab = 'tls'">
+        <span class="sb-icon mint">盾</span><span><b>{{ tlsList.length }}</b><small>TLS 配置 · 证书 {{ certList.length }}</small></span>
+      </button>
+      <button type="button" @click="tab = 'inbounds'">
+        <span class="sb-icon amber">入</span><span><b>{{ enabledInboundCount }} / {{ inbounds.length }}</b><small>启用入站 / 全部入站</small></span>
+      </button>
+      <button type="button" @click="tab = 'egress'">
+        <span class="sb-icon violet">出</span><span><b>{{ egresses.length }}</b><small>代理出口 · 绑定 {{ egressBoundCount }} 入站</small></span>
+      </button>
+      <button type="button" @click="tab = 'topology'">
+        <span class="sb-icon" :class="syncFailedCount ? 'danger' : 'ok'">同步</span><span><b>{{ syncHealthyCount }} / {{ machines.length }}</b><small>{{ syncFailedCount ? `${syncFailedCount} 台下发失败` : '机器同步状态正常' }}</small></span>
+      </button>
     </div>
     <n-tabs v-model:value="tab" animated @update:value="onTabChange">
       <n-tab-pane name="tls" tab="TLS 配置">
@@ -251,9 +271,9 @@
                 <span class="topo-arrow">→</span>
                 <span class="topo-node inet">🌐 互联网</span>
                 <span class="topo-actions">
-                  <n-button v-if="!r.upstream_inbound_id && !r.egress_id" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
+                  <n-button v-if="!r.upstream_inbound_id && !r.egress_id" class="primary-quiet" size="tiny" quaternary type="primary" @click="addLandingAfter(r)">＋ 串联落地</n-button>
                   <n-popselect v-if="!r.upstream_inbound_id && !r.egress_id && egresses.length" :options="egressPopOpts" class="qz-wide-menu" scrollable @update:value="(v: number) => attachEgress(r, v)">
-                    <n-button size="tiny" quaternary type="primary">＋ 挂出口</n-button>
+                    <n-button class="primary-quiet" size="tiny" quaternary type="primary">＋ 挂出口</n-button>
                   </n-popselect>
                   <n-button v-else-if="r.upstream_inbound_id" size="tiny" quaternary type="warning" @click="unlinkRelay(r)">解除中转</n-button>
                   <n-button v-else-if="r.egress_id" size="tiny" quaternary type="warning" @click="unlinkEgress(r)">解除出口</n-button>
@@ -720,7 +740,10 @@ function syncBadge(machineId: number): SyncBadge | null {
     case 'pending': return { type: 'default', text: '待下发', title: '排队等待推送配置' }
     case 'running': return { type: 'warning', text: '下发中…', title: '正在推送配置到该机器' }
     case 'ok': return { type: 'success', text: '已同步', title: '配置已成功下发' }
-    case 'failed': return { type: 'error', text: '下发失败', title: s.error || '推送失败，将在下个周期自动重试' }
+    case 'failed': {
+      const tripped = String(s.error || '').includes('熔断')
+      return { type: 'error', text: tripped ? '已熔断' : '下发失败', title: s.error || '推送失败，将在下个周期自动重试' }
+    }
     default: return null
   }
 }
@@ -759,6 +782,10 @@ const certList = ref<any[]>([])
 const inbounds = ref<any[]>([])
 const servers = ref<any[]>([])
 const egresses = ref<any[]>([])
+const enabledInboundCount = computed(() => inbounds.value.filter(item => item.enabled).length)
+const egressBoundCount = computed(() => inbounds.value.filter(item => item.egress_id).length)
+const syncHealthyCount = computed(() => machines.value.filter(machine => syncStatus.value[String(machine.id)]?.state === 'ok').length)
+const syncFailedCount = computed(() => machines.value.filter(machine => syncStatus.value[String(machine.id)]?.state === 'failed').length)
 const previewJson = ref('')
 const previewLoading = ref(false)
 const previewSid = ref<number | null>(null)
@@ -1699,8 +1726,20 @@ async function load() {
 <style scoped>
 .page-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
 .page-head .page-title { margin: 0; }
+.page-head .page-sub { margin:4px 0 0; }
 .page-head .n-button { margin-left: auto; }
 .page-title { font-size: 21px; margin-bottom: 16px; }
+.sb-overview { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin-bottom:18px; }
+.sb-overview button { display:flex; align-items:center; gap:10px; min-width:0; padding:11px 12px; border:1px solid var(--border); border-radius:12px; background:var(--card); color:inherit; text-align:left; font:inherit; box-shadow:var(--shadow-xs); cursor:pointer; transition:transform .2s cubic-bezier(.2,.8,.2,1), box-shadow .2s ease, border-color .2s ease; }
+.sb-overview button:hover { transform:translateY(-2px); border-color:var(--border-strong); box-shadow:var(--shadow-sm); }
+.sb-overview button > span:last-child { display:flex; min-width:0; flex-direction:column; }
+.sb-overview b { color:var(--text); font-size:18px; line-height:1.15; letter-spacing:-.02em; }
+.sb-overview small { overflow:hidden; margin-top:3px; color:var(--text-3); font-size:10.5px; white-space:nowrap; text-overflow:ellipsis; }
+.sb-icon { display:grid; place-items:center; flex:none; width:32px; height:32px; border-radius:10px; background:#e8eef3; color:#52606c; font-size:10px; font-weight:700; }
+.sb-icon.mint,.sb-icon.ok { background:#e5f3ed; color:#39715a; }
+.sb-icon.amber { background:#f8efdc; color:#89651f; }
+.sb-icon.violet { background:#eeeaf5; color:#685484; }
+.sb-icon.danger { background:#f7e8e6; color:#a24d48; }
 :deep(.n-drawer-content-body) { display: flex; flex-direction: column; }
 
 .form-tip { font-size: 12px; color: var(--text-3, #999); margin-top: 4px; line-height: 1.5; }
@@ -1860,6 +1899,8 @@ async function load() {
 .machine-host { font-size: 12px; color: var(--text-3); }
 .machine-extra { display: flex; align-items: center; gap: 6px; }
 @media (max-width: 640px) {
+  .sb-overview { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .sb-overview button:last-child { grid-column:1 / -1; }
   .machine-host { display: none; }
   .machine-extra { gap: 4px; }
 }

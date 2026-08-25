@@ -274,6 +274,7 @@ func (a *API) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 func (a *API) StartTelegram(ctx context.Context) {
 	go a.telegramPollLoop(ctx)
 	go a.telegramNotifyLoop(ctx)
+	go a.resumeManualNotifications()
 }
 
 func (a *API) telegramPollLoop(ctx context.Context) {

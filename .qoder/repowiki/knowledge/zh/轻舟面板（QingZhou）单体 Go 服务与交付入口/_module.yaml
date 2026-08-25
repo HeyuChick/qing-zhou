@@ -1,0 +1,21 @@
+schema_version: 1
+module_path: ""
+title: 轻舟面板（QingZhou）单体 Go 服务与交付入口
+scope:
+    - .gitignore
+    - .dockerignore
+    - .gitattributes
+    - Dockerfile
+    - docker-compose.yml
+    - go.mod
+    - go.sum
+    - install.sh
+    - start.ps1
+    - .claude/
+    - .github/
+    - LICENSE
+    - README.md
+    - main.go
+source_files: []
+depends_on: []
+related_to: []

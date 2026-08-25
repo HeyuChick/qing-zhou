@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"qingzhou/internal/singbox"
@@ -76,13 +77,21 @@ func mergeRelayUser(users []singbox.User, landingUsers map[string]singbox.User, 
 // machine. Relay inbounds whose upstream is missing/disabled or whose landing
 // protocol has no outbound renderer are skipped (their traffic falls through to
 // route.final), never failing the whole build.
-func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound) ([]singbox.Relay, map[string]singbox.User, error) {
+func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound, usersByTag map[string][]singbox.User) ([]singbox.Relay, map[string]singbox.User, error) {
 	byID := make(map[int64]*SbInbound, len(allInbounds))
+	byTag := make(map[string]*SbInbound, len(allInbounds))
 	targeted := map[int64]bool{}
 	for _, ib := range allInbounds {
 		byID[ib.ID] = ib
+		byTag[ib.Tag] = ib
 		if ib.Enabled && ib.UpstreamInboundID != 0 {
 			targeted[ib.UpstreamInboundID] = true
+		}
+	}
+	nodes, _ := s.ListNodes()
+	for _, n := range nodes {
+		if n.Enabled && n.Type == "self_built" && n.RouteUpstreamInboundID != 0 && !n.RouteUpstreamBroken {
+			targeted[n.RouteUpstreamInboundID] = true
 		}
 	}
 
@@ -104,6 +113,44 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound) ([]si
 	// several relay inbounds pointing at the same landing share one outbound.
 	serverCache := map[int64]*Server{}
 	tlsCache := map[int64]*SbTls{}
+	serverTags := map[string]bool{}
+	for _, ib := range serverInbounds {
+		serverTags[ib.Tag] = true
+	}
+	// Logical routes come first: route rules are first-match, so the auth_user
+	// branches must run before a legacy rule that steers the entire inbound.
+	relays := make([]singbox.Relay, 0)
+	logicalOutbound := map[int64]map[string]interface{}{}
+	for _, n := range nodes {
+		if !n.Enabled || n.Type != "self_built" || n.RouteUpstreamInboundID == 0 || n.RouteUpstreamBroken || !serverTags[n.InboundTag] {
+			continue
+		}
+		entry, landing := byTag[n.InboundTag], byID[n.RouteUpstreamInboundID]
+		if entry == nil || !entry.Enabled || landing == nil || !landing.Enabled {
+			continue
+		}
+		auth := make([]string, 0)
+		for _, u := range usersByTag[entry.Tag] {
+			if isRouteIdentityFor(u.Name, n.ID) {
+				auth = append(auth, u.Name)
+			}
+		}
+		if len(auth) == 0 {
+			continue
+		}
+		sort.Strings(auth)
+		ob := logicalOutbound[landing.ID]
+		if ob == nil {
+			var err error
+			ob, err = s.relayOutbound(landing, serverCache, tlsCache)
+			if err != nil || ob == nil {
+				continue
+			}
+			logicalOutbound[landing.ID] = ob
+		}
+		relays = append(relays, singbox.Relay{Outbound: ob, InboundTags: []string{entry.Tag}, AuthUsers: auth})
+	}
+
 	byLanding := map[int64]*singbox.Relay{}
 	var order []int64
 	for _, r := range serverInbounds {
@@ -125,7 +172,6 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound) ([]si
 		byLanding[landing.ID] = &singbox.Relay{Outbound: ob, InboundTags: []string{r.Tag}}
 		order = append(order, landing.ID)
 	}
-	relays := make([]singbox.Relay, 0, len(order))
 	for _, id := range order {
 		relays = append(relays, *byLanding[id])
 	}

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,7 +248,21 @@ func (m *Manager) Validate(config []byte) error {
 // Apply validates the config, then (only on success) atomically replaces the
 // live config file and reloads sing-box. Serialized so concurrent applies can't
 // interleave a half-written file with a reload.
+// ConfigPath is the file Apply installs to. The controller reads it to catch a
+// server row that points at the very same file (see sbctl.panelPathConflict).
+func (m *Manager) ConfigPath() string { return m.configPath }
+
+// Apply installs config and reloads sing-box, unless the file already holds
+// exactly these bytes and the last reload succeeded.
 func (m *Manager) Apply(config []byte) error {
+	_, err := m.ApplyChanged(config)
+	return err
+}
+
+// ApplyChanged is Apply, reporting whether sing-box was actually reloaded —
+// which is to say whether every connection on this machine was just cut. The
+// controller counts those to notice a node stuck in a restart loop.
+func (m *Manager) ApplyChanged(config []byte) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -260,28 +275,33 @@ func (m *Manager) Apply(config []byte) error {
 	// the file was swapped, not that sing-box picked it up.
 	if !m.reloadFailed {
 		if cur, err := os.ReadFile(m.configPath); err == nil && bytes.Equal(cur, config) {
-			return nil
+			return false, nil
 		}
 	}
 
 	if err := m.Validate(config); err != nil {
-		return err // invalid: live config untouched, no reload
+		return false, err // invalid: live config untouched, no reload
 	}
 
 	if err := m.swap(config); err != nil {
-		return err
+		return false, err
 	}
+
+	// The reload below cuts every connection on this machine. It only happens
+	// when the config genuinely changed, and saying so is what makes an
+	// unexpected reload every minute visible instead of invisible.
+	log.Printf("sbproc: 本机 sing-box 配置有变化，已写入 %s 并重载（本机连接会断一次）", m.configPath)
 
 	if m.reload != nil {
 		if err := m.reload(); err != nil {
 			// Leave the flag set so the next Apply retries the reload instead of
 			// short-circuiting on the already-swapped file.
 			m.reloadFailed = true
-			return err
+			return true, err
 		}
 	}
 	m.reloadFailed = false
-	return nil
+	return true, nil
 }
 
 // FindSingBoxBin auto-detects the sing-box binary path. It checks the

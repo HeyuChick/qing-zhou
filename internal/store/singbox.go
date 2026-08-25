@@ -277,6 +277,19 @@ func (s *Store) GetSbInbound(id int64) (*SbInbound, error) {
 	return &n, nil
 }
 
+func (s *Store) GetSbInboundByTag(tag string) (*SbInbound, error) {
+	var n SbInbound
+	var enabled, broken int
+	err := s.db.QueryRow(`SELECT id, server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, egress_id, upstream_broken, created_at, updated_at
+		FROM sb_inbounds WHERE tag=?`, tag).Scan(&n.ID, &n.ServerID, &n.Type, &n.Tag, &n.Listen, &n.ListenPort, &n.TlsID, &n.Options, &enabled, &n.SortOrder, &n.UpstreamInboundID, &n.RelaySecret, &n.EgressID, &broken, &n.CreatedAt, &n.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	n.Enabled = enabled == 1
+	n.UpstreamBroken = broken == 1
+	return &n, err
+}
+
 func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 	now := time.Now().Unix()
 	if n.Options == "" {
@@ -359,9 +372,8 @@ func (s *Store) DeleteSbInbound(id int64) ([]int64, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	// A self-built node is a 1:1 mirror of an inbound (linked by tag). Without
-	// its inbound the node is non-functional and produces no subscription link,
-	// so remove the mirror node(s) and their group memberships too — otherwise
+	// A self-built node's physical entry is linked by tag. Without that listener
+	// the logical node is non-functional, so remove every node using it — otherwise
 	// they linger as zombies and silently revive if a same-tag inbound is recreated.
 	var tag string
 	_ = tx.QueryRow(`SELECT tag FROM sb_inbounds WHERE id=?`, id).Scan(&tag)
@@ -390,6 +402,9 @@ func (s *Store) DeleteSbInbound(id int64) ([]int64, error) {
 	if _, err := tx.Exec(`UPDATE sb_inbounds SET upstream_inbound_id=0, upstream_broken=1 WHERE upstream_inbound_id=?`, id); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(`UPDATE nodes SET route_upstream_inbound_id=0, route_upstream_broken=1 WHERE route_upstream_inbound_id=?`, id); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(`DELETE FROM sb_inbounds WHERE id=?`, id); err != nil {
 		return nil, err
 	}
@@ -403,7 +418,12 @@ func (s *Store) DeleteSbInbound(id int64) ([]int64, error) {
 // the given landing inbound. Those servers must rebuild when the landing goes
 // away, to drop the upstream outbound that dialed it.
 func serverIDsRelayingTo(tx *sql.Tx, landingID int64) ([]int64, error) {
-	rows, err := tx.Query(`SELECT DISTINCT server_id FROM sb_inbounds WHERE upstream_inbound_id=?`, landingID)
+	rows, err := tx.Query(`SELECT DISTINCT server_id FROM (
+		SELECT server_id FROM sb_inbounds WHERE upstream_inbound_id=?
+		UNION
+		SELECT i.server_id FROM nodes n JOIN sb_inbounds i ON i.tag=n.inbound_tag
+		 WHERE n.type='self_built' AND n.route_upstream_inbound_id=?
+	)`, landingID, landingID)
 	if err != nil {
 		return nil, err
 	}
@@ -572,7 +592,7 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 	if err != nil {
 		return nil, err
 	}
-	relays, landingUsers, err := s.buildRelayWiring(inbounds, allInbounds)
+	relays, landingUsers, err := s.buildRelayWiring(inbounds, allInbounds, usersByTag)
 	if err != nil {
 		return nil, err
 	}
@@ -630,7 +650,7 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 	if err != nil {
 		return nil, err
 	}
-	relays, landingUsers, err := s.buildRelayWiring(inbounds, allInbounds)
+	relays, landingUsers, err := s.buildRelayWiring(inbounds, allInbounds, usersByTag)
 	if err != nil {
 		return nil, err
 	}
@@ -682,8 +702,9 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 // The tag is carried alongside rather than read back out of the link's remark,
 // because the remark shows the node's admin-configured display name.
 type SelfBuiltLink struct {
-	Tag  string // inbound tag — the group filter's join key
-	Link string
+	NodeID int64  // logical node id — several nodes may share one inbound tag
+	Tag    string // physical inbound tag — topology/config join key
+	Link   string
 }
 
 // BuildSelfBuiltLinks generates client share-links for every enabled native
@@ -748,8 +769,15 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 	// Each self-built node is owned by one of the user's buckets; the link uses
 	// that bucket's credentials and shows its own remaining quota/expiry. A node
 	// with no active owning bucket is omitted (no access).
-	owners, _ := s.UserOwnedInbounds(u.ID, time.Now().Unix())
-	nodeNames, _ := s.SelfBuiltNodeNames()
+	now := time.Now().Unix()
+	owners, _ := s.UserOwnedNodes(u.ID, now)
+	legacyOwners, _ := s.UserOwnedInbounds(u.ID, now)
+	legacyNames, _ := s.SelfBuiltNodeNames()
+	nodes, _ := s.ListNodes()
+	inboundByTag := map[string]*SbInbound{}
+	for _, ib := range inbounds {
+		inboundByTag[ib.Tag] = ib
+	}
 	// Whether an inbound's bound egress drops UDP (udp_mode=block), so the link
 	// can say so (LinkParams.NoUDP) and clients refuse UDP locally instead of
 	// timing out against the node-side reject. Cached per egress id: several
@@ -771,11 +799,30 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 	}
 
 	var out []SelfBuiltLink
-	for _, ib := range inbounds {
-		if !ib.Enabled {
+	legacyDone := map[string]bool{}
+	for _, n := range nodes {
+		if !n.Enabled || n.Type != "self_built" || n.RouteUpstreamBroken {
 			continue
 		}
-		owner := owners[ib.Tag]
+		ib := inboundByTag[n.InboundTag]
+		if ib == nil || !ib.Enabled {
+			continue
+		}
+		if n.RouteUpstreamInboundID != 0 {
+			if !inboundRouteHealthy(inbounds, n.RouteUpstreamInboundID) {
+				continue // fixed exits fail closed; never leak through the entry machine
+			}
+		}
+		owner := owners[n.ID]
+		logicalID := n.ID
+		if n.RouteUpstreamInboundID == 0 {
+			if legacyDone[ib.Tag] {
+				continue
+			}
+			legacyDone[ib.Tag] = true
+			owner = legacyOwners[ib.Tag]
+			logicalID = 0
+		}
 		if owner == nil {
 			continue // no active bucket grants this node
 		}
@@ -809,17 +856,35 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 
 		// Remark = the node's display name from the 节点 page; the raw inbound tag
 		// is only a fallback for an inbound no node is bound to.
-		remark := ib.Tag
-		if n := nodeNames[ib.Tag]; n != "" {
-			remark = n
+		remark := n.Name
+		if logicalID == 0 {
+			remark = legacyNames[ib.Tag]
+		}
+		if remark == "" {
+			remark = ib.Tag
+		}
+		cred := singbox.User{Name: owner.ClientName, UUID: owner.ClientUUID, Password: owner.ClientSecret}
+		if n.RouteUpstreamInboundID != 0 {
+			cred = deriveRouteUser(cred, n.ID)
+		}
+		exit := ib
+		if n.RouteUpstreamInboundID != 0 {
+			if routed := inboundByID(inbounds, n.RouteUpstreamInboundID); routed != nil {
+				exit = routed
+			}
+		}
+		seenExit := map[int64]bool{}
+		for exit != nil && exit.UpstreamInboundID != 0 && !seenExit[exit.ID] {
+			seenExit[exit.ID] = true
+			exit = inboundByID(inbounds, exit.UpstreamInboundID)
 		}
 		// 节点名必须稳定：客户端（Clash Verge/v2rayNG）按名字记住手动选中的
 		// 节点，名字带动态剩余流量/天数时每次订阅刷新都会改名，手动选择随即
 		// 失效、分组回退自动选择。剩余流量/到期由 Subscription-Userinfo 头承载。
 		p := singbox.LinkParams{
 			Type: ib.Type, Tag: remark, Host: nodeHost, Port: ib.ListenPort,
-			UUID: owner.ClientUUID, Password: owner.ClientSecret,
-			NoUDP:       noUDP(ib.EgressID),
+			UUID: cred.UUID, Password: cred.Password,
+			NoUDP:       exit != nil && noUDP(exit.EgressID),
 			TLS:         ib.TlsID != 0,
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
@@ -885,10 +950,35 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			p.ALPN = strings.Join(parts, ",")
 		}
 		if link := singbox.BuildShareLink(p); link != "" {
-			out = append(out, SelfBuiltLink{Tag: ib.Tag, Link: link})
+			out = append(out, SelfBuiltLink{NodeID: logicalID, Tag: ib.Tag, Link: link})
 		}
 	}
 	return out
+}
+
+func inboundByID(inbounds []*SbInbound, id int64) *SbInbound {
+	for _, ib := range inbounds {
+		if ib.ID == id {
+			return ib
+		}
+	}
+	return nil
+}
+
+func inboundRouteHealthy(inbounds []*SbInbound, first int64) bool {
+	seen := map[int64]bool{}
+	cur := inboundByID(inbounds, first)
+	for cur != nil && !seen[cur.ID] {
+		if !cur.Enabled {
+			return false
+		}
+		seen[cur.ID] = true
+		if cur.UpstreamInboundID == 0 {
+			return true
+		}
+		cur = inboundByID(inbounds, cur.UpstreamInboundID)
+	}
+	return false // missing hop or cycle
 }
 
 // UserProxy is one mixed (HTTP/SOCKS5) inbound's connection info for a user,
@@ -1141,6 +1231,38 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 	}
 
 	out := map[string][]singbox.User{}
+	emit := func(ib *SbInbound, b *Bucket, routeNodeID int64) {
+		add := func(u singbox.User) {
+			if routeNodeID > 0 {
+				u = deriveRouteUser(u, routeNodeID)
+			}
+			key := inboundUser{ib.Tag, u.Name}
+			if seen[key] {
+				return
+			}
+			seen[key] = true
+			out[ib.Tag] = append(out[ib.Tag], u)
+		}
+		if ib.Type == "mixed" {
+			// Keep both account-level and per-plan proxy credentials. Logical routes
+			// derive both, so auth_user can distinguish exits on the shared port while
+			// traffic accounting still canonicalises the name back to its owner.
+			if b.Kind != KindFree {
+				if a, ok := accounts[b.UserID]; ok && a.active(now) && b.Active(now) {
+					add(singbox.User{Name: a.name, Password: a.password})
+				}
+			}
+			if b.ProxyActive(now) {
+				add(singbox.User{Name: b.ProxyName(), Password: b.ProxySecret()})
+			}
+			return
+		}
+		add(singbox.User{Name: b.ClientName, UUID: b.ClientUUID, Password: b.ClientSecret})
+	}
+
+	// Legacy/default nodes inherit the physical inbound's own upstream chain and
+	// keep their existing credentials byte-for-byte. Route nodes are handled in
+	// the second pass with per-node derived credentials.
 	for _, ib := range inbounds {
 		if !ib.Enabled {
 			continue
@@ -1154,53 +1276,26 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 			if b == nil {
 				continue
 			}
-			// A mixed (HTTP/SOCKS5) inbound authenticates with the bucket's custom
-			// proxy credential (username/password), which has its own optional expiry
-			// separate from the plan. Skip a bucket whose proxy credential has expired
-			// so its user drops out of the mixed inbound (and GenerateConfig then omits
-			// a now-userless mixed inbound rather than exposing an open proxy).
-			// A whole subscription line shares one identity, so two live份 of the
-			// same line would otherwise be emitted as the same user twice. The
-			// queue promotes one份 at a time and retires the rest, so this should
-			// not arise — but a duplicate user in an inbound is the kind of thing
-			// sing-box may reject outright, and taking every user's nodes down is
-			// too expensive an outcome to leave to "should not arise".
-			if ib.Type == "mixed" {
-				// Two credentials authenticate a mixed inbound, and both are emitted.
-				//
-				// The account-level one is what the panel shows: one login per user,
-				// the same on every node they can reach, so a node changing groups no
-				// longer changes what they must paste into 1Panel/Docker/git. It is
-				// withheld from a free-owned inbound — free traffic is metered apart
-				// from paid quota, and this identity is charged to a paid bucket.
-				//
-				// The per-bucket one stays alongside it because it may already be
-				// saved in someone's tooling; dropping it would make the upgrade
-				// itself the thing that breaks their proxy. It keeps metering to its
-				// own bucket exactly as before.
-				if b.Kind != KindFree {
-					if a, ok := accounts[b.UserID]; ok && a.active(now) && b.Active(now) {
-						u := singbox.User{Name: a.name, Password: a.password}
-						if !seen[inboundUser{ib.Tag, u.Name}] {
-							seen[inboundUser{ib.Tag, u.Name}] = true
-							out[ib.Tag] = append(out[ib.Tag], u)
-						}
-					}
-				}
-				if !b.ProxyActive(now) {
-					continue
-				}
-				u := singbox.User{Name: b.ProxyName(), Password: b.ProxySecret()}
-				if !seen[inboundUser{ib.Tag, u.Name}] {
-					seen[inboundUser{ib.Tag, u.Name}] = true
-					out[ib.Tag] = append(out[ib.Tag], u)
-				}
-			} else {
-				u := singbox.User{Name: b.ClientName, UUID: b.ClientUUID, Password: b.ClientSecret}
-				if !seen[inboundUser{ib.Tag, u.Name}] {
-					seen[inboundUser{ib.Tag, u.Name}] = true
-					out[ib.Tag] = append(out[ib.Tag], u)
-				}
+			emit(ib, b, 0)
+		}
+	}
+
+	byTag := map[string]*SbInbound{}
+	for _, ib := range inbounds {
+		byTag[ib.Tag] = ib
+	}
+	nodes, _ := s.ListNodes()
+	for _, n := range nodes {
+		if !n.Enabled || n.Type != "self_built" || n.RouteUpstreamInboundID == 0 || n.RouteUpstreamBroken {
+			continue
+		}
+		ib := byTag[n.InboundTag]
+		if ib == nil || !ib.Enabled || !inboundRouteHealthy(inbounds, n.RouteUpstreamInboundID) {
+			continue
+		}
+		for _, ord := range ordered {
+			if b := pickOwner(ord, n.GroupIDs, groupCount); b != nil {
+				emit(ib, b, n.ID)
 			}
 		}
 	}
@@ -1391,6 +1486,30 @@ func (s *Store) UserOwnedInbounds(userID, now int64) (map[string]*Bucket, error)
 		}
 		if b := pickOwner(ord, ibGroups, groupCount); b != nil {
 			out[ib.Tag] = b
+		}
+	}
+	return out, nil
+}
+
+// UserOwnedNodes is the logical-route equivalent of UserOwnedInbounds. The
+// node's own group membership decides its bucket, so two nodes sharing a
+// physical inbound may belong to different plans without broadening access.
+func (s *Store) UserOwnedNodes(userID, now int64) (map[int64]*Bucket, error) {
+	ord, groupCount, err := s.userBucketOrder(userID, now)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := s.ListNodes()
+	if err != nil {
+		return nil, err
+	}
+	out := map[int64]*Bucket{}
+	for _, n := range nodes {
+		if !n.Enabled || n.Type != "self_built" || n.RouteUpstreamBroken {
+			continue
+		}
+		if b := pickOwner(ord, n.GroupIDs, groupCount); b != nil {
+			out[n.ID] = b
 		}
 	}
 	return out, nil

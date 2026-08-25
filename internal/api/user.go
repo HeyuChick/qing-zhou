@@ -843,23 +843,29 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 
 // emailBlocksSub withholds node links from a pending-verify signup.
 //
-// v0.2.53 applied this to every unverified account. CreateUser always writes
-// email_verified=0, and before the login/sub gates existed people just signed
-// in and bought plans without clicking the mail. Flipping the gate on then
-// emptied the subscription of paying customers who still showed an active
-// plan in the panel (handleUserNodes never had this check).
+// Open-registration accounts stay gated until they verify, so a throwaway
+// signup cannot scrape free-group upstream credentials. A purchased or
+// admin-assigned plan is a real entitlement though: they already paid (or
+// an admin granted them service) and should receive the nodes that plan
+// unlocks without clicking the mail. The signup grant and the free-group
+// bucket do not count — HasLivePaidPlan excludes them — so minting the
+// welcome quota still cannot punch through.
 //
-// Only open-registration pending-verify accounts are blocked. Compatibility
-// for accounts that were already admitted before enforcement is persisted by
-// migration (and set explicitly by invite/admin admission), not inferred from
-// current plan/client state: otherwise an unverified new signup could buy a
-// package and turn that purchase into its own verification bypass.
+// Invite-code and admin-created accounts stay exempt via EmailGateExempt
+// / pre-verify, independent of later purchases. Compatibility for accounts
+// already admitted before the gate existed is the same persisted bit.
 func (a *API) emailBlocksSub(u *store.User) bool {
 	if u == nil || u.Role == "admin" || u.EmailVerified || u.EmailGateExempt {
 		return false
 	}
 	verifyReq, _ := a.st.GetSettingBool("email_verify_required")
-	return verifyReq
+	if !verifyReq {
+		return false
+	}
+	if paid, err := a.st.HasLivePaidPlan(u.ID); err == nil && paid {
+		return false
+	}
+	return true
 }
 
 // ---- Public subscription endpoint ----
@@ -895,19 +901,20 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 		serviceable = false
 	}
 
-	// Build the link list + a link→group map (drives the per-group auto-select
-	// groups), honoring the user's per-node blocklist.
+	// Build the link list plus the user's accessible AI-node set, honoring the
+	// per-node blocklist. Group membership never grants access here; it only marks
+	// an already-accessible node as eligible for the guarded AI route.
 	disabled, _ := a.st.DisabledNodeKeys(u.ID)
 	var links []string
-	groups := map[string]string{}
+	aiNodes := map[string]bool{}
 	if serviceable {
 		for _, e := range a.collectEntries(u) {
 			if subconv.NodeDisabled(disabled, e.Link) {
 				continue
 			}
 			links = append(links, e.Link)
-			if e.GroupName != "" {
-				groups[e.Link] = e.GroupName
+			if e.IsAI {
+				aiNodes[e.Link] = true
 			}
 		}
 	}
@@ -940,7 +947,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = subconv.FormatForUA(r.Header.Get("User-Agent"))
 	}
-	body, ctype, err := subconv.Render(format, links, groups, clashTpl, singboxTpl, subURL)
+	body, ctype, err := subconv.Render(format, links, aiNodes, clashTpl, singboxTpl, subURL)
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)
 		return
@@ -976,7 +983,7 @@ func (a *API) userHasNodeAccess(u *store.User) bool {
 	return len(gids) > 0
 }
 
-// collectEntries returns the user's nodes (link + group), cached ~30s to avoid
+// collectEntries returns the user's nodes (link + accessible group metadata), cached ~30s to avoid
 // recomputing on every client poll.
 func (a *API) collectEntries(u *store.User) []nodeEntry {
 	a.linkMu.Lock()
@@ -1023,10 +1030,15 @@ type nodeEntry struct {
 	Link      string
 	GroupID   int64
 	GroupName string
+	IsAI      bool
 	// Tag is the sing-box inbound tag for a self-built node, "" for an external
 	// (imported share-link) one. It is the join key to the inbound row, and so to
 	// the relay/egress chain behind the node.
 	Tag string
+	// RouteUpstream overrides the physical inbound's first hop for a logical
+	// node. Zero keeps the legacy/inherited chain.
+	RouteUpstream int64
+	RouteBroken   bool
 }
 
 // computeNodeEntries builds the user's nodes with group attribution: external
@@ -1035,12 +1047,18 @@ type nodeEntry struct {
 // free group) means no nodes — including when the admin never created groups.
 func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	var out []nodeEntry
-	seen := map[string]bool{}
-	add := func(l string, gid int64, gname, tag string) {
-		if l != "" && !seen[l] {
-			seen[l] = true
-			out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname, Tag: tag})
+	seen := map[string]int{}
+	add := func(l string, gid int64, gname, tag string, routeUpstream int64, routeBroken, isAI bool) {
+		if l == "" {
+			return
 		}
+		if idx, ok := seen[l]; ok {
+			out[idx].IsAI = out[idx].IsAI || isAI
+			return
+		}
+		seen[l] = len(out)
+		out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname, IsAI: isAI, Tag: tag,
+			RouteUpstream: routeUpstream, RouteBroken: routeBroken})
 	}
 
 	groupIDs, _ := a.st.AccessibleGroupIDs(u)
@@ -1057,21 +1075,51 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	}
 
 	nodes, _ := a.st.NodesInGroupsTagged(groupIDs)
-	tagGroup := map[string]int64{} // self-built inbound tag → representative group
+	type nodeMeta struct {
+		groupID       int64
+		isAI          bool
+		routeUpstream int64
+		routeBroken   bool
+	}
+	nodeGroup := map[int64]nodeMeta{} // routed logical node id → accessible metadata
+	tagGroup := map[string]nodeMeta{} // legacy nodes still collapse by physical tag
 	for _, n := range nodes {
 		switch n.Type {
 		case "external":
-			add(n.ShareLink, n.GroupID, gname[n.GroupID], "")
+			add(n.ShareLink, n.GroupID, gname[n.GroupID], "", 0, false, n.IsAI)
 		case "self_built":
 			if n.InboundTag != "" {
-				tagGroup[n.InboundTag] = n.GroupID
+				if n.RouteUpstreamInboundID == 0 {
+					meta, exists := tagGroup[n.InboundTag]
+					if !exists || n.GroupID < meta.groupID {
+						meta.groupID = n.GroupID
+					}
+					meta.isAI = meta.isAI || n.IsAI
+					meta.routeBroken = n.RouteUpstreamBroken
+					tagGroup[n.InboundTag] = meta
+					continue
+				}
+				meta, exists := nodeGroup[n.ID]
+				if !exists || n.GroupID < meta.groupID {
+					meta.groupID = n.GroupID
+				}
+				meta.isAI = meta.isAI || n.IsAI
+				meta.routeUpstream = n.RouteUpstreamInboundID
+				meta.routeBroken = n.RouteUpstreamBroken
+				nodeGroup[n.ID] = meta
 			}
 		}
 	}
-	if len(tagGroup) > 0 {
+	if len(nodeGroup) > 0 || len(tagGroup) > 0 {
 		for _, l := range a.selfBuiltLinks(u) {
-			if gid, ok := tagGroup[l.Tag]; ok {
-				add(l.Link, gid, gname[gid], l.Tag)
+			if l.NodeID == 0 {
+				if meta, ok := tagGroup[l.Tag]; ok {
+					add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, 0, meta.routeBroken, meta.isAI)
+				}
+				continue
+			}
+			if meta, ok := nodeGroup[l.NodeID]; ok {
+				add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, meta.routeUpstream, meta.routeBroken, meta.isAI)
 			}
 		}
 	}

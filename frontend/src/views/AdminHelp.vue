@@ -1,9 +1,13 @@
 <template>
   <div>
-    <h2 class="page-title">帮助文档管理</h2>
-    <div class="page-toolbar">
-      <span class="spacer" />
-      <n-button type="primary" @click="openCreate">新建文档</n-button>
+    <div class="page-head">
+      <div><h2 class="page-title">帮助文档管理</h2><p class="page-sub">Markdown 编辑、发布状态、展示顺序与用户端内容维护</p></div>
+      <div class="page-actions"><n-button type="primary" @click="openCreate">新建文档</n-button></div>
+    </div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ docs.length }}</b><span>全部文档</span></div>
+      <div class="resource-metric success"><b>{{ docs.filter(d => d.published).length }}</b><span>已发布</span></div>
+      <div class="resource-metric"><b>{{ docs.filter(d => !d.published).length }}</b><span>草稿</span></div>
     </div>
     <n-spin :show="loading">
       <div v-if="docs.length" class="card-grid">

@@ -1,13 +1,14 @@
 <template>
   <div>
-    <h2 class="page-title">用户组</h2>
-    <p style="font-size:13px;color:var(--text-2);margin:-4px 0 12px;">
+    <div class="page-head"><div><h2 class="page-title">用户组</h2><p class="page-sub">购买权限、专属套餐与成员关系管理</p></div><div class="page-actions"><n-button type="primary" @click="openForm()">创建用户组</n-button></div></div>
+    <p class="section-note" style="margin:0 0 14px;">
       用户组决定<b>谁能购买某个套餐</b>。把用户加进组，再到「套餐管理」里给套餐勾选可购买的用户组，该套餐就只对组内成员可见、可买。
       未绑定任何用户组的套餐对所有人开放。（与「节点管理」里的节点分组无关，那个决定的是买到套餐后能用哪些节点。）
     </p>
-    <div class="page-toolbar">
-      <span class="spacer" />
-      <n-button type="primary" @click="openForm()">创建用户组</n-button>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ groups.length }}</b><span>全部用户组</span></div>
+      <div class="resource-metric"><b>{{ groups.reduce((sum, g) => sum + (g.members || 0), 0) }}</b><span>成员关系总数</span></div>
+      <div class="resource-metric"><b>{{ packages.filter(p => p.user_group_ids?.length).length }}</b><span>专属套餐</span></div>
     </div>
 
     <n-spin :show="loading">

@@ -16,6 +16,7 @@
     <div class="pi-foot">
       <span class="pi-when">{{ whenText }}</span>
       <span class="spacer" />
+      <n-button v-if="canAdjust" size="tiny" quaternary :disabled="removing" @click="$emit('adjust')">调整</n-button>
       <n-button size="tiny" type="error" quaternary :loading="removing" @click="$emit('remove')">
         {{ plan.kind === 'pool' ? '清空' : '移除' }}
       </n-button>
@@ -30,11 +31,17 @@ import { fmtBytes, fmtDate, fmtDateTime, pct } from '@/utils/format'
 import { planStatusMeta, planTimeText } from '@/utils/plan'
 
 const props = defineProps<{ plan: any; removing?: boolean }>()
-defineEmits<{ (e: 'remove'): void }>()
+defineEmits<{ (e: 'remove'): void; (e: 'adjust'): void }>()
 
 const meta = computed(() => planStatusMeta(props.plan))
 const bucket = computed<'active' | 'queued' | 'finished'>(() =>
   meta.value.label === '使用中' ? 'active' : meta.value.label === '排队中' ? 'queued' : 'finished')
+// 不限量没有可改的数字；已过期的份加流量也不会重新生效。已用尽仍可加，好把这一份救回来。
+const canAdjust = computed(() => {
+  const p = props.plan
+  if (p.traffic_limit <= 0 && p.kind !== 'pool') return false
+  return meta.value.label !== '已过期'
+})
 
 const usedPct = computed(() => pct(props.plan.used, props.plan.traffic_limit))
 const fillWidth = computed(() =>

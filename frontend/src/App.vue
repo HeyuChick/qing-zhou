@@ -15,11 +15,18 @@ import { useConfigStore } from '@/stores/config'
 
 const themeOverrides: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#2b2b2b',
-    primaryColorHover: '#1a1a1a',
-    primaryColorPressed: '#000000',
-    primaryColorSuppl: '#ececec',
+    primaryColor: '#1769a5',
+    primaryColorHover: '#125b91',
+    primaryColorPressed: '#0d4c78',
+    primaryColorSuppl: '#1769a5',
+    infoColor: '#1769a5',
+    successColor: '#337a5c',
+    warningColor: '#b66b20',
+    errorColor: '#b6413a',
     borderRadius: '10px',
+    borderColor: 'rgba(28, 48, 70, .1)',
+    textColorBase: '#1d2733',
+    fontFamily: '"Segoe UI Variable", "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif',
   },
 }
 

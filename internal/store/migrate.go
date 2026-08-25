@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   name            TEXT    NOT NULL,
   protocol        TEXT    NOT NULL DEFAULT '',
   inbound_tag TEXT    NOT NULL DEFAULT '', -- self_built: matches sing-box inbound tag
+  route_upstream_inbound_id INTEGER NOT NULL DEFAULT 0, -- self_built logical route override; 0 = inherit inbound chain
+  route_upstream_broken INTEGER NOT NULL DEFAULT 0, -- selected landing was deleted; route stays fail-closed until acknowledged
   share_link      TEXT    NOT NULL DEFAULT '', -- external: raw share URI
   source_id       INTEGER NOT NULL DEFAULT 0,
   enabled         INTEGER NOT NULL DEFAULT 1,
@@ -138,6 +140,7 @@ CREATE TABLE IF NOT EXISTS node_groups (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   name        TEXT    NOT NULL,
   description TEXT    NOT NULL DEFAULT '',
+  is_ai       INTEGER NOT NULL DEFAULT 0,
   sort_order  INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL
 );
@@ -461,7 +464,10 @@ CREATE TABLE IF NOT EXISTS servers (
   status          TEXT    NOT NULL DEFAULT 'unknown',
   last_seen       INTEGER NOT NULL DEFAULT 0,
   created_at      INTEGER NOT NULL,
-  updated_at      INTEGER NOT NULL
+  updated_at      INTEGER NOT NULL,
+  use_sudo        INTEGER NOT NULL DEFAULT 0,
+  sudo_password   TEXT    NOT NULL DEFAULT '',
+  ssh_key_path    TEXT    NOT NULL DEFAULT ''
 );
 
 -- ===== Monitor probe (轻舟探针) =====
@@ -531,6 +537,10 @@ CREATE TABLE IF NOT EXISTS telegram_binds (
   first_name     TEXT    NOT NULL DEFAULT '',
   notify_expiry  INTEGER NOT NULL DEFAULT 1,
   notify_traffic INTEGER NOT NULL DEFAULT 1,
+  -- Operations alerts (node restart loops). Off by default and set by an admin
+  -- only: this is not something a user may subscribe themselves to, and the
+  -- message names nodes and failure counts.
+  notify_ops     INTEGER NOT NULL DEFAULT 0,
   bound_at       INTEGER NOT NULL,
   last_chat_at   INTEGER NOT NULL DEFAULT 0
 );
@@ -553,6 +563,28 @@ CREATE TABLE IF NOT EXISTS user_notify_log (
   subject  TEXT    NOT NULL,
   sent_at  INTEGER NOT NULL,
   PRIMARY KEY (user_id, kind, subject)
+);
+
+-- Admin-created Telegram broadcasts. The recipient table is a snapshot: it
+-- preserves who was selected and why delivery did/did not happen even if the
+-- user later binds Telegram, changes their name, or is deleted.
+CREATE TABLE IF NOT EXISTS manual_notifications (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  title        TEXT    NOT NULL,
+  content      TEXT    NOT NULL DEFAULT '',
+  target_type  TEXT    NOT NULL, -- all | selected
+  created_by   INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS manual_notification_recipients (
+  notification_id INTEGER NOT NULL,
+  user_id         INTEGER NOT NULL,
+  username        TEXT    NOT NULL DEFAULT '',
+  chat_id         INTEGER NOT NULL DEFAULT 0,
+  status          TEXT    NOT NULL DEFAULT 'pending', -- pending | sending | sent | failed | skipped
+  error           TEXT    NOT NULL DEFAULT '',
+  sent_at         INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (notification_id, user_id)
 );
 `
 
@@ -604,6 +636,8 @@ CREATE INDEX IF NOT EXISTS idx_alerts_open ON server_alerts(server_id, type, rea
 CREATE INDEX IF NOT EXISTS idx_tg_bind_tokens_user ON telegram_bind_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_tg_bind_tokens_exp ON telegram_bind_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_notify_log_user ON user_notify_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_manual_notifications_created ON manual_notifications(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_manual_notify_recipients_status ON manual_notification_recipients(notification_id, status);
 `
 
 // Migrate brings the schema up to date in three ordered phases: tables, then
@@ -644,6 +678,40 @@ func (s *Store) migrateEmailGateExempt() error {
 	return tx.Commit()
 }
 
+// migrateServerUseSudo adds servers.use_sudo and, in the same transaction that
+// creates it, turns it on for every row whose SSH user is not root.
+//
+// It cannot live in the best-effort additive list below, for the same reason
+// migrateEmailGateExempt cannot: those statements run on every boot, so the
+// backfill would re-enable sudo on a row an admin had deliberately turned it off
+// for, once per restart, forever.
+//
+// Backfilling to 1 rather than 0 is safe because a non-root row is already
+// broken today: every deploy on it dies on mkdir /etc/sing-box or on systemctl.
+// Turning sudo on can only move such a row from "fails" to "works".
+func (s *Store) migrateServerUseSudo() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('servers') WHERE name='use_sudo'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists > 0 {
+		return tx.Commit()
+	}
+	if _, err := tx.Exec(`ALTER TABLE servers ADD COLUMN use_sudo INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE servers SET use_sudo=1 WHERE ssh_user <> 'root' AND ssh_user <> ''`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -655,11 +723,20 @@ func (s *Store) Migrate() error {
 	if err := s.migrateEmailGateExempt(); err != nil {
 		return err
 	}
+	if err := s.migrateServerUseSudo(); err != nil {
+		return err
+	}
 	// Additive column migrations for DBs created before these columns existed.
 	// Errors (e.g. "duplicate column name") are expected on up-to-date DBs.
 	for _, stmt := range []string{
+		// Ops-alert recipient flag. Default 0, so upgrading never starts sending
+		// node failure details to anyone who was merely bound for expiry notices.
+		`ALTER TABLE telegram_binds ADD COLUMN notify_ops INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE announcements ADD COLUMN start_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE announcements ADD COLUMN end_at INTEGER NOT NULL DEFAULT 0`,
+		// AI groups feed the subscription's guarded AI route. Existing groups stay
+		// ordinary, so upgrading cannot reroute any user's traffic by surprise.
+		`ALTER TABLE node_groups ADD COLUMN is_ai INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE node_sources ADD COLUMN group_ids TEXT NOT NULL DEFAULT ''`,
 		// Shop selling-point bullets, stored as a JSON array of strings.
 		`ALTER TABLE packages ADD COLUMN highlights TEXT NOT NULL DEFAULT ''`,
@@ -681,7 +758,19 @@ func (s *Store) Migrate() error {
 		// deleted, so 链路拓扑 can keep showing that the exit silently moved to this
 		// machine. Cleared by any save of the inbound. See SbInbound.UpstreamBroken.
 		`ALTER TABLE sb_inbounds ADD COLUMN upstream_broken INTEGER NOT NULL DEFAULT 0`,
+		// A self-built node is the user-facing logical route. Several nodes may now
+		// share one physical inbound and select different landing inbounds; 0 keeps
+		// the legacy behaviour of inheriting the physical inbound's own chain.
+		`ALTER TABLE nodes ADD COLUMN route_upstream_inbound_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE nodes ADD COLUMN route_upstream_broken INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE servers ADD COLUMN ssh_password TEXT NOT NULL DEFAULT ''`,
+		// sudo password for accounts without NOPASSWD (encrypted at rest, like the
+		// SSH password beside it), and the name of a key file in the panel's key
+		// directory for rows that do not want the PEM pasted into the browser.
+		// use_sudo is NOT here — it carries a one-time backfill, see
+		// migrateServerUseSudo.
+		`ALTER TABLE servers ADD COLUMN sudo_password TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE servers ADD COLUMN ssh_key_path TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sb_tls ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
 		// Certificate center: a mode=tls profile references a managed certificate
 		// by id instead of inlining its PEM, so one cert serves many inbounds and a
@@ -825,6 +914,9 @@ func (s *Store) Migrate() error {
 		`UPDATE sb_inbounds SET upstream_inbound_id=0, upstream_broken=1
 		 WHERE upstream_inbound_id<>0
 		   AND upstream_inbound_id NOT IN (SELECT id FROM sb_inbounds)`,
+		`UPDATE nodes SET route_upstream_inbound_id=0, route_upstream_broken=1
+		 WHERE route_upstream_inbound_id<>0
+		   AND route_upstream_inbound_id NOT IN (SELECT id FROM sb_inbounds)`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			// Benign on an up-to-date DB: the column already exists (ADD COLUMN) or

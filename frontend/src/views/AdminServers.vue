@@ -1,9 +1,14 @@
 <template>
   <div>
-    <h2 class="page-title">服务器管理</h2>
-    <div class="page-toolbar">
-      <span class="spacer" />
-      <n-button type="primary" @click="openForm()">添加服务器</n-button>
+    <div class="page-head">
+      <div><h2 class="page-title">服务器管理</h2><p class="page-sub">远程机器、SSH 接管、探针与 sing-box 运行版本</p></div>
+      <div class="page-actions"><n-button type="primary" @click="openForm()">添加服务器</n-button></div>
+    </div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ servers.length }}</b><span>全部远程服务器</span></div>
+      <div class="resource-metric success"><b>{{ servers.filter(s => s.enabled).length }}</b><span>已启用</span></div>
+      <div class="resource-metric"><b>{{ servers.filter(s => s.probe_enabled).length }}</b><span>探针已开启</span></div>
+      <div class="resource-metric" :class="{ danger: versions.filter(v => v.too_old || (v.version && !v.has_v2ray_api)).length }"><b>{{ versions.filter(v => v.too_old || (v.version && !v.has_v2ray_api)).length }}</b><span>版本或统计异常</span></div>
     </div>
     <!-- 各节点实际在跑的 sing-box。数据来自面板本来就在做的能力探测，
          以前只取了「有没有 v2ray_api」，版本号被丢掉了。 -->
@@ -82,10 +87,40 @@
         <n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item>
         <n-form-item label="主机"><n-input v-model:value="form.host" placeholder="IP 或域名" /></n-form-item>
         <n-form-item label="SSH 端口"><n-input-number v-model:value="form.port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
-        <n-form-item label="SSH 用户"><n-input v-model:value="form.ssh_user" placeholder="root" /></n-form-item>
+        <n-form-item label="SSH 用户"><n-input v-model:value="form.ssh_user" placeholder="root" @update:value="onSshUserInput" /></n-form-item>
+        <n-form-item label="sudo 提权">
+          <div style="width:100%;">
+            <n-switch v-model:value="form.use_sudo" />
+            <div class="hint">
+              非 root 账号必须打开：写配置、装配置、重启服务都要 root。
+              <b>需要免密 sudo（NOPASSWD），等同于把 root 交给面板</b>；填了密码则用密码提权。
+            </div>
+          </div>
+        </n-form-item>
+        <n-form-item v-if="form.use_sudo" label="sudo 密码"><n-input v-model:value="form.sudo_password" type="password" show-password-on="click" placeholder="留空并保存 = 改用免密 sudo" /></n-form-item>
         <n-form-item label="SSH 密码"><n-input v-model:value="form.ssh_password" type="password" show-password-on="click" placeholder="与密钥二选一" /></n-form-item>
-        <n-form-item label="SSH 私钥"><n-input v-model:value="form.ssh_key" type="textarea" :rows="3" placeholder="-----BEGIN ... PRIVATE KEY-----" /></n-form-item>
-        <n-form-item label="密钥密码"><n-input v-model:value="form.ssh_key_pass" type="password" show-password-on="click" /></n-form-item>
+        <n-form-item label="SSH 私钥">
+          <div style="width:100%;">
+            <n-radio-group v-model:value="keyMode" size="small">
+              <n-radio-button value="paste">粘贴</n-radio-button>
+              <n-radio-button value="file">从文件选择</n-radio-button>
+            </n-radio-group>
+            <n-input v-if="keyMode==='paste'" v-model:value="form.ssh_key" type="textarea" :rows="3"
+                     placeholder="-----BEGIN ... PRIVATE KEY-----" style="margin-top:8px;" />
+            <template v-else>
+              <n-select v-model:value="form.ssh_key_path" :options="keyOptions" clearable
+                        :loading="keysLoading" placeholder="选择一个私钥文件" style="margin-top:8px;" />
+              <div class="hint">
+                目录：<code>{{ keyDir || '未配置' }}</code>
+                <template v-if="!keysConfigured"> —— 未配置，设置 <code>QZ_SSH_KEY_DIR</code> 后可用。</template>
+                <template v-else-if="!keyFiles.length"> —— 目录不存在或还没有私钥文件；把私钥放进去并 <code>chmod 600</code>。</template>
+                <br>私钥不经过浏览器、也不入库。容器内面板以 uid 10001 运行，挂进去的密钥要它能读（<code>chown 10001</code>）。
+                <template v-if="form.ssh_key"><br><b>已选文件时，上面粘贴过的私钥不再使用。</b></template>
+              </div>
+            </template>
+          </div>
+        </n-form-item>
+        <n-form-item label="密钥密码"><n-input v-model:value="form.ssh_key_pass" type="password" show-password-on="click" placeholder="已保存时显示 ***；清空并保存可删除" /></n-form-item>
         <n-form-item label="配置路径"><n-input v-model:value="form.config_path" placeholder="/etc/sing-box/config.json" /></n-form-item>
         <n-form-item label="systemd 单元"><n-input v-model:value="form.systemd_unit" placeholder="sing-box" /></n-form-item>
         <n-form-item label="sing-box 路径"><n-input v-model:value="form.sing_box_bin" placeholder="/usr/local/bin/sing-box" /></n-form-item>
@@ -100,8 +135,8 @@
   </div>
 </template>
 <script setup lang="ts">
-import { ref, reactive, onMounted, h } from 'vue'
-import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, NCard, useMessage, useDialog } from 'naive-ui'
+import { ref, reactive, computed, onMounted, h } from 'vue'
+import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, NCard, NSelect, NRadioGroup, NRadioButton, useMessage, useDialog } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete, apiGet } from '@/api'
 import { fmtDateTime } from '@/utils/format'
 const message = useMessage()
@@ -109,21 +144,59 @@ const dialog = useDialog()
 const servers = ref<any[]>([])
 const loading = ref(false); const saving = ref(false); const testing = ref(false)
 const showForm = ref(false); const editing = ref<any>(null)
-const mk = () => ({ name:'', host:'', port:22, ssh_user:'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', config_path:'/etc/sing-box/config.json', systemd_unit:'sing-box', sing_box_bin:'/usr/local/bin/sing-box', v2ray_listen:'127.0.0.1:18080', enabled:true })
+const mk = () => ({ name:'', host:'', port:22, ssh_user:'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:false, sudo_password:'', ssh_key_path:'', config_path:'/etc/sing-box/config.json', systemd_unit:'sing-box', sing_box_bin:'/usr/local/bin/sing-box', v2ray_listen:'127.0.0.1:18080', enabled:true })
 const form = reactive(mk())
+
+// 私钥来源二选一。粘贴走 ssh_key（加密入库），选文件走 ssh_key_path（只存文件名，
+// 内容始终留在面板机器上）。后端以文件优先。
+const keyMode = ref<'paste'|'file'>('paste')
+const keyFiles = ref<any[]>([])
+const keyDir = ref(''); const keysConfigured = ref(false); const keysLoading = ref(false)
+const keyOptions = computed(() => keyFiles.value.map((f:any) => ({
+  // 可读性直接标在选项上：容器内以 uid 10001 跑，宿主机 chmod 600 的 root 私钥
+  // 挂进去读不了，是这个功能最常见的失败方式。让人一眼看见，别保存完去猜。
+  label: f.name + (!f.readable ? '（面板读不了）' : (!f.mode_ok ? '（权限过松）' : '')),
+  value: f.name,
+  disabled: !f.readable,
+})))
+async function loadKeys(){
+  keysLoading.value = true
+  try{
+    const r:any = await apiGet('/api/admin/ssh-keys')
+    keyFiles.value = r?.files || []; keyDir.value = r?.dir || ''; keysConfigured.value = !!r?.configured
+  }catch{ keyFiles.value = []; keysConfigured.value = false }
+  finally{ keysLoading.value = false }
+}
 function openForm(s?:any){
   editing.value = s||null
-  if(s){ Object.assign(form,{ name:s.name, host:s.host, port:s.port||22, ssh_user:s.ssh_user||'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', config_path:s.config_path||'/etc/sing-box/config.json', systemd_unit:s.systemd_unit||'sing-box', sing_box_bin:s.sing_box_bin||'/usr/local/bin/sing-box', v2ray_listen:s.v2ray_listen||'127.0.0.1:18080', enabled:s.enabled??true }) }
+  if(s){ Object.assign(form,{ name:s.name, host:s.host, port:s.port||22, ssh_user:s.ssh_user||'root', ssh_password:'', ssh_key:'', ssh_key_pass:s.ssh_key_pass||'', use_sudo:s.use_sudo??false, sudo_password:s.sudo_password||'', ssh_key_path:s.ssh_key_path||'', config_path:s.config_path||'/etc/sing-box/config.json', systemd_unit:s.systemd_unit||'sing-box', sing_box_bin:s.sing_box_bin||'/usr/local/bin/sing-box', v2ray_listen:s.v2ray_listen||'127.0.0.1:18080', enabled:s.enabled??true }) }
   else { Object.assign(form, mk()) }
+  keyMode.value = form.ssh_key_path ? 'file' : 'paste'
   showForm.value = true
+  loadKeys()
 }
+// 改 SSH 用户时替管理员把 sudo 开关拨到通常正确的位置：非 root 必然要提权，
+// root 必然不要。只在「人手动改这个输入框」时触发 —— 打开已有服务器走的是
+// openForm，不经过这里，所以不会覆盖管理员自己拨过的开关。
+function onSshUserInput(v:string){
+  form.use_sudo = (v||'').trim() !== 'root' && (v||'').trim() !== ''
+}
+
 async function handleSave(){
   saving.value = true
   try{
     const b:any = {...form}
     if(!b.ssh_password) delete b.ssh_password
     if(!b.ssh_key) delete b.ssh_key
-    if(!b.ssh_key_pass) delete b.ssh_key_pass
+    // 这两个字段必须把空字符串送到后端：更新接口以「字段缺失」表示保留旧值，
+    // 以空字符串表示真的清除。编辑时保留的 *** 会由后端换回原密文。
+    // sudo 已关闭时密码不再有用途，保存时顺手从库里清掉。
+    if(!b.use_sudo) b.sudo_password = ''
+    // 切回粘贴就是明确不要文件了，所以显式送空把它清掉（更新接口是「没送的字段
+    // 保留原值」，delete 会让旧的文件名留在库里继续生效）。反过来选了文件时不动
+    // ssh_key：后端本来就文件优先，而空的 ssh_key 会被下面删掉以免误清密钥。
+    if(keyMode.value === 'paste'){ b.ssh_key_path = '' }
+    else { delete b.ssh_key }
     if(editing.value) await apiPut(`/api/admin/servers/${editing.value.id}`,b)
     else await apiPost('/api/admin/servers',b)
     message.success('保存成功'); showForm.value=false; editing.value=null; await load()
@@ -256,4 +329,5 @@ onMounted(() => { load(); loadVersions() })
   white-space:pre-wrap; word-break:break-all;
   background:var(--code-bg,rgba(128,128,128,.1)); border-radius:6px; color:var(--text-2);
 }
+.hint{ font-size:12px; line-height:1.6; color:var(--n-text-color-3,#8a8a8a); margin-top:6px; }
 </style>

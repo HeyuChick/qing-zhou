@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <rect x="2" y="2" width="44" height="44" rx="11" fill="#6f8f76"/>
+  <rect x="2" y="2" width="44" height="44" rx="11" fill="url(#gg-shine)" fill-opacity=".18"/>
+  <defs>
+    <linearGradient id="gg-shine" x1="8" y1="4" x2="36" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <text x="24" y="32" font-size="27" text-anchor="middle" fill="#ffffff" font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif" font-weight="600">鸡</text>
+</svg>

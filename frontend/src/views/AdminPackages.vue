@@ -1,9 +1,14 @@
 <template>
   <div>
-    <h2 class="page-title">套餐管理</h2>
-    <div class="page-toolbar">
-      <span class="spacer" />
-      <n-button type="primary" @click="openForm()">创建套餐</n-button>
+    <div class="page-head">
+      <div><h2 class="page-title">套餐管理</h2><p class="page-sub">商品规格、时长阶梯、库存、权限与上下架状态</p></div>
+      <div class="page-actions"><n-button type="primary" @click="openForm()">创建套餐</n-button></div>
+    </div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ packages.length }}</b><span>全部套餐</span></div>
+      <div class="resource-metric success"><b>{{ packages.filter(p => p.enabled !== false).length }}</b><span>正在上架</span></div>
+      <div class="resource-metric"><b>{{ packages.filter(p => p.type === 'plan').length }}</b><span>订阅计划</span></div>
+      <div class="resource-metric"><b>{{ packages.filter(p => p.type === 'traffic').length }}</b><span>流量包 · 专属 {{ packages.filter(p => p.user_group_ids?.length).length }}</span></div>
     </div>
     <n-spin :show="loading">
       <div v-if="packages.length" class="card-grid">

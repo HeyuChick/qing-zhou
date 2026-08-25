@@ -1,9 +1,13 @@
 <template>
   <div>
-    <h2 class="page-title">公告管理</h2>
-    <div class="page-toolbar">
-      <span class="spacer" />
-      <n-button type="primary" @click="openCreate">发布公告</n-button>
+    <div class="page-head">
+      <div><h2 class="page-title">公告管理</h2><p class="page-sub">管理公告内容、展示时段、置顶与启用状态</p></div>
+      <div class="page-actions"><n-button type="primary" @click="openCreate">发布公告</n-button></div>
+    </div>
+    <div class="resource-overview">
+      <div class="resource-metric"><b>{{ announcements.length }}</b><span>全部公告</span></div>
+      <div class="resource-metric success"><b>{{ announcements.filter(a => a.enabled).length }}</b><span>当前启用</span></div>
+      <div class="resource-metric"><b>{{ announcements.filter(a => a.pinned).length }}</b><span>置顶公告</span></div>
     </div>
     <n-spin :show="loading">
       <div v-if="announcements.length" class="card-grid">
@@ -11,8 +15,8 @@
           <div class="lc-head">
             <span class="lc-title">{{ a.title || '—' }}</span>
             <n-space :size="4">
-              <n-tag v-if="a.pinned" type="warning" size="tiny" bordered="false">置顶</n-tag>
-              <n-tag :type="a.enabled ? 'success' : 'default'" size="tiny" bordered="false">{{ a.enabled ? '启用' : '禁用' }}</n-tag>
+              <n-tag v-if="a.pinned" type="warning" size="tiny" :bordered="false">置顶</n-tag>
+              <n-tag :type="a.enabled ? 'success' : 'default'" size="tiny" :bordered="false">{{ a.enabled ? '启用' : '禁用' }}</n-tag>
             </n-space>
           </div>
           <div v-if="a.content" class="lc-meta" style="color:var(--text-2);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">{{ a.content }}</div>
@@ -32,8 +36,8 @@
       <n-form label-placement="left" label-width="80">
         <n-form-item label="标题"><n-input v-model:value="form.title" /></n-form-item>
         <n-form-item label="内容"><n-input v-model:value="form.content" type="textarea" :rows="6" /></n-form-item>
-        <n-form-item label="开始时间"><n-input v-model:value="form.start_at" type="datetime-local" /></n-form-item>
-        <n-form-item label="结束时间"><n-input v-model:value="form.end_at" type="datetime-local" /></n-form-item>
+        <n-form-item label="开始时间"><n-input v-model:value="form.start_at" :input-props="{ type: 'datetime-local' }" /></n-form-item>
+        <n-form-item label="结束时间"><n-input v-model:value="form.end_at" :input-props="{ type: 'datetime-local' }" /></n-form-item>
         <n-form-item label="置顶"><n-switch v-model:value="form.pinned" /></n-form-item>
         <n-form-item label="启用"><n-switch v-model:value="form.enabled" /></n-form-item>
       </n-form>

@@ -48,8 +48,10 @@
       <template #header><span class="card-h">可用性热力图</span></template>
       <template #header-extra>
         <n-space :size="4" align="center">
-          <n-button v-for="r in heatRanges" :key="r.value" size="tiny" :type="heatRange===r.value?'primary':'default'" @click="loadHeatmap(r.value)">{{ r.label }}</n-button>
-          <span class="hm-legend"><i class="hm-dot ok" />正常 <i class="hm-dot warn" />高负载 <i class="hm-dot crit" />离线/无数据</span>
+          <span class="range-switch">
+            <button v-for="r in heatRanges" :key="r.value" type="button" :class="{ active: heatRange===r.value }" @click="loadHeatmap(r.value)">{{ r.label }}</button>
+          </span>
+          <span class="hm-legend"><i class="hm-dot ok" />正常 <i class="hm-dot warn" />高负载 <i class="hm-dot crit" />严重 <i class="hm-dot none" />无数据</span>
         </n-space>
       </template>
       <div ref="heatEl" class="heat-chart" />
@@ -152,9 +154,9 @@
         <div v-else class="no-data">暂无数据</div>
 
         <div class="mini-chart-box">
-          <n-space :size="4" style="margin-bottom:6px;">
-            <n-button v-for="r in ranges" :key="r.value" size="tiny" :type="chartRange[s.id]===r.value?'primary':'default'" @click="loadChart(s.id, r.value)">{{ r.label }}</n-button>
-          </n-space>
+          <div class="range-switch mini-range">
+            <button v-for="r in ranges" :key="r.value" type="button" :class="{ active: chartRange[s.id]===r.value }" @click="loadChart(s.id, r.value)">{{ r.label }}</button>
+          </div>
           <div :ref="(el:any) => setChartRef(s.id, el)" class="mini-chart" />
         </div>
       </n-card>
@@ -216,11 +218,14 @@ const alertsExpanded = ref(false)
 const ALERT_PREVIEW = 5
 const ALERT_META: Record<string, { label: string; kind: 'error' | 'warning'; rank: number }> = {
   offline: { label: '离线', kind: 'error', rank: 0 },
-  expired: { label: '已过期', kind: 'error', rank: 1 },
-  disk_full: { label: '磁盘将满', kind: 'warning', rank: 2 },
-  high_mem: { label: '内存偏高', kind: 'warning', rank: 3 },
-  high_cpu: { label: 'CPU 偏高', kind: 'warning', rank: 4 },
-  expiring: { label: '即将到期', kind: 'warning', rank: 5 },
+  // 节点反复重启：每次重启都会切断该节点上所有人的连接，用户侧就是「一会儿就断」。
+  // 排在离线后面 —— 还能连上，但连不稳。
+  restart_loop: { label: '反复重启', kind: 'error', rank: 1 },
+  expired: { label: '已过期', kind: 'error', rank: 2 },
+  disk_full: { label: '磁盘将满', kind: 'warning', rank: 3 },
+  high_mem: { label: '内存偏高', kind: 'warning', rank: 4 },
+  high_cpu: { label: 'CPU 偏高', kind: 'warning', rank: 5 },
+  expiring: { label: '即将到期', kind: 'warning', rank: 6 },
 }
 function alertLabel(t: string) { return ALERT_META[t]?.label || t }
 function alertKind(t: string) { return ALERT_META[t]?.kind || 'warning' }
@@ -281,6 +286,15 @@ function fmtHeatTime(ts: number, range: string): string {
   if (range === '7d' || range === '24h') return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
+function fmtHeatAxisTime(ts: number, range: string): string {
+  const d = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  if (range === '7d') return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+function escapeHeatHtml(value: unknown): string {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c))
+}
 async function loadHeatmap(range: string) {
   heatRange.value = range
   heatLoading.value = true
@@ -307,54 +321,66 @@ function renderHeatmap() {
   const range = data.range || '24h'
   // 组装 ECharts heatmap data: [xIndex, yIndex, value]
   const pts: [number, number, number][] = []
+  const hasDistinctNoData = Number(data.state_count || 0) >= 4
   for (let y = 0; y < servers.length; y++) {
     const row = matrix[y] || []
     for (let x = 0; x < buckets.length; x++) {
-      pts.push([x, y, row[x] ?? 2])
+      const raw = row[x] ?? 3
+      pts.push([x, y, !hasDistinctNoData && raw === 2 ? 3 : raw])
     }
   }
-  const xLabels = buckets.map((t: number) => fmtHeatTime(t, range))
+  const xLabels = buckets.map((t: number) => fmtHeatAxisTime(t, range))
   const yLabels = servers.map((s: any) => s.name)
-  // 计算正方形单元格：根据容器宽度和列数推算 cellSize，再设置容器高度
   const cw = heatEl.value.clientWidth || 600
   const maxNameLen = Math.max(...yLabels.map((n: string) => String(n).length), 4)
-  const yLabelW = Math.min(maxNameLen * 7 + 16, 150)
-  const padL = 8, padR = 8, padT = 12, padB = 4, xLabelH = 22
-  const gridW = Math.max(cw - padL - padR - yLabelW, 100)
-  const cellSize = Math.max(6, Math.floor(gridW / buckets.length))
-  const chartH = servers.length * cellSize + padT + padB + xLabelH
+  const yLabelW = Math.min(maxNameLen * 7 + 18, cw < 640 ? 92 : 150)
+  const padR = 4, padT = 5, padB = 30
+  const rowHeight = cw < 640 ? 18 : 22
+  const gridHeight = Math.max(1, servers.length) * rowHeight
+  const chartH = gridHeight + padT + padB
+  const labelCount = cw < 520 ? 4 : cw < 900 ? 6 : 8
+  const labelInterval = Math.max(0, Math.ceil(buckets.length / labelCount) - 1)
+  const states = [
+    { label: '运行正常', color: '#63a887' },
+    { label: '高负载', color: '#d2a34c' },
+    { label: '严重负载', color: '#c96d67' },
+    { label: '离线 / 无数据', color: '#b9c2cc' },
+  ]
   heatEl.value.style.height = chartH + 'px'
   chart.setOption({
+    animationDuration: 560,
+    animationDurationUpdate: 380,
+    animationEasing: 'cubicOut',
+    animationEasingUpdate: 'cubicOut',
     tooltip: {
+      backgroundColor: 'rgba(255,255,255,.98)', borderColor: '#dfe4ea', borderWidth: 1,
+      padding: [10, 12], textStyle: { color: '#26323f', fontSize: 12 },
+      extraCssText: 'border-radius:10px;box-shadow:0 10px 30px rgba(42,55,70,.14);',
       formatter: (p: any) => {
         const [x, y, v] = p.value
-        const sname = yLabels[y] || ''
-        const t = xLabels[x] || ''
-        const tag = v === 0 ? '<span style="color:#10b981">正常</span>' : v === 1 ? '<span style="color:#fbbf24">高负载</span>' : '<span style="color:#ef4444">离线/无数据</span>'
-        return `${sname}<br/>${t}<br/>${tag}`
+        const state = states[v] || states[3]
+        const time = buckets[x] ? fmtHeatTime(buckets[x], range) : ''
+        return `<div style="font-weight:650;margin-bottom:4px">${escapeHeatHtml(yLabels[y])}</div><div style="color:#7b8794;margin-bottom:7px">${escapeHeatHtml(time)}</div><div style="display:flex;align-items:center;gap:7px"><i style="width:8px;height:8px;border-radius:3px;background:${state.color};display:inline-block"></i>${state.label}</div>`
       },
     },
-    grid: { left: padL, right: padR, top: padT, bottom: padB, containLabel: true },
+    grid: { left: yLabelW, right: padR, top: padT, height: gridHeight },
     xAxis: {
       type: 'category', data: xLabels, splitArea: { show: true },
-      axisLabel: { fontSize: 10, hideOverlap: true },
+      axisLabel: { interval: labelInterval, color: '#7b8794', fontSize: 10, margin: 10, hideOverlap: true },
       axisTick: { show: false }, axisLine: { show: false },
     },
     yAxis: {
       type: 'category', data: yLabels, splitArea: { show: true },
-      axisLabel: { fontSize: 11 },
+      axisLabel: { color: '#606d7b', fontSize: 11, width: yLabelW - 12, overflow: 'truncate', margin: 10 },
       axisTick: { show: false }, axisLine: { show: false },
     },
-    visualMap: {
-      min: 0, max: 2, calculable: false, show: false,
-      inRange: { color: ['#10b981', '#fbbf24', '#ef4444'] },
-    },
+    visualMap: { type: 'piecewise', show: false, pieces: states.map((state, value) => ({ value, color: state.color })) },
     series: [{
       type: 'heatmap', data: pts, progressive: 0,
-      itemStyle: { borderColor: '#fff', borderWidth: 1, borderRadius: 2 },
-      emphasis: { itemStyle: { borderColor: '#333', borderWidth: 1 } },
+      itemStyle: { borderColor: 'rgba(255,255,255,.96)', borderWidth: 3, borderRadius: 5 },
+      emphasis: { itemStyle: { borderColor: '#fff', borderWidth: 2, shadowBlur: 10, shadowColor: 'rgba(42,55,70,.18)' } },
     }],
-  })
+  }, true)
   chart.resize()
 }
 
@@ -544,19 +570,25 @@ onUnmounted(() => {
 .card-h { font-weight: 650; font-size: 14px; }
 
 /* 汇总卡 */
-.sum-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
-.sum-card { display: flex; align-items: center; gap: 10px; padding: 14px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
-.sum-ic { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; flex-shrink: 0; }
-.sum-card div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.sum-val { font-size: 19px; font-weight: 720; }
-.sum-lab { font-size: 11px; color: var(--text-3); }
+.sum-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.sum-card { min-height: 76px; box-sizing: border-box; display: flex; align-items: center; gap: 11px; padding: 13px 14px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-sm); }
+.sum-ic { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; flex: 0 0 36px; }
+.sum-card > div:not(.sum-ic) { display: flex; flex-direction: column; justify-content: center; gap: 2px; min-width: 0; }
+.sum-val { font-size: 19px; font-weight: 720; line-height: 1.12; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sum-lab { font-size: 11px; line-height: 1.25; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* 热力图 */
 .hm-legend { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); margin-left: 8px; }
-.hm-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-left: 6px; }
-.hm-dot.ok { background: #10b981; } .hm-dot.warn { background: #fbbf24; } .hm-dot.crit { background: #ef4444; }
-.heat-chart { width: 100%; height: 360px; min-height: 120px; }
+.hm-dot { width: 8px; height: 8px; border-radius: 3px; display: inline-block; margin-left: 6px; box-shadow: inset 0 0 0 1px rgba(31,43,55,.05); }
+.hm-dot.ok { background: #63a887; } .hm-dot.warn { background: #d2a34c; } .hm-dot.crit { background: #c96d67; } .hm-dot.none { background: #b9c2cc; }
+.heat-chart { width: 100%; height: 58px; min-height: 0; }
 .heat-chart:empty { display: none; }
+.range-switch { display:inline-flex; align-items:center; gap:0; padding:3px; border:1px solid rgba(28,48,70,.09); border-radius:8px; background:#eef1f4; }
+.range-switch button { min-width:30px; padding:3px 8px; border:0; border-radius:5px; background:transparent; color:var(--text-3); font:600 11px/1.5 var(--ff); cursor:pointer; transition:background .18s var(--ease-standard), color .18s var(--ease-standard), box-shadow .18s var(--ease-standard); }
+.range-switch button:hover { color:var(--text); }
+.range-switch button.active { background:#fff; color:var(--text); box-shadow:0 1px 2px rgba(30,45,60,.1); }
+.range-switch button:focus-visible { outline:0; box-shadow:inset 0 0 0 2px rgba(29,39,51,.16); }
+.mini-range { width:max-content; margin-bottom:6px; }
 
 /* 告警 */
 .alert-cnt { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 9px; background: var(--danger-soft, #fef2f2); color: var(--danger, #dc2626); font-size: 11px; font-weight: 650; }
@@ -597,4 +629,5 @@ onUnmounted(() => {
   .card-grid { grid-template-columns: 1fr; }
   .sum-grid { grid-template-columns: repeat(2, 1fr); }
 }
+@media (min-width: 769px) and (max-width: 1180px) { .sum-grid { grid-template-columns: repeat(3, 1fr); } }
 </style>

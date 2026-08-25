@@ -51,7 +51,20 @@ type API struct {
 	// Tests replace Telegram I/O; production leaves these nil.
 	tgSendFn   func(chatID int64, html string) error
 	tgClientFn func(token string) *telegram.Client
+
+	// Where server rows may keep SSH private keys as files. Empty disables the
+	// feature; see sshctl/keyfile.go.
+	sshKeyDir string
+
+	// Node restart-loop watching (restartalert.go). Both are buffered and both
+	// are written to with a non-blocking send, so neither config deployment nor
+	// the watcher can ever wait on the one behind it.
+	restartCh chan restartEvent
+	opsCh     chan string
 }
+
+// SetSSHKeyDir points the panel at the directory holding SSH private key files.
+func (a *API) SetSSHKeyDir(dir string) { a.sshKeyDir = dir }
 
 // SetSbController attaches the native sing-box controller so admin changes to
 // inbounds/TLS/users can trigger a config rebuild. Safe to leave unset.
@@ -120,6 +133,8 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		subRL:     newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
 		tgRL:      newRateLimiter(20, time.Minute),   // 20 bot commands / telegram user / min
 		linkCache: make(map[int64]linkCacheEntry),
+		restartCh: make(chan restartEvent, restartEventQueue),
+		opsCh:     make(chan string, opsMessageQueue),
 	}
 	// Self-updater: repo + optional GitHub token come from env or DB settings,
 	// falling back to the project's canonical repo.
@@ -239,6 +254,9 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/settings/default-templates", a.handleGetDefaultTemplates)
 		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
 		ar.Post("/api/admin/settings/test-telegram", a.handleTestTelegram)
+		ar.Get("/api/admin/ops-recipients", a.handleListOpsRecipients)
+		ar.Put("/api/admin/ops-recipients/{id}", a.handleSetOpsRecipient)
+		ar.Post("/api/admin/ops-recipients/test", a.handleTestOpsAlert)
 		ar.Get("/api/admin/settings/detect-node-host", a.handleDetectNodeHost)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
 		ar.Get("/api/admin/backup", a.handleAdminBackup)
@@ -271,6 +289,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/users/{id}/orders", a.handleAdminUserOrders)
 		ar.Get("/api/admin/users/{id}/plans", a.handleAdminUserPlans)
 		ar.Delete("/api/admin/users/{id}/plans/{planID}", a.handleAdminDeleteUserPlan)
+		ar.Post("/api/admin/users/{id}/plans/{planID}/traffic", a.handleAdminAdjustUserPlanTraffic)
 		ar.Get("/api/admin/orders/{id}/refund-preview", a.handleAdminRefundPreview)
 		ar.Post("/api/admin/orders/{id}/refund", a.handleAdminRefundOrder)
 		ar.Delete("/api/admin/orders/{id}", a.handleAdminDeleteOrder)
@@ -334,6 +353,7 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/servers/{id}/rebuild", a.handleAdminRebuildServer)
 		// Recover from a legitimately changed host key (reinstalled/replaced node).
 		ar.Post("/api/admin/servers/{id}/clear-host-key", a.handleAdminClearServerHostKey)
+		ar.Get("/api/admin/ssh-keys", a.handleAdminListSSHKeys)
 		ar.Put("/api/admin/servers/{id}/monitor", a.handleUpdateServerMonitor)
 
 		// monitor probe
@@ -395,6 +415,11 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/announcements", a.handleAdminCreateAnnouncement)
 		ar.Put("/api/admin/announcements/{id}", a.handleAdminUpdateAnnouncement)
 		ar.Delete("/api/admin/announcements/{id}", a.handleAdminDeleteAnnouncement)
+
+		ar.Get("/api/admin/manual-notifications/users", a.handleAdminManualNotificationUsers)
+		ar.Get("/api/admin/manual-notifications", a.handleAdminListManualNotifications)
+		ar.Post("/api/admin/manual-notifications", a.handleAdminCreateManualNotification)
+		ar.Get("/api/admin/manual-notifications/{id}", a.handleAdminManualNotificationDetail)
 	})
 
 	// sing-box one-click install script. Registered explicitly above the SPA

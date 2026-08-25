@@ -15,8 +15,8 @@
           <stop offset="0" stop-color="#d98a7f" /><stop offset="1" stop-color="#c2685c" />
         </linearGradient>
         <linearGradient id="spark-grad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#6f8f76" stop-opacity="0.32" />
-          <stop offset="1" stop-color="#6f8f76" stop-opacity="0" />
+          <stop offset="0" stop-color="#3180b5" stop-opacity="0.24" />
+          <stop offset="1" stop-color="#3180b5" stop-opacity="0" />
         </linearGradient>
       </defs>
     </svg>
@@ -125,7 +125,7 @@
           <span class="section-title">可用性热力图</span>
           <div class="heat-range">
             <button v-for="r in heatRanges" :key="r.value" class="heat-range-btn" :class="{ active: heatRange === r.value }" @click="loadHeatmap(r.value)">{{ r.label }}</button>
-            <span class="heat-legend"><i class="hm-dot ok"></i>正常 <i class="hm-dot warn"></i>高负载 <i class="hm-dot crit"></i>离线/无数据</span>
+            <span class="heat-legend"><i class="hm-dot ok"></i>正常 <i class="hm-dot warn"></i>高负载 <i class="hm-dot crit"></i>严重 <i class="hm-dot none"></i>无数据</span>
           </div>
         </div>
 
@@ -407,6 +407,15 @@ function fmtHeatTime(ts: number, range: string): string {
   if (range === '7d' || range === '24h') return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
+function fmtHeatAxisTime(ts: number, range: string): string {
+  const d = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  if (range === '7d') return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+function escapeHeatHtml(value: unknown): string {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] || c))
+}
 async function loadHeatmap(range: string) {
   heatRange.value = range
   try {
@@ -427,36 +436,54 @@ function renderHeatmap() {
   const matrix: number[][] = data.matrix || []
   const range = data.range || '24h'
   const pts: [number, number, number][] = []
+  const hasDistinctNoData = Number(data.state_count || 0) >= 4
   for (let y = 0; y < servers.length; y++) {
     const row = matrix[y] || []
-    for (let x = 0; x < buckets.length; x++) pts.push([x, y, row[x] ?? 2])
+    for (let x = 0; x < buckets.length; x++) {
+      const raw = row[x] ?? 3
+      pts.push([x, y, !hasDistinctNoData && raw === 2 ? 3 : raw])
+    }
   }
-  const xLabels = buckets.map((t: number) => fmtHeatTime(t, range))
+  const xLabels = buckets.map((t: number) => fmtHeatAxisTime(t, range))
   const yLabels = servers.map((s: any) => s.name)
   const cw = heatEl.value.clientWidth || 600
   const maxNameLen = Math.max(...yLabels.map((n: string) => String(n).length), 4)
-  const yLabelW = Math.min(maxNameLen * 7 + 16, 150)
-  const padL = 8, padR = 8, padT = 12, padB = 4, xLabelH = 22
-  const gridW = Math.max(cw - padL - padR - yLabelW, 100)
-  const cellSize = Math.max(6, Math.floor(gridW / buckets.length))
-  const chartH = servers.length * cellSize + padT + padB + xLabelH
+  const yLabelW = Math.min(maxNameLen * 7 + 18, cw < 640 ? 92 : 150)
+  const padR = 4, padT = 5, padB = 30
+  const rowHeight = cw < 640 ? 18 : 22
+  const gridHeight = Math.max(1, servers.length) * rowHeight
+  const chartH = gridHeight + padT + padB
+  const labelCount = cw < 520 ? 4 : cw < 900 ? 6 : 8
+  const labelInterval = Math.max(0, Math.ceil(buckets.length / labelCount) - 1)
+  const states = [
+    { label: '运行正常', color: '#63a887' },
+    { label: '高负载', color: '#d2a34c' },
+    { label: '严重负载', color: '#c96d67' },
+    { label: '离线 / 无数据', color: '#b9c2cc' },
+  ]
   heatEl.value.style.height = chartH + 'px'
   chart.setOption({
+    animationDuration: 560,
+    animationDurationUpdate: 380,
+    animationEasing: 'cubicOut',
+    animationEasingUpdate: 'cubicOut',
     tooltip: {
+      backgroundColor: 'rgba(255,255,255,.98)', borderColor: '#dfe4ea', borderWidth: 1,
+      padding: [10, 12], textStyle: { color: '#26323f', fontSize: 12 },
+      extraCssText: 'border-radius:10px;box-shadow:0 10px 30px rgba(42,55,70,.14);',
       formatter: (p: any) => {
         const [x, y, v] = p.value
-        const sname = yLabels[y] || ''
-        const t = xLabels[x] || ''
-        const tag = v === 0 ? '<span style="color:#10b981">正常</span>' : v === 1 ? '<span style="color:#fbbf24">高负载</span>' : '<span style="color:#ef4444">离线/无数据</span>'
-        return `${sname}<br/>${t}<br/>${tag}`
+        const state = states[v] || states[3]
+        const time = buckets[x] ? fmtHeatTime(buckets[x], range) : ''
+        return `<div style="font-weight:650;margin-bottom:4px">${escapeHeatHtml(yLabels[y])}</div><div style="color:#7b8794;margin-bottom:7px">${escapeHeatHtml(time)}</div><div style="display:flex;align-items:center;gap:7px"><i style="width:8px;height:8px;border-radius:3px;background:${state.color};display:inline-block"></i>${state.label}</div>`
       },
     },
-    grid: { left: padL, right: padR, top: padT, bottom: padB, containLabel: true },
-    xAxis: { type: 'category', data: xLabels, splitArea: { show: true }, axisLabel: { fontSize: 10, hideOverlap: true }, axisTick: { show: false }, axisLine: { show: false } },
-    yAxis: { type: 'category', data: yLabels, splitArea: { show: true }, axisLabel: { fontSize: 11 }, axisTick: { show: false }, axisLine: { show: false } },
-    visualMap: { min: 0, max: 2, calculable: false, show: false, inRange: { color: ['#6f8f76', '#d9a441', '#c2685c'] } },
-    series: [{ type: 'heatmap', data: pts, progressive: 0, itemStyle: { borderColor: '#fff', borderWidth: 1, borderRadius: 2 }, emphasis: { itemStyle: { borderColor: '#333', borderWidth: 1 } } }],
-  })
+    grid: { left: yLabelW, right: padR, top: padT, height: gridHeight },
+    xAxis: { type: 'category', data: xLabels, axisLabel: { interval: labelInterval, color: '#7b8794', fontSize: 10, margin: 10, hideOverlap: true }, axisTick: { show: false }, axisLine: { show: false } },
+    yAxis: { type: 'category', data: yLabels, axisLabel: { color: '#606d7b', fontSize: 11, width: yLabelW - 12, overflow: 'truncate', margin: 10 }, axisTick: { show: false }, axisLine: { show: false } },
+    visualMap: { type: 'piecewise', show: false, pieces: states.map((state, value) => ({ value, color: state.color })) },
+    series: [{ type: 'heatmap', data: pts, progressive: 0, itemStyle: { borderColor: 'rgba(255,255,255,.96)', borderWidth: 3, borderRadius: 5 }, emphasis: { itemStyle: { borderColor: '#fff', borderWidth: 2, shadowBlur: 10, shadowColor: 'rgba(42,55,70,.18)' } } }],
+  }, true)
   chart.resize()
 }
 function onWinResize() { if (heatData.value) renderHeatmap() }
@@ -480,32 +507,32 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.monitor-page { min-height: 100vh; background: var(--bg); }
+.monitor-page { min-height: 100vh; background: transparent; }
 .monitor-content { padding: 22px 24px 56px; max-width: 1320px; margin: 0 auto; }
 
 /* ===== 顶部标题 ===== */
-.hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 22px; flex-wrap: wrap; animation: heroIn .7s var(--ease-emphasized) both; }
+@keyframes heroIn { from { opacity: 0; transform: translateY(7px); } }
 .hero-title {
-  font-size: 24px; font-weight: 760; letter-spacing: -.02em; margin: 0; line-height: 1.1;
-  background: linear-gradient(120deg, var(--text) 30%, var(--accent-strong)); -webkit-background-clip: text; background-clip: text; color: transparent;
+  font-size: 25px; font-weight: 700; letter-spacing: -.025em; margin: 0; line-height: 1.1; color: var(--text);
 }
 .hero-sub { margin: 4px 0 0; font-size: 13px; color: var(--text-3); }
 .hero-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .clock {
   display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums;
   font-size: 13px; font-weight: 650; color: var(--text-2); letter-spacing: .02em;
-  padding: 6px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 9px;
+  padding: 6px 12px; background: rgba(255,255,255,.72); border: 1px solid var(--border); border-radius: 9px; box-shadow: var(--shadow-sm); backdrop-filter: blur(10px);
 }
 .clock svg { opacity: .55; }
 .auto-badge { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-3); font-weight: 500; }
-.auto-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 rgba(111,143,118,.5); }
+.auto-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 rgba(23,105,165,.35); }
 .auto-dot.active { animation: ping 1s ease-out; }
-@keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(111,143,118,.5); } 100% { box-shadow: 0 0 0 8px rgba(111,143,118,0); } }
+@keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(23,105,165,.38); } 100% { box-shadow: 0 0 0 9px rgba(23,105,165,0); } }
 .refresh-btn {
   display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 9px;
-  border: 1px solid var(--border); background: var(--card); color: var(--text-2); cursor: pointer; transition: all .15s;
+  border: 1px solid var(--border); background: rgba(255,255,255,.72); color: var(--text-2); cursor: pointer; transition: color .24s var(--ease-standard), background .24s var(--ease-standard), box-shadow .3s var(--ease-standard), transform .3s var(--ease-emphasized);
 }
-.refresh-btn:hover:not(:disabled) { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
+.refresh-btn:hover:not(:disabled) { color: var(--accent-strong); border-color: rgba(23,105,165,.22); background: #fff; box-shadow: var(--shadow-sm); transform: translateY(-1px); }
 .refresh-btn:disabled { opacity: .5; cursor: not-allowed; }
 .refresh-btn.spinning svg { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -513,45 +540,52 @@ onUnmounted(() => {
 /* ===== 汇总卡片 ===== */
 .summary-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 22px; }
 .summary-card {
-  display: flex; align-items: center; gap: 12px; padding: 14px 16px;
-  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
-  box-shadow: var(--shadow-sm); transition: box-shadow .2s, transform .2s; min-width: 0;
+  position: relative; overflow: hidden; display: flex; align-items: center; gap: 12px; padding: 15px 16px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px; backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-sm); transition: box-shadow .34s var(--ease-standard), transform .4s var(--ease-emphasized), border-color .28s var(--ease-standard); min-width: 0;
+  animation: summaryIn .68s var(--ease-emphasized) both;
 }
-.summary-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); }
-.summary-icon { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; flex-shrink: 0; color: #fff; }
-.summary-icon.i-server { background: linear-gradient(135deg, #7fa588, #5c7c63); }
-.summary-icon.i-cpu { background: linear-gradient(135deg, #6f96b8, #4f7799); }
-.summary-icon.i-mem { background: linear-gradient(135deg, #b892c9, #9166a8); }
-.summary-icon.i-disk { background: linear-gradient(135deg, #d3a95a, #bf9540); }
-.summary-icon.i-up { background: linear-gradient(135deg, #7fa588, #5c7c63); }
-.summary-icon.i-down { background: linear-gradient(135deg, #6f96b8, #4f7799); }
+.summary-card:nth-child(2) { animation-delay: 45ms; } .summary-card:nth-child(3) { animation-delay: 90ms; }
+.summary-card:nth-child(4) { animation-delay: 135ms; } .summary-card:nth-child(5) { animation-delay: 180ms; } .summary-card:nth-child(6) { animation-delay: 225ms; }
+@keyframes summaryIn { from { opacity: 0; transform: translateY(9px) scale(.985); filter: blur(3px); } to { opacity: 1; transform: none; filter: none; } }
+.summary-card::before { content: ''; position: absolute; inset: 0 0 auto; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,.95), transparent); pointer-events: none; }
+.summary-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); border-color: var(--border-strong); }
+.summary-icon { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; flex-shrink: 0; border: 1px solid rgba(39,95,137,.08); box-shadow: inset 0 1px 0 rgba(255,255,255,.8); }
+.summary-icon.i-server { background: linear-gradient(145deg, #e8f3f9, #deedf6); color: #286c98; }
+.summary-icon.i-cpu { background: linear-gradient(145deg, #eaf4fa, #e1eff7); color: #347ba8; }
+.summary-icon.i-mem { background: linear-gradient(145deg, #edf1f9, #e4eaf5); color: #526c9a; }
+.summary-icon.i-disk { background: linear-gradient(145deg, #edf4f6, #e4eef1); color: #527686; }
+.summary-icon.i-up { background: linear-gradient(145deg, #eaf5f3, #e0efec); color: #39796e; }
+.summary-icon.i-down { background: linear-gradient(145deg, #e8f2f9, #dfeef7); color: #316f9b; }
 .summary-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .summary-val { font-size: 23px; font-weight: 770; letter-spacing: -.03em; color: var(--text); font-variant-numeric: tabular-nums; line-height: 1.05; }
 .summary-val.small { font-size: 18px; }
 .summary-val i { font-size: 13px; font-weight: 600; color: var(--text-3); font-style: normal; margin-left: 1px; }
 .summary-label { font-size: 11.5px; color: var(--text-3); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .summary-label b { font-weight: 650; }
-.ok-text { color: var(--accent-strong); } .crit-text { color: var(--danger); }
+.ok-text { color: var(--success); } .crit-text { color: var(--danger); }
 .mini-bar { height: 4px; border-radius: 3px; background: var(--bg); overflow: hidden; margin-top: 5px; }
-.mini-fill { height: 100%; border-radius: 3px; transition: width .8s cubic-bezier(.4,0,.2,1); }
-.mini-fill.ok { background: var(--accent); } .mini-fill.warn { background: var(--warn); } .mini-fill.crit { background: var(--danger); }
+.mini-fill { height: 100%; border-radius: 3px; transition: width 1s var(--ease-emphasized); }
+.mini-fill.ok { background: var(--success); } .mini-fill.warn { background: var(--warn); } .mini-fill.crit { background: var(--danger); }
 
 /* ===== 分节栏 ===== */
 .section-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 12px; flex-wrap: wrap; }
 .section-title { font-size: 14px; font-weight: 680; color: var(--text); }
-.heat-range { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.heat-range { display: flex; align-items: center; gap: 0; flex-wrap: wrap; padding:3px; border:1px solid rgba(28,48,70,.09); border-radius:8px; background:#eef1f4; }
 .heat-range-btn {
-  padding: 4px 11px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--card); color: var(--text-3); font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s; font-family: inherit;
+  padding: 4px 11px; border-radius: 5px; border: 0;
+  background: transparent; color: var(--text-3); font-size: 12px; font-weight: 600; cursor: pointer; transition: background .18s var(--ease-standard), color .18s var(--ease-standard), box-shadow .18s var(--ease-standard); font-family: inherit;
 }
 .heat-range-btn:hover { color: var(--text); }
-.heat-range-btn.active { background: var(--accent-soft); color: var(--accent-strong); border-color: transparent; }
+.heat-range-btn.active { background: #fff; color: var(--text); box-shadow: 0 1px 2px rgba(30,45,60,.1); }
+.heat-range-btn:focus-visible { outline:0; box-shadow:inset 0 0 0 2px rgba(29,39,51,.16); }
 .heat-legend { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); margin-left: 10px; }
-.hm-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-left: 6px; }
-.hm-dot.ok { background: #6f8f76; } .hm-dot.warn { background: #d9a441; } .hm-dot.crit { background: #c2685c; }
+.hm-dot { width: 8px; height: 8px; border-radius: 3px; display: inline-block; margin-left: 6px; box-shadow: inset 0 0 0 1px rgba(31,43,55,.05); }
+.hm-dot.ok { background: #63a887; } .hm-dot.warn { background: #d2a34c; } .hm-dot.crit { background: #c96d67; } .hm-dot.none { background: #b9c2cc; }
 
-.heatmap-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-sm); padding: 16px 18px; margin-bottom: 26px; }
-.heat-chart { width: 100%; height: 340px; min-height: 120px; }
+.heatmap-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-sm); backdrop-filter: blur(14px); padding: 14px 16px 10px; margin-bottom: 26px; animation: panelIn .72s .16s var(--ease-emphasized) both; }
+@keyframes panelIn { from { opacity: 0; transform: translateY(8px); } }
+.heat-chart { width: 100%; height: 58px; min-height: 0; }
 .heat-chart:empty { display: none; }
 .heat-empty { text-align: center; color: var(--text-3); padding: 24px; font-size: 13px; }
 
@@ -561,11 +595,11 @@ onUnmounted(() => {
 .server-card {
   position: relative; overflow: hidden;
   background: var(--card); border: 1px solid var(--border); border-radius: 16px;
-  box-shadow: var(--shadow-sm); transition: box-shadow .25s ease, transform .25s ease, border-color .25s;
-  animation: cardIn .5s cubic-bezier(.22,1,.36,1) backwards; animation-delay: calc(var(--i) * 45ms);
+  box-shadow: var(--shadow-sm); backdrop-filter: blur(14px); transition: box-shadow .34s var(--ease-standard), transform .42s var(--ease-emphasized), border-color .28s var(--ease-standard);
+  animation: cardIn .7s var(--ease-emphasized) backwards; animation-delay: calc(var(--i) * 55ms);
 }
-@keyframes cardIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
-.server-card:hover { box-shadow: var(--shadow); transform: translateY(-3px); border-color: #d5d5d5; }
+@keyframes cardIn { from { opacity: 0; transform: translateY(11px) scale(.988); filter: blur(3px); } to { opacity: 1; transform: none; filter: none; } }
+.server-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); border-color: var(--border-strong); }
 
 .card-top-line { height: 3px; }
 .card-top-line.online { background: linear-gradient(90deg, #5c7c63, #8fb097); }
@@ -586,7 +620,7 @@ onUnmounted(() => {
   padding: 3px 9px; border-radius: 20px; font-size: 11px; font-weight: 650;
 }
 .status-badge .badge-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.status-badge.online { background: var(--accent-soft); color: var(--accent-strong); }
+.status-badge.online { background: var(--success-soft); color: var(--success); }
 .status-badge.offline { background: var(--danger-soft); color: var(--danger); }
 
 .tag-line { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 12px; }
@@ -595,7 +629,7 @@ onUnmounted(() => {
 .tag.spec { font-variant-numeric: tabular-nums; }
 .tag.expiry { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
 .tag.expiry .exp-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.tag.expiry.ok { background: var(--accent-soft); color: var(--accent-strong); }
+.tag.expiry.ok { background: var(--success-soft); color: var(--success); }
 .tag.expiry.warn { background: #f6edd6; color: #a97e1f; }
 .tag.expiry.crit { background: var(--danger-soft); color: var(--danger); }
 
@@ -604,7 +638,7 @@ onUnmounted(() => {
 .gauge { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; }
 .gauge-svg { width: 100%; max-width: 76px; aspect-ratio: 1; transform: rotate(-90deg); }
 .gauge-bg { fill: none; stroke: var(--bg); stroke-width: 5; }
-.gauge-fg { fill: none; stroke-width: 5; stroke-linecap: round; transition: stroke-dashoffset 1s cubic-bezier(.4,0,.2,1); }
+.gauge-fg { fill: none; stroke-width: 5; stroke-linecap: round; transition: stroke-dashoffset 1.15s var(--ease-emphasized); }
 .gauge-center { position: absolute; top: 0; left: 0; right: 0; display: grid; place-items: center; pointer-events: none; }
 .gauge-svg + .gauge-center { height: 100%; max-height: 76px; }
 .gauge-center { height: min(76px, 100%); }
@@ -626,8 +660,8 @@ onUnmounted(() => {
 .swap-row { display: flex; align-items: center; gap: 8px; padding: 0 16px 12px; font-size: 11px; }
 .swap-label { color: var(--text-3); font-weight: 600; flex-shrink: 0; }
 .swap-track { flex: 1; height: 5px; border-radius: 3px; background: var(--bg); overflow: hidden; }
-.swap-fill { height: 100%; border-radius: 3px; transition: width .8s cubic-bezier(.4,0,.2,1); }
-.swap-fill.ok { background: var(--accent); } .swap-fill.warn { background: var(--warn); } .swap-fill.crit { background: var(--danger); }
+.swap-fill { height: 100%; border-radius: 3px; transition: width 1s var(--ease-emphasized); }
+.swap-fill.ok { background: var(--success); } .swap-fill.warn { background: var(--warn); } .swap-fill.crit { background: var(--danger); }
 .swap-detail { color: var(--text-3); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 
 /* 详细信息网格 */

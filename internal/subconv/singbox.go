@@ -21,7 +21,8 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 	// before anything else touches dns.rules.
 	modernizeSingboxDNS(doc)
 
-	// Convert first, then dedupe so url-test/selector tags are unique and real.
+	// Convert first, then dedupe so policy/selector tags are unique and real.
+	customTags := singboxTemplateSelectorTags(doc["outbounds"])
 	type conv struct {
 		o map[string]any
 		p *Proxy
@@ -36,35 +37,70 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 	for i, c := range cs {
 		kept[i] = c.p
 	}
-	dedupeNames(kept)
+	dedupeNamesWithReserved(kept, customTags)
 	outs := make([]map[string]any, len(cs))
 	for i, c := range cs {
 		c.o["tag"] = c.p.Name // sync after dedupe
 		outs[i] = c.o
 	}
-	ag := buildAutoGroups(kept)
+	sg := buildStrategyGroups(kept)
 
-	// Primary selector: manual pick across auto + per-group auto-select + nodes.
+	// sing-box currently has no ordered fallback outbound. Keep the generated
+	// fallback selector manual and ordered instead of silently replacing it with
+	// latency-based urltest, which would switch nodes without user intent.
 	sel := []string{}
-	if len(ag.all) > 0 {
-		sel = append(sel, tagAuto)
+	if len(sg.all) > 0 {
+		sel = append(sel, tagFixed)
 	}
-	for _, g := range ag.byGroup {
-		sel = append(sel, g.name)
+	if len(sg.all) > 1 {
+		sel = append(sel, tagFallback)
 	}
-	sel = append(sel, ag.all...)
 	sel = append(sel, "direct")
 
+	generatedTags := map[string]bool{
+		tagProxy: true, tagFixed: true, tagFallback: true,
+		"direct": true, allPlaceholder: true,
+	}
+	if len(sg.ai) > 0 {
+		generatedTags[tagAI] = true
+	}
+	for _, n := range sg.all {
+		generatedTags[n] = true
+	}
+	customSelectors := mergeSingboxSelectors(doc["outbounds"], sg.all, generatedTags)
+
 	all := []map[string]any{{"type": "selector", "tag": tagProxy, "outbounds": sel}}
-	if len(ag.all) > 0 {
-		all = append(all, singboxURLTest(tagAuto, ag.all))
-		for _, g := range ag.byGroup {
-			all = append(all, singboxURLTest(g.name, g.names))
+	// Keep optional platform selectors near the top and give them the same
+	// ordering semantics as Clash: primary, custom, policies, nodes.
+	all = append(all, customSelectors...)
+	if len(sg.all) > 0 {
+		all = append(all, map[string]any{"type": "selector", "tag": tagFixed, "outbounds": sg.all})
+	}
+	if len(sg.all) > 1 {
+		all = append(all, map[string]any{"type": "selector", "tag": tagFallback, "outbounds": sg.all})
+	}
+	if len(sg.ai) > 0 {
+		ai := map[string]any{"type": "selector", "tag": tagAI, "outbounds": sg.ai}
+		if len(sg.ai) > 1 {
+			ai = map[string]any{
+				"type": "urltest", "tag": tagAI, "outbounds": sg.ai,
+				"url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50,
+			}
 		}
+		all = append(all, ai)
 	}
 	all = append(all, outs...)
 	all = append(all, map[string]any{"type": "direct", "tag": "direct"})
 	doc["outbounds"] = all
+	if len(sg.ai) > 0 {
+		injectSingboxAIRoute(doc)
+	}
+	// Templates are normalized before generated outbounds exist. Perform this
+	// compatibility cleanup only now, against the final direct outbound, so old
+	// admin-stored templates without an outbounds array are fixed too.
+	if dns, ok := doc["dns"].(map[string]any); ok {
+		stripEmptyDirectDetour(doc, mapSlice(dns["servers"]))
+	}
 
 	if _, ok := doc["inbounds"]; !ok {
 		doc["inbounds"] = []map[string]any{
@@ -81,7 +117,7 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 			// a hardcoded address — bypasses the tunnel out the physical NIC.
 			{"type": "tun", "tag": "tun-in",
 				"address":    []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
-				"auto_route": true, "strict_route": false, "stack": "gvisor",
+				"auto_route": true, "strict_route": true, "stack": "gvisor",
 				// Defensive, not load-bearing: auto_route installs ::/0, which
 				// nominally covers link-local and multicast, but the kernel's own
 				// more-specific on-link routes (fe80::/64 dev <if>) win in the main
@@ -109,6 +145,105 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 
 	b, err := json.MarshalIndent(doc, "", "  ")
 	return string(b), err
+}
+
+// singboxTemplateSelectorTags returns stable custom tags that generated nodes
+// and policy groups must not claim. Built-in tags and the placeholder are not
+// reservable by templates; those selectors are ignored later.
+func singboxTemplateSelectorTags(tpl any) map[string]bool {
+	tags := map[string]bool{}
+	reserved := map[string]bool{
+		tagProxy: true, tagFixed: true, tagFallback: true,
+		"direct": true, allPlaceholder: true,
+	}
+	for _, outbound := range mapSlice(tpl) {
+		typ, _ := outbound["type"].(string)
+		tag, _ := outbound["tag"].(string)
+		if typ == "selector" && tag != "" && !reserved[tag] {
+			tags[tag] = true
+		}
+	}
+	return tags
+}
+
+// mergeSingboxSelectors preserves extra selector outbounds from an admin
+// template. The renderer owns all other outbounds because node definitions are
+// generated per subscriber; retaining arbitrary template outbounds would make
+// collisions and dangling dependencies impossible to validate safely.
+//
+// "all" expands in place to every generated node tag. References are restricted
+// to generated outbounds so a typo or a custom-selector cycle cannot make
+// sing-box reject or loop the complete subscription. An empty selector falls
+// back to proxy, which also gives optional platform groups the intended
+// inherit-main behavior. A dangling `default` is removed so sing-box uses the
+// first valid outbound as documented.
+func mergeSingboxSelectors(tpl any, nodeTags []string, generatedTags map[string]bool) []map[string]any {
+	candidates := mapSlice(tpl)
+	accepted := make([]map[string]any, 0, len(candidates))
+	taken := make(map[string]bool, len(generatedTags)+len(candidates))
+	for tag := range generatedTags {
+		taken[tag] = true
+	}
+	for _, outbound := range candidates {
+		typ, _ := outbound["type"].(string)
+		tag, _ := outbound["tag"].(string)
+		if typ != "selector" || tag == "" || taken[tag] {
+			continue
+		}
+		taken[tag] = true
+		accepted = append(accepted, outbound)
+	}
+
+	for _, selector := range accepted {
+		self, _ := selector["tag"].(string)
+		raw := stringSlice(selector["outbounds"])
+		refs := make([]string, 0, len(raw)+len(nodeTags))
+		seen := map[string]bool{}
+		appendRef := func(ref string) {
+			if ref != "" && ref != self && generatedTags[ref] && !seen[ref] {
+				seen[ref] = true
+				refs = append(refs, ref)
+			}
+		}
+		for _, ref := range raw {
+			if ref == "auto" {
+				ref = tagFallback // migrate stored selectors from the old built-in tag
+			}
+			if ref == allPlaceholder {
+				for _, tag := range nodeTags {
+					appendRef(tag)
+				}
+				continue
+			}
+			appendRef(ref)
+		}
+		if len(refs) == 0 {
+			refs = []string{tagProxy}
+			seen[tagProxy] = true
+		}
+		selector["outbounds"] = refs
+		if def, ok := selector["default"].(string); !ok || !seen[def] {
+			delete(selector, "default")
+		}
+	}
+	return accepted
+}
+
+func stringSlice(v any) []string {
+	switch values := v.(type) {
+	case []string:
+		return values
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			if s, ok := value.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // mapSlice normalizes a JSON array value to []map[string]any. A template loaded
@@ -147,6 +282,44 @@ func prependRule(v any, rule map[string]any) any {
 	}
 }
 
+// injectSingboxAIRoute keeps sniff/DNS actions first, then inserts the guarded
+// domain route before any geographic direct rule from an admin template.
+func injectSingboxAIRoute(doc map[string]any) {
+	route, ok := doc["route"].(map[string]any)
+	if !ok {
+		route = map[string]any{}
+		doc["route"] = route
+	}
+	rules := mapSlice(route["rules"])
+	insertAt := 0
+	for insertAt < len(rules) {
+		action, _ := rules[insertAt]["action"].(string)
+		if action != "sniff" && action != "hijack-dns" {
+			break
+		}
+		insertAt++
+	}
+	aiRule := map[string]any{"rule_set": "qingzhou-ai", "outbound": tagAI}
+	merged := make([]map[string]any, 0, len(rules)+1)
+	merged = append(merged, rules[:insertAt]...)
+	merged = append(merged, aiRule)
+	merged = append(merged, rules[insertAt:]...)
+	route["rules"] = merged
+
+	ruleSets := mapSlice(route["rule_set"])
+	kept := make([]map[string]any, 0, len(ruleSets)+1)
+	for _, ruleSet := range ruleSets {
+		if tag, _ := ruleSet["tag"].(string); tag != "qingzhou-ai" {
+			kept = append(kept, ruleSet)
+		}
+	}
+	kept = append(kept, map[string]any{
+		"type": "remote", "tag": "qingzhou-ai", "format": "binary",
+		"download_detour": tagProxy, "url": singboxAIRuleURL,
+	})
+	route["rule_set"] = kept
+}
+
 // injectSingboxDomains makes the client resolve each domain-based node server via
 // the direct "local" DNS (never fake-ip or the proxy-detoured "remote" server)
 // and route the connection to that server directly. Without this, resolving a
@@ -168,13 +341,6 @@ func injectSingboxDomains(doc map[string]any, proxies []*Proxy) {
 	}
 	if route, ok := doc["route"].(map[string]any); ok {
 		route["rules"] = prependRule(route["rules"], map[string]any{"domain": domains, "outbound": "direct"})
-	}
-}
-
-func singboxURLTest(tag string, outbounds []string) map[string]any {
-	return map[string]any{
-		"type": "urltest", "tag": tag, "outbounds": outbounds,
-		"url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50,
 	}
 }
 

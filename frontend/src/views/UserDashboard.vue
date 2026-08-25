@@ -30,6 +30,13 @@
       </n-alert>
     </transition-group>
 
+    <div v-if="!activeCount" class="onboarding-strip">
+      <div class="onboarding-copy"><b>从这里开始</b><span>当前没有生效中的套餐，完成下面两步即可使用服务。</span></div>
+      <button type="button" @click="router.push('/shop')"><i>1</i><span><b>选择套餐</b><small>对比流量、时长与价格</small></span></button>
+      <button type="button" @click="router.push('/sub')"><i>2</i><span><b>导入订阅</b><small>复制地址或一键打开客户端</small></span></button>
+      <button type="button" @click="router.push('/help')"><i>?</i><span><b>查看帮助</b><small>安装、连接与常见问题</small></span></button>
+    </div>
+
     <!-- 核心指标 -->
     <div class="kpi-row">
       <StatCard
@@ -75,7 +82,7 @@
 
     <!-- 主区域：左侧用量环，右侧流量趋势 -->
     <div class="dash-grid">
-      <n-card size="small" class="sec" style="margin-bottom:0;">
+      <n-card size="small" class="sec usage-card" style="margin-bottom:0;">
         <template #header><span class="sec-title">流量用量</span></template>
         <div class="ring-wrap">
           <div class="ring-box">
@@ -315,6 +322,10 @@ a{color:var(--accent-strong)}
 .dash-alert{margin-bottom:10px}
 .alert-enter-active,.alert-leave-active{transition:opacity .25s ease,transform .25s ease}
 .alert-enter-from,.alert-leave-to{opacity:0;transform:translateY(-6px)}
+.onboarding-strip{display:grid;grid-template-columns:minmax(220px,1.25fr) repeat(3,minmax(160px,1fr));gap:8px;margin:0 0 16px;padding:10px;border:1px solid var(--border);border-radius:14px;background:color-mix(in srgb,var(--card) 86%,var(--bg-soft));box-shadow:var(--shadow-sm)}
+.onboarding-copy{display:flex;flex-direction:column;justify-content:center;padding:4px 8px}.onboarding-copy b{font-size:13px}.onboarding-copy span{margin-top:2px;color:var(--text-3);font-size:11.5px;line-height:1.5}
+.onboarding-strip button{display:flex;align-items:center;gap:9px;padding:8px 9px;border:0;border-radius:10px;background:var(--card);color:inherit;text-align:left;font:inherit;cursor:pointer;transition:transform .2s var(--ease-emphasized),box-shadow .2s ease}.onboarding-strip button:hover{transform:translateY(-2px);box-shadow:var(--shadow-sm)}
+.onboarding-strip button i{display:grid;place-items:center;flex:none;width:26px;height:26px;border-radius:8px;background:#e8ecef;color:#4f5b65;font-size:11px;font-style:normal;font-weight:700}.onboarding-strip button span{display:flex;min-width:0;flex-direction:column}.onboarding-strip button b{font-size:12px}.onboarding-strip button small{overflow:hidden;color:var(--text-3);font-size:10.5px;white-space:nowrap;text-overflow:ellipsis}
 
 /* KPI */
 .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:16px}
@@ -328,7 +339,9 @@ a{color:var(--accent-strong)}
 /* 主区域两栏 */
 .dash-grid{display:grid;grid-template-columns:minmax(220px,260px) 1fr;gap:16px;align-items:start}
 @media (max-width:840px){.dash-grid{grid-template-columns:1fr}}
+@media (max-width:980px){.onboarding-strip{grid-template-columns:1fr}.onboarding-copy{padding-bottom:8px}}
 .dash-main{display:flex;flex-direction:column;gap:16px;min-width:0}
+.usage-card :deep(.n-card__content){padding-bottom:10px}
 
 /* 环形 */
 .ring-wrap{display:flex;flex-direction:column;align-items:center;padding:4px 0 2px}
@@ -341,6 +354,7 @@ a{color:var(--accent-strong)}
 .ring-inf{font-size:30px}
 .ring-label{font-size:11px;color:var(--text-3);margin-top:4px}
 .ring-foot{font-size:12px;color:var(--text-2);margin-top:10px;text-align:center}
+.usage-card :deep(.n-space){gap:6px!important}
 
 /* 趋势页脚汇总 */
 .trend-foot{display:flex;flex-wrap:wrap;gap:16px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:12px;color:var(--text-2)}
