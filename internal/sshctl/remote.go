@@ -500,7 +500,7 @@ func (m *RemoteManager) nodeAlreadyHas(ctx context.Context, client *ssh.Client, 
 	if len(fields) < 2 {
 		return false, nil
 	}
-	return fields[0] == configHash(configJSON) && fields[1] == "active", nil
+	return fields[0] == configHash(remoteBytes(configJSON)) && fields[1] == "active", nil
 }
 
 // RunCommand dials the server and runs one shell command, returning its combined
@@ -765,6 +765,12 @@ func (m *RemoteManager) writeFile(ctx context.Context, client *ssh.Client, remot
 	// umask 077 + explicit chmod so the file (which embeds the Reality private
 	// key, user passwords and UUIDs) is never world-readable to other local
 	// users on the landing host.
+	//
+	// The body is trimmed because the heredoc supplies the final newline itself:
+	// what lands on the node is remoteBytes(data), and nodeAlreadyHas hashes the
+	// same function of the same input. Embedding data verbatim instead makes the
+	// two disagree by one byte forever — every sync then rewrites an identical
+	// config and restarts sing-box under the live connections.
 	const delim = "__SSHCTL_EOF_8f3a__"
 	script := fmt.Sprintf(
 		`umask 077; cat > %s << '%s'
@@ -772,7 +778,7 @@ func (m *RemoteManager) writeFile(ctx context.Context, client *ssh.Client, remot
 %s
 chmod 600 %s
 `,
-		shellQuote(remotePath), delim, string(data), delim, shellQuote(remotePath),
+		shellQuote(remotePath), delim, heredocBody(data), delim, shellQuote(remotePath),
 	)
 
 	if _, err := m.run(ctx, client, script); err != nil {
@@ -1044,6 +1050,30 @@ func shellQuote(s string) string {
 func configHash(data []byte) string {
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
+}
+
+// remoteBytes is what writeFile actually leaves on the node for data: a shell
+// heredoc is line-oriented and always terminates its body with a newline, while
+// the generated config comes out of json.MarshalIndent without one.
+//
+// Anything comparing the panel's bytes against the node's file has to go through
+// here. Hashing the raw config instead compares 38 bytes with the 39 on disk, so
+// "the node already has this config" can never be true — which turns the once-a-
+// minute sync pass into a once-a-minute config rewrite and sing-box restart on
+// every SSH-managed node, dropping every user's connection each time.
+func remoteBytes(data []byte) []byte {
+	body := heredocBody(data)
+	out := make([]byte, 0, len(body)+1)
+	out = append(out, body...)
+	return append(out, '\n')
+}
+
+// heredocBody is data with its trailing newlines removed, ready to be embedded
+// between heredoc delimiters. Trailing blank lines are dropped rather than kept
+// because the delimiter has to start a line of its own: keeping them would make
+// the body no longer round-trip through remoteBytes.
+func heredocBody(data []byte) string {
+	return strings.TrimRight(string(data), "\n")
 }
 
 // UpgradeSingBox reinstalls sing-box on the remote node by running the panel's

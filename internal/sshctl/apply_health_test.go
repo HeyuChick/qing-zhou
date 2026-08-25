@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -20,7 +21,10 @@ import (
 // and its in-memory state stay alive.
 func TestApplyConfigRechecksServiceAfterAnEarlierNoOp(t *testing.T) {
 	configJSON := []byte(`{"inbounds":[]}`)
-	remoteHash := configHash(configJSON)
+	// What the node reports is the hash of the file the transfer script leaves
+	// behind, not of the raw config — the heredoc terminates its body with a
+	// newline the marshalled config does not have.
+	remoteHash := configHash(remoteBytes(configJSON))
 
 	var mu sync.Mutex
 	active := true
@@ -142,6 +146,13 @@ func serveApplyTestSSHConn(raw net.Conn, config *ssh.ServerConfig, handler func(
 		if err != nil {
 			continue
 		}
+		// Drain what the client sends on the channel, and do not close it until
+		// that is done. A sudo row feeds the password over stdin; a server that
+		// closes first makes the client's stdin copy fail, and x/crypto/ssh
+		// surfaces that from session.Wait as a bare EOF — indistinguishable from
+		// the command itself having died.
+		drained := make(chan struct{})
+		go func() { defer close(drained); _, _ = io.Copy(io.Discard, channel) }()
 		go func() {
 			defer channel.Close()
 			for request := range channelRequests {
@@ -156,6 +167,10 @@ func serveApplyTestSSHConn(raw net.Conn, config *ssh.ServerConfig, handler func(
 				}
 				_ = request.Reply(true, nil)
 				out, status := handler(payload.Command)
+				select {
+				case <-drained:
+				case <-time.After(5 * time.Second):
+				}
 				if out != "" {
 					_, _ = channel.Write([]byte(out))
 				}
