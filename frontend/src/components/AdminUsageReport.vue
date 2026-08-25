@@ -118,32 +118,42 @@
         </n-card>
       </div>
 
-      <!-- 明细：用户 × 套餐。这是「能看到用户对应各个套餐的用量」的落点 -->
+      <!-- 同一份数据提供两个口径：用户汇总用于判断账号整体流量需求，套餐明细用于继续追溯消耗来源。 -->
       <n-card size="small" class="sec">
         <template #header>
-          <span class="sec-title">用户 · 套餐明细</span>
-          <span class="sec-note">共 {{ detail.length }} 行</span>
-          <n-button size="tiny" quaternary :disabled="!detail.length" style="margin-left:auto;" @click="exportCSV">
+          <span class="sec-title">{{ tableMode === 'user' ? '用户流量汇总' : '用户 · 套餐明细' }}</span>
+          <span class="sec-note">
+            {{ tableMode === 'user' ? `合并同一用户的全部套餐 · 共 ${userSummary.length} 位用户` : `共 ${detail.length} 行` }}
+          </span>
+          <n-radio-group v-model:value="tableMode" size="small" class="table-mode">
+            <n-radio-button value="user">按用户汇总</n-radio-button>
+            <n-radio-button value="package">按套餐明细</n-radio-button>
+          </n-radio-group>
+          <n-button size="tiny" quaternary :disabled="!tableRows.length" @click="exportCSV">
             导出 CSV
           </n-button>
         </template>
-        <div v-if="!detail.length" class="empty">没有可展示的明细</div>
+        <div v-if="!tableRows.length" class="empty">没有可展示的统计</div>
         <div v-else class="tbl-wrap">
           <table class="tbl">
             <thead>
               <tr>
                 <th class="l">用户</th>
-                <th class="l">套餐</th>
+                <th class="l">{{ tableMode === 'user' ? '合并套餐' : '套餐' }}</th>
                 <th v-for="c in cols" :key="c.k" class="sortable" :class="{ on: sortKey === c.k }" @click="sortBy(c.k)">
                   {{ c.l }}<span v-if="sortKey === c.k">{{ sortDesc ? ' ↓' : ' ↑' }}</span>
                 </th>
-                <th class="l">占比</th>
+                <th class="l">相对消耗</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(d, i) in sortedDetail" :key="i">
+              <tr v-for="d in sortedTableRows" :key="tableMode === 'user' ? d.user_id : `${d.user_id}:${d.package_id}`">
                 <td class="l"><span class="u-name">{{ d.username || '—' }}</span></td>
-                <td class="l">
+                <td v-if="tableMode === 'user'" class="l merged-packages">
+                  <b>{{ d.package_count }} 个套餐</b>
+                  <span :title="d.package_names.join('、')">{{ d.package_names.join('、') || '暂无可归属套餐' }}</span>
+                </td>
+                <td v-else class="l">
                   <span class="pkg" :class="{ synthetic: d.package_id <= 0 }">{{ d.package_name }}</span>
                 </td>
                 <td>{{ fmtBytes(d.up) }}</td>
@@ -253,11 +263,28 @@ const kpis = computed(() => {
 const cols = [{ k: 'up', l: '上行' }, { k: 'down', l: '下行' }, { k: 'total', l: '合计' }]
 const sortKey = ref('total')
 const sortDesc = ref(true)
+const tableMode = ref<'user' | 'package'>('user')
 const detail = computed(() => byPackage.value)
-const maxDetail = computed(() => Math.max(...detail.value.map(d => d.up + d.down), 1))
+const userSummary = computed(() => {
+  const packages = new Map<number, Map<number, string>>()
+  byPackage.value.forEach((d: any) => {
+    if (!packages.has(d.user_id)) packages.set(d.user_id, new Map())
+    packages.get(d.user_id)!.set(d.package_id, d.package_name)
+  })
+  return byUser.value.map((d: any) => {
+    const userPackages = packages.get(d.user_id)
+    return {
+      ...d,
+      package_count: userPackages?.size || 0,
+      package_names: userPackages ? [...userPackages.values()] : [],
+    }
+  })
+})
+const tableRows = computed(() => tableMode.value === 'user' ? userSummary.value : detail.value)
+const maxTableRow = computed(() => Math.max(...tableRows.value.map(d => d.up + d.down), 1))
 
-const sortedDetail = computed(() => {
-  const rows = [...detail.value]
+const sortedTableRows = computed(() => {
+  const rows = [...tableRows.value]
   const get = (d: any) => sortKey.value === 'total' ? d.up + d.down : d[sortKey.value] || 0
   rows.sort((a, b) => sortDesc.value ? get(b) - get(a) : get(a) - get(b))
   return rows
@@ -269,19 +296,26 @@ function sortBy(k: string) {
 }
 
 // 占比以「本表最大行」为基准而非总量：几十行时按总量算出来的条全是细线，看不出差异。
-function pct(d: any) { return (d.up + d.down) / maxDetail.value * 100 }
+function pct(d: any) { return (d.up + d.down) / maxTableRow.value * 100 }
 
 function exportCSV() {
-  const head = ['用户', '套餐', '上行(字节)', '下行(字节)', '合计(字节)']
   const esc = (s: any) => `"${String(s ?? '').replace(/"/g, '""')}"`
-  const body = sortedDetail.value.map(d =>
-    [d.username, d.package_name, d.up, d.down, d.up + d.down].map(esc).join(','))
+  const isUser = tableMode.value === 'user'
+  const head = isUser
+    ? ['用户', '套餐数', '合并套餐', '上行(字节)', '下行(字节)', '合计(字节)']
+    : ['用户', '套餐', '上行(字节)', '下行(字节)', '合计(字节)']
+  const body = sortedTableRows.value.map(d => {
+    const row = isUser
+      ? [d.username, d.package_count, d.package_names.join('、'), d.up, d.down, d.up + d.down]
+      : [d.username, d.package_name, d.up, d.down, d.up + d.down]
+    return row.map(esc).join(',')
+  })
   // BOM：没有它 Excel 会把中文列名读成乱码。
   const blob = new Blob(['﻿' + [head.map(esc).join(','), ...body].join('\r\n')],
     { type: 'text/csv;charset=utf-8' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  a.download = `用量_${preset.value}_${toDay(Date.now())}.csv`
+  a.download = `${isUser ? '用户流量汇总' : '用户套餐明细'}_${preset.value}_${toDay(Date.now())}.csv`
   a.click()
   URL.revokeObjectURL(a.href)
   message.success('已导出')
@@ -598,9 +632,21 @@ onUnmounted(() => {
 .u-name { font-weight: 600; }
 .pkg { color: var(--text-2); }
 .pkg.synthetic { color: var(--text-3); font-style: italic; }
+.table-mode { margin-left: auto; }
+.merged-packages { max-width: 360px; }
+.merged-packages b { margin-right: 8px; font-weight: 650; color: var(--text-2); }
+.merged-packages span {
+  display: inline-block; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+  vertical-align: bottom; color: var(--text-3);
+}
 
 .ratio { display: flex; align-items: center; gap: 8px; min-width: 120px; }
 .ratio-bar { flex: 1; height: 5px; background: var(--bg-soft); border-radius: 3px; overflow: hidden; }
 .ratio-bar i { display: block; height: 100%; background: #5e7a99; border-radius: 3px; }
 .ratio-num { color: var(--text-3); font-size: 11px; min-width: 38px; text-align: right; }
+@media (max-width: 700px) {
+  .table-mode { order: 3; margin-left: 0; }
+  .merged-packages { max-width: 240px; }
+  .merged-packages span { max-width: 150px; }
+}
 </style>
