@@ -30,6 +30,16 @@ const reAlertWindow = 24 * time.Hour
 // alertTypes are the conditions CheckProbeAlerts evaluates and auto-resolves.
 var alertTypes = []string{"offline", "expiring", "expired", "high_cpu", "high_mem", "disk_full"}
 
+// AlertRestartLoop marks a node that keeps restarting without anyone asking it
+// to — every restart cuts all connections on that node, so a loop is a user-
+// visible outage even while the panel reports every deploy as successful.
+//
+// Deliberately NOT in alertTypes: those are derived from probe metrics and are
+// auto-resolved by CheckProbeAlerts when the metric recovers. This one is
+// derived from the config-deploy path, has no probe data behind it, and is
+// resolved by the watcher that raised it (see api/restartalert.go).
+const AlertRestartLoop = "restart_loop"
+
 // flappyAlertTypes are sampled conditions: each check reads one instant, and one
 // instant is not a problem. A build, a backup or a log rotation drives CPU over
 // any threshold for a few seconds, and alerting on that first sample trains the
@@ -135,27 +145,42 @@ func scanAlert(sc scanner) (*ServerAlert, error) {
 // then it stays quiet for reAlertWindow so a permanently broken server nags at
 // most once a day — or closed by ResolveAlert, in which case this is a genuinely
 // new episode and alerts immediately.
-func (s *Store) InsertAlert(a ServerAlert) error {
+//
+// The bool reports whether this call opened a NEW alert episode, as opposed to
+// folding into one that is already on screen. Only a new episode is worth a
+// push notification: the hits+1 path fires on every recurrence and would turn a
+// single bad night into a stream of identical Telegram messages.
+func (s *Store) InsertAlert(a ServerAlert) (bool, error) {
 	if a.Ts == 0 {
 		a.Ts = time.Now().Unix()
 	}
 	res, err := s.db.Exec(`UPDATE server_alerts SET message=?, ts=?, hits=hits+1
 		WHERE server_id=? AND type=? AND read=0`, a.Message, a.Ts, a.ServerID, a.Type)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
-		return nil
+		return false, nil
 	}
 	// resolved=0 rows that are read = acknowledged but never cleared.
 	var lastAck int64
 	_ = s.db.QueryRow(`SELECT COALESCE(MAX(ts),0) FROM server_alerts
 		WHERE server_id=? AND type=? AND resolved=0`, a.ServerID, a.Type).Scan(&lastAck)
 	if lastAck > 0 && a.Ts-lastAck < int64(reAlertWindow.Seconds()) {
-		return nil
+		return false, nil
 	}
 	_, err = s.db.Exec(`INSERT INTO server_alerts (server_id, type, message, ts, first_ts, hits, read, resolved)
 		VALUES (?,?,?,?,?,1,0,0)`, a.ServerID, a.Type, a.Message, a.Ts, a.Ts)
+	return err == nil, err
+}
+
+// ResolveAlertsByType closes every open episode of one type, whatever server it
+// is on. Used at startup for conditions the panel tracks in memory: the evidence
+// for them died with the previous process, so an alert nobody can clear would
+// otherwise sit on the page until an admin dismissed it by hand. A condition
+// that is still happening re-raises itself within one window.
+func (s *Store) ResolveAlertsByType(typ string) error {
+	_, err := s.db.Exec(`UPDATE server_alerts SET read=1, resolved=1 WHERE type=? AND resolved=0`, typ)
 	return err
 }
 
@@ -302,7 +327,7 @@ func (s *Store) CheckProbeAlerts() error {
 			if flappyAlertTypes[typ] && !s.observeStreak(alertStreakKey{sv.ID, typ}, streakNeeded) {
 				return
 			}
-			_ = s.InsertAlert(ServerAlert{ServerID: sv.ID, Type: typ, Message: msg})
+			_, _ = s.InsertAlert(ServerAlert{ServerID: sv.ID, Type: typ, Message: msg})
 		}
 
 		// Offline: last_seen > 2 minutes ago

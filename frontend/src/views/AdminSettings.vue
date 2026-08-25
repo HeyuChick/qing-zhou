@@ -216,6 +216,49 @@
         </n-form>
 
         <div class="tg-tpl">
+          <div class="tg-tpl-h">运维告警 · 节点反复重启</div>
+          <p class="form-hint" style="margin:0 0 10px;">
+            节点每重启一次，它上面所有人的连接都会断一次。改配置引起的重启是正常的，
+            这里只统计<b>没有任何后台操作时</b>自动发生的重启：超过阈值就在监控页告警，并推送给下面选中的接收人。
+          </p>
+          <n-form label-placement="left" label-width="140">
+            <n-form-item label="启用">
+              <n-switch v-model:value="restartAlertOn" />
+            </n-form-item>
+            <n-form-item label="判定条件">
+              <n-input-number v-model:value="restartWindowMin" :min="5" :max="360" style="width:120px;" />
+              <span class="form-hint" style="margin:0 8px;">分钟内自动重启达</span>
+              <n-input-number v-model:value="restartCount" :min="2" :max="50" style="width:110px;" />
+              <span class="form-hint" style="margin-left:8px;">次</span>
+            </n-form-item>
+            <n-form-item label="接收人">
+              <div style="width:100%;">
+                <div v-if="!opsCandidates.length" class="form-hint">
+                  还没有账号绑定 Telegram。接收人不必是管理员 —— 让对方在「账户设置」里绑定后，这里就能勾选。
+                </div>
+                <n-space v-else vertical size="small">
+                  <n-checkbox v-for="c in opsCandidates" :key="c.user_id" :checked="c.on"
+                              @update:checked="(v: boolean) => toggleOpsRecipient(c, v)">
+                    {{ c.username }}
+                    <span class="form-hint" style="margin-left:6px;">{{ c.is_admin ? '管理员' : '普通用户' }} · @{{ c.tg_name }}</span>
+                  </n-checkbox>
+                </n-space>
+                <div class="form-hint" style="margin-top:6px;">勾选即时生效，无需保存。告警里会出现节点名和重启次数，选你愿意让对方看到这些的人。</div>
+              </div>
+            </n-form-item>
+            <n-form-item label="额外 chat ID">
+              <n-input v-model:value="form.alert_ops_extra_chats" type="textarea" :autosize="{ minRows: 1, maxRows: 3 }"
+                       placeholder="推到群/频道：把 Bot 拉进去，填该会话的 chat_id，多个用逗号分隔" />
+            </n-form-item>
+            <n-form-item label=" ">
+              <n-button size="small" :loading="testingOps" :disabled="!opsEffective" @click="handleTestOpsAlert">发送测试告警</n-button>
+              <span v-if="opsEffective" class="form-hint" style="margin-left:8px;">当前 {{ opsEffective }} 个聊天会收到告警</span>
+              <span v-else style="margin-left:8px;color:#dc2626;font-size:12px;">当前没有人会收到告警</span>
+            </n-form-item>
+          </n-form>
+        </div>
+
+        <div class="tg-tpl">
           <div class="tg-tpl-h">消息排版</div>
           <p class="form-hint" style="margin:0 0 10px;">
             发给用户的查询结果和通知都走模板。支持 Telegram HTML（<code>&lt;b&gt;</code> <code>&lt;i&gt;</code> <code>&lt;code&gt;</code> <code>&lt;a href&gt;</code>）和占位符 <code v-pre>{{name}}</code>。
@@ -410,6 +453,14 @@ const testingSmtp = ref(false)
 const testingTg = ref(false)
 const notifyExpiryDays = ref(3)
 const notifyTrafficPct = ref(20)
+// 运维告警（节点反复重启）。接收人不限角色，故意用「已绑定 Telegram 的账号」
+// 而不是「管理员」来列候选：跑机器的人未必有面板管理员账号。
+const restartAlertOn = ref(true)
+const restartWindowMin = ref(30)
+const restartCount = ref(5)
+const opsCandidates = ref<any[]>([])
+const opsEffective = ref(0)
+const testingOps = ref(false)
 type TgTplVar = { key: string; desc: string }
 type TgTplMeta = { key: string; name: string; body: string; vars?: TgTplVar[] }
 const tgTplMeta = ref<TgTplMeta[]>([])
@@ -574,6 +625,9 @@ async function handleSave() {
       refund_fee_percent: String(refundFee.value),
       notify_expiry_days: String(notifyExpiryDays.value),
       notify_traffic_percent: String(notifyTrafficPct.value),
+      alert_restart_enabled: restartAlertOn.value ? 'true' : 'false',
+      alert_restart_window_min: String(restartWindowMin.value),
+      alert_restart_count: String(restartCount.value),
     }
     await apiPut('/api/admin/settings', body)
     message.success('保存成功')
@@ -599,6 +653,36 @@ async function handleTestSMTP() {
   if (!testEmail.value) { message.warning('请输入测试收件人'); return }
   testingSmtp.value = true
   try { await apiPost('/api/admin/settings/test-smtp', { to: testEmail.value }); message.success('测试邮件已发送') } catch (e: any) { message.error(e.message) } finally { testingSmtp.value = false }
+}
+
+// 接收人列表与「实际能收到的聊天数」都由后端算：解绑、封禁、chat id 写错都会
+// 让名单悄悄变空，而这个数字是唯一能看出来的地方。
+function applyOpsRecipients(d: any) {
+  if (!d) return
+  opsCandidates.value = d.candidates || []
+  opsEffective.value = d.effective || 0
+  if (form.alert_ops_extra_chats === undefined) form.alert_ops_extra_chats = d.extra_chats || ''
+}
+
+async function reloadOpsRecipients() {
+  applyOpsRecipients(await apiGet<any>('/api/admin/ops-recipients').catch(() => null))
+}
+
+async function toggleOpsRecipient(c: any, on: boolean) {
+  try {
+    await apiPut(`/api/admin/ops-recipients/${c.user_id}`, { on })
+    c.on = on
+    await reloadOpsRecipients()
+  } catch (e: any) { message.error(e.message) }
+}
+
+async function handleTestOpsAlert() {
+  testingOps.value = true
+  try {
+    const d = await apiPost<{ sent?: number; failed?: string[] }>('/api/admin/ops-recipients/test', {})
+    if (d?.failed?.length) message.warning(`已发送 ${d.sent || 0} 个，失败 ${d.failed.length} 个：${d.failed[0]}`)
+    else message.success(`测试告警已发送给 ${d?.sent || 0} 个聊天`)
+  } catch (e: any) { message.error(e.message) } finally { testingOps.value = false }
 }
 
 async function handleTestTelegram() {
@@ -663,10 +747,12 @@ async function loadSettings() {
     // an online update re-execs the backend. Optional metadata must not be able
     // to turn a successful settings read into a blank page.
     const data = await readSettingsWithRetry()
-    const [groups, defaults] = await Promise.all([
+    const [groups, defaults, ops] = await Promise.all([
       apiList<any>('/api/admin/node-groups').catch(() => []),
       apiGet<any>('/api/admin/settings/default-templates').catch(() => null),
+      apiGet<any>('/api/admin/ops-recipients').catch(() => null),
     ])
+    applyOpsRecipients(ops)
     if (Array.isArray(defaults?.telegram)) tgTplMeta.value = defaults.telegram
     defaultTemplates = defaults
     if (data) {
@@ -691,6 +777,10 @@ async function loadSettings() {
       refundFee.value = parseFloat(data.refund_fee_percent) || 0
       notifyExpiryDays.value = parseInt(data.notify_expiry_days) || 3
       notifyTrafficPct.value = parseInt(data.notify_traffic_percent) || 20
+      restartAlertOn.value = data.alert_restart_enabled !== 'false'
+      restartWindowMin.value = parseInt(data.alert_restart_window_min) || 30
+      restartCount.value = parseInt(data.alert_restart_count) || 5
+      form.alert_ops_extra_chats ??= ''
       form.telegram_bot_token ??= ''
       form.telegram_bot_username ??= ''
       for (const t of tgTplMeta.value) form['tg_tpl_' + t.key] ??= ''

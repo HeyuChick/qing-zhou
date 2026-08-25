@@ -537,6 +537,10 @@ CREATE TABLE IF NOT EXISTS telegram_binds (
   first_name     TEXT    NOT NULL DEFAULT '',
   notify_expiry  INTEGER NOT NULL DEFAULT 1,
   notify_traffic INTEGER NOT NULL DEFAULT 1,
+  -- Operations alerts (node restart loops). Off by default and set by an admin
+  -- only: this is not something a user may subscribe themselves to, and the
+  -- message names nodes and failure counts.
+  notify_ops     INTEGER NOT NULL DEFAULT 0,
   bound_at       INTEGER NOT NULL,
   last_chat_at   INTEGER NOT NULL DEFAULT 0
 );
@@ -725,6 +729,9 @@ func (s *Store) Migrate() error {
 	// Additive column migrations for DBs created before these columns existed.
 	// Errors (e.g. "duplicate column name") are expected on up-to-date DBs.
 	for _, stmt := range []string{
+		// Ops-alert recipient flag. Default 0, so upgrading never starts sending
+		// node failure details to anyone who was merely bound for expiry notices.
+		`ALTER TABLE telegram_binds ADD COLUMN notify_ops INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE announcements ADD COLUMN start_at INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE announcements ADD COLUMN end_at INTEGER NOT NULL DEFAULT 0`,
 		// AI groups feed the subscription's guarded AI route. Existing groups stay

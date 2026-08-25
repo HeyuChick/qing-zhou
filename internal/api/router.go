@@ -55,6 +55,12 @@ type API struct {
 	// Where server rows may keep SSH private keys as files. Empty disables the
 	// feature; see sshctl/keyfile.go.
 	sshKeyDir string
+
+	// Node restart-loop watching (restartalert.go). Both are buffered and both
+	// are written to with a non-blocking send, so neither config deployment nor
+	// the watcher can ever wait on the one behind it.
+	restartCh chan restartEvent
+	opsCh     chan string
 }
 
 // SetSSHKeyDir points the panel at the directory holding SSH private key files.
@@ -127,6 +133,8 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		subRL:     newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
 		tgRL:      newRateLimiter(20, time.Minute),   // 20 bot commands / telegram user / min
 		linkCache: make(map[int64]linkCacheEntry),
+		restartCh: make(chan restartEvent, restartEventQueue),
+		opsCh:     make(chan string, opsMessageQueue),
 	}
 	// Self-updater: repo + optional GitHub token come from env or DB settings,
 	// falling back to the project's canonical repo.
@@ -246,6 +254,9 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/settings/default-templates", a.handleGetDefaultTemplates)
 		ar.Post("/api/admin/settings/test-smtp", a.handleTestSMTP)
 		ar.Post("/api/admin/settings/test-telegram", a.handleTestTelegram)
+		ar.Get("/api/admin/ops-recipients", a.handleListOpsRecipients)
+		ar.Put("/api/admin/ops-recipients/{id}", a.handleSetOpsRecipient)
+		ar.Post("/api/admin/ops-recipients/test", a.handleTestOpsAlert)
 		ar.Get("/api/admin/settings/detect-node-host", a.handleDetectNodeHost)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
 		ar.Get("/api/admin/backup", a.handleAdminBackup)

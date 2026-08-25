@@ -218,11 +218,14 @@ const alertsExpanded = ref(false)
 const ALERT_PREVIEW = 5
 const ALERT_META: Record<string, { label: string; kind: 'error' | 'warning'; rank: number }> = {
   offline: { label: '离线', kind: 'error', rank: 0 },
-  expired: { label: '已过期', kind: 'error', rank: 1 },
-  disk_full: { label: '磁盘将满', kind: 'warning', rank: 2 },
-  high_mem: { label: '内存偏高', kind: 'warning', rank: 3 },
-  high_cpu: { label: 'CPU 偏高', kind: 'warning', rank: 4 },
-  expiring: { label: '即将到期', kind: 'warning', rank: 5 },
+  // 节点反复重启：每次重启都会切断该节点上所有人的连接，用户侧就是「一会儿就断」。
+  // 排在离线后面 —— 还能连上，但连不稳。
+  restart_loop: { label: '反复重启', kind: 'error', rank: 1 },
+  expired: { label: '已过期', kind: 'error', rank: 2 },
+  disk_full: { label: '磁盘将满', kind: 'warning', rank: 3 },
+  high_mem: { label: '内存偏高', kind: 'warning', rank: 4 },
+  high_cpu: { label: 'CPU 偏高', kind: 'warning', rank: 5 },
+  expiring: { label: '即将到期', kind: 'warning', rank: 6 },
 }
 function alertLabel(t: string) { return ALERT_META[t]?.label || t }
 function alertKind(t: string) { return ALERT_META[t]?.kind || 'warning' }

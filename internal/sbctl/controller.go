@@ -71,6 +71,16 @@ type Controller struct {
 	v2rayListen string
 	remoteMgr   *sshctl.RemoteManager // SSH manager for remote servers; nil if not configured
 
+	// restartObserver is told about every sing-box restart caused by the PERIODIC
+	// sync pass — the ones nobody asked for. Restarts from an admin edit are
+	// deliberate and are not reported, so a watcher downstream can treat what it
+	// receives as unexplained by definition. nil disables the reporting.
+	//
+	// Written once during startup wiring, before Run and therefore before any
+	// rebuild goroutine exists, so it needs no lock. Not a field to start
+	// swapping at runtime.
+	restartObserver func(serverID int64, name string)
+
 	mu sync.Mutex // serializes Rebuild
 
 	// syncInterval is the period of the Run loop in nanoseconds, published for
@@ -141,6 +151,23 @@ func New(st ConfigStore, mgr Applier, stats StatsFetcher, baseConfig, v2rayListe
 	}
 }
 
+// SetRestartObserver registers a callback for restarts caused by the periodic
+// pass. It runs on the rebuild goroutine, so it must not block: the alert
+// watcher behind it does its own bookkeeping in memory and hands anything
+// slower (a DB write, a Telegram push) to its own worker.
+func (c *Controller) SetRestartObserver(fn func(serverID int64, name string)) {
+	c.restartObserver = fn
+}
+
+// notifyRestart reports one restart, if anyone is listening and this pass was
+// the periodic one.
+func (c *Controller) notifyRestart(periodic bool, serverID int64, name string) {
+	if !periodic || c.restartObserver == nil {
+		return
+	}
+	c.restartObserver(serverID, name)
+}
+
 // SetRemoteManager attaches the SSH remote manager for multi-server support.
 func (c *Controller) SetRemoteManager(rm *sshctl.RemoteManager) {
 	c.remoteMgr = rm
@@ -202,6 +229,19 @@ func resolveSingBoxBin(configured string) (string, error) {
 	return "", fmt.Errorf("sing-box binary not found; set sing_box_bin or install sing-box in PATH")
 }
 
+// applyPanel installs the panel machine's own config, reporting whether
+// sing-box was reloaded. Applier itself only returns an error (the test fakes
+// implement just that), so the richer answer is taken when the real manager is
+// behind the interface.
+func (c *Controller) applyPanel(cfg []byte) (bool, error) {
+	if r, ok := c.mgr.(interface {
+		ApplyChanged([]byte) (bool, error)
+	}); ok {
+		return r.ApplyChanged(cfg)
+	}
+	return false, c.mgr.Apply(cfg)
+}
+
 // localConfigPath is the file the panel's own sing-box config is installed at,
 // or "" when the applier does not expose one (the fakes in tests).
 func (c *Controller) localConfigPath() string {
@@ -253,10 +293,10 @@ func panelPathConflict(panelPath string, sv *store.Server, serverCfg, panelCfg [
 // machine for a server entry that is on the local host (avoiding SSH to self).
 // It mirrors sbproc.Manager.Apply but uses the server entry's own config_path
 // and systemd_unit instead of the global defaults.
-func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
+func (c *Controller) applyLocal(sv *store.Server, cfg []byte) (bool, error) {
 	bin, err := resolveSingBoxBin(sv.SingBoxBin)
 	if err != nil {
-		return err
+		return false, err
 	}
 	configPath := serverConfigPath(sv)
 	unit := sv.SystemdUnit
@@ -274,7 +314,7 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 	c.restartMu.Unlock()
 	if !pending {
 		if cur, err := os.ReadFile(configPath); err == nil && bytes.Equal(cur, cfg) {
-			return nil
+			return false, nil
 		}
 	}
 
@@ -285,13 +325,13 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 	// sbproc.WriteConfig, which escapes that sandbox for the install itself).
 	tmp, err := os.CreateTemp("", "qz-sbcheck-*.json")
 	if err != nil {
-		return fmt.Errorf("create temp config: %w", err)
+		return false, fmt.Errorf("create temp config: %w", err)
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if _, err := tmp.Write(cfg); err != nil {
 		tmp.Close()
-		return err
+		return false, err
 	}
 	tmp.Close()
 
@@ -300,11 +340,11 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 	defer vcancel()
 	vout, verr := exec.CommandContext(vctx, bin, "check", "-c", tmpPath).CombinedOutput()
 	if verr != nil {
-		return fmt.Errorf("sing-box check failed: %v: %s", verr, vout)
+		return false, fmt.Errorf("sing-box check failed: %v: %s", verr, vout)
 	}
 
 	if err := sbproc.WriteConfig(configPath, cfg); err != nil {
-		return fmt.Errorf("install config: %w", err)
+		return false, fmt.Errorf("install config: %w", err)
 	}
 
 	// Same reason as the SSH path: a restart is the one thing users feel, so it
@@ -322,10 +362,13 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) error {
 		delete(c.restartFailed, sv.ID)
 	}
 	c.restartMu.Unlock()
+	// Restarted either way from here on: the config was swapped and systemctl was
+	// told to go, so the connections on this machine are gone whether or not the
+	// unit came back up.
 	if rerr != nil {
-		return fmt.Errorf("systemctl restart %s: %v: %s", unit, rerr, rout)
+		return true, fmt.Errorf("systemctl restart %s: %v: %s", unit, rerr, rout)
 	}
-	return nil
+	return true, nil
 }
 
 // statsListenFor returns the v2ray_api listen address to bake into a server's
@@ -413,7 +456,14 @@ func (c *Controller) invalidateRemoteCaches(serverID int64) {
 // applies it (validate + reload). Safe to call on every change; serialized.
 // When multi-server is configured, it iterates over all enabled remote servers
 // in addition to the local instance.
-func (c *Controller) Rebuild() error {
+func (c *Controller) Rebuild() error { return c.rebuild(false) }
+
+// rebuildPeriodic is the timer-driven pass. Restarts it causes are reported to
+// the restart observer; restarts from an admin's own edit are not, because a
+// node restarting right after someone changed it is the system working.
+func (c *Controller) rebuildPeriodic() error { return c.rebuild(true) }
+
+func (c *Controller) rebuild(periodic bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -445,7 +495,11 @@ func (c *Controller) Rebuild() error {
 		record(0, lastErr)
 	} else {
 		panelCfg = cfg
-		if err := c.mgr.Apply(cfg); err != nil {
+		restarted, err := c.applyPanel(cfg)
+		if restarted {
+			c.notifyRestart(periodic, store.LocalNodeID, store.LocalNodeName)
+		}
+		if err != nil {
 			lastErr = fmt.Errorf("local apply: %w", err)
 			log.Printf("sbctl: local apply error: %v", err)
 			record(0, lastErr)
@@ -489,7 +543,11 @@ func (c *Controller) Rebuild() error {
 				record(sv.ID, err)
 				continue
 			}
-			if err := c.applyLocal(sv, cfg); err != nil {
+			restarted, err := c.applyLocal(sv, cfg)
+			if restarted {
+				c.notifyRestart(periodic, sv.ID, sv.Name)
+			}
+			if err != nil {
 				log.Printf("sbctl: server %d (%s) local apply error: %v", sv.ID, sv.Name, err)
 				setErr(fmt.Errorf("server %d apply: %w", sv.ID, err))
 				record(sv.ID, fmt.Errorf("本机下发失败: %w", err))
@@ -519,6 +577,7 @@ func (c *Controller) Rebuild() error {
 				// and a silent one is how a node ends up cycling for a day before
 				// anyone connects the disconnects to the panel.
 				log.Printf("sbctl: server %d (%s) 配置有变化，已下发并重启 sing-box（该节点的连接会断一次）", sv.ID, sv.Name)
+				c.notifyRestart(periodic, sv.ID, sv.Name)
 			}
 			if err != nil {
 				log.Printf("sbctl: server %d (%s) apply error: %v", sv.ID, sv.Name, err)
@@ -589,7 +648,7 @@ func (c *Controller) RebuildServer(serverID int64) error {
 		if err := panelPathConflict(c.localConfigPath(), sv, cfg, panelCfg); err != nil {
 			return err
 		}
-		if err := c.applyLocal(sv, cfg); err != nil {
+		if _, err := c.applyLocal(sv, cfg); err != nil {
 			return fmt.Errorf("server %d apply: %w", sv.ID, err)
 		}
 		return nil
@@ -775,7 +834,7 @@ func (c *Controller) Run(ctx context.Context, interval time.Duration, errFn func
 	// explicitly (a node-credential rotation, which rides this pass rather than
 	// forcing its own restart) can take to reach the nodes, and the UI quotes it.
 	c.syncInterval.Store(int64(interval))
-	report(c.Rebuild()) // apply current state on startup
+	report(c.rebuildPeriodic()) // apply current state on startup
 	// The remote nodes get their version recorded by the capability probe inside
 	// Rebuild; the local machine has no such path, so it is probed here.
 	c.refreshLocalVersion(false)
@@ -789,7 +848,7 @@ func (c *Controller) Run(ctx context.Context, interval time.Duration, errFn func
 			if _, err := c.CollectStats(ctx); err != nil {
 				report(err)
 			}
-			report(c.Rebuild())
+			report(c.rebuildPeriodic())
 			c.refreshLocalVersion(false)
 		}
 	}

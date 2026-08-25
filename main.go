@@ -205,6 +205,9 @@ func buildSbController(st *store.Store, app *api.API, sshKeyDir string) *sbctl.C
 	ctrl := sbctl.New(st, mgr, stats, base, v2rayListen)
 	ctrl.SetRemoteManager(remoteMgr)
 	app.SetSbController(ctrl)
+	// Restarts caused by the periodic pass — the ones nobody asked for — feed the
+	// restart-loop watcher.
+	ctrl.SetRestartObserver(app.NodeRestarted)
 	return ctrl
 }
 

@@ -886,6 +886,7 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 // StartMonitorTasks starts the periodic probe alert checker and metrics pruner.
 func (a *API) StartMonitorTasks(ctx context.Context) {
 	a.StartLocalMetrics(ctx)
+	a.StartRestartWatch(ctx)
 	go func() {
 		t := time.NewTicker(1 * time.Hour)
 		defer t.Stop()
@@ -897,6 +898,9 @@ func (a *API) StartMonitorTasks(ctx context.Context) {
 				if err := a.st.CheckProbeAlerts(); err != nil {
 					log.Printf("probe alert check: %v", err)
 				}
+				// Close restart-loop episodes whose node has gone quiet. Riding the
+				// existing tick is the whole reason this feature adds no timer.
+				a.sweepRestartAlerts()
 				if err := a.st.PruneMetrics(30); err != nil {
 					log.Printf("metrics prune: %v", err)
 				}

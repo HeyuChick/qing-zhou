@@ -252,7 +252,17 @@ func (m *Manager) Validate(config []byte) error {
 // server row that points at the very same file (see sbctl.panelPathConflict).
 func (m *Manager) ConfigPath() string { return m.configPath }
 
+// Apply installs config and reloads sing-box, unless the file already holds
+// exactly these bytes and the last reload succeeded.
 func (m *Manager) Apply(config []byte) error {
+	_, err := m.ApplyChanged(config)
+	return err
+}
+
+// ApplyChanged is Apply, reporting whether sing-box was actually reloaded —
+// which is to say whether every connection on this machine was just cut. The
+// controller counts those to notice a node stuck in a restart loop.
+func (m *Manager) ApplyChanged(config []byte) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -265,16 +275,16 @@ func (m *Manager) Apply(config []byte) error {
 	// the file was swapped, not that sing-box picked it up.
 	if !m.reloadFailed {
 		if cur, err := os.ReadFile(m.configPath); err == nil && bytes.Equal(cur, config) {
-			return nil
+			return false, nil
 		}
 	}
 
 	if err := m.Validate(config); err != nil {
-		return err // invalid: live config untouched, no reload
+		return false, err // invalid: live config untouched, no reload
 	}
 
 	if err := m.swap(config); err != nil {
-		return err
+		return false, err
 	}
 
 	// The reload below cuts every connection on this machine. It only happens
@@ -287,11 +297,11 @@ func (m *Manager) Apply(config []byte) error {
 			// Leave the flag set so the next Apply retries the reload instead of
 			// short-circuiting on the already-swapped file.
 			m.reloadFailed = true
-			return err
+			return true, err
 		}
 	}
 	m.reloadFailed = false
-	return nil
+	return true, nil
 }
 
 // FindSingBoxBin auto-detects the sing-box binary path. It checks the
