@@ -740,7 +740,10 @@ function syncBadge(machineId: number): SyncBadge | null {
     case 'pending': return { type: 'default', text: '待下发', title: '排队等待推送配置' }
     case 'running': return { type: 'warning', text: '下发中…', title: '正在推送配置到该机器' }
     case 'ok': return { type: 'success', text: '已同步', title: '配置已成功下发' }
-    case 'failed': return { type: 'error', text: '下发失败', title: s.error || '推送失败，将在下个周期自动重试' }
+    case 'failed': {
+      const tripped = String(s.error || '').includes('熔断')
+      return { type: 'error', text: tripped ? '已熔断' : '下发失败', title: s.error || '推送失败，将在下个周期自动重试' }
+    }
     default: return null
   }
 }

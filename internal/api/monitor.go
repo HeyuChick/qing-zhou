@@ -898,8 +898,8 @@ func (a *API) StartMonitorTasks(ctx context.Context) {
 				if err := a.st.CheckProbeAlerts(); err != nil {
 					log.Printf("probe alert check: %v", err)
 				}
-				// Close restart-loop episodes whose node has gone quiet. Riding the
-				// existing tick is the whole reason this feature adds no timer.
+				// Prune old restart samples. Open circuits remain latched until a
+				// successful administrator-forced apply explicitly recovers them.
 				a.sweepRestartAlerts()
 				if err := a.st.PruneMetrics(30); err != nil {
 					log.Printf("metrics prune: %v", err)

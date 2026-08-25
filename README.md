@@ -285,7 +285,8 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 | `QZ_SINGBOX_CONFIG` | `/etc/sing-box/config.json` | 面板下发的配置路径 |
 | `QZ_SINGBOX_UNIT` | `sing-box` | sing-box 的 systemd 服务名 |
 | `QZ_SINGBOX_V2RAY` | `127.0.0.1:18080` | v2ray_api gRPC 监听地址（统计用，须与配置一致） |
-| `QZ_SINGBOX_STATS_INTERVAL` | `1m` | 采集用量 + 重建配置（剔除超额/到期用户）的周期 |
+| `QZ_SINGBOX_STATS_INTERVAL` | `1m` | 采集用量并生成期望配置（剔除超额/到期用户）的周期；摘要未变化时不连接节点 |
+| `QZ_SINGBOX_RECONCILE_INTERVAL` | `10m` | 绕过摘要缓存，核对远端配置文件与 sing-box 运行状态的周期 |
 | `QZ_SMTP_HOST` / `PORT` / `USER` / `PASS` / `FROM` / `FROM_NAME` / `SECURITY` | — | SMTP 配置（也可在面板「设置」页填，密码加密存储） |
 
 > 完整示例见 [`deploy/qingzhou.env.example`](deploy/qingzhou.env.example)。

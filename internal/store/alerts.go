@@ -194,6 +194,16 @@ func (s *Store) ResolveAlert(serverID int64, typ string) error {
 	return err
 }
 
+// IsAlertOpen reports whether a condition still owns an unresolved episode.
+// Restart-loop alerts double as a persisted circuit-breaker latch, so this is
+// intentionally independent of read/acknowledged state.
+func (s *Store) IsAlertOpen(serverID int64, typ string) (bool, error) {
+	var one int
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM server_alerts
+		WHERE server_id=? AND type=? AND resolved=0)`, serverID, typ).Scan(&one)
+	return one == 1, err
+}
+
 // ListAlerts returns alerts. If unreadOnly is true, only unread alerts.
 func (s *Store) ListAlerts(unreadOnly bool) ([]*ServerAlert, error) {
 	q := `SELECT ` + alertCols + ` FROM server_alerts`

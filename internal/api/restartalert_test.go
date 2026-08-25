@@ -2,8 +2,11 @@ package api
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"qingzhou/internal/sbctl"
 )
 
 const (
@@ -54,30 +57,22 @@ func TestRestartTrackerForgetsOutsideTheWindow(t *testing.T) {
 	}
 }
 
-// TestRestartTrackerClosesAndReopensEpisodes covers recovery: once a node has
-// been quiet for a full window the alert is closed, and a relapse is a new
-// episode that announces itself again rather than being swallowed as "already
-// alerted".
-func TestRestartTrackerClosesAndReopensEpisodes(t *testing.T) {
+// TestRestartTrackerRequiresExplicitRecovery pins the circuit semantics: quiet
+// is what an open circuit looks like, so only a successful manual apply may
+// clear it and arm a later episode.
+func TestRestartTrackerRequiresExplicitRecovery(t *testing.T) {
 	tr := newRestartTracker()
 	now := int64(1_700_000_000)
 	for i := 0; i < testThreshold; i++ {
 		tr.record(7, "hk-01", now+int64(i)*60, testWindow, testThreshold)
 	}
 
-	// Still restarting — nothing to close.
-	if got := tr.idle(now+int64(testThreshold)*60, testWindow); len(got) != 0 {
-		t.Fatalf("closed an episode that is still going: %v", got)
-	}
-
 	quiet := now + int64(testThreshold)*60 + testWindow + 1
-	if got := tr.idle(quiet, testWindow); !reflect.DeepEqual(got, []int64{7}) {
-		t.Fatalf("a node quiet for a full window was not closed: %v", got)
+	tr.prune(quiet, testWindow)
+	if !tr.alerted[7] {
+		t.Fatal("quiet circuit was treated as recovered")
 	}
-	// Closing twice must not produce a second resolve.
-	if got := tr.idle(quiet+1, testWindow); len(got) != 0 {
-		t.Fatalf("closed the same episode twice: %v", got)
-	}
+	tr.recover(7)
 
 	for i := 0; i < testThreshold-1; i++ {
 		if fire, _ := tr.record(7, "hk-01", quiet+int64(i)*60, testWindow, testThreshold); fire {
@@ -86,6 +81,34 @@ func TestRestartTrackerClosesAndReopensEpisodes(t *testing.T) {
 	}
 	if fire, _ := tr.record(7, "hk-01", quiet+int64(testThreshold)*60, testWindow, testThreshold); !fire {
 		t.Fatal("a relapse after recovery never alerted")
+	}
+}
+
+func TestRestartTrackerRetriesAfterDurableAlertFailure(t *testing.T) {
+	tr := newRestartTracker()
+	now := int64(1_700_000_000)
+	for i := 0; i < testThreshold; i++ {
+		tr.record(7, "hk-01", now+int64(i)*60, testWindow, testThreshold)
+	}
+
+	// runRestartWatch calls this when InsertAlert fails. The history must stay
+	// intact so the immediately following restart sample crosses the threshold
+	// again and retries the DB write/Telegram path.
+	tr.unmarkAlerted(7)
+	fire, count := tr.record(7, "hk-01", now+int64(testThreshold)*60, testWindow, testThreshold)
+	if !fire || count != testThreshold+1 {
+		t.Fatalf("failed durable alert was not retried: fire=%v count=%d", fire, count)
+	}
+}
+
+func TestRestartCircuitTelegramMessagesDescribeTripAndRecovery(t *testing.T) {
+	trip := renderRestartLoopAlert("hk-01", 5, 30)
+	if !strings.Contains(trip, "已熔断") || !strings.Contains(trip, "流量统计") {
+		t.Fatalf("trip message misses circuit impact: %q", trip)
+	}
+	recovered := renderRestartCircuitRecovery("hk-01")
+	if !strings.Contains(recovered, "已恢复") || !strings.Contains(recovered, "周期性配置同步恢复") {
+		t.Fatalf("recovery message misses restored state: %q", recovered)
 	}
 }
 
@@ -129,6 +152,21 @@ func TestNodeRestartedNeverBlocks(t *testing.T) {
 	empty := &API{}
 	empty.NodeRestarted(1, "hk-01")
 	empty.sweepRestartAlerts()
+}
+
+func TestCircuitTripCarriesControllerDecisionWithoutReevaluation(t *testing.T) {
+	a := &API{restartCh: make(chan restartEvent, 2)}
+	a.NodeCircuitChanged(sbctl.RestartCircuitEvent{
+		ServerID: 7, Name: "hk-01", Open: true, Count: 3, Window: 10 * time.Minute,
+	})
+	select {
+	case ev := <-a.restartCh:
+		if !ev.tripped || ev.recovered || ev.serverID != 7 || ev.count != 3 || ev.windowSec != 600 {
+			t.Fatalf("trip event lost controller decision: %#v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("circuit trip was not queued")
+	}
 }
 
 // TestParseChatIDs covers what an admin actually types into the extra-chats

@@ -94,7 +94,7 @@ func main() {
 	bgWG.Add(1)
 	go func() {
 		defer bgWG.Done()
-		ctrl.Run(ctx, sbStatsInterval(), func(err error) { log.Printf("sing-box controller: %v", err) })
+		ctrl.Run(ctx, sbStatsInterval(), sbReconcileInterval(), func(err error) { log.Printf("sing-box controller: %v", err) })
 	}()
 
 	app.StartSourceSync(ctx, time.Hour)
@@ -208,6 +208,7 @@ func buildSbController(st *store.Store, app *api.API, sshKeyDir string) *sbctl.C
 	// Restarts caused by the periodic pass — the ones nobody asked for — feed the
 	// restart-loop watcher.
 	ctrl.SetRestartObserver(app.NodeRestarted)
+	ctrl.SetRestartCircuit(app.RestartCircuitPolicy, app.RestartCircuitOpen, app.NodeCircuitChanged)
 	return ctrl
 }
 
@@ -219,6 +220,18 @@ func sbStatsInterval() time.Duration {
 		}
 	}
 	return time.Minute
+}
+
+// sbReconcileInterval is the slower full node-health pass. Minute-level quota
+// enforcement still regenerates desired configs, but unchanged bytes never
+// reach SSH between these reconciliations.
+func sbReconcileInterval() time.Duration {
+	if v := os.Getenv("QZ_SINGBOX_RECONCILE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 10 * time.Minute
 }
 
 func firstNonEmpty(a, b string) string {

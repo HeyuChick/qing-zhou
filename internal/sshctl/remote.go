@@ -333,7 +333,14 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 	// all of them, dropping every user's connection for no reason. applyLocal has
 	// compared the on-disk bytes for exactly this reason all along; the remote
 	// path never did.
-	if same, err := m.nodeAlreadyHas(ctx, client, cfg, configJSON); err == nil && same {
+	same, err := m.nodeAlreadyHas(ctx, client, cfg, configJSON)
+	if err != nil {
+		// A periodic pass that cannot prove the current state must fail closed.
+		// Treating a transient SSH/sudo/hash error as "different" turns a harmless
+		// observation failure into a disruptive config rewrite and restart.
+		return false, fmt.Errorf("verify current config: %w", err)
+	}
+	if same {
 		return false, nil
 	}
 
@@ -480,8 +487,9 @@ func (m *RemoteManager) installConfig(ctx context.Context, client *ssh.Client, c
 // systemd directly is one extra word on a command we are already sending, and it
 // closes that hole rather than tracking it in memory that a restart wipes.
 //
-// Any trouble reading either answer returns false: the cost of a needless apply
-// is one restart, the cost of a wrong skip is a node quietly serving nothing.
+// A valid inactive/missing state returns false so the apply can repair it. An
+// observation error is returned to the caller instead: turning an unknown state
+// into a rewrite/restart is exactly the failure mode this comparison prevents.
 func (m *RemoteManager) nodeAlreadyHas(ctx context.Context, client *ssh.Client, cfg *ServerConfig, configJSON []byte) (bool, error) {
 	m.mu.Lock()
 	pending := m.restartPending[cfg.ID]
@@ -496,7 +504,10 @@ func (m *RemoteManager) nodeAlreadyHas(ctx context.Context, client *ssh.Client, 
 	}
 	// One round trip for both answers. sha256sum needs root for a 0600 config;
 	// systemctl is-active does not, but it rides along.
-	cmd := fmt.Sprintf("sha256sum %s 2>/dev/null | cut -d%s -f1; systemctl is-active %s 2>/dev/null",
+	// systemctl returns 3 for a known but inactive unit. That is a valid answer
+	// (and means the config should be applied/started), not an observation error.
+	// Other failures stay non-zero so ApplyConfig fails closed.
+	cmd := fmt.Sprintf("sha256sum %s 2>/dev/null | cut -d%s -f1; systemctl is-active %s 2>/dev/null; rc=$?; [ \"$rc\" -eq 0 ] || [ \"$rc\" -eq 3 ]",
 		shellQuote(cfg.ConfigPath), shellQuote(" "), shellQuote(unit))
 	out, err := m.runElevated(ctx, client, cfg, cmd)
 	if err != nil {

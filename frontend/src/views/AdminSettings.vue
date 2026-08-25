@@ -216,10 +216,11 @@
         </n-form>
 
         <div class="tg-tpl">
-          <div class="tg-tpl-h">运维告警 · 节点反复重启</div>
+          <div class="tg-tpl-h">运维保护 · 节点反复重启熔断</div>
           <p class="form-hint" style="margin:0 0 10px;">
             节点每重启一次，它上面所有人的连接都会断一次。改配置引起的重启是正常的，
-            这里只统计<b>没有任何后台操作时</b>自动发生的重启：超过阈值就在监控页告警，并推送给下面选中的接收人。
+            这里只统计<b>没有任何后台操作时</b>自动发生的重启：超过阈值后暂停该节点的周期性自动下发，
+            在监控页告警并推送给下面选中的接收人。流量统计和探针上报不受影响，人工重新下发成功后自动解除。
           </p>
           <n-form label-placement="left" label-width="140">
             <n-form-item label="启用">

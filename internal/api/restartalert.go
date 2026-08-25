@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"qingzhou/internal/sbctl"
 	"qingzhou/internal/store"
 	"qingzhou/internal/telegram"
 )
@@ -62,6 +63,15 @@ type restartEvent struct {
 	// sweep asks for the idle check instead of recording a restart. It rides the
 	// same channel so the tracker needs no lock.
 	sweep bool
+	// recovered is emitted only after an administrator-forced apply succeeds.
+	// A quiet circuit is still open, so silence alone must never resolve it.
+	recovered bool
+	// tripped carries the controller's already-made decision. Count/window are
+	// captured there so a concurrent settings edit cannot open a circuit under
+	// one threshold while the Telegram watcher re-evaluates another.
+	tripped   bool
+	count     int
+	windowSec int64
 }
 
 // restartTracker holds the recent restart times per node and which nodes are
@@ -107,27 +117,45 @@ func (t *restartTracker) record(serverID int64, name string, now, windowSec int6
 	return true, count
 }
 
-// idle returns the alerting nodes that have gone quiet for a full window, i.e.
-// whose episode is over. Their alert state is cleared here, so a later relapse
-// counts as a new episode and announces itself again.
-func (t *restartTracker) idle(now, windowSec int64) []int64 {
+// prune drops old pre-threshold samples. Alerted nodes are deliberately retained:
+// once the controller opens its circuit it becomes quiet by design, and only a
+// successful administrator-forced apply is proof of recovery.
+func (t *restartTracker) prune(now, windowSec int64) {
 	cutoff := now - windowSec
-	var out []int64
-	for id := range t.alerted {
-		recent := false
-		for _, ts := range t.hist[id] {
+	for id, hist := range t.hist {
+		if t.alerted[id] {
+			continue
+		}
+		kept := hist[:0]
+		for _, ts := range hist {
 			if ts >= cutoff {
-				recent = true
-				break
+				kept = append(kept, ts)
 			}
 		}
-		if !recent {
-			out = append(out, id)
-			delete(t.alerted, id)
+		if len(kept) == 0 {
 			delete(t.hist, id)
+			delete(t.names, id)
+		} else {
+			t.hist[id] = kept
 		}
 	}
-	return out
+}
+
+func (t *restartTracker) recover(serverID int64) {
+	delete(t.alerted, serverID)
+	delete(t.hist, serverID)
+	delete(t.names, serverID)
+}
+
+func (t *restartTracker) markAlerted(serverID int64, name string) {
+	t.names[serverID] = name
+	t.alerted[serverID] = true
+}
+
+// unmarkAlerted preserves the timestamps so the ordinary restart sample queued
+// immediately after a circuit transition can retry a failed durable alert.
+func (t *restartTracker) unmarkAlerted(serverID int64) {
+	delete(t.alerted, serverID)
 }
 
 func (t *restartTracker) name(serverID int64) string {
@@ -158,6 +186,42 @@ func (a *API) restartPolicy() restartPolicy {
 	return p
 }
 
+// RestartCircuitPolicy exposes the same live settings to sbctl. Keeping one
+// source of truth guarantees that the Telegram message and the actual circuit
+// open on the same restart.
+func (a *API) RestartCircuitPolicy() sbctl.RestartCircuitPolicy {
+	p := a.restartPolicy()
+	return sbctl.RestartCircuitPolicy{Enabled: p.enabled, Window: time.Duration(p.windowSec) * time.Second, Threshold: p.threshold}
+}
+
+// RestartCircuitOpen restores the latch from the unresolved alert after a panel
+// restart. Acknowledging the alert does not silently re-enable automatic deploys.
+func (a *API) RestartCircuitOpen(serverID int64) bool {
+	open, err := a.st.IsAlertOpen(serverID, store.AlertRestartLoop)
+	return err == nil && open
+}
+
+// NodeCircuitChanged receives non-blocking transition notifications from the
+// controller. Opening is announced by the threshold-crossing restart event;
+// closing needs its own event so recipients get an explicit recovery message.
+func (a *API) NodeCircuitChanged(ev sbctl.RestartCircuitEvent) {
+	if a.restartCh == nil {
+		return
+	}
+	e := restartEvent{serverID: ev.ServerID, name: ev.Name, at: time.Now()}
+	if ev.Open {
+		e.tripped = true
+		e.count = ev.Count
+		e.windowSec = int64(ev.Window / time.Second)
+	} else {
+		e.recovered = true
+	}
+	select {
+	case a.restartCh <- e:
+	default:
+	}
+}
+
 // NodeRestarted is the controller's restart observer. It runs on the rebuild
 // goroutine, so it does exactly one thing: hand the event over. A full queue
 // drops the event — losing one sample of a condition that repeats every minute
@@ -173,9 +237,9 @@ func (a *API) NodeRestarted(serverID int64, name string) {
 	}
 }
 
-// sweepRestartAlerts asks the watcher to close episodes that have gone quiet.
-// Called from the existing maintenance tick — this feature adds no timer of its
-// own.
+// sweepRestartAlerts prunes old pre-threshold samples. Open circuits are not
+// closed by silence: silence is their expected state, and only a successful
+// manual apply proves recovery. Called from the existing maintenance tick.
 func (a *API) sweepRestartAlerts() {
 	if a.restartCh == nil {
 		return
@@ -187,15 +251,7 @@ func (a *API) sweepRestartAlerts() {
 }
 
 // StartRestartWatch runs the watcher and the Telegram sender until ctx ends.
-//
-// Also clears any restart-loop alert left open by a previous process: the
-// evidence for it was in that process's memory. A node still stuck in a loop
-// re-raises within one window, and one that recovered while the panel was down
-// should not leave a red dot nobody can explain.
 func (a *API) StartRestartWatch(ctx context.Context) {
-	if err := a.st.ResolveAlertsByType(store.AlertRestartLoop); err != nil {
-		log.Printf("restart watch: clear stale alerts: %v", err)
-	}
 	go a.runOpsSender(ctx)
 	go a.runRestartWatch(ctx)
 }
@@ -209,12 +265,31 @@ func (a *API) runRestartWatch(ctx context.Context) {
 		case ev := <-a.restartCh:
 			now := ev.at.Unix()
 			policy := a.restartPolicy()
-			if ev.sweep {
-				for _, id := range tracker.idle(now, policy.windowSec) {
-					if err := a.st.ResolveAlert(id, store.AlertRestartLoop); err != nil {
-						log.Printf("restart watch: resolve alert for server %d: %v", id, err)
-					}
+			if ev.tripped {
+				minutes := ev.windowSec / 60
+				if minutes < 1 {
+					minutes = 1
 				}
+				if a.raiseRestartCircuit(ev.serverID, ev.name, ev.count, minutes, now) {
+					tracker.markAlerted(ev.serverID, ev.name)
+				}
+				continue
+			}
+			if ev.recovered {
+				wasOpen, _ := a.st.IsAlertOpen(ev.serverID, store.AlertRestartLoop)
+				tracker.recover(ev.serverID)
+				if err := a.st.ResolveAlert(ev.serverID, store.AlertRestartLoop); err != nil {
+					log.Printf("restart watch: resolve recovered circuit for server %d: %v", ev.serverID, err)
+					continue
+				}
+				if wasOpen {
+					log.Printf("restart watch: server %d (%s) 人工下发成功，已解除熔断", ev.serverID, ev.name)
+					a.queueOpsMessage(renderRestartCircuitRecovery(ev.name))
+				}
+				continue
+			}
+			if ev.sweep {
+				tracker.prune(now, policy.windowSec)
 				continue
 			}
 			if !policy.enabled {
@@ -226,33 +301,47 @@ func (a *API) runRestartWatch(ctx context.Context) {
 			}
 			minutes := policy.windowSec / 60
 			name := tracker.name(ev.serverID)
-			created, err := a.st.InsertAlert(store.ServerAlert{
-				ServerID: ev.serverID,
-				Type:     store.AlertRestartLoop,
-				Message:  fmt.Sprintf("%d 分钟内自动重启 %d 次，节点上的用户连接反复中断", minutes, count),
-				Ts:       now,
-			})
-			if err != nil {
-				log.Printf("restart watch: raise alert for server %d: %v", ev.serverID, err)
-				continue
-			}
-			log.Printf("restart watch: server %d (%s) 在 %d 分钟内自动重启 %d 次，已告警", ev.serverID, name, minutes, count)
-			if created {
-				a.queueOpsMessage(renderRestartLoopAlert(name, count, minutes))
+			if !a.raiseRestartCircuit(ev.serverID, name, count, minutes, now) {
+				tracker.unmarkAlerted(ev.serverID)
 			}
 		}
 	}
+}
+
+func (a *API) raiseRestartCircuit(serverID int64, name string, count int, minutes, now int64) bool {
+	created, err := a.st.InsertAlert(store.ServerAlert{
+		ServerID: serverID,
+		Type:     store.AlertRestartLoop,
+		Message:  fmt.Sprintf("%d 分钟内自动重启 %d 次，已暂停该节点的周期性自动下发", minutes, count),
+		Ts:       now,
+	})
+	if err != nil {
+		log.Printf("restart watch: raise alert for server %d: %v", serverID, err)
+		return false
+	}
+	log.Printf("restart watch: server %d (%s) 在 %d 分钟内自动重启 %d 次，已熔断并告警", serverID, name, minutes, count)
+	if created {
+		a.queueOpsMessage(renderRestartLoopAlert(name, count, minutes))
+	}
+	return true
 }
 
 // renderRestartLoopAlert is the Telegram body. It names the node and what the
 // recipient should do; it deliberately carries no config, credential or user
 // data, because a recipient need not be an administrator.
 func renderRestartLoopAlert(name string, count int, minutes int64) string {
-	return "⚠️ <b>节点反复重启</b>\n\n" +
+	return "🔴 <b>节点自动下发已熔断</b>\n\n" +
 		"节点：<b>" + telegram.Escape(name) + "</b>\n" +
 		fmt.Sprintf("最近 %d 分钟内自动重启 <b>%d</b> 次，且不是由后台操作触发的。\n\n", minutes, count) +
-		"每次重启都会切断该节点上所有用户的连接。请在面板机器上查看：\n" +
+		"已暂停该节点的周期性配置下发；流量统计与探针上报继续运行。请检查后在面板中人工重新下发。\n\n" +
+		"面板日志：\n" +
 		"<code>journalctl -u qingzhou | grep 连接会断一次</code>"
+}
+
+func renderRestartCircuitRecovery(name string) string {
+	return "✅ <b>节点自动下发已恢复</b>\n\n" +
+		"节点：<b>" + telegram.Escape(name) + "</b>\n" +
+		"管理员重新下发成功，重启熔断已解除，周期性配置同步恢复。"
 }
 
 func (a *API) queueOpsMessage(html string) {

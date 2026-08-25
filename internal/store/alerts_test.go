@@ -159,6 +159,34 @@ func TestMarkAllAlertsRead(t *testing.T) {
 	}
 }
 
+func TestRestartCircuitLatchSurvivesAcknowledgementUntilResolved(t *testing.T) {
+	st := newRefundStore(t)
+	created, err := st.InsertAlert(ServerAlert{ServerID: 7, Type: AlertRestartLoop, Message: "已熔断"})
+	if err != nil || !created {
+		t.Fatalf("insert circuit alert: created=%v err=%v", created, err)
+	}
+	open, err := st.IsAlertOpen(7, AlertRestartLoop)
+	if err != nil || !open {
+		t.Fatalf("new circuit is not open: open=%v err=%v", open, err)
+	}
+	a := unreadOf(t, st, AlertRestartLoop)
+	if a == nil {
+		t.Fatal("missing circuit alert")
+	}
+	if err := st.MarkAlertRead(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := st.IsAlertOpen(7, AlertRestartLoop); !open {
+		t.Fatal("acknowledging the Telegram/panel alert silently closed the circuit")
+	}
+	if err := st.ResolveAlert(7, AlertRestartLoop); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := st.IsAlertOpen(7, AlertRestartLoop); open {
+		t.Fatal("successful recovery did not close the circuit")
+	}
+}
+
 // Upgrading a panel that already accumulated one row per observation must fold
 // the backlog: newest row per (server, type) survives, carrying the group's
 // start time and observation count.

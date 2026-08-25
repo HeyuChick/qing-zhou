@@ -39,7 +39,9 @@ func TestApplyConfigRechecksServiceAfterAnEarlierNoOp(t *testing.T) {
 			if active {
 				return remoteHash + "\nactive\n", 0
 			}
-			return remoteHash + "\ninactive\n", 3
+			// nodeAlreadyHas normalizes systemd's exit 3 (known but inactive)
+			// to success while preserving the textual state.
+			return remoteHash + "\ninactive\n", 0
 		case strings.HasPrefix(command, "for c in "):
 			return "/usr/local/bin/sing-box\n", 0
 		case strings.Contains(command, "systemctl restart"):
@@ -85,6 +87,33 @@ func TestApplyConfigRechecksServiceAfterAnEarlierNoOp(t *testing.T) {
 	defer mu.Unlock()
 	if restarts != 1 {
 		t.Fatalf("stopped node was restarted %d time(s), want 1", restarts)
+	}
+}
+
+func TestApplyConfigFailsClosedWhenCurrentStateCannotBeRead(t *testing.T) {
+	configJSON := []byte(`{"inbounds":[]}`)
+	restarts := 0
+	host, port := startApplyTestSSHServer(t, func(command string) (string, uint32) {
+		switch {
+		case strings.Contains(command, "sha256sum") && strings.Contains(command, "systemctl is-active"):
+			return "sudo: a password is required\n", 1
+		case strings.Contains(command, "systemctl restart"):
+			restarts++
+			return "", 0
+		default:
+			return "", 0
+		}
+	})
+	m := New(WithTimeout(2 * time.Second))
+	cfg := &ServerConfig{ID: 1, Host: host, Port: port, SSHUser: "deploy", SSHPassword: "fixture", ConfigPath: "/etc/sing-box/config.json", SystemdUnit: "sing-box"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if restarted, err := m.ApplyConfig(ctx, cfg, configJSON); err == nil || restarted {
+		t.Fatalf("unreadable state result = restarted:%v err:%v, want a non-mutating error", restarted, err)
+	}
+	if restarts != 0 {
+		t.Fatalf("observation failure restarted the node %d time(s)", restarts)
 	}
 }
 
