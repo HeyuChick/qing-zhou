@@ -59,12 +59,18 @@ type User struct {
 	// non-zero traffic delta, so it doubles as the proxy-side liveness signal.
 	// Panel logins do not touch it — see sessions for that.
 	LastOnlineAt int64
+	// Subscription fetch telemetry is deliberately coarse. SubLastClient is a
+	// bounded category selected by the API, not the raw User-Agent or an IP.
+	SubLastFetchedAt int64
+	SubLastFormat    string
+	SubLastClient    string
 }
 
 const userCols = `id, username, email, password_hash, role, status, email_verified, email_gate_exempt, points,
 	client_id, client_name, client_uuid, client_secret, sub_token, current_plan_id,
 	traffic_limit, used_up, used_down, expiry_at, created_at, updated_at,
-	last_online_at, creds_reset_at, proxy_username, proxy_password, proxy_expires_at, remark`
+	last_online_at, sub_last_fetched_at, sub_last_format, sub_last_client,
+	creds_reset_at, proxy_username, proxy_password, proxy_expires_at, remark`
 
 type scanner interface{ Scan(...any) error }
 
@@ -74,6 +80,7 @@ func scanUser(sc scanner) (*User, error) {
 		&u.EmailVerified, &u.EmailGateExempt, &u.Points, &u.ClientID, &u.ClientName, &u.ClientUUID,
 		&u.ClientSecret, &u.SubToken, &u.CurrentPlanID, &u.TrafficLimit,
 		&u.UsedUp, &u.UsedDown, &u.ExpiryAt, &u.CreatedAt, &u.UpdatedAt, &u.LastOnlineAt,
+		&u.SubLastFetchedAt, &u.SubLastFormat, &u.SubLastClient,
 		&u.CredsResetAt, &u.ProxyUsername, &u.ProxyPassword, &u.ProxyExpiresAt, &u.Remark)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -156,6 +163,31 @@ func (s *Store) SetSubTokenIfEmpty(userID int64, token string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE users SET sub_token=?, updated_at=?
 		WHERE id=? AND (sub_token IS NULL OR sub_token='')`,
 		token, time.Now().Unix(), userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+const subscriptionFetchWriteInterval int64 = 3600
+
+// RecordSubscriptionFetch records a successfully written subscription response.
+// The conditional UPDATE is both the one-hour write throttle and the concurrency
+// guard: two simultaneous refreshes that read the same old User can never both
+// advance the row. Observational telemetry intentionally does not touch
+// users.updated_at, which describes account changes elsewhere in the panel.
+func (s *Store) RecordSubscriptionFetch(userID, fetchedAt int64, format, client string) (bool, error) {
+	if userID <= 0 || fetchedAt <= 0 {
+		return false, fmt.Errorf("invalid subscription fetch identity/time")
+	}
+	if format == "" || len(format) > 24 || client == "" || len(client) > 24 {
+		return false, fmt.Errorf("invalid subscription fetch format/client")
+	}
+	res, err := s.db.Exec(`UPDATE users
+		SET sub_last_fetched_at=?, sub_last_format=?, sub_last_client=?
+		WHERE id=? AND (sub_last_fetched_at=0 OR sub_last_fetched_at<=?)`,
+		fetchedAt, format, client, userID, fetchedAt-subscriptionFetchWriteInterval)
 	if err != nil {
 		return false, err
 	}

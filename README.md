@@ -171,6 +171,15 @@ docker compose logs -f qingzhou     # 首启打印随机管理员密码（未设
 
 或直接用镜像：`docker run -d -p 8081:8081 -e QZ_SECRET_KEY=$(openssl rand -hex 32) -v qingzhou-data:/data ghcr.io/mllt992/qing-zhou:latest`。**Docker 用「拉新镜像 + 重建容器」升级**，详见 [Wiki · Docker 部署](https://github.com/mllt992/qing-zhou/wiki/Docker-部署)。
 
+通过当前发布工作流新构建的 GHCR 镜像会携带构建来源证明（provenance）与 SBOM，并标记
+对应的源码 revision。可用 Buildx 查看镜像清单和证明；把示例版本换成实际安装的 tag：
+
+```bash
+docker buildx imagetools inspect ghcr.io/mllt992/qing-zhou:vX.Y.Z
+docker buildx imagetools inspect ghcr.io/mllt992/qing-zhou:vX.Y.Z --format '{{json .Provenance}}'
+docker buildx imagetools inspect ghcr.io/mllt992/qing-zhou:vX.Y.Z --format '{{json .SBOM}}'
+```
+
 ### 二、本地开发运行
 
 前端产物不入库（仓库里 `frontend/dist` 只有一个占位文件），所以**先构建一次前端**，否则面板是白页：

@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS users (
   -- comped, ...). Panel-side only: never rendered into sing-box config, never
   -- shown to the user themselves.
   remark          TEXT    NOT NULL DEFAULT '',
+  -- Coarse operational telemetry for subscription support. Client is a bounded
+  -- category, never the raw User-Agent; timestamps are throttled by the writer.
+  sub_last_fetched_at INTEGER NOT NULL DEFAULT 0,
+  sub_last_format  TEXT    NOT NULL DEFAULT '',
+  sub_last_client  TEXT    NOT NULL DEFAULT '',
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -781,6 +786,11 @@ func (s *Store) Migrate() error {
 		// list keeps its historical order.
 		`ALTER TABLE sb_tls ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,
+		// Last successful subscription response. Store only a bounded client class,
+		// never the raw User-Agent/IP; RecordSubscriptionFetch throttles writes.
+		`ALTER TABLE users ADD COLUMN sub_last_fetched_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN sub_last_format TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN sub_last_client TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN creds_reset_at INTEGER NOT NULL DEFAULT 0`,
 		// Admin-only note on an account. Panel-side metadata; nothing downstream
 		// (sing-box config, subscriptions, the user's own pages) reads it.

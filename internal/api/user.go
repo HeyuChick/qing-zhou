@@ -933,13 +933,16 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	// A person who pasted the link into a browser gets a readable page instead
 	// of a wall of base64. `?format=info` asks for it explicitly.
 	if strings.EqualFold(reqFormat, "info") || wantsSubInfoPage(r, reqFormat) {
-		a.writeSubInfoHTML(w, subInfo{
+		err := a.writeSubInfoHTML(w, subInfo{
 			SiteName: siteName, SubURL: subURL,
 			Used: u.UsedUp + u.UsedDown, Total: u.TrafficLimit, ExpiryAt: u.ExpiryAt,
 			NodeCount: len(links),
 			Expired:   u.ExpiryAt != 0 && u.ExpiryAt <= now,
 			OverQuota: u.TrafficLimit != 0 && u.UsedUp+u.UsedDown >= u.TrafficLimit,
 		})
+		if err == nil {
+			a.recordSubscriptionFetch(u, "info", subscriptionClientForUA(r.Header.Get("User-Agent")))
+		}
 		return
 	}
 
@@ -947,6 +950,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = subconv.FormatForUA(r.Header.Get("User-Agent"))
 	}
+	format = subconv.NormalizeFormat(format)
 	body, ctype, err := subconv.Render(format, links, aiNodes, clashTpl, singboxTpl, subURL)
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)
@@ -964,9 +968,25 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	// Clash-family clients name the imported profile after this; without it they
 	// fall back to the URL's last path segment, which is the subscription token —
 	// pinning a secret into the client's visible profile list.
-	w.Header().Set("Content-Disposition", contentDisposition(siteName, subconv.NormalizeFormat(format)))
+	w.Header().Set("Content-Disposition", contentDisposition(siteName, format))
 	w.Header().Set("Content-Type", ctype)
-	_, _ = w.Write([]byte(body))
+	if n, err := w.Write([]byte(body)); err == nil && n == len(body) {
+		a.recordSubscriptionFetch(u, format, subscriptionClientForUA(r.Header.Get("User-Agent")))
+	}
+}
+
+// recordSubscriptionFetch is best-effort and never changes the subscription
+// response. The User snapshot avoids even issuing an UPDATE for ordinary client
+// refreshes inside the one-hour window; the Store repeats the condition to close
+// the concurrent-request race.
+func (a *API) recordSubscriptionFetch(u *store.User, format, client string) {
+	now := time.Now().Unix()
+	if u.SubLastFetchedAt > 0 && now-u.SubLastFetchedAt < 3600 {
+		return
+	}
+	if _, err := a.st.RecordSubscriptionFetch(u.ID, now, format, client); err != nil {
+		log.Printf("subscription fetch telemetry (user %d): %v", u.ID, err)
+	}
 }
 
 type linkCacheEntry struct {

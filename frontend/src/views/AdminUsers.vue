@@ -90,6 +90,7 @@
 
           <div class="uc-meta">
             <span class="kv">积分 <b>{{ u.points }}</b></span>
+            <span class="kv" :title="subFetchTitle(u)">订阅 <b>{{ subFetchText(u) }}</b></span>
             <span v-if="u.group_ids?.length" class="kv">用户组 <b>{{ groupNames(u.group_ids) }}</b></span>
           </div>
 
@@ -367,12 +368,32 @@ const sortBy = ref('default')
 const sortOptions = [
   { label: '默认排序', value: 'default' },
   { label: '最后在线', value: 'online' },
+  { label: '最后拉取订阅', value: 'subfetch' },
   { label: '用量最高', value: 'usage' },
   { label: '最近到期', value: 'expiry' },
   { label: '积分最高', value: 'points' },
 ]
 
 const onlineCount = computed(() => users.value.filter((u: any) => u.online).length)
+
+const subClientLabels: Record<string, string> = {
+  browser: '浏览器', mihomo: 'Mihomo', clash: 'Clash', stash: 'Stash',
+  'sing-box': 'sing-box', surge: 'Surge', shadowrocket: 'Shadowrocket',
+  v2rayn: 'v2rayN', curl: 'curl', unknown: '未知客户端',
+}
+const subFormatLabels: Record<string, string> = {
+  info: '信息页', clash: 'Clash', singbox: 'sing-box', surge: 'Surge', base64: '通用',
+}
+function subFetchText(u: any) {
+  if (!u.sub_last_fetched_at) return '从未拉取'
+  return timeAgo(u.sub_last_fetched_at)
+}
+function subFetchTitle(u: any) {
+  if (!u.sub_last_fetched_at) return '尚未成功获取过订阅'
+  const client = subClientLabels[u.sub_last_client] || '未知客户端'
+  const format = subFormatLabels[u.sub_last_format] || u.sub_last_format || '未知格式'
+  return `${fmtDateTime(u.sub_last_fetched_at)} · ${client} · ${format}（记录最多每小时更新一次）`
+}
 
 // ---- 流量口径 ----
 // 后端的 traffic 只统计「当前可用」的份：排队中的份还不能用，已过期的份订阅里
@@ -451,19 +472,21 @@ function expiringSoon(u: any) {
 const stats = computed(() => [
   { key: 'all', label: '全部用户', value: users.value.length, color: '' },
   { key: 'online', label: '在线', value: onlineCount.value, color: '#6f8f76' },
+  { key: 'unfetched', label: '从未拉取订阅', value: users.value.filter((u: any) => !u.sub_last_fetched_at).length, color: '#767676' },
   { key: 'noplan', label: '无生效套餐', value: users.value.filter(needsPlan).length, color: '#767676' },
   { key: 'expiring', label: '7 天内到期', value: users.value.filter(expiringSoon).length, color: '#bf9540' },
   { key: 'banned', label: '已封禁', value: users.value.filter((u: any) => u.status === 'banned').length, color: '#c2685c' },
 ])
 const emptyText = computed(() => {
   if (search.value) return '没有匹配的用户'
-  return { online: '当前无在线用户', noplan: '所有用户都有生效中的套餐', expiring: '近 7 天没有套餐到期', banned: '没有被封禁的用户' }[filter.value] || '暂无用户'
+  return { online: '当前无在线用户', unfetched: '所有用户都拉取过订阅', noplan: '所有用户都有生效中的套餐', expiring: '近 7 天没有套餐到期', banned: '没有被封禁的用户' }[filter.value] || '暂无用户'
 })
 
 const filtered = computed(() => {
   let list = users.value
   switch (filter.value) {
     case 'online': list = list.filter((u: any) => u.online); break
+    case 'unfetched': list = list.filter((u: any) => !u.sub_last_fetched_at); break
     case 'noplan': list = list.filter(needsPlan); break
     case 'expiring': list = list.filter(expiringSoon); break
     case 'banned': list = list.filter((u: any) => u.status === 'banned'); break
@@ -478,6 +501,7 @@ const filtered = computed(() => {
   sorted.sort((a: any, b: any) => {
     switch (sortBy.value) {
       case 'online': return (b.last_online_at || 0) - (a.last_online_at || 0)
+      case 'subfetch': return (b.sub_last_fetched_at || 0) - (a.sub_last_fetched_at || 0)
       case 'usage': return usedPctOf(b) - usedPctOf(a) || (b.traffic?.used || 0) - (a.traffic?.used || 0)
       // 不过期的份排在最后：它们永远轮不到「需要续费」
       case 'expiry': return (a.plan_summary?.next_expiry_at || Infinity) - (b.plan_summary?.next_expiry_at || Infinity)

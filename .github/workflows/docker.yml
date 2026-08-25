@@ -24,6 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch can rebuild an older tag. Fetch the tag and build
+          # that exact revision instead of silently packaging the current main.
+          fetch-depth: 0
 
       - name: Resolve tag
         id: ver
@@ -33,7 +37,10 @@ jobs:
           else
             TAG="${{ github.event.release.tag_name }}"
           fi
+          REVISION="$(git rev-parse "${TAG}^{commit}")"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          git checkout --detach "$REVISION"
 
       # ghcr 镜像名必须小写
       - name: Lowercase image name
@@ -54,10 +61,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.img.outputs.name }}
-          # latest 在发布 release 时自动打；手动 dispatch 也打（仅对最新 tag 手动重建时用）
+          # latest 只随正式 release 移动；手动重建历史 tag 只覆盖该版本标签。
           tags: |
             type=raw,value=${{ steps.ver.outputs.tag }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.ver.outputs.revision }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.tag }}
+            org.opencontainers.image.licenses=CC-BY-NC-SA-4.0
 
       - name: Build & push (amd64 + arm64)
         uses: docker/build-push-action@v6
@@ -65,6 +77,10 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          # Attach supply-chain metadata to the multi-platform image. Consumers
+          # can inspect both without trusting a separate file from the release.
+          sbom: true
+          provenance: mode=max
           build-args: |
             VERSION=${{ steps.ver.outputs.tag }}
           tags: ${{ steps.meta.outputs.tags }}
