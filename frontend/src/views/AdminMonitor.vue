@@ -120,7 +120,7 @@
             </n-tooltip>
             <n-button size="tiny" @click="openAsset(s)">编辑</n-button>
             <!-- 本机是面板自采集，没有探针可装 -->
-            <n-button v-if="!s.local" size="tiny" @click="copyInstall(s)">安装</n-button>
+            <n-button v-if="!s.local" size="tiny" @click="copyInstall(s)">安装 / 升级</n-button>
           </n-space>
         </template>
 
@@ -441,7 +441,7 @@ async function setPublicVisible(s: any, v: boolean) {
 function copyInstall(s: any) {
   if (!s.probe_token) { message.warning('请先启用探针'); return }
   const cmd = `bash <(curl -sL ${location.origin}/api/monitor/install.sh) ${s.probe_token}`
-  navigator.clipboard.writeText(cmd); message.success('安装命令已复制')
+  navigator.clipboard.writeText(cmd); message.success('探针安装 / 升级命令已复制')
 }
 
 // --- ECharts（懒加载 + resize）---

@@ -13,6 +13,7 @@ import (
 
 	"qingzhou/internal/api"
 	"qingzhou/internal/config"
+	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/mailer"
 	"qingzhou/internal/sbctl"
 	"qingzhou/internal/sbproc"
@@ -94,7 +95,9 @@ func main() {
 	bgWG.Add(1)
 	go func() {
 		defer bgWG.Done()
-		ctrl.Run(ctx, sbStatsInterval(), sbReconcileInterval(), func(err error) { log.Printf("sing-box controller: %v", err) })
+		ctrl.Run(ctx, func() (time.Duration, time.Duration) {
+			return intervalcfg.Controller(st)
+		}, func(err error) { log.Printf("sing-box controller: %v", err) })
 	}()
 
 	app.StartSourceSync(ctx, time.Hour)
@@ -210,28 +213,6 @@ func buildSbController(st *store.Store, app *api.API, sshKeyDir string) *sbctl.C
 	ctrl.SetRestartObserver(app.NodeRestarted)
 	ctrl.SetRestartCircuit(app.RestartCircuitPolicy, app.RestartCircuitOpen, app.NodeCircuitChanged)
 	return ctrl
-}
-
-// sbStatsInterval is how often the controller polls per-user traffic + rebuilds.
-func sbStatsInterval() time.Duration {
-	if v := os.Getenv("QZ_SINGBOX_STATS_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
-	}
-	return time.Minute
-}
-
-// sbReconcileInterval is the slower full node-health pass. Minute-level quota
-// enforcement still regenerates desired configs, but unchanged bytes never
-// reach SSH between these reconciliations.
-func sbReconcileInterval() time.Duration {
-	if v := os.Getenv("QZ_SINGBOX_RECONCILE_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
-	return 10 * time.Minute
 }
 
 func firstNonEmpty(a, b string) string {

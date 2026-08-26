@@ -355,6 +355,39 @@
         <p style="font-size:12px;color:var(--text-3);margin-top:4px;">改动需点下方「保存设置」后生效。</p>
       </n-card>
 
+      <n-card id="settings-runtime" class="settings-section" title="节点采集与同步频率" size="small">
+        <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;line-height:1.7;">
+          调大间隔可减少小型 VPS 的探针采样、SSH 握手和健康检查开销。保存后面板调度立即更新；
+          已升级的新探针会在下一次上报时自动领取新间隔，无需重启节点服务。
+        </p>
+        <n-form label-placement="left" label-width="170">
+          <n-form-item label="探针采集间隔（秒）">
+            <div style="width:100%;">
+              <n-input-number v-model:value="probeIntervalSeconds" :min="30" :max="3600" :step="30"
+                              :disabled="envLocked('monitor_probe_interval_seconds')" style="width:220px;" />
+              <p class="form-hint">范围 30–3600 秒，默认 60 秒。影响节点监控曲线刷新速度，不影响流量计费。</p>
+            </div>
+          </n-form-item>
+          <n-form-item label="流量统计间隔（分钟）">
+            <div style="width:100%;">
+              <n-input-number v-model:value="statsIntervalMinutes" :min="1" :max="60" :step="1"
+                              :disabled="envLocked('singbox_stats_interval_minutes')" style="width:220px;" />
+              <p class="form-hint">范围 1–60 分钟，默认 10 分钟。间隔越大，面板用量、超额停用和到期剔除的生效延迟越长。</p>
+            </div>
+          </n-form-item>
+          <n-form-item label="完整健康检查（分钟）">
+            <div style="width:100%;">
+              <n-input-number v-model:value="reconcileIntervalMinutes" :min="10" :max="1440" :step="10"
+                              :disabled="envLocked('singbox_reconcile_interval_minutes')" style="width:220px;" />
+              <p class="form-hint">范围 10–1440 分钟，默认 60 分钟，且不能小于流量统计间隔。检查远端配置文件和 sing-box 服务状态。</p>
+            </div>
+          </n-form-item>
+          <n-alert v-if="runtimeEnvLocked" type="warning" :show-icon="true">
+            部分间隔由服务器环境变量固定，面板中只显示实际值。移除对应环境变量并重启面板后才能在线修改。
+          </n-alert>
+        </n-form>
+      </n-card>
+
       <n-card id="settings-monitor" class="settings-section" title="监控告警阈值" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">超过以下百分比时触发告警（0-100）。修改后下次检查生效。</p>
         <n-form label-placement="left" label-width="120">
@@ -441,6 +474,7 @@ const settingsSections = [
   { id: 'settings-cert', label: '证书 / ACME', note: 'Cloudflare DNS' },
   { id: 'settings-security', label: '出口安全', note: '内网访问防护' },
   { id: 'settings-template', label: '订阅模板', note: '客户端输出' },
+  { id: 'settings-runtime', label: '采集与同步', note: '节点负载' },
   { id: 'settings-monitor', label: '监控告警', note: '阈值与通知' },
   { id: 'settings-update', label: '在线更新', note: '版本与令牌' },
   { id: 'settings-backup', label: '数据备份', note: '一致性快照' },
@@ -538,6 +572,9 @@ const alertCpu = ref(90)
 const alertMem = ref(90)
 const alertDisk = ref(85)
 const alertStreak = ref(2)
+const probeIntervalSeconds = ref(60)
+const statsIntervalMinutes = ref(10)
+const reconcileIntervalMinutes = ref(60)
 const refundMode = ref('prorated')
 const refundBasis = ref('min')
 const refundFee = ref(0)
@@ -565,6 +602,11 @@ const telegramConfigured = computed(() => !!(form.telegram_bot_token || '').trim
 function envLocked(key: string): boolean {
   return (form._env_keys || '').split(',').includes(key)
 }
+const runtimeEnvLocked = computed(() => [
+  'monitor_probe_interval_seconds',
+  'singbox_stats_interval_minutes',
+  'singbox_reconcile_interval_minutes',
+].some(envLocked))
 
 type NodeHostCandidate = { value: string; source: string; label: string; note: string; recommended?: boolean }
 const detecting = ref(false)
@@ -605,6 +647,10 @@ async function handleSave() {
     message.error('系统配置尚未成功读取，已阻止保存以保护原配置')
     return
   }
+  if (reconcileIntervalMinutes.value < statsIntervalMinutes.value) {
+    message.error('完整健康检查间隔不能小于流量统计间隔')
+    return
+  }
   saving.value = true
   try {
     const body: Record<string, any> = {
@@ -621,6 +667,9 @@ async function handleSave() {
       alert_mem_threshold: String(alertMem.value),
       alert_disk_threshold: String(alertDisk.value),
       alert_consecutive: String(alertStreak.value),
+      monitor_probe_interval_seconds: String(probeIntervalSeconds.value),
+      singbox_stats_interval_minutes: String(statsIntervalMinutes.value),
+      singbox_reconcile_interval_minutes: String(reconcileIntervalMinutes.value),
       refund_mode: refundMode.value,
       refund_basis: refundBasis.value,
       refund_fee_percent: String(refundFee.value),
@@ -773,6 +822,9 @@ async function loadSettings() {
       alertMem.value = parseInt(data.alert_mem_threshold) || 90
       alertDisk.value = parseInt(data.alert_disk_threshold) || 85
       alertStreak.value = parseInt(data.alert_consecutive) || 2
+      probeIntervalSeconds.value = parseInt(data.monitor_probe_interval_seconds) || 60
+      statsIntervalMinutes.value = parseInt(data.singbox_stats_interval_minutes) || 10
+      reconcileIntervalMinutes.value = parseInt(data.singbox_reconcile_interval_minutes) || 60
       refundMode.value = data.refund_mode === 'full' ? 'full' : 'prorated'
       refundBasis.value = ['traffic', 'time', 'min'].includes(data.refund_basis) ? data.refund_basis : 'min'
       refundFee.value = parseFloat(data.refund_fee_percent) || 0

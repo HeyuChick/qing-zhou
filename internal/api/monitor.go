@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/idgen"
+	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/store"
 )
 
@@ -51,7 +52,13 @@ func (a *API) handleMonitorReport(w http.ResponseWriter, r *http.Request) {
 	_ = a.st.TouchProbeSeen(sv.ID)
 	_ = a.st.UpdateServerStatus(sv.ID, "online")
 
-	ok(w, J{"ok": true})
+	// New probes use this response as a tiny control plane and reset their live
+	// timer without a service restart. Old probes already ignore the body beyond
+	// draining it, so adding the field is wire-compatible during rolling updates.
+	ok(w, J{
+		"ok":                     true,
+		"probe_interval_seconds": int64(intervalcfg.Probe(a.st) / time.Second),
+	})
 }
 
 // handleDownloadAgent serves the pre-compiled probe agent binary.
@@ -181,7 +188,8 @@ fi
 // ---- Admin monitoring endpoints ----
 
 func (a *API) handleMonitorDashboard(w http.ResponseWriter, r *http.Request) {
-	total, online, expiring, err := a.st.CountProbeServers()
+	freshSince := time.Now().Add(-intervalcfg.OnlineWindow(a.st)).Unix()
+	total, online, expiring, err := a.st.CountProbeServersSince(freshSince)
 	if err != nil {
 		fail(w, 500, "查询失败")
 		return
@@ -214,7 +222,7 @@ func (a *API) handleMonitorDashboard(w http.ResponseWriter, r *http.Request) {
 	if local := a.localMonitorServer(latest); local != nil {
 		total++
 		now := time.Now()
-		if local.LastSeen >= now.Add(-2*time.Minute).Unix() {
+		if local.LastSeen >= freshSince {
 			online++
 		}
 		// Same 3-day window CountProbeServers uses.
@@ -242,7 +250,7 @@ func (a *API) handleMonitorDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	onlineWindow := now.Add(-2 * time.Minute).Unix()
+	onlineWindow := now.Add(-intervalcfg.OnlineWindow(a.st)).Unix()
 	latest, _ := a.st.GetLatestMetricsForAll() // one query instead of one per server
 	// Return ALL servers (not just probe-enabled) so the UI can manage probes,
 	// with the panel's own machine at the head — it has no servers row and needs
@@ -787,7 +795,7 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	onlineWindow := now.Add(-2 * time.Minute).Unix()
+	onlineWindow := now.Add(-intervalcfg.OnlineWindow(a.st)).Unix()
 
 	type pubMetrics struct {
 		CPUPercent     float64 `json:"cpu_percent"`

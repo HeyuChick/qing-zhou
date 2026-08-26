@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/store"
 	"qingzhou/internal/sysmetrics"
 )
@@ -18,11 +19,6 @@ import (
 // everywhere else, store.LocalNodeID.
 //
 // No probe binary, no token, no systemd unit, no server row.
-
-// localMetricsInterval matches the probe's default reporting interval, so the
-// local machine's series has the same resolution as every other machine's and
-// the shared retention window means the same thing for all of them.
-const localMetricsInterval = 30 * time.Second
 
 // settingLocalPublic gates whether the panel's own machine appears on the
 // unauthenticated status page. Default off — the panel host is the one machine
@@ -44,12 +40,14 @@ func (a *API) StartLocalMetrics(ctx context.Context) {
 		sampler := &sysmetrics.Sampler{}
 		sampler.Sample()
 
-		t := time.NewTicker(localMetricsInterval)
+		t := time.NewTimer(intervalcfg.Probe(a.st))
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-a.monitorIntervalCh:
+				resetAPITimer(t, intervalcfg.Probe(a.st))
 			case <-t.C:
 				m := sampler.Sample()
 				if err := a.st.InsertMetrics(store.LocalNodeID, store.ServerMetrics{
@@ -64,9 +62,20 @@ func (a *API) StartLocalMetrics(ctx context.Context) {
 				}); err != nil {
 					log.Printf("local metrics: %v", err)
 				}
+				t.Reset(intervalcfg.Probe(a.st))
 			}
 		}
 	}()
+}
+
+func resetAPITimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
 }
 
 // localPublicVisible reports whether the panel's own machine is listed on the

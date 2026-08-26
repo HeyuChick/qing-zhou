@@ -61,6 +61,9 @@ type API struct {
 	// the watcher can ever wait on the one behind it.
 	restartCh chan restartEvent
 	opsCh     chan string
+	// monitorIntervalCh resets the panel host's local sampler when an admin
+	// changes the same cadence remote probes receive. Coalesced and non-blocking.
+	monitorIntervalCh chan struct{}
 }
 
 // SetSSHKeyDir points the panel at the directory holding SSH private key files.
@@ -97,7 +100,7 @@ func (a *API) sbRebuildLog() {
 // no controller is attached.
 func (a *API) sbSyncInterval() time.Duration {
 	if a.sbctl == nil {
-		return time.Minute
+		return 10 * time.Minute
 	}
 	return a.sbctl.SyncInterval()
 }
@@ -130,11 +133,12 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		// retry, a double-click, a misbehaving script — leaves the user with a
 		// subscription that never stays valid long enough to import. Generous
 		// enough that nobody swapping addresses on purpose will notice.
-		subRL:     newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
-		tgRL:      newRateLimiter(20, time.Minute),   // 20 bot commands / telegram user / min
-		linkCache: make(map[int64]linkCacheEntry),
-		restartCh: make(chan restartEvent, restartEventQueue),
-		opsCh:     make(chan string, opsMessageQueue),
+		subRL:             newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
+		tgRL:              newRateLimiter(20, time.Minute),   // 20 bot commands / telegram user / min
+		linkCache:         make(map[int64]linkCacheEntry),
+		restartCh:         make(chan restartEvent, restartEventQueue),
+		opsCh:             make(chan string, opsMessageQueue),
+		monitorIntervalCh: make(chan struct{}, 1),
 	}
 	// Self-updater: repo + optional GitHub token come from env or DB settings,
 	// falling back to the project's canonical repo.
@@ -159,6 +163,16 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		},
 	)
 	return a
+}
+
+func (a *API) notifyRuntimeIntervalsChanged() {
+	if a.sbctl != nil {
+		a.sbctl.NotifyIntervalsChanged()
+	}
+	select {
+	case a.monitorIntervalCh <- struct{}{}:
+	default:
+	}
 }
 
 func (a *API) Router() http.Handler {

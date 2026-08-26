@@ -195,7 +195,14 @@ func (s *Store) ListAllMetricsSince(since int64) ([]*ServerMetrics, error) {
 // CountProbeServers returns total, online (last_seen within 2min), and expiring
 // (within 3 days) counts for probe-enabled servers.
 func (s *Store) CountProbeServers() (total, online, expiring int, err error) {
-	onlineWindow := time.Now().Add(-2 * time.Minute).Unix()
+	return s.CountProbeServersSince(time.Now().Add(-2 * time.Minute).Unix())
+}
+
+// CountProbeServersSince is CountProbeServers with a caller-selected freshness
+// cutoff. The API uses the live probe cadence; keeping CountProbeServers as the
+// compatibility wrapper avoids spreading configuration concerns into callers
+// that only need the historical two-minute default.
+func (s *Store) CountProbeServersSince(onlineWindow int64) (total, online, expiring int, err error) {
 	expiringWindow := time.Now().AddDate(0, 0, 3).Unix()
 	now := time.Now().Unix()
 
@@ -210,8 +217,8 @@ func (s *Store) CountProbeServers() (total, online, expiring int, err error) {
 // ListProbeServersWithMetrics returns all probe-enabled servers joined with
 // their latest metrics row (if any). Used by the dashboard and server list.
 type ProbeServerView struct {
-	Server  *Server         `json:"server"`
-	Metrics *ServerMetrics  `json:"metrics"`
+	Server   *Server        `json:"server"`
+	Metrics  *ServerMetrics `json:"metrics"`
 	DaysLeft *int           `json:"days_left"` // nil = no expiry set
 }
 
