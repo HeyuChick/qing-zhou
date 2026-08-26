@@ -134,7 +134,7 @@ jobs:
       # that degrades a 1H1G box over days rather than failing outright.
       - name: Build sing-box with v2ray_api
         env:
-          SB_VERSION: v1.13.18
+          SB_VERSION: v1.13.19
         run: |
           set -e
           git clone --depth 1 --branch "$SB_VERSION" https://github.com/SagerNet/sing-box.git /tmp/sing-box
