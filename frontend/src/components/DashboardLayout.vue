@@ -88,7 +88,7 @@
 </template>
 
 <script setup lang="ts">
-import { h, computed, ref, onMounted, onUnmounted } from 'vue'
+import { h, computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { NDrawer, NDrawerContent, NButton, NDropdown, NIcon, NMenu, NAlert, NAutoComplete } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
@@ -139,9 +139,12 @@ async function resendVerify() {
 const activeKey = computed(() => route.path)
 const searchQuery = ref('')
 
-// 品牌定制：未登录落地控制台时自动弹登录框（?login=1）
+// 品牌定制：?login=1 即弹登录框（首载落地与 401 中途弹回都覆盖；用 watch 而非
+// onMounted，组件复用时 query 变化也能触发）
 const showLogin = ref(false)
-onMounted(() => { if (route.query.login === '1') showLogin.value = true })
+watch(() => route.query.login, (v) => {
+  if (v === '1' && !auth.isLoggedIn) showLogin.value = true
+}, { immediate: true })
 
 // ---- 响应式：移动端判定 ----
 const isMobile = ref(false)

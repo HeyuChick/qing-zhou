@@ -58,7 +58,6 @@
 
 <script setup lang="ts">
 import { ref, reactive, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { NModal, NTabs, NTabPane, NForm, NFormItem, NInput, NButton, useMessage } from 'naive-ui'
 import type { FormRules } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
@@ -69,7 +68,6 @@ import { apiPost } from '@/api'
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ 'update:show': [value: boolean] }>()
 
-const router = useRouter()
 const auth = useAuthStore()
 const config = useConfigStore()
 const message = useMessage()
@@ -107,7 +105,12 @@ async function handleLogin() {
     await auth.login(loginForm.username, loginForm.password)
     message.success('登录成功')
     emit('update:show', false)
-    router.push('/dashboard')
+    // 登录成功后清掉 login=1 并整页刷新：路由守卫已放行的页面（dashboard 等）
+    // 不会因登录而重挂载，不刷新的话各页面仍拿着未登录的空数据。
+    if (window.location.hash.includes('login=1')) {
+      window.location.hash = '#/dashboard'
+    }
+    window.location.reload()
   } catch (e: any) {
     message.error(e.message || '登录失败')
   } finally {
@@ -126,7 +129,11 @@ async function handleRegister() {
     }
     message.success('注册成功')
     emit('update:show', false)
-    router.push('/dashboard')
+    // 同 handleLogin：清 login=1 后整页刷新，页面拿到登录态重新拉数据
+    if (window.location.hash.includes('login=1')) {
+      window.location.hash = '#/dashboard'
+    }
+    window.location.reload()
   } catch (e: any) {
     message.error(e.message || '注册失败')
   } finally {

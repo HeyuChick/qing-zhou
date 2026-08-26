@@ -8,10 +8,15 @@ const router = createRouter({
       path: '/',
       name: 'monitor',
       component: () => import('@/views/Monitor.vue'),
-      // 品牌定制：首页（监控大屏）仅管理员可见，普通用户/未登录一律转控制台
-      beforeEnter: (to) => {
+      // 品牌定制：首页（监控大屏）仅管理员可见，普通用户/未登录一律转控制台；
+      // 未登录时带 login=1 让 DashboardLayout 自动弹出登录框
+      beforeEnter: () => {
         const auth = useAuthStore()
-        if (!auth.isAdmin) return { name: 'dashboard' }
+        if (!auth.isAdmin) {
+          return auth.isLoggedIn
+            ? { name: 'dashboard' }
+            : { name: 'dashboard', query: { login: '1' } }
+        }
       },
     },
     {
@@ -61,8 +66,12 @@ router.beforeEach(async (to) => {
   const requiresAdmin = to.matched.some(r => r.meta.requiresAdmin)
 
   if (requiresAuth && !auth.isLoggedIn) {
-    // 品牌定制：首页不对未登录开放，直接送到控制台——那里有内嵌登录框
-    return { name: 'dashboard', query: { login: '1' } }
+    // 品牌定制：未登录的目的地是控制台时放行（DashboardLayout 会弹登录框），
+    // 其余受保护页仍拦下送控制台。注意不能无条件重定向 dashboard：dashboard 自身
+    // 带 requiresAuth，守卫会把它再弹回 dashboard，形成自指重定向死循环，
+    // 浏览器主线程被微任务队列耗尽而白屏（换域名丢 token 后所有人必现）。
+    if (to.name !== 'dashboard') return { name: 'dashboard', query: { login: '1' } }
+    return true
   }
   if (requiresAdmin && !auth.isAdmin) {
     return { name: 'dashboard' }
