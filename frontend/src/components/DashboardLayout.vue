@@ -75,8 +75,6 @@
         </div>
       </header>
       <main class="layout-content">
-        <!-- 品牌定制：未登录访问控制台时弹出登录框（首页已不对未登录开放） -->
-        <LoginDialog v-model:show="showLogin" />
         <router-view v-slot="{ Component, route: viewRoute }">
           <div :key="viewRoute.path" class="route-page-shell">
             <component :is="Component" :key="viewRoute.path" />
@@ -88,7 +86,7 @@
 </template>
 
 <script setup lang="ts">
-import { h, computed, ref, onMounted, onUnmounted, watch } from 'vue'
+import { h, computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { NDrawer, NDrawerContent, NButton, NDropdown, NIcon, NMenu, NAlert, NAutoComplete } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
@@ -104,7 +102,6 @@ import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
 import { apiPost } from '@/api'
 import { useMessage } from 'naive-ui'
-import LoginDialog from './LoginDialog.vue'
 import BrandMark from './BrandMark.vue'
 
 const router = useRouter()
@@ -138,13 +135,6 @@ async function resendVerify() {
 
 const activeKey = computed(() => route.path)
 const searchQuery = ref('')
-
-// 品牌定制：?login=1 即弹登录框（首载落地与 401 中途弹回都覆盖；用 watch 而非
-// onMounted，组件复用时 query 变化也能触发）
-const showLogin = ref(false)
-watch(() => route.query.login, (v) => {
-  if (v === '1' && !auth.isLoggedIn) showLogin.value = true
-}, { immediate: true })
 
 // ---- 响应式：移动端判定 ----
 const isMobile = ref(false)
@@ -282,7 +272,7 @@ function goAndClose(key: string) {
   drawerShow.value = false
 }
 function handleUserSelect(key: string) {
-  if (key === 'logout') { auth.logout(); router.push('/dashboard') }
+  if (key === 'logout') { auth.logout(); router.push('/login') }
 }
 function handleAdminSelect(key: string) { router.push(key) }
 function handleSearchSelect(path: string) {

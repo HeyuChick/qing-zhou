@@ -28,11 +28,13 @@ async function request<T = any>(path: string, opts: RequestInit = {}, raw = fals
   if (!res.ok) {
     if (res.status === 401) {
       auth.logout()
-      // 品牌定制：控制台（dashboard）才是带登录框的落地面（监控大屏仅管理员），
-      // 会话失效时弹回控制台登录；已在控制台则跳过，避免反复重定向。
+      // 会话失效 → 独立登录页，带上当前路径登录后回来。已在登录页则跳过
+      // （登录接口密码错也回 401，不能引发重复跳转）。
       const h = window.location.hash
-      if (!h.startsWith('#/dashboard')) {
-        window.location.hash = '/dashboard?login=1'
+      if (!h.startsWith('#/login')) {
+        const cur = h.startsWith('#') ? h.slice(1) : '/'
+        const safe = cur.startsWith('/') && !cur.startsWith('//') ? cur.split('?')[0] : '/'
+        window.location.hash = '/login?redirect=' + encodeURIComponent(safe)
       }
     }
     const err = new Error((body && body.msg) || `请求失败 ${res.status}`) as ApiError

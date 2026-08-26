@@ -24,37 +24,26 @@
         </n-dropdown>
       </template>
       <template v-else>
-        <n-button type="primary" size="small" @click="showLogin = true">
+        <n-button type="primary" size="small" @click="router.push('/login')">
           登录
         </n-button>
       </template>
     </div>
-
-    <LoginDialog v-model:show="showLogin" />
   </header>
 </template>
 
 <script setup lang="ts">
-import { ref, h, onUnmounted } from 'vue'
+import { h } from 'vue'
 import { useRouter } from 'vue-router'
 import { NButton, NDropdown, NIcon } from 'naive-ui'
 import { HomeOutline, SettingsOutline, PersonOutline, LogOutOutline } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
-import LoginDialog from './LoginDialog.vue'
 import BrandMark from './BrandMark.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
 const config = useConfigStore()
-const showLogin = ref(false)
-
-// Store the unregister fn and drop the hook on unmount so it doesn't accumulate
-// across remounts (each stale hook could re-open the login dialog).
-const stopAfterEach = router.afterEach((to) => {
-  if (to.query.login === '1') showLogin.value = true
-})
-onUnmounted(stopAfterEach)
 
 const userMenu = [
   { label: '控制台', key: '/dashboard' },

@@ -8,16 +8,19 @@ const router = createRouter({
       path: '/',
       name: 'monitor',
       component: () => import('@/views/Monitor.vue'),
-      // 品牌定制：首页（监控大屏）仅管理员可见，普通用户/未登录一律转控制台；
-      // 未登录时带 login=1 让 DashboardLayout 自动弹出登录框
+      // 品牌定制：首页（监控大屏）仅管理员可见；登录的普通用户去控制台，
+      // 未登录去独立登录页（守卫也会把受保护页送到那里）
       beforeEnter: () => {
         const auth = useAuthStore()
         if (!auth.isAdmin) {
-          return auth.isLoggedIn
-            ? { name: 'dashboard' }
-            : { name: 'dashboard', query: { login: '1' } }
+          return auth.isLoggedIn ? { name: 'dashboard' } : { name: 'login' }
         }
       },
+    },
+    {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/LoginView.vue'),
     },
     {
       path: '/',
@@ -62,16 +65,21 @@ router.beforeEach(async (to) => {
     await auth.init()
   }
 
+  // 已登录还落在登录页 → 直接进控制台（登录页只服务未登录/会话失效的人）
+  if (to.name === 'login' && auth.isLoggedIn) {
+    return { name: 'dashboard' }
+  }
+
   const requiresAuth = to.matched.some(r => r.meta.requiresAuth)
   const requiresAdmin = to.matched.some(r => r.meta.requiresAdmin)
 
   if (requiresAuth && !auth.isLoggedIn) {
-    // 品牌定制：未登录的目的地是控制台时放行（DashboardLayout 会弹登录框），
-    // 其余受保护页仍拦下送控制台。注意不能无条件重定向 dashboard：dashboard 自身
-    // 带 requiresAuth，守卫会把它再弹回 dashboard，形成自指重定向死循环，
-    // 浏览器主线程被微任务队列耗尽而白屏（换域名丢 token 后所有人必现）。
-    if (to.name !== 'dashboard') return { name: 'dashboard', query: { login: '1' } }
-    return true
+    // 品牌定制：未登录一律送独立登录页，并带 redirect 以便登录后回到原目的地。
+    // 登录页是公开路由，守卫不会把它再拦回去，自指循环从结构上不可能出现。
+    return {
+      name: 'login',
+      query: to.fullPath && to.fullPath !== '/' ? { redirect: to.fullPath } : undefined,
+    }
   }
   if (requiresAdmin && !auth.isAdmin) {
     return { name: 'dashboard' }
