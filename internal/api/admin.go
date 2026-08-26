@@ -133,6 +133,14 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
+	if raw, submitted := in[telegramCustomCommandsSetting]; submitted {
+		normalized, err := normalizeTelegramCustomCommands(raw)
+		if err != nil {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		in[telegramCustomCommandsSetting] = normalized
+	}
 	runtimeChanged, err := a.validateRuntimeIntervals(in)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err.Error())

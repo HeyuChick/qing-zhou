@@ -54,6 +54,9 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		// these only decide when a bound user is nudged.
 		"notify_expiry_days":     "3",
 		"notify_traffic_percent": "20",
+		// Administrator-defined Telegram slash commands. Stored as one JSON
+		// array; [] means only the built-in account commands are enabled.
+		"telegram_custom_commands": "[]",
 		// Node restart-loop alert. A node that keeps restarting cuts every
 		// connection on it each time, so this watches for restarts nobody asked
 		// for: 5 within 30 minutes on one node, counting only the periodic sync

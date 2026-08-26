@@ -237,6 +237,90 @@ func TestTelegramCommandsRequireBind(t *testing.T) {
 	}
 }
 
+func TestTelegramCustomCommandRepliesAndAppearsInHelp(t *testing.T) {
+	a, st, inbox := newTelegramAPI(t)
+	uid, err := st.CreateUser(store.NewUser{Username: "alice", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindTelegram(uid, 41, 41, "alice_tg", "Alice"); err != nil {
+		t.Fatal(err)
+	}
+	raw := `[{"command":"contact","description":"联系客服","response":"<b>{{site}}</b> · {{username}}\n{{panel_link}}"}]`
+	if err := st.SetSetting(telegramCustomCommandsSetting, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	a.handleTelegramUpdate(telegram.Update{UpdateID: 1, Message: &telegram.Message{
+		From: &telegram.User{ID: 41}, Chat: telegram.Chat{ID: 41, Type: "private"}, Text: "/contact@qingzhou_bot ignored",
+	}})
+	if len(*inbox) != 1 || !strings.Contains((*inbox)[0].html, "alice") ||
+		!strings.Contains((*inbox)[0].html, `<a href="https://panel.example">`) {
+		t.Fatalf("custom reply = %#v", *inbox)
+	}
+
+	*inbox = nil
+	a.handleTelegramUpdate(telegram.Update{UpdateID: 2, Message: &telegram.Message{
+		From: &telegram.User{ID: 41}, Chat: telegram.Chat{ID: 41, Type: "private"}, Text: "/help",
+	}})
+	if len(*inbox) != 1 || !strings.Contains((*inbox)[0].html, "/contact") ||
+		!strings.Contains((*inbox)[0].html, "联系客服") {
+		t.Fatalf("help with custom commands = %#v", *inbox)
+	}
+}
+
+func TestNormalizeTelegramCustomCommands(t *testing.T) {
+	got, err := normalizeTelegramCustomCommands(`[{"command":"/Contact","description":" 联系客服 ","response":" hi "}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `[{"command":"contact","description":"联系客服","response":"hi"}]` {
+		t.Fatalf("normalized commands = %s", got)
+	}
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"reserved", `[{"command":"sub","description":"x","response":"x"}]`},
+		{"duplicate", `[{"command":"x","description":"x","response":"x"},{"command":"x","description":"x","response":"x"}]`},
+		{"invalid", `[{"command":"bad-name","description":"x","response":"x"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := normalizeTelegramCustomCommands(tc.raw); err == nil {
+				t.Fatal("invalid custom command was accepted")
+			}
+		})
+	}
+}
+
+func TestSettingsRejectInvalidTelegramCustomCommandsBeforeWriting(t *testing.T) {
+	a, st := newUserEditAPI(t)
+	if err := st.SetSetting("site_name", "before"); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.NewReader(`{"site_name":"after","telegram_custom_commands":"[{\"command\":\"sub\",\"description\":\"x\",\"response\":\"x\"}]"}`)
+	w := httptest.NewRecorder()
+	a.handlePutSettings(w, httptest.NewRequest(http.MethodPut, "/api/admin/settings", body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400: %s", w.Code, w.Body.String())
+	}
+	if got, _ := st.GetSetting("site_name"); got != "before" {
+		t.Fatalf("invalid command request partially wrote settings: site_name=%q", got)
+	}
+}
+
+func TestTelegramMenuContainsSortedCustomCommands(t *testing.T) {
+	a, st, _ := newTelegramAPI(t)
+	if err := st.SetSetting(telegramCustomCommandsSetting,
+		`[{"command":"zebra","description":"Z","response":"z"},{"command":"about","description":"A","response":"a"}]`); err != nil {
+		t.Fatal(err)
+	}
+	menu := a.telegramMenuCommands()
+	if n := len(telegramBuiltinMenu); len(menu) != n+2 || menu[n].Command != "about" || menu[n+1].Command != "zebra" {
+		t.Fatalf("menu = %#v", menu)
+	}
+}
+
 func TestTelegramBannedUserIsRefused(t *testing.T) {
 	a, st, inbox := newTelegramAPI(t)
 	uid, err := st.CreateUser(store.NewUser{Username: "banned", PasswordHash: "x", SubToken: "T"})

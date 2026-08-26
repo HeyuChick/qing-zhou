@@ -216,6 +216,32 @@
         </n-form>
 
         <div class="tg-tpl">
+          <div class="tg-tpl-h">自定义指令</div>
+          <p class="form-hint" style="margin:0 0 10px;">
+            添加固定回复指令，保存后会同步到 Telegram 的指令菜单。名称不用输入 <code>/</code>；
+            回复支持 Telegram HTML，以及 <code v-pre>{{site}}</code>、<code v-pre>{{username}}</code>、
+            <code v-pre>{{panel}}</code>、<code v-pre>{{panel_link}}</code> 占位符。未绑定用户的 <code v-pre>{{username}}</code> 为空。
+          </p>
+          <div v-if="telegramCustomCommands.length" class="tg-custom-list">
+            <div v-for="(item, index) in telegramCustomCommands" :key="item.id" class="tg-custom-item">
+              <div class="tg-custom-head">
+                <n-input v-model:value="item.command" maxlength="32" placeholder="指令，如 contact">
+                  <template #prefix>/</template>
+                </n-input>
+                <n-input v-model:value="item.description" maxlength="256" show-count placeholder="菜单说明，如 联系客服" />
+                <n-button quaternary type="error" @click="removeTelegramCustomCommand(index)">删除</n-button>
+              </div>
+              <n-input v-model:value="item.response" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }"
+                       maxlength="4096" show-count placeholder="发送该指令时机器人的回复内容" />
+            </div>
+          </div>
+          <n-button size="small" :disabled="telegramCustomCommands.length >= 20" @click="addTelegramCustomCommand">
+            添加自定义指令
+          </n-button>
+          <span class="form-hint" style="margin-left:8px;">最多 20 条；不能覆盖内置指令。</span>
+        </div>
+
+        <div class="tg-tpl">
           <div class="tg-tpl-h">运维保护 · 节点反复重启熔断</div>
           <p class="form-hint" style="margin:0 0 10px;">
             节点每重启一次，它上面所有人的连接都会断一次。改配置引起的重启是正常的，
@@ -488,6 +514,45 @@ const testingSmtp = ref(false)
 const testingTg = ref(false)
 const notifyExpiryDays = ref(3)
 const notifyTrafficPct = ref(20)
+type TelegramCustomCommand = { id: number; command: string; description: string; response: string }
+const telegramCustomCommands = ref<TelegramCustomCommand[]>([])
+let telegramCustomCommandID = 0
+const telegramReservedCommands = new Set(['start', 'help', 'sub', 'plan', 'plans', 'traffic', 'status', 'unbind'])
+function addTelegramCustomCommand() {
+  if (telegramCustomCommands.value.length >= 20) return
+  telegramCustomCommands.value.push({ id: ++telegramCustomCommandID, command: '', description: '', response: '' })
+}
+function removeTelegramCustomCommand(index: number) { telegramCustomCommands.value.splice(index, 1) }
+function loadTelegramCustomCommands(raw: unknown) {
+  try {
+    const parsed = JSON.parse(typeof raw === 'string' && raw.trim() ? raw : '[]')
+    telegramCustomCommands.value = Array.isArray(parsed) ? parsed.map((item: any) => ({
+      id: ++telegramCustomCommandID,
+      command: String(item?.command || ''),
+      description: String(item?.description || ''),
+      response: String(item?.response || ''),
+    })).slice(0, 20) : []
+  } catch {
+    telegramCustomCommands.value = []
+  }
+}
+function serializeTelegramCustomCommands(): string {
+  const rows = telegramCustomCommands.value.map(item => ({
+    command: item.command.trim().replace(/^\//, '').toLowerCase(),
+    description: item.description.trim(),
+    response: item.response.trim(),
+  })).filter(item => item.command || item.description || item.response)
+  const seen = new Set<string>()
+  for (const [index, item] of rows.entries()) {
+    if (!/^[a-z0-9_]{1,32}$/.test(item.command)) throw new Error(`第 ${index + 1} 条指令名称只能包含小写字母、数字和下划线`)
+    if (telegramReservedCommands.has(item.command)) throw new Error(`/${item.command} 是内置指令，不能覆盖`)
+    if (seen.has(item.command)) throw new Error(`自定义指令 /${item.command} 重复`)
+    if (!item.description) throw new Error(`请填写 /${item.command} 的菜单说明`)
+    if (!item.response) throw new Error(`请填写 /${item.command} 的回复内容`)
+    seen.add(item.command)
+  }
+  return JSON.stringify(rows)
+}
 // 运维告警（节点反复重启）。接收人不限角色，故意用「已绑定 Telegram 的账号」
 // 而不是「管理员」来列候选：跑机器的人未必有面板管理员账号。
 const restartAlertOn = ref(true)
@@ -651,6 +716,13 @@ async function handleSave() {
     message.error('完整健康检查间隔不能小于流量统计间隔')
     return
   }
+  let customCommandsJSON = '[]'
+  try {
+    customCommandsJSON = serializeTelegramCustomCommands()
+  } catch (e: any) {
+    message.error(e.message || '自定义 Telegram 指令有误')
+    return
+  }
   saving.value = true
   try {
     const body: Record<string, any> = {
@@ -678,6 +750,7 @@ async function handleSave() {
       alert_restart_enabled: restartAlertOn.value ? 'true' : 'false',
       alert_restart_window_min: String(restartWindowMin.value),
       alert_restart_count: String(restartCount.value),
+      telegram_custom_commands: customCommandsJSON,
     }
     await apiPut('/api/admin/settings', body)
     message.success('保存成功')
@@ -833,6 +906,7 @@ async function loadSettings() {
       restartAlertOn.value = data.alert_restart_enabled !== 'false'
       restartWindowMin.value = parseInt(data.alert_restart_window_min) || 30
       restartCount.value = parseInt(data.alert_restart_count) || 5
+      loadTelegramCustomCommands(data.telegram_custom_commands)
       form.alert_ops_extra_chats ??= ''
       form.telegram_bot_token ??= ''
       form.telegram_bot_username ??= ''
@@ -894,6 +968,9 @@ onMounted(loadSettings)
 .cf-guide code { background: var(--border); padding: 0 4px; border-radius: 4px; }
 .tg-tpl { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
 .tg-tpl-h { font-size: 13px; font-weight: 650; margin-bottom: 6px; }
+.tg-custom-list { display:flex; flex-direction:column; gap:10px; margin-bottom:10px; }
+.tg-custom-item { padding:10px; border:1px solid var(--border); border-radius:10px; background:var(--bg-soft); }
+.tg-custom-head { display:grid; grid-template-columns:minmax(150px,.7fr) minmax(220px,1.3fr) auto; gap:8px; margin-bottom:8px; }
 .tg-preview {
   margin-top: 10px; background: #1b2838; color: #e8eef6; border-radius: 10px;
   padding: 10px 12px; max-width: 420px;
@@ -925,6 +1002,9 @@ onMounted(loadSettings)
   .settings-nav { position:relative; top:auto; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); }
   .settings-nav small { display:none; }
   .settings-nav button:hover { transform:none; }
+}
+@media (max-width: 640px) {
+  .tg-custom-head { grid-template-columns:1fr; }
 }
 @media (max-width: 560px) {
   .settings-hero { align-items:flex-start; }

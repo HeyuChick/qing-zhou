@@ -339,7 +339,11 @@ func planItemVars(p planView) map[string]string {
 }
 
 func (a *API) renderTGHelp(username string) string {
-	return applyTpl(a.tgTpl("help"), a.tgBaseVars(username))
+	base := applyTpl(a.tgTpl("help"), a.tgBaseVars(username))
+	if custom := a.telegramCustomHelp(); custom != "" {
+		return strings.TrimSpace(base) + "\n\n" + custom
+	}
+	return base
 }
 
 func (a *API) renderTGBound(username string) string {

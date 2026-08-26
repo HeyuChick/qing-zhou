@@ -23,6 +23,7 @@ func TestEscape(t *testing.T) {
 
 func TestGetMeAndSend(t *testing.T) {
 	var gotSend map[string]any
+	var gotCommands map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/getMe"):
@@ -30,6 +31,9 @@ func TestGetMeAndSend(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
 			_ = json.NewDecoder(r.Body).Decode(&gotSend)
 			_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
+		case strings.HasSuffix(r.URL.Path, "/setMyCommands"):
+			_ = json.NewDecoder(r.Body).Decode(&gotCommands)
+			_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -52,6 +56,13 @@ func TestGetMeAndSend(t *testing.T) {
 	}
 	if gotSend["disable_web_page_preview"] != true {
 		t.Fatal("subscription URLs would be preview-fetched")
+	}
+	if err := SetCommands(context.Background(), c, []BotCommand{{Command: "help", Description: "Help"}}); err != nil {
+		t.Fatal(err)
+	}
+	commands, ok := gotCommands["commands"].([]any)
+	if !ok || len(commands) != 1 || commands[0].(map[string]any)["command"] != "help" {
+		t.Fatalf("setMyCommands payload = %#v", gotCommands)
 	}
 }
 

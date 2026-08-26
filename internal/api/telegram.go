@@ -280,6 +280,7 @@ func (a *API) StartTelegram(ctx context.Context) {
 func (a *API) telegramPollLoop(ctx context.Context) {
 	var offset int64
 	var lastToken string
+	var lastMenuSignature string
 	for {
 		if ctx.Err() != nil {
 			return
@@ -287,6 +288,7 @@ func (a *API) telegramPollLoop(ctx context.Context) {
 		tok := a.telegramToken()
 		if tok == "" {
 			lastToken = ""
+			lastMenuSignature = ""
 			select {
 			case <-ctx.Done():
 				return
@@ -311,6 +313,18 @@ func (a *API) telegramPollLoop(ctx context.Context) {
 			cancel()
 			offset = 0
 			lastToken = tok
+			lastMenuSignature = ""
+		}
+		menuSignature := a.telegramMenuSignature()
+		if menuSignature != lastMenuSignature {
+			mctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			err := a.syncTelegramMenu(mctx, c)
+			cancel()
+			if err != nil {
+				log.Printf("telegram: setMyCommands: %v", err)
+			} else {
+				lastMenuSignature = menuSignature
+			}
 		}
 		uctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 		updates, err := telegram.GetUpdates(uctx, c, offset, telegramPollTimeout)
@@ -376,6 +390,10 @@ func (a *API) handleTelegramUpdate(u telegram.Update) {
 		a.tgCmdUnbind(msg)
 	default:
 		if strings.HasPrefix(cmd, "/") {
+			if item, ok := a.telegramCustomCommand(cmd); ok {
+				a.tgCmdCustom(msg, item)
+				return
+			}
 			a.tgSend(msg.Chat.ID, "未知命令。发送 /help 查看可用命令。")
 		}
 	}
