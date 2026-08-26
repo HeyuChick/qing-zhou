@@ -29,6 +29,7 @@
           <div class="lc-meta" style="color:var(--text-2);">
             <span v-if="p.traffic_bytes" class="kv">{{ fmtTotal(p.traffic_bytes) }}</span>
             <span v-if="p.duration_days" class="kv">{{ p.duration_days }}天</span>
+            <span v-if="p.type === 'plan' && p.queue_key" class="kv">续期组 <b>{{ p.queue_key }}</b></span>
           </div>
           <!-- 多时长套餐：把每档时长的价格摊开，免得只看到默认那档 -->
           <div v-if="p.options?.length > 1" class="lc-opts">
@@ -61,6 +62,14 @@
         <n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item>
         <n-form-item label="类型">
           <n-select v-model:value="form.type" :options="[{label:'流量包',value:'traffic'},{label:'订阅计划',value:'plan'}]" />
+        </n-form-item>
+        <n-form-item v-if="form.type==='plan'" label="续期组">
+          <div style="width:100%;">
+            <n-input v-model:value="form.queue_key" placeholder="留空 = 仅与当前套餐续期排队" />
+            <div style="margin-top:4px;font-size:12px;color:var(--text-3);line-height:1.5;">
+              两个套餐填写相同续期组时互相排队；不同组立即生效。仅限字母、数字、点、下划线和短横线。
+            </div>
+          </div>
         </n-form-item>
         <n-form-item label="描述"><n-input v-model:value="form.description" type="textarea" :autosize="{ minRows: 1, maxRows: 3 }" placeholder="套餐一句话说明" /></n-form-item>
         <n-form-item label="亮点">
@@ -150,7 +159,7 @@ const reordering = ref(false)
 const showForm = ref(false)
 const editing = ref<any>(null)
 type OptRow = { days: number | null; traffic_gb: number | null; price: number | null }
-const form = reactive({ name: '', type: 'traffic', description: '', highlights: [] as string[], traffic_gb: 0, days: 30, price: 100, stock: -1, options: [] as OptRow[], group_ids: [] as number[], user_group_ids: [] as number[] })
+const form = reactive({ name: '', type: 'traffic', queue_key: '', description: '', highlights: [] as string[], traffic_gb: 0, days: 30, price: 100, stock: -1, options: [] as OptRow[], group_ids: [] as number[], user_group_ids: [] as number[] })
 
 const GB = 1024 * 1024 * 1024
 
@@ -197,7 +206,7 @@ function openForm(pkg?: any) {
   editing.value = pkg || null
   if (pkg) {
     Object.assign(form, {
-      name: pkg.name, type: pkg.type, description: pkg.description || '',
+      name: pkg.name, type: pkg.type, queue_key: pkg.queue_key || '', description: pkg.description || '',
       highlights: Array.isArray(pkg.highlights) ? [...pkg.highlights] : [],
       traffic_gb: (pkg.traffic_bytes || 0) / GB, days: pkg.duration_days || 0,
       price: pkg.price_points || 0, stock: pkg.stock ?? -1,
@@ -205,7 +214,7 @@ function openForm(pkg?: any) {
       group_ids: pkg.group_ids || [], user_group_ids: pkg.user_group_ids || [],
     })
   } else {
-    Object.assign(form, { name: '', type: 'traffic', description: '', highlights: [], traffic_gb: 0, days: 30, price: 100, stock: -1, options: optRowsOf(), group_ids: [], user_group_ids: [] })
+    Object.assign(form, { name: '', type: 'traffic', queue_key: '', description: '', highlights: [], traffic_gb: 0, days: 30, price: 100, stock: -1, options: optRowsOf(), group_ids: [], user_group_ids: [] })
   }
   showForm.value = true
 }
@@ -222,6 +231,7 @@ async function handleSave() {
     const first = opts[0]
     const body = {
       ...rest,
+      queue_key: isPlan ? form.queue_key : '',
       options: opts.length > 1 ? opts : [],
       traffic_bytes: isPlan ? (first?.traffic_bytes || 0) : Math.round(traffic_gb * GB),
       duration_days: isPlan ? (first?.days || 0) : days,

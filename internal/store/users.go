@@ -201,8 +201,8 @@ func (s *Store) RecordSubscriptionFetch(userID, fetchedAt int64, format, client 
 // instant it commits.
 //
 // What this does NOT do is revoke access. Whoever fetched the old address still
-// holds the node links it served, and those authenticate with the bucket's
-// uuid/password — see RotateNodeCredentials for the half that cuts them off.
+// holds the node links it served, and those authenticate with the user's
+// UUID/password — see RotateNodeCredentials for the half that cuts them off.
 // Callers must not describe this as making the old links stop working.
 func (s *Store) RotateSubToken(userID int64, subToken string) error {
 	_, err := s.db.Exec(`UPDATE users SET sub_token=?, updated_at=? WHERE id=?`,
@@ -210,13 +210,11 @@ func (s *Store) RotateSubToken(userID int64, subToken string) error {
 	return err
 }
 
-// RotateNodeCredentials mints fresh sing-box credentials for every bucket the
-// user holds, which is what actually revokes the node links a leaked
-// subscription already handed out: those carry the bucket's uuid/password, not
-// the subscription token, so swapping the address alone leaves them working.
+// RotateNodeCredentials replaces the user's stable sing-box credential, which
+// is what actually revokes links a leaked subscription already handed out.
 //
 // Two things are deliberately preserved:
-//   - client_name — the sing-box stats identity usage is metered against
+//   - every client_name — the sing-box stats identity usage is metered against
 //     (BucketByClientName). Rotating it would orphan the user's traffic history.
 //   - the mixed (HTTP/SOCKS5) proxy password, which merely *falls back* to
 //     client_secret when the user hasn't set a custom one. That credential is
@@ -242,9 +240,19 @@ func (s *Store) RotateNodeCredentials(userID, lastResetBefore int64) error {
 	defer func() { _ = tx.Rollback() }()
 
 	now := time.Now().Unix()
+	// Capture the currently effective protocol secret before rotating it. Bucket
+	// mixed-proxy accounts may fall back to this value and are intentionally not
+	// revoked by a subscription credential reset.
+	var oldSecret sql.NullString
+	if err := tx.QueryRow(`SELECT client_secret FROM users WHERE id=?`, userID).Scan(&oldSecret); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return err
+	}
 	// Claim the rotation first: the users row carries creds_reset_at, so its
-	// conditional UPDATE is both the cooldown gate and the stamp. Doing it before
-	// the per-bucket work means a refused caller changes nothing at all.
+	// conditional UPDATE is both the cooldown gate and the stamp. A refused caller
+	// therefore changes nothing at all.
 	//
 	// The users row is also the seed for the pool bucket of accounts provisioned
 	// later (EnsurePoolBucket) and is the legacy identity, so leaving the leaked
@@ -274,69 +282,19 @@ func (s *Store) RotateNodeCredentials(userID, lastResetBefore int64) error {
 	// Pin the effective proxy credential before client_secret moves out from
 	// under the fallback (see ProxySecret). Both places a credential can live have
 	// to be pinned, or the line's proxy login silently changes with the rotation.
-	if _, err := tx.Exec(`UPDATE user_plans SET proxy_password=client_secret, updated_at=?
-		WHERE user_id=? AND proxy_password=''`, now, userID); err != nil {
+	if _, err := tx.Exec(`UPDATE user_plans SET proxy_password=?, updated_at=?
+		WHERE user_id=? AND proxy_password=''`, oldSecret.String, now, userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE plan_identities SET proxy_password=client_secret, updated_at=?
-		WHERE user_id=? AND proxy_password=''`, now, userID); err != nil {
+	if _, err := tx.Exec(`UPDATE plan_identities SET proxy_password=?, updated_at=?
+		WHERE user_id=? AND proxy_password=''`, oldSecret.String, now, userID); err != nil {
 		return err
 	}
-
-	rows, err := tx.Query(`SELECT id FROM user_plans WHERE user_id=?`, userID)
-	if err != nil {
+	// A reset is an explicit revocation, so migration aliases must not keep any
+	// old subscription link alive. Bucket/line client_* columns are historical
+	// storage only; runtime authentication reads the user's primary pair.
+	if _, err := tx.Exec(`DELETE FROM user_credential_aliases WHERE user_id=?`, userID); err != nil {
 		return err
-	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	// Per-bucket credentials, minted independently: buckets are separately
-	// metered identities and must not collapse onto a shared one.
-	for _, id := range ids {
-		bu, bs := genBucketCreds()
-		if _, err := tx.Exec(`UPDATE user_plans SET client_uuid=?, client_secret=?, updated_at=? WHERE id=?`,
-			bu, bs, now, id); err != nil {
-			return err
-		}
-	}
-
-	// And the subscription lines, which are what a plan份 actually authenticates
-	// with. Rotating only the buckets would make this whole action a no-op for
-	// every paid plan — it would restart sing-box on every node, report success,
-	// and leave the leaked links working, which is the exact opposite of the point.
-	lineRows, err := tx.Query(`SELECT package_id FROM plan_identities WHERE user_id=?`, userID)
-	if err != nil {
-		return err
-	}
-	var pkgIDs []int64
-	for lineRows.Next() {
-		var pid int64
-		if err := lineRows.Scan(&pid); err != nil {
-			lineRows.Close()
-			return err
-		}
-		pkgIDs = append(pkgIDs, pid)
-	}
-	lineRows.Close()
-	if err := lineRows.Err(); err != nil {
-		return err
-	}
-	for _, pid := range pkgIDs {
-		lu, ls := genBucketCreds()
-		if _, err := tx.Exec(`UPDATE plan_identities SET client_uuid=?, client_secret=?, updated_at=?
-			WHERE user_id=? AND package_id=?`, lu, ls, now, userID, pid); err != nil {
-			return err
-		}
 	}
 	return tx.Commit()
 }
@@ -446,6 +404,7 @@ func (s *Store) DeleteUser(id int64) error {
 		`DELETE FROM user_group_members WHERE user_id=?`,
 		`DELETE FROM user_plans WHERE user_id=?`,
 		`DELETE FROM plan_identities WHERE user_id=?`,
+		`DELETE FROM user_credential_aliases WHERE user_id=?`,
 		`DELETE FROM traffic_samples WHERE user_id=?`,
 		// The daily rollup is keyed by user_id too, and unlike the samples it is
 		// never pruned by age — leaving it behind would keep a deleted account's
@@ -547,10 +506,13 @@ func applyManualGrant(tx txLike, userID int64, g *ManualGrant, now int64) error 
 			if err := tx.QueryRow(`SELECT username FROM users WHERE id=?`, userID).Scan(&uname); err != nil {
 				return err
 			}
-			uu, ss := genBucketCreds()
+			_, _, err := ensureUserProtocolCredential(tx, userID, uname, now)
+			if err != nil {
+				return err
+			}
 			if _, err := insertBucket(tx, &Bucket{
 				UserID: userID, Kind: "plan", PackageID: 0, Name: "管理员额度",
-				ClientName: fmt.Sprintf("qz_%s_admin", uname), ClientUUID: uu, ClientSecret: ss,
+				ClientName:   fmt.Sprintf("qz_%s_admin", uname),
 				TrafficLimit: g.Traffic, ExpiryAt: g.Expiry, CreatedAt: now,
 			}); err != nil {
 				return err

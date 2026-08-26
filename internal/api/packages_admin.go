@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -12,16 +14,24 @@ import (
 )
 
 var validPkgTypes = map[string]bool{"traffic": true, "plan": true}
+var queueKeyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // validatePackage rejects nonsensical/negative package fields. A negative price
 // would credit points on "purchase"; a negative traffic would reduce quota while
 // charging; a plan with no duration never expires by accident.
 func validatePackage(p *store.Package) string {
+	p.QueueKey = strings.TrimSpace(p.QueueKey)
 	if !validPkgTypes[p.Type] {
 		return "商品类型必须为 traffic / plan"
 	}
 	if p.Name == "" {
 		return "商品名称不能为空"
+	}
+	if p.Type != "plan" && p.QueueKey != "" {
+		return "只有订阅计划支持续期组"
+	}
+	if p.QueueKey != "" && !queueKeyRe.MatchString(p.QueueKey) {
+		return "续期组须为 1-64 位字母、数字、点、下划线或短横线，并以字母或数字开头"
 	}
 	if p.PricePoints < 0 {
 		return "价格不能为负"

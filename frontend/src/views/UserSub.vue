@@ -94,7 +94,7 @@
             </div>
           </div>
 
-          <!-- 同一个套餐买过好几份（续费、买不同时长）：它们其实是一条订阅线，
+          <!-- 同一个续期组买过好几份（续费、买不同时长或新旧商品）：它们是一条订阅线，
                一份结束下一份接上。摊成同名的几张卡片就分不清哪份在用、上一段又
                用掉了多少，所以按时间先后串成一条时间线，每段各自记自己的流量。 -->
           <div v-else class="plan-row line">
@@ -112,6 +112,7 @@
               <div v-for="p in line.segs" :key="p.id" class="pl-seg" :class="segCls(p)">
                 <span class="pl-dot"></span>
                 <div class="pl-when">
+                  <span v-if="p.name !== line.name" class="pl-seg-name">{{ p.name }}</span>
                   <span class="pl-range">{{ segRange(p) }}</span>
                   <span v-if="p.duration_days" class="pl-len">{{ p.duration_days }} 天</span>
                   <n-tag :type="planStatus(p).type" size="tiny" bordered>{{ planStatus(p).label }}</n-tag>
@@ -360,10 +361,10 @@ const sortedPlans = computed<any[]>(() => {
 })
 const hasQueued = computed(() => plans.value.some(p => p.status === 'queued'))
 
-// ---- 订阅线：同一个套餐的若干份合成一条时间线 ----
+// ---- 订阅线：同一个续期组的若干份合成一条时间线 ----
 //
 // 后端按份独立计量，续费或买了不同时长就会有好几份同名的份并存。它们在时间上
-// 是首尾相接的一条线（一份用完/到期，下一份自动接上），所以按套餐归组、组内按
+// 是首尾相接的一条线（一份用完/到期，下一份自动接上），所以按续期组归组、组内按
 // 时间先后排，比平铺几张同名卡片好读得多，也才能让每一段各自显示自己的用量。
 // 不属于套餐的份（流量池、管理员赠送）没有这种接续关系，各自成一条单段线。
 type PlanLine = {
@@ -395,7 +396,7 @@ const planLines = computed<PlanLine[]>(() => {
   const byKey = new Map<string, any[]>()
   // 用 sortedPlans 的顺序建组，于是组的先后仍是「使用中的套餐在前」。
   for (const p of sortedPlans.value) {
-    const key = p.kind === 'plan' && p.package_id > 0 ? 'pkg:' + p.package_id : 'one:' + p.id
+    const key = p.kind === 'plan' && p.package_id > 0 ? (p.queue_key || 'pkg:' + p.package_id) : 'one:' + p.id
     const arr = byKey.get(key)
     if (arr) arr.push(p)
     else byKey.set(key, [p])
@@ -807,6 +808,7 @@ onMounted(async () => {
 .pl-seg.q .pl-dot { background: transparent; border: 1px dashed var(--text-3); }
 .pl-seg.fin { opacity: .62; }
 .pl-when { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 5px; }
+.pl-seg-name { font-size: 12px; font-weight: 600; color: var(--text); }
 .pl-range { font-size: 12px; color: var(--text-2); }
 .pl-len { font-size: 11px; color: var(--text-3); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
 .pl-use { font-size: 11px; color: var(--text-3); margin-top: 4px; }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,9 +22,13 @@ type PlanOption struct {
 }
 
 type Package struct {
-	ID           int64        `json:"id"`
-	Type         string       `json:"type"` // traffic | plan
-	Name         string       `json:"name"`
+	ID   int64  `json:"id"`
+	Type string `json:"type"` // traffic | plan
+	Name string `json:"name"`
+	// QueueKey groups plans that renew one another. Blank means this package is
+	// its own line ("pkg:<id>"). Two different products may deliberately share a
+	// key, e.g. an old-price and a new-price edition of the same service.
+	QueueKey     string       `json:"queue_key"`
 	Description  string       `json:"description"`
 	Highlights   []string     `json:"highlights"` // selling-point bullets shown in the shop
 	PricePoints  int64        `json:"price_points"`
@@ -39,13 +44,13 @@ type Package struct {
 	Subscribers  int64        `json:"subscribers,omitempty"`    // users currently on this plan (not a column)
 }
 
-const pkgCols = `id, type, name, description, highlights, price_points, traffic_bytes,
+const pkgCols = `id, type, name, queue_key, description, highlights, price_points, traffic_bytes,
 	duration_days, duration_options, stock, enabled, sort_order, created_at`
 
 func scanPackage(sc scanner) (*Package, error) {
 	var p Package
 	var highlights, options string
-	err := sc.Scan(&p.ID, &p.Type, &p.Name, &p.Description, &highlights, &p.PricePoints, &p.TrafficBytes,
+	err := sc.Scan(&p.ID, &p.Type, &p.Name, &p.QueueKey, &p.Description, &highlights, &p.PricePoints, &p.TrafficBytes,
 		&p.DurationDays, &options, &p.Stock, &p.Enabled, &p.SortOrder, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -283,9 +288,9 @@ func (s *Store) ListPackagesForUser(userID int64) ([]*Package, error) {
 func (s *Store) CreatePackage(p Package) (int64, error) {
 	p.applyDefaultOption()
 	res, err := s.db.Exec(`INSERT INTO packages
-		(type, name, description, highlights, price_points, traffic_bytes, duration_days, duration_options, stock, enabled, sort_order, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes,
+		(type, name, queue_key, description, highlights, price_points, traffic_bytes, duration_days, duration_options, stock, enabled, sort_order, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.Type, p.Name, strings.TrimSpace(p.QueueKey), p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes,
 		p.DurationDays, encodeOptions(p.Options), p.Stock, boolToInt(p.Enabled), p.SortOrder, time.Now().Unix())
 	if err != nil {
 		return 0, err
@@ -295,12 +300,41 @@ func (s *Store) CreatePackage(p Package) (int64, error) {
 
 func (s *Store) UpdatePackage(p Package) error {
 	p.applyDefaultOption()
-	_, err := s.db.Exec(`UPDATE packages SET
-		type=?, name=?, description=?, highlights=?, price_points=?, traffic_bytes=?,
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	key := strings.TrimSpace(p.QueueKey)
+	if _, err := tx.Exec(`UPDATE packages SET
+		type=?, name=?, queue_key=?, description=?, highlights=?, price_points=?, traffic_bytes=?,
 		duration_days=?, duration_options=?, stock=?, enabled=?, sort_order=? WHERE id=?`,
-		p.Type, p.Name, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes,
-		p.DurationDays, encodeOptions(p.Options), p.Stock, boolToInt(p.Enabled), p.SortOrder, p.ID)
-	return err
+		p.Type, p.Name, key, p.Description, encodeHighlights(p.Highlights), p.PricePoints, p.TrafficBytes,
+		p.DurationDays, encodeOptions(p.Options), p.Stock, boolToInt(p.Enabled), p.SortOrder, p.ID); err != nil {
+		return err
+	}
+	// queue_key is snapshotted on every entitlement so package edits/deletions do
+	// not make an existing queue ambiguous. When an admin deliberately changes the
+	// key, move all still-held shares with the product into the new line as one
+	// atomic operation. Existing parallel active shares remain active; future
+	// grants wait until all of them finish, preserving already-started time.
+	if _, err := tx.Exec(`UPDATE user_plans SET queue_key=?, updated_at=?
+		WHERE kind='plan' AND package_id=?`, effectiveQueueKey(p.ID, key), time.Now().Unix(), p.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// effectiveQueueKey gives a plan with no explicit renewal group a stable,
+// collision-free line of its own. Keeping this derived default out of the
+// package row makes the admin field genuinely optional while user_plans still
+// carries a complete snapshot.
+func effectiveQueueKey(packageID int64, key string) string {
+	key = strings.TrimSpace(key)
+	if key != "" {
+		return key
+	}
+	return "pkg:" + strconv.FormatInt(packageID, 10)
 }
 
 // ReorderPackages sets sort_order to each id's position in the given slice, so

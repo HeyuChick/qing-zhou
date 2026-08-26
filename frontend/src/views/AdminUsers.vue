@@ -200,7 +200,7 @@
           </div>
           <div v-if="assignIsPlan" class="pm-assign-tip">可填 1–3650 天。命中套餐档位用该档流量，自定义天数按默认档流量开通。</div>
           <div v-if="assignWillQueue" class="pm-assign-hint">
-            该用户已有此套餐在生效，新的一份会排队，等当前份用完或到期后自动启用。
+            该用户已有同一续期组的套餐在生效，新的一份会排队，等当前份用完或到期后自动启用，届时才开始计算有效期。
           </div>
           <!-- 管理员账号也能分配：它在 sing-box 侧就是一个普通身份，自己拿来当订阅用很常见 -->
           <div v-if="plansUser?.role === 'admin' && !assignWillQueue" class="pm-assign-hint">
@@ -739,11 +739,13 @@ const assignPkgId = ref<number | null>(null)
 const assignDays = ref<number | null>(null)
 const pkgOptions = ref<any[]>([])
 const pkgList = ref<any[]>([])
-const assignWillQueue = computed(() =>
-  !!assignPkgId.value && userPlans.value.some((p: any) =>
-    p.kind === 'plan' && p.package_id === assignPkgId.value && bucketOf(p) === 'active'))
-// 天数输入只对订阅计划出现。流量包加的是共享池，填天数既不会到期也不会改额度。
 const assignPkg = computed(() => pkgList.value.find((p: any) => p.id === assignPkgId.value) || null)
+function packageQueueKey(pkg: any): string { return pkg?.queue_key || (pkg?.id ? `pkg:${pkg.id}` : '') }
+const assignWillQueue = computed(() =>
+  !!assignPkg.value && assignPkg.value.type === 'plan' && userPlans.value.some((p: any) =>
+    p.kind === 'plan' && bucketOf(p) === 'active' &&
+    (p.queue_key || `pkg:${p.package_id}`) === packageQueueKey(assignPkg.value)))
+// 天数输入只对订阅计划出现。流量包加的是共享池，填天数既不会到期也不会改额度。
 const assignIsPlan = computed(() => assignPkg.value?.type === 'plan')
 function defaultAssignDays(pkg: any): number | null {
   if (!pkg || pkg.type !== 'plan') return null

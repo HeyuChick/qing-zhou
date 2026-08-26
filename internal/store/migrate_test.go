@@ -74,6 +74,36 @@ func TestMigrate_Idempotent(t *testing.T) {
 	}
 }
 
+func TestMigrate_AddsAndBackfillsQueueKeys(t *testing.T) {
+	st := openMigrated(t)
+	uid := mkUser(t, st, "old-queue-schema")
+	pkg := mkPlan(t, st, "旧套餐", 100, 100, 30)
+	buy(t, st, uid, pkg)
+	for _, stmt := range []string{
+		`DROP INDEX IF EXISTS idx_user_plans_queue`,
+		`ALTER TABLE user_plans DROP COLUMN queue_key`,
+		`ALTER TABLE packages DROP COLUMN queue_key`,
+	} {
+		if _, err := st.db.Exec(stmt); err != nil {
+			t.Fatalf("rewind queue schema with %q: %v", stmt, err)
+		}
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("upgrade queue schema: %v", err)
+	}
+	var key string
+	if err := st.db.QueryRow(`SELECT queue_key FROM user_plans WHERE user_id=? AND package_id=?`, uid, pkg.ID).Scan(&key); err != nil {
+		t.Fatal(err)
+	}
+	want := effectiveQueueKey(pkg.ID, "")
+	if key != want {
+		t.Fatalf("backfilled queue_key = %q, want %q", key, want)
+	}
+	if got, err := st.GetPackage(pkg.ID); err != nil || got == nil || got.QueueKey != "" {
+		t.Fatalf("upgraded package = %+v, %v", got, err)
+	}
+}
+
 func TestMigrate_AddsNodeGroupAIFlagWithoutChangingExistingGroups(t *testing.T) {
 	st := openMigrated(t)
 	if _, err := st.db.Exec(`INSERT INTO node_groups (name, description, is_ai, sort_order, created_at)

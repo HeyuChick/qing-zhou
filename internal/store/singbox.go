@@ -1212,6 +1212,10 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 	if err != nil {
 		return nil, err
 	}
+	aliases, err := s.activeCredentialAliases(now)
+	if err != nil {
+		return nil, err
+	}
 
 	planGroupsCache := map[int64][]int64{}
 	planGroups := func(pkgID int64) []int64 {
@@ -1232,16 +1236,19 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 
 	out := map[string][]singbox.User{}
 	emit := func(ib *SbInbound, b *Bucket, routeNodeID int64) {
-		add := func(u singbox.User) {
-			if routeNodeID > 0 {
-				u = deriveRouteUser(u, routeNodeID)
-			}
+		addRaw := func(u singbox.User) {
 			key := inboundUser{ib.Tag, u.Name}
 			if seen[key] {
 				return
 			}
 			seen[key] = true
 			out[ib.Tag] = append(out[ib.Tag], u)
+		}
+		add := func(u singbox.User) {
+			if routeNodeID > 0 {
+				u = deriveRouteUser(u, routeNodeID)
+			}
+			addRaw(u)
 		}
 		if ib.Type == "mixed" {
 			// Keep both account-level and per-plan proxy credentials. Logical routes
@@ -1257,7 +1264,43 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 			}
 			return
 		}
-		add(singbox.User{Name: b.ClientName, UUID: b.ClientUUID, Password: b.ClientSecret})
+		primary := singbox.User{Name: b.ClientName, UUID: b.ClientUUID, Password: b.ClientSecret}
+		if routeNodeID > 0 {
+			primary = deriveRouteUser(primary, routeNodeID)
+		}
+		addRaw(primary)
+		authKey := func(u singbox.User) string {
+			switch ib.Type {
+			case "vless", "vmess":
+				return "uuid:" + u.UUID
+			case "trojan", "shadowsocks", "anytls", "hysteria", "hysteria2":
+				return "password:" + u.Password
+			default: // TUIC and future two-part credentials
+				return u.UUID + "\x00" + u.Password
+			}
+		}
+		wireSeen := map[string]bool{authKey(primary): true}
+		// Online-upgrade compatibility: accept credentials already imported by an
+		// old client while every new subscription renders only the primary above.
+		// Alias names encode the current owner, so traffic remains attributed to the
+		// right套餐 even when the old credential originally came from another one.
+		for _, a := range aliases[b.UserID] {
+			statsBase := credentialAliasStatsName(b.ClientName, a.ID)
+			var legacy singbox.User
+			if routeNodeID > 0 {
+				legacy = deriveLegacyRouteUser(statsBase, a.SourceName, a.ClientUUID, a.ClientSecret, routeNodeID)
+			} else {
+				legacy = singbox.User{Name: statsBase, UUID: a.ClientUUID, Password: a.ClientSecret}
+			}
+			// The raw primary may also be recorded as an alias because old logical
+			// routes hashed its source name. A normal inbound needs no duplicate.
+			key := authKey(legacy)
+			if wireSeen[key] {
+				continue
+			}
+			wireSeen[key] = true
+			addRaw(legacy)
+		}
 	}
 
 	// Legacy/default nodes inherit the physical inbound's own upstream chain and

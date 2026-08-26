@@ -37,17 +37,38 @@ func baseRouteIdentity(name string) (string, bool) {
 	return name[:i], true
 }
 
-// deriveRouteUser gives one logical node a stable credential on a shared
-// physical inbound. The name is what auth_user routes on; UUID/password are
-// independently derived so two subscription links cannot authenticate as each
-// other even though they dial the same host and port.
-func deriveRouteUser(base singbox.User, nodeID int64) singbox.User {
-	seed := fmt.Sprintf("qz-route:%d:%s:%s:%s", nodeID, base.Name, base.UUID, base.Password)
+// routeWireCredential derives what goes over the wire independently from the
+// stats name. That separation is load-bearing: a node may move from套餐 A to B,
+// changing who is billed and therefore its internal auth_user name, while the
+// user's imported UUID/password must remain byte-for-byte stable.
+func routeWireCredential(seed string) (string, string) {
 	h := sha256.Sum256([]byte(seed))
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(seed)).String(), hex.EncodeToString(h[:16])
+}
+
+// deriveRouteUser gives one logical node a stable credential on a shared
+// physical inbound. The current derivation intentionally excludes base.Name;
+// only the user's stable secret material and node id participate.
+func deriveRouteUser(base singbox.User, nodeID int64) singbox.User {
+	seed := fmt.Sprintf("qz-route-v2:%d:%s:%s", nodeID, base.UUID, base.Password)
+	uu, password := routeWireCredential(seed)
 	return singbox.User{
 		Name:     routeIdentityName(base.Name, nodeID),
-		UUID:     uuid.NewSHA1(uuid.NameSpaceOID, []byte(seed)).String(),
-		Password: hex.EncodeToString(h[:16]),
+		UUID:     uu,
+		Password: password,
+	}
+}
+
+// deriveLegacyRouteUser reproduces the pre-v2 derivation for one temporary
+// credential alias, but gives it a current, reversible stats name so its traffic
+// lands on the bucket that owns the node today.
+func deriveLegacyRouteUser(statsBase, sourceName, clientUUID, clientSecret string, nodeID int64) singbox.User {
+	seed := fmt.Sprintf("qz-route:%d:%s:%s:%s", nodeID, sourceName, clientUUID, clientSecret)
+	uu, password := routeWireCredential(seed)
+	return singbox.User{
+		Name:     routeIdentityName(statsBase, nodeID),
+		UUID:     uu,
+		Password: password,
 	}
 }
 
