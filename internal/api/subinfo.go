@@ -36,7 +36,10 @@ func wantsSubInfoPage(r *http.Request, explicitFormat string) bool {
 	if !strings.Contains(r.Header.Get("Accept"), "text/html") {
 		return false
 	}
-	ua := r.Header.Get("User-Agent")
+	return isBrowserUA(r.Header.Get("User-Agent"))
+}
+
+func isBrowserUA(ua string) bool {
 	if !strings.HasPrefix(ua, "Mozilla/") {
 		return false
 	}
@@ -46,6 +49,37 @@ func wantsSubInfoPage(r *http.Request, explicitFormat string) bool {
 		}
 	}
 	return false
+}
+
+// subscriptionClientForUA collapses User-Agent into a small operational label.
+// Never persist the raw value: it is unbounded, often identifying, and adds no
+// value to the support question this field answers.
+func subscriptionClientForUA(ua string) string {
+	s := strings.ToLower(strings.TrimSpace(ua))
+	switch {
+	case isBrowserUA(ua):
+		return "browser"
+	case strings.Contains(s, "mihomo"):
+		return "mihomo"
+	case strings.Contains(s, "clash"):
+		return "clash"
+	case strings.Contains(s, "stash"):
+		return "stash"
+	case strings.Contains(s, "sing-box"), strings.Contains(s, "singbox"),
+		strings.HasPrefix(s, "sfa/"), strings.HasPrefix(s, "sfi/"),
+		strings.HasPrefix(s, "sfm/"), strings.HasPrefix(s, "sft/"):
+		return "sing-box"
+	case strings.Contains(s, "surge"):
+		return "surge"
+	case strings.Contains(s, "shadowrocket"):
+		return "shadowrocket"
+	case strings.Contains(s, "v2rayn"):
+		return "v2rayn"
+	case strings.HasPrefix(s, "curl/"):
+		return "curl"
+	default:
+		return "unknown"
+	}
 }
 
 // subInfo is what the info page and ?format=info report. It is intentionally the
@@ -234,7 +268,7 @@ function copy(){
 </script>
 </div></body></html>`))
 
-func (a *API) writeSubInfoHTML(w http.ResponseWriter, info subInfo) {
+func (a *API) writeSubInfoHTML(w http.ResponseWriter, info subInfo) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Same reason the subscription body is no-store: the page reflects live
 	// quota, and a token that has since been revoked must not be served from a
@@ -246,8 +280,9 @@ func (a *API) writeSubInfoHTML(w http.ResponseWriter, info subInfo) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if err := subInfoPage.Execute(w, info); err != nil {
 		// Headers are already committed; a partial page is all we can do.
-		return
+		return err
 	}
+	return nil
 }
 
 // subExt is the file extension matching a rendered subscription format.

@@ -298,11 +298,18 @@ func TestQueueIdentity_BackfillMatchesWhoActuallyServes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := insertBucket(st.db, &Bucket{
+	if _, err := st.db.Exec(`UPDATE user_plans SET client_uuid='serving-uuid', client_secret='s1' WHERE id=?`, serving); err != nil {
+		t.Fatal(err)
+	}
+	later, err := insertBucket(st.db, &Bucket{
 		UserID: uid, Kind: "plan", PackageID: pkg.ID, Name: "月付",
 		ClientName: "qz_ulla_later", ClientUUID: "later-uuid", ClientSecret: "s2",
 		TrafficLimit: 100 * giB, ExpiryAt: now + 20*86400, DurationDays: 30,
-	}); err != nil {
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE user_plans SET client_uuid='later-uuid', client_secret='s2' WHERE id=?`, later); err != nil {
 		t.Fatal(err)
 	}
 
@@ -337,12 +344,17 @@ func TestQueueIdentity_BackfillSpentChainKeepsTheLastServed(t *testing.T) {
 	pkg := mkPlan(t, st, "月付", 100, 100, 30)
 	const past = int64(1000000)
 	for i, e := range []int64{past, past + 86400} { // 份2 served last
-		if _, err := insertBucket(st.db, &Bucket{
+		id, err := insertBucket(st.db, &Bucket{
 			UserID: uid, Kind: "plan", PackageID: pkg.ID, Name: "月付",
 			ClientName:   "qz_nate_" + string(rune('a'+i)),
 			ClientUUID:   []string{"first-uuid", "last-served-uuid"}[i],
 			ClientSecret: "s", TrafficLimit: 100 * giB, ExpiryAt: e, DurationDays: 30,
-		}); err != nil {
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.Exec(`UPDATE user_plans SET client_uuid=?, client_secret='s' WHERE id=?`,
+			[]string{"first-uuid", "last-served-uuid"}[i], id); err != nil {
 			t.Fatal(err)
 		}
 	}

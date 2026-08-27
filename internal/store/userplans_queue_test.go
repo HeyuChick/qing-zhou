@@ -184,6 +184,51 @@ func TestQueue_DifferentPackagesParallel(t *testing.T) {
 	}
 }
 
+// Different product rows may represent the same renewable service (for example
+// an old-price and a new-price edition). queue_key, not the row id, defines that
+// line: the second product waits, while an unrelated line starts immediately.
+func TestQueue_SharedQueueKeyQueuesAcrossProducts(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "queue-group")
+	a := mkPlan(t, st, "B 旧价格", 100, 100, 30)
+	b := mkPlan(t, st, "B 新价格", 120, 100, 30)
+	c := mkPlan(t, st, "C", 200, 200, 30)
+	for _, p := range []*Package{a, b} {
+		p.QueueKey = "standard-b"
+		if err := st.UpdatePackage(*p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	buy(t, st, uid, a)
+	buy(t, st, uid, b)
+	buy(t, st, uid, c)
+
+	var aStatus, bStatus, cStatus string
+	for p, dst := range map[*Package]*string{a: &aStatus, b: &bStatus, c: &cStatus} {
+		if err := st.db.QueryRow(`SELECT status FROM user_plans WHERE user_id=? AND package_id=?`, uid, p.ID).Scan(dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if aStatus != "active" || bStatus != "queued" || cStatus != "active" {
+		t.Fatalf("statuses A/B/C = %s/%s/%s, want active/queued/active", aStatus, bStatus, cStatus)
+	}
+
+	if _, err := st.db.Exec(`UPDATE user_plans SET used_down=traffic_limit
+		WHERE user_id=? AND package_id=?`, uid, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := st.AdvanceQueueFor(uid); err != nil || !changed {
+		t.Fatalf("advance shared line = %v, %v", changed, err)
+	}
+	if err := st.db.QueryRow(`SELECT status FROM user_plans WHERE user_id=? AND package_id=?`, uid, b.ID).Scan(&bStatus); err != nil {
+		t.Fatal(err)
+	}
+	if bStatus != "active" {
+		t.Fatalf("B successor status = %s, want active", bStatus)
+	}
+}
+
 // Refunding a queued order removes just that份 (full refund); refunding the active
 // head removes it and promotes the next份.
 func TestQueue_Refund(t *testing.T) {

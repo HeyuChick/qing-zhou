@@ -107,6 +107,13 @@
             <span class="srv-name" @click="goDetail(s)">{{ s.name }}</span>
             <!-- 本机没有资产信息可填、也不需要装探针，标一下省得找那两个按钮 -->
             <n-tag v-if="s.local" size="small" type="info" :bordered="false">面板自采集</n-tag>
+            <n-tooltip v-else-if="s.metrics && s.probe_outdated" trigger="hover">
+              <template #trigger>
+                <n-tag size="small" type="warning" :bordered="false">探针 {{ s.probe_version || '版本未知' }} · 待升级</n-tag>
+              </template>
+              当前 {{ s.probe_version || '无法识别' }}，目标 {{ s.probe_target_version }}
+            </n-tooltip>
+            <n-tag v-else-if="s.metrics && s.probe_version" size="small" type="success" :bordered="false">探针 {{ s.probe_version }}</n-tag>
             <n-tag v-if="s.location" size="small" :bordered="false">{{ s.location }}</n-tag>
           </div>
         </template>
@@ -120,7 +127,16 @@
             </n-tooltip>
             <n-button size="tiny" @click="openAsset(s)">编辑</n-button>
             <!-- 本机是面板自采集，没有探针可装 -->
-            <n-button v-if="!s.local" size="tiny" @click="copyInstall(s)">安装</n-button>
+            <n-button
+              v-if="!s.local"
+              size="tiny"
+              :type="s.probe_outdated ? 'warning' : 'primary'"
+              :loading="s.probe_upgrading"
+              @click="upgradeProbe(s)"
+            >
+              {{ s.probe_upgrading ? '安装中' : (!s.metrics ? '一键安装' : (s.probe_outdated ? '一键升级' : '重装探针')) }}
+            </n-button>
+            <n-button v-if="!s.local" size="tiny" @click="copyInstall(s)">复制命令</n-button>
           </n-space>
         </template>
 
@@ -130,6 +146,14 @@
           <span v-if="s.price" class="tag-mini">¥{{ s.price }}/月</span>
           <span v-if="s.days_left != null" class="tag-mini" :class="{ danger: s.days_left <= 7 }">剩 {{ s.days_left }} 天</span>
         </div>
+
+        <n-alert v-if="s.probe_upgrading" type="info" :bordered="false" class="probe-job">
+          正在通过 SSH 上传并安装探针，离开页面不影响安装。
+        </n-alert>
+        <n-alert v-else-if="s.probe_upgrade_error" type="error" :bordered="false" class="probe-job">
+          安装失败
+          <pre class="probe-out">{{ s.probe_upgrade_error }}</pre>
+        </n-alert>
 
         <template v-if="s.metrics">
           <div class="metric">
@@ -149,6 +173,13 @@
             <span class="tag-mini">↓ {{ fmtBytes(s.metrics.net_rx) }}/s</span>
             <span class="tag-mini">负载 {{ s.metrics.load1.toFixed(2) }}</span>
             <span class="tag-mini">{{ fmtUptime(s.metrics.uptime) }}</span>
+          </div>
+          <div class="traffic-total">
+            <div class="m-row"><span>本月流量（IN + OUT）</span><b>{{ trafficStatus(s) }}</b></div>
+            <div class="traffic-split">
+              <span>IN {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.rx) : '—' }}</span>
+              <span>OUT {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.tx) : '—' }}</span>
+            </div>
           </div>
         </template>
         <div v-else class="no-data">暂无数据</div>
@@ -245,7 +276,10 @@ const q = ref('')
 const fStatus = ref<string | null>(null)
 const fLoc = ref<string | null>(null)
 const fProv = ref<string | null>(null)
-const statusOpts = [{ label: '在线', value: 'online' }, { label: '离线', value: 'offline' }]
+const statusOpts = [
+  { label: '在线', value: 'online' }, { label: '离线', value: 'offline' },
+  { label: '探针待升级', value: 'probe_outdated' },
+]
 const locOpts = computed(() => uniqueOpts(servers.value.map(s => s.location)))
 const provOpts = computed(() => uniqueOpts(servers.value.map(s => s.provider)))
 function uniqueOpts(arr: string[]) {
@@ -255,7 +289,8 @@ const filtered = computed(() => {
   const kw = q.value.trim().toLowerCase()
   return servers.value.filter(s => {
     if (kw && ![s.name, s.location, s.provider].some(v => (v || '').toLowerCase().includes(kw))) return false
-    if (fStatus.value && s.status !== fStatus.value) return false
+    if (fStatus.value === 'probe_outdated' && !s.probe_outdated) return false
+    if (fStatus.value && fStatus.value !== 'probe_outdated' && s.status !== fStatus.value) return false
     if (fLoc.value && s.location !== fLoc.value) return false
     if (fProv.value && s.provider !== fProv.value) return false
     return true
@@ -264,6 +299,11 @@ const filtered = computed(() => {
 
 function memPct(s: any) { return s.metrics ? pct(s.metrics.mem_used, s.metrics.mem_total) : 0 }
 function diskPct(s: any) { return s.metrics ? pct(s.metrics.disk_used, s.metrics.disk_total) : 0 }
+function trafficReady(t: any) { return (t?.sample_count || 0) >= 2 }
+function trafficStatus(s: any) {
+  if (trafficReady(s.month_traffic)) return fmtBytes(s.month_traffic.total)
+  return s.metrics?.net_totals_valid ? '采集中' : '需升级探针'
+}
 function pctColor(v: number) { return v >= 90 ? '#c2685c' : v >= 70 ? '#bf9540' : '#6f8f76' }
 
 // 热力图分类：绿/黄/红
@@ -441,7 +481,50 @@ async function setPublicVisible(s: any, v: boolean) {
 function copyInstall(s: any) {
   if (!s.probe_token) { message.warning('请先启用探针'); return }
   const cmd = `bash <(curl -sL ${location.origin}/api/monitor/install.sh) ${s.probe_token}`
-  navigator.clipboard.writeText(cmd); message.success('安装命令已复制')
+  navigator.clipboard.writeText(cmd); message.success('探针安装 / 升级命令已复制')
+}
+
+const probePolls = new Set<number>()
+async function upgradeProbe(s: any) {
+  try {
+    await apiPost(`/api/admin/monitor/servers/${s.id}/probe/upgrade`)
+    s.probe_upgrading = true
+    s.probe_upgrade_error = ''
+    message.info(`已开始为「${s.name}」安装探针`)
+    void pollProbeUpgrade(s.id, s.name)
+  } catch (e: any) {
+    message.error(e?.message || '启动探针安装失败', { duration: 10000 })
+  }
+}
+
+async function pollProbeUpgrade(serverId: number, serverName: string) {
+  if (probePolls.has(serverId)) return
+  probePolls.add(serverId)
+  try {
+    for (let i = 0; i < 150; i++) {
+      if (!monitorMounted) return
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      if (!monitorMounted) return
+      try {
+        const list = await apiList('/api/admin/monitor/servers')
+        servers.value = list || []
+      } catch {
+        continue
+      }
+      const current = servers.value.find(s => s.id === serverId)
+      if (!current?.probe_upgrading) {
+        if (current?.probe_upgrade_error) {
+          message.error(`「${serverName}」探针安装失败`, { duration: 10000 })
+        } else {
+          message.success(`「${serverName}」探针安装完成`)
+        }
+        return
+      }
+    }
+    message.warning(`「${serverName}」安装仍在进行，请稍后刷新查看`)
+  } finally {
+    probePolls.delete(serverId)
+  }
 }
 
 // --- ECharts（懒加载 + resize）---
@@ -512,6 +595,7 @@ async function loadChart(serverId: number, range: string) {
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 let resizeTimer: ReturnType<typeof setInterval> | null = null
+let monitorMounted = false
 
 async function load() {
   loading.value = true
@@ -527,11 +611,13 @@ async function load() {
     unreadAlerts.value = a || []
     for (const sv of servers.value) {
       if (!chartRange.value[sv.id]) chartRange.value[sv.id] = '24h'
+      if (sv.probe_upgrading) void pollProbeUpgrade(sv.id, sv.name)
     }
   } catch {} finally { loading.value = false }
 }
 
 onMounted(async () => {
+  monitorMounted = true
   checkMobile()
   window.addEventListener('resize', onWinResize)
   await load()
@@ -556,6 +642,7 @@ function onWinResize() {
 }
 
 onUnmounted(() => {
+  monitorMounted = false
   if (refreshTimer) clearInterval(refreshTimer)
   if (resizeTimer) clearInterval(resizeTimer)
   window.removeEventListener('resize', onWinResize)
@@ -617,10 +704,14 @@ onUnmounted(() => {
 .asset-line { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
 .tag-mini { padding: 2px 6px; background: var(--bg-soft); border-radius: 4px; font-size: 11px; color: var(--text-2); }
 .tag-mini.danger { background: var(--danger-soft); color: var(--danger); }
+.probe-job { margin-bottom: 10px; font-size: 12px; }
+.probe-out { margin: 5px 0 0; white-space: pre-wrap; word-break: break-word; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 
 .metric { margin-bottom: 8px; }
 .m-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
 .info-strip { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.traffic-total { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--border); }
+.traffic-split { display: flex; gap: 14px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
 .no-data { text-align: center; color: var(--text-3); padding: 16px; font-size: 13px; }
 .mini-chart-box { margin-top: 12px; }
 .mini-chart { height: 160px; }

@@ -63,6 +63,12 @@ type Update struct {
 	Message  *Message `json:"message"`
 }
 
+// BotCommand is one entry in Telegram's slash-command menu.
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
 type apiResp struct {
 	OK          bool            `json:"ok"`
 	Description string          `json:"description"`
@@ -153,6 +159,15 @@ func GetUpdates(ctx context.Context, c *Client, offset int64, timeoutSec int) ([
 		out = []Update{}
 	}
 	return out, err
+}
+
+// SetCommands replaces the bot's default command menu. Passing an empty slice
+// is valid and clears the menu.
+func SetCommands(ctx context.Context, c *Client, commands []BotCommand) error {
+	if commands == nil {
+		commands = []BotCommand{}
+	}
+	return c.call(ctx, "setMyCommands", map[string]any{"commands": commands}, nil)
 }
 
 // SendHTML delivers a private-chat message. disable_web_page_preview keeps a

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"qingzhou/internal/config"
+	"qingzhou/internal/intervalcfg"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -31,6 +32,13 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		"default_expiry_days":   "30",
 		"points_per_cny":        "10",
 		"signup_bonus_points":   "0",
+		// Runtime collection/synchronisation cadence. These are settings (rather
+		// than deployment-only environment variables) so an administrator can
+		// tune small nodes without logging into the panel host. New releases add
+		// them to existing databases through the same idempotent seed pass.
+		intervalcfg.SettingProbeSeconds:     "60",
+		intervalcfg.SettingStatsMinutes:     "10",
+		intervalcfg.SettingReconcileMinutes: "60",
 		// Monitor alert thresholds (percentages). CheckProbeAlerts reads these.
 		"alert_cpu_threshold":  "90",
 		"alert_mem_threshold":  "90",
@@ -46,6 +54,9 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		// these only decide when a bound user is nudged.
 		"notify_expiry_days":     "3",
 		"notify_traffic_percent": "20",
+		// Administrator-defined Telegram slash commands. Stored as one JSON
+		// array; [] means only the built-in account commands are enabled.
+		"telegram_custom_commands": "[]",
 		// Node restart-loop alert. A node that keeps restarting cuts every
 		// connection on it each time, so this watches for restarts nobody asked
 		// for: 5 within 30 minutes on one node, counting only the periodic sync

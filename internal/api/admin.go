@@ -2,10 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
+	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/store"
 	"qingzhou/internal/subconv"
 )
@@ -87,6 +91,19 @@ func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			envKeys = append(envKeys, k)
 		}
 	}
+	// Runtime intervals need unit conversion rather than the raw duration strings
+	// used by their environment variables ("10m", "1h"). Always surface an
+	// effective value, including on a pre-upgrade DB before Seed has populated
+	// the new keys.
+	all[intervalcfg.SettingProbeSeconds] = strconv.FormatInt(int64(intervalcfg.Probe(a.st)/time.Second), 10)
+	all[intervalcfg.SettingStatsMinutes] = strconv.FormatInt(int64(intervalcfg.Stats(a.st)/time.Minute), 10)
+	all[intervalcfg.SettingReconcileMinutes] = strconv.FormatInt(int64(intervalcfg.Reconcile(a.st)/time.Minute), 10)
+	for _, k := range intervalcfg.RuntimeSettingKeys {
+		if v, locked := intervalcfg.EnvSettingValue(k); locked {
+			all[k] = v
+			envKeys = append(envKeys, k)
+		}
+	}
 	for k := range all {
 		if secretSettings[k] && all[k] != "" {
 			all[k] = "***" // mask but show that it is set
@@ -116,6 +133,19 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
+	if raw, submitted := in[telegramCustomCommandsSetting]; submitted {
+		normalized, err := normalizeTelegramCustomCommands(raw)
+		if err != nil {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		in[telegramCustomCommandsSetting] = normalized
+	}
+	runtimeChanged, err := a.validateRuntimeIntervals(in)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// Bot username is derived from getMe. If a real token submission changes,
 	// ignore the form's stale username regardless of map iteration order and
 	// clear the cache after all writes.
@@ -133,6 +163,9 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if immutableSettings[k] {
 			continue // host-only settings; see immutableSettings
+		}
+		if _, locked := intervalcfg.EnvSettingValue(k); locked {
+			continue // preserve the DB fallback while the host override is active
 		}
 		if secretSettings[k] && (v == "***" || (v == "" && !clearableSecrets[k])) {
 			continue // keep current secret: masked sentinel or left blank
@@ -169,7 +202,83 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if runtimeChanged {
+		a.notifyRuntimeIntervalsChanged()
+	}
 	a.handleGetSettings(w, r)
+}
+
+type runtimeIntervalSpec struct {
+	label string
+	def   int64
+	min   int64
+	max   int64
+	unit  string
+}
+
+var runtimeIntervalSpecs = map[string]runtimeIntervalSpec{
+	intervalcfg.SettingProbeSeconds: {
+		label: "探针采集间隔",
+		def:   intervalcfg.DefaultProbeSeconds, min: intervalcfg.MinProbeSeconds,
+		max: intervalcfg.MaxProbeSeconds, unit: "秒",
+	},
+	intervalcfg.SettingStatsMinutes: {
+		label: "流量统计间隔",
+		def:   intervalcfg.DefaultStatsMinutes, min: intervalcfg.MinStatsMinutes,
+		max: intervalcfg.MaxStatsMinutes, unit: "分钟",
+	},
+	intervalcfg.SettingReconcileMinutes: {
+		label: "完整健康检查间隔",
+		def:   intervalcfg.DefaultReconcileMinutes, min: intervalcfg.MinReconcileMinutes,
+		max: intervalcfg.MaxReconcileMinutes, unit: "分钟",
+	},
+}
+
+// validateRuntimeIntervals rejects the entire request before the settings loop
+// writes anything. It also canonicalises numbers so values such as whitespace
+// cannot produce a UI/runtime disagreement after a successful save.
+func (a *API) validateRuntimeIntervals(in map[string]string) (bool, error) {
+	touched := false
+	changed := false
+	values := map[string]int64{}
+	for key, spec := range runtimeIntervalSpecs {
+		raw, submitted := in[key]
+		if submitted {
+			touched = true
+		}
+		env, locked := intervalcfg.EnvSettingValue(key)
+		if locked {
+			raw = env
+		} else if !submitted {
+			raw, _ = a.st.GetSetting(key)
+		}
+		if strings.TrimSpace(raw) == "" {
+			raw = strconv.FormatInt(spec.def, 10)
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil || n < spec.min || n > spec.max {
+			return false, fmt.Errorf("%s必须是 %d–%d %s之间的整数", spec.label, spec.min, spec.max, spec.unit)
+		}
+		values[key] = n
+		if submitted {
+			in[key] = strconv.FormatInt(n, 10)
+			if !locked {
+				currentRaw, _ := a.st.GetSetting(key)
+				current, currentErr := strconv.ParseInt(strings.TrimSpace(currentRaw), 10, 64)
+				if currentErr != nil || current < spec.min || current > spec.max {
+					current = spec.def
+				}
+				changed = changed || current != n
+			}
+		}
+	}
+	if !touched {
+		return false, nil
+	}
+	if values[intervalcfg.SettingReconcileMinutes] < values[intervalcfg.SettingStatsMinutes] {
+		return false, fmt.Errorf("完整健康检查间隔不能小于流量统计间隔")
+	}
+	return changed, nil
 }
 
 // handleGetDefaultTemplates returns the built-in Clash/sing-box subscription

@@ -3,12 +3,14 @@
 package sshctl
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"path"
 	"strconv"
@@ -1013,6 +1015,13 @@ func (m *RemoteManager) run(ctx context.Context, client *ssh.Client, cmd string)
 // visible to every local user on the node through ps and /proc/<pid>/cmdline,
 // and this is a password that opens a root shell there.
 func (m *RemoteManager) runStdin(ctx context.Context, client *ssh.Client, cmd, stdin string) (string, error) {
+	return m.runInput(ctx, client, cmd, strings.NewReader(stdin))
+}
+
+// runInput is the binary-safe counterpart of runStdin. Keeping the probe bytes
+// on SSH stdin avoids shell argument limits and heredoc corruption (an ELF is
+// neither UTF-8 text nor line-oriented).
+func (m *RemoteManager) runInput(ctx context.Context, client *ssh.Client, cmd string, stdin io.Reader) (string, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return "", fmt.Errorf("new session: %w", err)
@@ -1022,8 +1031,8 @@ func (m *RemoteManager) runStdin(ctx context.Context, client *ssh.Client, cmd, s
 	var stdout, stderr strings.Builder
 	session.Stdout = &stdout
 	session.Stderr = &stderr
-	if stdin != "" {
-		session.Stdin = strings.NewReader(stdin)
+	if stdin != nil {
+		session.Stdin = stdin
 	}
 
 	if err := session.Start(cmd); err != nil {
@@ -1044,6 +1053,126 @@ func (m *RemoteManager) runStdin(ctx context.Context, client *ssh.Client, cmd, s
 		}
 		return combined, nil
 	}
+}
+
+// writeBinary streams an opaque file through SSH stdin to an already-created
+// private temporary path. Unlike writeFile it never embeds bytes in a shell
+// command, so NULs and arbitrary ELF contents round-trip exactly.
+func (m *RemoteManager) writeBinary(ctx context.Context, client *ssh.Client, remotePath string, data []byte) error {
+	cmd := fmt.Sprintf("umask 077; cat > %s; chmod 700 %s", shellQuote(remotePath), shellQuote(remotePath))
+	if _, err := m.runInput(ctx, client, cmd, bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("binary upload: %w", err)
+	}
+	return nil
+}
+
+// InstallProbe uploads the panel-bundled probe, installs its environment and
+// hardened systemd unit, then starts it. The remote machine never has to reach
+// back to the panel to download a binary; only its normal report connection is
+// required after startup.
+func (m *RemoteManager) InstallProbe(ctx context.Context, cfg *ServerConfig, binary []byte, panelURL, token string) (string, error) {
+	if len(binary) == 0 {
+		return "", errors.New("探针二进制为空")
+	}
+	if strings.ContainsAny(panelURL+token, "\r\n") {
+		return "", errors.New("探针配置包含非法换行")
+	}
+	client, err := m.dial(ctx, cfg)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+
+	type stagedFile struct {
+		path string
+	}
+	var staged []stagedFile
+	stage := func(template string) (string, error) {
+		p, err := m.createTempFile(ctx, client, template)
+		if err == nil {
+			staged = append(staged, stagedFile{path: p})
+		}
+		return p, err
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		for _, f := range staged {
+			_, _ = m.run(cleanup, client, "rm -f "+shellQuote(f.path))
+		}
+	}()
+
+	binPath, err := stage(".qz-probe-bin.XXXXXXXXXX")
+	if err != nil {
+		return "", err
+	}
+	envPath, err := stage(".qz-probe-env.XXXXXXXXXX")
+	if err != nil {
+		return "", err
+	}
+	unitPath, err := stage(".qz-probe-unit.XXXXXXXXXX")
+	if err != nil {
+		return "", err
+	}
+
+	if err := m.writeBinary(ctx, client, binPath, binary); err != nil {
+		return "", fmt.Errorf("上传探针失败: %w", err)
+	}
+	wantHash := sha256.Sum256(binary)
+	gotHash, err := m.run(ctx, client, "sha256sum "+shellQuote(binPath)+" | cut -d' ' -f1")
+	if err != nil || strings.TrimSpace(gotHash) != hex.EncodeToString(wantHash[:]) {
+		return gotHash, errors.New("上传后的探针校验失败")
+	}
+	envBody := "QZ_PROBE_SERVER=" + panelURL + "\nQZ_PROBE_TOKEN=" + token + "\n"
+	unitBody := `[Unit]
+Description=Qingzhou Monitor Probe
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/qingzhou-probe.env
+ExecStart=/usr/local/bin/qingzhou-probe
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/proc /sys
+
+[Install]
+WantedBy=multi-user.target
+`
+	if err := m.writeFile(ctx, client, envPath, []byte(envBody)); err != nil {
+		return "", fmt.Errorf("上传探针配置失败: %w", err)
+	}
+	if err := m.writeFile(ctx, client, unitPath, []byte(unitBody)); err != nil {
+		return "", fmt.Errorf("上传探针服务失败: %w", err)
+	}
+
+	// Each elevated call is one simple command. runElevated deliberately avoids
+	// `sh -c`, so joining these with && would elevate only the first command for
+	// sudo-based server rows.
+	steps := []string{
+		"install -m 755 " + shellQuote(binPath) + " /usr/local/bin/qingzhou-probe.new",
+		"mv -f /usr/local/bin/qingzhou-probe.new /usr/local/bin/qingzhou-probe",
+		"install -m 600 " + shellQuote(envPath) + " /etc/qingzhou-probe.env",
+		"install -m 644 " + shellQuote(unitPath) + " /etc/systemd/system/qingzhou-probe.service",
+		"systemctl daemon-reload",
+		"systemctl enable qingzhou-probe",
+		"systemctl restart qingzhou-probe",
+		"systemctl is-active --quiet qingzhou-probe",
+	}
+	for _, cmd := range steps {
+		out, err := m.runElevated(ctx, client, cfg, cmd)
+		if err != nil {
+			return out, fmt.Errorf("安装探针失败（%s）: %w", cmd, err)
+		}
+	}
+	ver, err := m.run(ctx, client, "/usr/local/bin/qingzhou-probe -version")
+	if err != nil {
+		return ver, fmt.Errorf("探针已启动，但读取版本失败: %w", err)
+	}
+	return "探针安装完成：" + strings.TrimSpace(ver), nil
 }
 
 // ──────────────────────────────────────────────────────────────

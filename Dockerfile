@@ -34,8 +34,8 @@ RUN GOOS=linux GOARCH=amd64 \
  && GOOS=linux GOARCH=arm64 \
     go build -trimpath -ldflags "-s -w -X qingzhou/internal/version.Version=${VERSION}" -o /out/qingzhou-arm64 .
 # 探针：两个架构都编（面板按被监控机架构分发 /api/monitor/agent/linux-<arch>）
-RUN GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /out/probe/probe-linux-amd64 ./cmd/probe \
- && GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o /out/probe/probe-linux-arm64 ./cmd/probe
+RUN GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X qingzhou/internal/version.Version=${VERSION}" -o /out/probe/probe-linux-amd64 ./cmd/probe \
+ && GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w -X qingzhou/internal/version.Version=${VERSION}" -o /out/probe/probe-linux-arm64 ./cmd/probe
 
 # --- ③ 运行镜像（本阶段平台就是 --platform 的目标，TARGETARCH 可信）---
 FROM alpine:3.20

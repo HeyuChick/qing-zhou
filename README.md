@@ -171,6 +171,15 @@ docker compose logs -f qingzhou     # 首启打印随机管理员密码（未设
 
 或直接用镜像：`docker run -d -p 8081:8081 -e QZ_SECRET_KEY=$(openssl rand -hex 32) -v qingzhou-data:/data ghcr.io/mllt992/qing-zhou:latest`。**Docker 用「拉新镜像 + 重建容器」升级**，详见 [Wiki · Docker 部署](https://github.com/mllt992/qing-zhou/wiki/Docker-部署)。
 
+通过当前发布工作流新构建的 GHCR 镜像会携带构建来源证明（provenance）与 SBOM，并标记
+对应的源码 revision。可用 Buildx 查看镜像清单和证明；把示例版本换成实际安装的 tag：
+
+```bash
+docker buildx imagetools inspect ghcr.io/mllt992/qing-zhou:vX.Y.Z
+docker buildx imagetools inspect ghcr.io/mllt992/qing-zhou:vX.Y.Z --format '{{json .Provenance}}'
+docker buildx imagetools inspect ghcr.io/mllt992/qing-zhou:vX.Y.Z --format '{{json .SBOM}}'
+```
+
 ### 二、本地开发运行
 
 前端产物不入库（仓库里 `frontend/dist` 只有一个占位文件），所以**先构建一次前端**，否则面板是白页：
@@ -285,8 +294,9 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 | `QZ_SINGBOX_CONFIG` | `/etc/sing-box/config.json` | 面板下发的配置路径 |
 | `QZ_SINGBOX_UNIT` | `sing-box` | sing-box 的 systemd 服务名 |
 | `QZ_SINGBOX_V2RAY` | `127.0.0.1:18080` | v2ray_api gRPC 监听地址（统计用，须与配置一致） |
-| `QZ_SINGBOX_STATS_INTERVAL` | `1m` | 采集用量并生成期望配置（剔除超额/到期用户）的周期；摘要未变化时不连接节点 |
-| `QZ_SINGBOX_RECONCILE_INTERVAL` | `10m` | 绕过摘要缓存，核对远端配置文件与 sing-box 运行状态的周期 |
+| `QZ_MONITOR_PROBE_INTERVAL` | `60s` | 节点探针与面板本机的指标采集周期；可在「系统设置 → 采集与同步」在线修改，本变量设置后界面只读 |
+| `QZ_SINGBOX_STATS_INTERVAL` | `10m` | 采集用量并生成期望配置（剔除超额/到期用户）的周期；可在设置页在线修改，本变量优先 |
+| `QZ_SINGBOX_RECONCILE_INTERVAL` | `60m` | 绕过摘要缓存，核对远端配置文件与 sing-box 运行状态的周期；可在设置页在线修改，本变量优先 |
 | `QZ_SMTP_HOST` / `PORT` / `USER` / `PASS` / `FROM` / `FROM_NAME` / `SECURITY` | — | SMTP 配置（也可在面板「设置」页填，密码加密存储） |
 
 > 完整示例见 [`deploy/qingzhou.env.example`](deploy/qingzhou.env.example)。

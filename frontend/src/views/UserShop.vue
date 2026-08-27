@@ -48,7 +48,7 @@
         </div>
 
         <div class="sc-foot">
-          <div v-if="willQueue(pkg)" class="sc-queue-note">✓ 已在使用 · 再买将排队，当前份结束后自动启用</div>
+          <div v-if="willQueue(pkg)" class="sc-queue-note">✓ 同续期组正在使用 · 本次将排队，当前份结束后自动启用</div>
           <div class="sc-price">
             <span class="sc-points">{{ priceOf(pkg) }}</span>
             <span class="sc-unit">积分</span>
@@ -94,17 +94,20 @@ const buying = ref<number|null>(null)
 const planCount = computed(() => packages.value.filter(p => p.type === 'plan').length)
 const trafficCount = computed(() => packages.value.filter(p => p.type === 'traffic').length)
 const affordableCount = computed(() => packages.value.filter(p => canAfford(p) && p.stock !== 0).length)
-// Package ids the user already has an ACTIVE plan bucket for — buying one of
-// these again queues behind the current份 instead of stacking, so we set that
-// expectation on the card and in the confirm/success copy.
-const heldActive = ref<Set<number>>(new Set())
+// Renewal-line keys the user already has an ACTIVE plan bucket for. Different
+// product rows may share one queue_key, so package_id alone would wrongly promise
+// immediate activation for a renamed/repriced edition of the same service.
+const heldActiveQueues = ref<Set<string>>(new Set())
+function packageQueueKey(pkg: any): string { return pkg.queue_key || `pkg:${pkg.id}` }
 async function loadHeld() {
   try {
     const plans = await apiList<any>('/api/user/plans')
-    heldActive.value = new Set(plans.filter((p: any) => p.kind === 'plan' && p.status === 'active' && p.package_id > 0).map((p: any) => p.package_id))
+    heldActiveQueues.value = new Set(plans
+      .filter((p: any) => p.kind === 'plan' && p.status === 'active' && p.package_id > 0)
+      .map((p: any) => p.queue_key || `pkg:${p.package_id}`))
   } catch {}
 }
-function willQueue(pkg: any): boolean { return pkg.type === 'plan' && heldActive.value.has(pkg.id) }
+function willQueue(pkg: any): boolean { return pkg.type === 'plan' && heldActiveQueues.value.has(packageQueueKey(pkg)) }
 
 function typeMeta(type: string) {
   if (type === 'traffic') return { label: '流量包', cls: 't-traffic' }
@@ -171,8 +174,8 @@ function handleBuy(pkg: any) {
   const opt = optOf(pkg)
   const what = `「${pkg.name}」${pkg.options?.length > 1 ? `（${opt.days} 天）` : ''}`
   const content = queue
-    ? `确定花费 ${opt.price_points} 积分购买${what}？\n你已在使用该套餐，本次购买将排队，在当前份用完或到期后自动启用（有效期届时才开始计算）。`
-    : `确定花费 ${opt.price_points} 积分购买${what}？`
+    ? `确定花费 ${opt.price_points} 积分购买${what}？\n同一续期组已有套餐正在使用，本次购买将排队，在当前份用完或到期后自动启用（有效期届时才开始计算）。`
+    : `确定花费 ${opt.price_points} 积分购买${what}？\n购买成功后立即生效，有效期从购买成功时开始计算；只有同一续期组已有套餐时才会排队。`
   dialog.warning({ title: '确认购买', content, positiveText: '确定', negativeText: '取消',
     onPositiveClick: async () => {
       buying.value = pkg.id

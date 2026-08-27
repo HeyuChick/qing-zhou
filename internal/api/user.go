@@ -281,12 +281,10 @@ func (a *API) refreshAfterPromotion(u *store.User, promoted bool) *store.User {
 
 // onQueuePromoted is what has to follow a promotion, wherever it came from.
 //
-// Dropping the cached links is not optional: every self-built link carries its
-// OWNING bucket's uuid/password, so activating the next份 changes the
-// credentials, and collectEntries caches a user's links for 30s. Without this the
-// request that promotes can answer from a cache built moments earlier and hand
-// back the retired份's credentials — links that authenticate against nothing, at
-// exactly the moment the user is checking whether their new套餐 works.
+// Dropping the cached links remains necessary even though the wire credential is
+// stable: activation can change which nodes the user owns and which internal
+// identity receives their traffic. collectEntries caches that entitlement view
+// for 30s, so serving it after promotion could omit newly unlocked nodes.
 //
 // The rebuild is scheduled, never awaited: pushing config to every node takes far
 // longer than an HTTP response may.
@@ -630,6 +628,7 @@ type planView struct {
 	ID           int64  `json:"id"`
 	Kind         string `json:"kind"`
 	PackageID    int64  `json:"package_id"`
+	QueueKey     string `json:"queue_key,omitempty"`
 	Name         string `json:"name"`
 	TrafficLimit int64  `json:"traffic_limit"`
 	Used         int64  `json:"used"`
@@ -662,7 +661,7 @@ type planView struct {
 }
 
 // queueActivations estimates, for each queued plan bucket, the LATEST time it
-// will activate: from the usable head's expiry, walking the same-package queue in
+// will activate: from the usable head's expiry, walking the same-renewal-line queue in
 // id order and adding each份's duration. 0 = unknown (unlimited-duration head →
 // only exhaustion advances it). When a package's head has already ended but isn't
 // promoted yet (the ~2min ticker gap), the oldest queued份 is treated as due now.
@@ -672,15 +671,19 @@ func queueActivations(buckets []*store.Bucket, now int64) map[int64]int64 {
 		hasHead bool
 		queued  []*store.Bucket
 	}
-	byPkg := map[int64]*pkgQ{}
+	byPkg := map[string]*pkgQ{}
 	for _, b := range buckets {
 		if b.Kind != "plan" || b.PackageID <= 0 {
 			continue
 		}
-		q := byPkg[b.PackageID]
+		key := b.QueueKey
+		if key == "" {
+			key = fmt.Sprintf("pkg:%d", b.PackageID)
+		}
+		q := byPkg[key]
 		if q == nil {
 			q = &pkgQ{}
-			byPkg[b.PackageID] = q
+			byPkg[key] = q
 		}
 		switch {
 		case b.Status == "queued":
@@ -815,7 +818,7 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 				name = live
 			}
 		}
-		pv := planView{ID: b.ID, Kind: b.Kind, PackageID: b.PackageID, Name: name, TrafficLimit: b.TrafficLimit,
+		pv := planView{ID: b.ID, Kind: b.Kind, PackageID: b.PackageID, QueueKey: b.QueueKey, Name: name, TrafficLimit: b.TrafficLimit,
 			Used: b.Used(), ExpiryAt: b.ExpiryAt, Remaining: -1, CreatedAt: b.CreatedAt, OrderID: b.OrderID,
 			DurationDays: b.DurationDays, StartedAt: startedAt(b)}
 		if b.TrafficLimit > 0 {
@@ -827,7 +830,7 @@ func buildPlanViews(buckets []*store.Bucket, pkgNames map[int64]string) []planVi
 		}
 		switch {
 		case b.Status == "queued":
-			pv.Status = "queued" // a same-package purchase waiting for the head to finish
+			pv.Status = "queued" // a same-renewal-line purchase waiting for the head
 			pv.ActivateBy = acts[b.ID]
 		case !b.NotExpired(now):
 			pv.Status = "expired"
@@ -933,13 +936,16 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	// A person who pasted the link into a browser gets a readable page instead
 	// of a wall of base64. `?format=info` asks for it explicitly.
 	if strings.EqualFold(reqFormat, "info") || wantsSubInfoPage(r, reqFormat) {
-		a.writeSubInfoHTML(w, subInfo{
+		err := a.writeSubInfoHTML(w, subInfo{
 			SiteName: siteName, SubURL: subURL,
 			Used: u.UsedUp + u.UsedDown, Total: u.TrafficLimit, ExpiryAt: u.ExpiryAt,
 			NodeCount: len(links),
 			Expired:   u.ExpiryAt != 0 && u.ExpiryAt <= now,
 			OverQuota: u.TrafficLimit != 0 && u.UsedUp+u.UsedDown >= u.TrafficLimit,
 		})
+		if err == nil {
+			a.recordSubscriptionFetch(u, "info", subscriptionClientForUA(r.Header.Get("User-Agent")))
+		}
 		return
 	}
 
@@ -947,6 +953,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = subconv.FormatForUA(r.Header.Get("User-Agent"))
 	}
+	format = subconv.NormalizeFormat(format)
 	body, ctype, err := subconv.Render(format, links, aiNodes, clashTpl, singboxTpl, subURL)
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)
@@ -964,9 +971,25 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	// Clash-family clients name the imported profile after this; without it they
 	// fall back to the URL's last path segment, which is the subscription token —
 	// pinning a secret into the client's visible profile list.
-	w.Header().Set("Content-Disposition", contentDisposition(siteName, subconv.NormalizeFormat(format)))
+	w.Header().Set("Content-Disposition", contentDisposition(siteName, format))
 	w.Header().Set("Content-Type", ctype)
-	_, _ = w.Write([]byte(body))
+	if n, err := w.Write([]byte(body)); err == nil && n == len(body) {
+		a.recordSubscriptionFetch(u, format, subscriptionClientForUA(r.Header.Get("User-Agent")))
+	}
+}
+
+// recordSubscriptionFetch is best-effort and never changes the subscription
+// response. The User snapshot avoids even issuing an UPDATE for ordinary client
+// refreshes inside the one-hour window; the Store repeats the condition to close
+// the concurrent-request race.
+func (a *API) recordSubscriptionFetch(u *store.User, format, client string) {
+	now := time.Now().Unix()
+	if u.SubLastFetchedAt > 0 && now-u.SubLastFetchedAt < 3600 {
+		return
+	}
+	if _, err := a.st.RecordSubscriptionFetch(u.ID, now, format, client); err != nil {
+		log.Printf("subscription fetch telemetry (user %d): %v", u.ID, err)
+	}
 }
 
 type linkCacheEntry struct {

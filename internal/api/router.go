@@ -44,6 +44,10 @@ type API struct {
 	// In-flight per-node sing-box reinstalls; see nodever_admin.go.
 	upgradeMu   sync.Mutex
 	upgradeJobs map[int64]*nodeUpgradeJob
+	// In-flight remote probe installs/upgrades. Kept separate from sing-box jobs:
+	// they manage different services and expose their state on different pages.
+	probeUpgradeMu   sync.Mutex
+	probeUpgradeJobs map[int64]*nodeUpgradeJob
 
 	// Per-Telegram-user command limiter. The bind token is already gated by
 	// resendRL; this one stops a bound chat from hammering /sub.
@@ -61,6 +65,9 @@ type API struct {
 	// the watcher can ever wait on the one behind it.
 	restartCh chan restartEvent
 	opsCh     chan string
+	// monitorIntervalCh resets the panel host's local sampler when an admin
+	// changes the same cadence remote probes receive. Coalesced and non-blocking.
+	monitorIntervalCh chan struct{}
 }
 
 // SetSSHKeyDir points the panel at the directory holding SSH private key files.
@@ -97,7 +104,7 @@ func (a *API) sbRebuildLog() {
 // no controller is attached.
 func (a *API) sbSyncInterval() time.Duration {
 	if a.sbctl == nil {
-		return time.Minute
+		return 10 * time.Minute
 	}
 	return a.sbctl.SyncInterval()
 }
@@ -130,11 +137,12 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		// retry, a double-click, a misbehaving script — leaves the user with a
 		// subscription that never stays valid long enough to import. Generous
 		// enough that nobody swapping addresses on purpose will notice.
-		subRL:     newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
-		tgRL:      newRateLimiter(20, time.Minute),   // 20 bot commands / telegram user / min
-		linkCache: make(map[int64]linkCacheEntry),
-		restartCh: make(chan restartEvent, restartEventQueue),
-		opsCh:     make(chan string, opsMessageQueue),
+		subRL:             newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
+		tgRL:              newRateLimiter(20, time.Minute),   // 20 bot commands / telegram user / min
+		linkCache:         make(map[int64]linkCacheEntry),
+		restartCh:         make(chan restartEvent, restartEventQueue),
+		opsCh:             make(chan string, opsMessageQueue),
+		monitorIntervalCh: make(chan struct{}, 1),
 	}
 	// Self-updater: repo + optional GitHub token come from env or DB settings,
 	// falling back to the project's canonical repo.
@@ -159,6 +167,16 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		},
 	)
 	return a
+}
+
+func (a *API) notifyRuntimeIntervalsChanged() {
+	if a.sbctl != nil {
+		a.sbctl.NotifyIntervalsChanged()
+	}
+	select {
+	case a.monitorIntervalCh <- struct{}{}:
+	default:
+	}
 }
 
 func (a *API) Router() http.Handler {
@@ -360,6 +378,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/monitor/dashboard", a.handleMonitorDashboard)
 		ar.Get("/api/admin/monitor/servers", a.handleMonitorServers)
 		ar.Get("/api/admin/monitor/servers/{id}/metrics", a.handleServerMetrics)
+		ar.Post("/api/admin/monitor/servers/{id}/probe/upgrade", a.handleAdminProbeUpgrade)
 		ar.Get("/api/admin/monitor/heatmap", a.handleMonitorHeatmap)
 		ar.Get("/api/admin/monitor/alerts", a.handleMonitorAlerts)
 		ar.Post("/api/admin/monitor/alerts/{id}/read", a.handleMarkAlertRead)

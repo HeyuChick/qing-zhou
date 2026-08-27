@@ -120,14 +120,17 @@ func adminUserView(u *store.User, groupIDs []int64, buckets []*store.Bucket) J {
 		// bucket, including queued份 the user cannot spend yet and expired份 that
 		// hand out nothing — which is why they must not be rendered as a ratio.
 		// Kept for older clients; new UI reads `traffic` below.
-		"used":           u.UsedUp + u.UsedDown,
-		"traffic_limit":  u.TrafficLimit,
-		"expiry_at":      u.ExpiryAt,
-		"has_client":     u.ClientID.Valid,
-		"created_at":     u.CreatedAt,
-		"last_online_at": u.LastOnlineAt,
-		"online":         u.LastOnlineAt > 0 && time.Now().Unix()-u.LastOnlineAt <= onlineWindow,
-		"group_ids":      groupIDs,
+		"used":                u.UsedUp + u.UsedDown,
+		"traffic_limit":       u.TrafficLimit,
+		"expiry_at":           u.ExpiryAt,
+		"has_client":          u.ClientID.Valid,
+		"created_at":          u.CreatedAt,
+		"last_online_at":      u.LastOnlineAt,
+		"sub_last_fetched_at": u.SubLastFetchedAt,
+		"sub_last_format":     u.SubLastFormat,
+		"sub_last_client":     u.SubLastClient,
+		"online":              u.LastOnlineAt > 0 && time.Now().Unix()-u.LastOnlineAt <= onlineWindow,
+		"group_ids":           groupIDs,
 		// Admin-only note. Present on this view only — the user-facing account
 		// endpoints must not echo what an admin wrote about them.
 		"remark": u.Remark,

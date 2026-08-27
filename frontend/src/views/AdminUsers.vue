@@ -90,6 +90,7 @@
 
           <div class="uc-meta">
             <span class="kv">积分 <b>{{ u.points }}</b></span>
+            <span class="kv" :title="subFetchTitle(u)">订阅 <b>{{ subFetchText(u) }}</b></span>
             <span v-if="u.group_ids?.length" class="kv">用户组 <b>{{ groupNames(u.group_ids) }}</b></span>
           </div>
 
@@ -199,7 +200,7 @@
           </div>
           <div v-if="assignIsPlan" class="pm-assign-tip">可填 1–3650 天。命中套餐档位用该档流量，自定义天数按默认档流量开通。</div>
           <div v-if="assignWillQueue" class="pm-assign-hint">
-            该用户已有此套餐在生效，新的一份会排队，等当前份用完或到期后自动启用。
+            该用户已有同一续期组的套餐在生效，新的一份会排队，等当前份用完或到期后自动启用，届时才开始计算有效期。
           </div>
           <!-- 管理员账号也能分配：它在 sing-box 侧就是一个普通身份，自己拿来当订阅用很常见 -->
           <div v-if="plansUser?.role === 'admin' && !assignWillQueue" class="pm-assign-hint">
@@ -367,12 +368,32 @@ const sortBy = ref('default')
 const sortOptions = [
   { label: '默认排序', value: 'default' },
   { label: '最后在线', value: 'online' },
+  { label: '最后拉取订阅', value: 'subfetch' },
   { label: '用量最高', value: 'usage' },
   { label: '最近到期', value: 'expiry' },
   { label: '积分最高', value: 'points' },
 ]
 
 const onlineCount = computed(() => users.value.filter((u: any) => u.online).length)
+
+const subClientLabels: Record<string, string> = {
+  browser: '浏览器', mihomo: 'Mihomo', clash: 'Clash', stash: 'Stash',
+  'sing-box': 'sing-box', surge: 'Surge', shadowrocket: 'Shadowrocket',
+  v2rayn: 'v2rayN', curl: 'curl', unknown: '未知客户端',
+}
+const subFormatLabels: Record<string, string> = {
+  info: '信息页', clash: 'Clash', singbox: 'sing-box', surge: 'Surge', base64: '通用',
+}
+function subFetchText(u: any) {
+  if (!u.sub_last_fetched_at) return '从未拉取'
+  return timeAgo(u.sub_last_fetched_at)
+}
+function subFetchTitle(u: any) {
+  if (!u.sub_last_fetched_at) return '尚未成功获取过订阅'
+  const client = subClientLabels[u.sub_last_client] || '未知客户端'
+  const format = subFormatLabels[u.sub_last_format] || u.sub_last_format || '未知格式'
+  return `${fmtDateTime(u.sub_last_fetched_at)} · ${client} · ${format}（记录最多每小时更新一次）`
+}
 
 // ---- 流量口径 ----
 // 后端的 traffic 只统计「当前可用」的份：排队中的份还不能用，已过期的份订阅里
@@ -451,19 +472,21 @@ function expiringSoon(u: any) {
 const stats = computed(() => [
   { key: 'all', label: '全部用户', value: users.value.length, color: '' },
   { key: 'online', label: '在线', value: onlineCount.value, color: '#6f8f76' },
+  { key: 'unfetched', label: '从未拉取订阅', value: users.value.filter((u: any) => !u.sub_last_fetched_at).length, color: '#767676' },
   { key: 'noplan', label: '无生效套餐', value: users.value.filter(needsPlan).length, color: '#767676' },
   { key: 'expiring', label: '7 天内到期', value: users.value.filter(expiringSoon).length, color: '#bf9540' },
   { key: 'banned', label: '已封禁', value: users.value.filter((u: any) => u.status === 'banned').length, color: '#c2685c' },
 ])
 const emptyText = computed(() => {
   if (search.value) return '没有匹配的用户'
-  return { online: '当前无在线用户', noplan: '所有用户都有生效中的套餐', expiring: '近 7 天没有套餐到期', banned: '没有被封禁的用户' }[filter.value] || '暂无用户'
+  return { online: '当前无在线用户', unfetched: '所有用户都拉取过订阅', noplan: '所有用户都有生效中的套餐', expiring: '近 7 天没有套餐到期', banned: '没有被封禁的用户' }[filter.value] || '暂无用户'
 })
 
 const filtered = computed(() => {
   let list = users.value
   switch (filter.value) {
     case 'online': list = list.filter((u: any) => u.online); break
+    case 'unfetched': list = list.filter((u: any) => !u.sub_last_fetched_at); break
     case 'noplan': list = list.filter(needsPlan); break
     case 'expiring': list = list.filter(expiringSoon); break
     case 'banned': list = list.filter((u: any) => u.status === 'banned'); break
@@ -478,6 +501,7 @@ const filtered = computed(() => {
   sorted.sort((a: any, b: any) => {
     switch (sortBy.value) {
       case 'online': return (b.last_online_at || 0) - (a.last_online_at || 0)
+      case 'subfetch': return (b.sub_last_fetched_at || 0) - (a.sub_last_fetched_at || 0)
       case 'usage': return usedPctOf(b) - usedPctOf(a) || (b.traffic?.used || 0) - (a.traffic?.used || 0)
       // 不过期的份排在最后：它们永远轮不到「需要续费」
       case 'expiry': return (a.plan_summary?.next_expiry_at || Infinity) - (b.plan_summary?.next_expiry_at || Infinity)
@@ -715,11 +739,13 @@ const assignPkgId = ref<number | null>(null)
 const assignDays = ref<number | null>(null)
 const pkgOptions = ref<any[]>([])
 const pkgList = ref<any[]>([])
-const assignWillQueue = computed(() =>
-  !!assignPkgId.value && userPlans.value.some((p: any) =>
-    p.kind === 'plan' && p.package_id === assignPkgId.value && bucketOf(p) === 'active'))
-// 天数输入只对订阅计划出现。流量包加的是共享池，填天数既不会到期也不会改额度。
 const assignPkg = computed(() => pkgList.value.find((p: any) => p.id === assignPkgId.value) || null)
+function packageQueueKey(pkg: any): string { return pkg?.queue_key || (pkg?.id ? `pkg:${pkg.id}` : '') }
+const assignWillQueue = computed(() =>
+  !!assignPkg.value && assignPkg.value.type === 'plan' && userPlans.value.some((p: any) =>
+    p.kind === 'plan' && bucketOf(p) === 'active' &&
+    (p.queue_key || `pkg:${p.package_id}`) === packageQueueKey(assignPkg.value)))
+// 天数输入只对订阅计划出现。流量包加的是共享池，填天数既不会到期也不会改额度。
 const assignIsPlan = computed(() => assignPkg.value?.type === 'plan')
 function defaultAssignDays(pkg: any): number | null {
   if (!pkg || pkg.type !== 'plan') return null

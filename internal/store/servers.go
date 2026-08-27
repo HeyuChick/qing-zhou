@@ -145,6 +145,26 @@ func (s *Store) UpdateServer(sv Server) error {
 	return err
 }
 
+// EnableServerProbe updates only the probe authentication fields. One-click
+// installation runs alongside node sync and asset editing, so routing it through
+// UpdateServer's full-row write could restore stale SSH/sing-box values read a
+// moment earlier and silently undo an unrelated concurrent change.
+func (s *Store) EnableServerProbe(id int64, token string) error {
+	res, err := s.db.Exec(`UPDATE servers SET probe_enabled=1, probe_token=?, probe_token_hash=?, updated_at=? WHERE id=?`,
+		s.encrypt(token), hashProbeToken(token), time.Now().Unix(), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) DeleteServer(id int64) error {
 	// Refuse deletion while inbounds/TLS are still bound to this server, else
 	// they become undeployable orphans (server_id points at nothing).

@@ -26,25 +26,26 @@ type txLike interface {
 }
 
 // enqueuePlanBucket mints a fresh, independently-metered plan bucket in the
-// 'queued' state for a plan purchase. Unlike the old stacking model, buying the
-// SAME package again does NOT merge into one bucket — each purchase is its own
-// bucket with its own identity and quota. A queued bucket does not count down
+// 'queued' state for a plan purchase. Unlike the old stacking model, buying a
+// plan in the SAME queue_key does NOT merge into one bucket — each purchase is
+// its own metered quota. A queued bucket does not count down
 // (expiry_at=0) and is invisible to the config until advanceUserQueues promotes
 // it. The caller runs advanceUserQueues right after, so a first purchase (no
 // active head yet) activates immediately while a repeat purchase waits in line.
 func enqueuePlanBucket(tx txLike, userID int64, username string, pkg *Package, orderID, now int64) error {
-	// The credentials belong to the subscription line, minted once. The row still
-	// gets a unique client_name of its own because user_plans.client_name carries a
-	// UNIQUE index, but it is an internal row label now — never a credential, and
-	// never what a client authenticates with (see bucketCols).
+	// UUID/secret belong to the user. The package line keeps a stable internal
+	// client_name for stats; user_plans.client_name is only a unique row label.
+	_, _, err := ensureUserProtocolCredential(tx, userID, username, now)
+	if err != nil {
+		return err
+	}
 	if err := ensurePlanIdentity(tx, userID, pkg.ID, username, now); err != nil {
 		return err
 	}
-	uu, ss := genBucketCreds()
-	_, err := insertBucket(tx, &Bucket{
+	_, err = insertBucket(tx, &Bucket{
 		UserID: userID, Kind: "plan", PackageID: pkg.ID, Name: pkg.Name,
-		ClientName: fmt.Sprintf("qz_%s_p%d", username, orderID),
-		ClientUUID: uu, ClientSecret: ss,
+		QueueKey:     effectiveQueueKey(pkg.ID, pkg.QueueKey),
+		ClientName:   fmt.Sprintf("qz_%s_p%d", username, orderID),
 		TrafficLimit: pkg.TrafficBytes,
 		Status:       "queued", ExpiryAt: 0, DurationDays: pkg.DurationDays,
 		OrderID: orderID, CreatedAt: now,
@@ -78,7 +79,7 @@ const usableHeadPredicate = `h.kind='plan' AND h.status='active'
 	AND (h.traffic_limit=0 OR h.used_up+h.used_down<h.traffic_limit)`
 
 // StatusRetired marks a plan bucket that has finished its turn and handed the
-// package's slot (and the user's credentials) to the next份.
+// renewal line's slot to the next份.
 //
 // Such a份 used to keep status='active' forever, which conflated "is the current
 // plan" with "was once the current plan" — and two things read that column as the
@@ -91,7 +92,7 @@ const usableHeadPredicate = `h.kind='plan' AND h.status='active'
 //     picked a consumed份 as the credential holder and tried to hand it a name it
 //     already had, failing the refund outright.
 //
-// Credentials have since moved to the subscription line, so that second reason is
+// Credentials have since moved to the user, so that second reason is
 // gone — but the first stands on its own: without this status a progressed queue
 // is indistinguishable from legacy duplicates and the merge eats it. Everything
 // else keys off expiry/quota rather than this column, and a retired份 is by
@@ -103,8 +104,9 @@ const StatusRetired = "retired"
 const planIdentityCols = `client_name, client_uuid, client_secret,
 	proxy_username, proxy_password, proxy_expires_at`
 
-// PlanIdentity is one subscription line's credentials — stable for the life of
-// the line, no matter how many份 pass through it.
+// PlanIdentity is one subscription line's internal stats/proxy identity. Its
+// UUID/secret fields remain as online-upgrade sources; users.client_* is runtime
+// protocol authority.
 type PlanIdentity struct {
 	ClientName     string
 	ClientUUID     string
@@ -114,13 +116,11 @@ type PlanIdentity struct {
 	ProxyExpiresAt int64
 }
 
-// ensurePlanIdentity mints this (user, package) line's credentials the first time
-// the user buys the package, and returns the existing ones every time after.
+// ensurePlanIdentity mints this (user, package) stats line the first time the
+// user buys the package, and reuses it every time after.
 //
-// This is why a handoff no longer touches credentials at all: the份 that takes
-// over does not inherit anything, it simply belongs to a line that already has an
-// identity. A refund or a revoke can delete any份 — even the one in service —
-// without the line losing its credentials.
+// A handoff never changes the user credential or line name. A refund/revoke can
+// delete any份 — even the one in service — without orphaning accounting.
 func ensurePlanIdentity(tx txLike, userID, packageID int64, username string, now int64) error {
 	var exists int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM plan_identities WHERE user_id=? AND package_id=?`,
@@ -130,11 +130,10 @@ func ensurePlanIdentity(tx txLike, userID, packageID int64, username string, now
 	if exists > 0 {
 		return nil
 	}
-	uu, ss := genBucketCreds()
 	_, err := tx.Exec(`INSERT INTO plan_identities
 		(user_id, package_id, client_name, client_uuid, client_secret, created_at, updated_at)
 		VALUES (?,?,?,?,?,?,?)`,
-		userID, packageID, fmt.Sprintf("qz_%s_s%d", username, packageID), uu, ss, now, now)
+		userID, packageID, fmt.Sprintf("qz_%s_s%d", username, packageID), "", "", now, now)
 	return err
 }
 
@@ -143,28 +142,28 @@ func ensurePlanIdentity(tx txLike, userID, packageID int64, username string, now
 // user_plans and one parameter (now) for the head predicate inside.
 const queueDuePredicate = `q.kind='plan' AND q.status='queued' AND q.package_id>0
 	AND NOT EXISTS (SELECT 1 FROM user_plans h
-	    WHERE h.user_id=q.user_id AND h.package_id=q.package_id AND ` + usableHeadPredicate + `)`
+	    WHERE h.user_id=q.user_id AND h.queue_key=q.queue_key AND ` + usableHeadPredicate + `)`
 
 // advanceUserQueues promotes queued plan buckets whose slot is now free. For each
-// package the user has a queued bucket for, if there is no currently-USABLE active
-// head (same package, status='active', not expired, has quota), the oldest queued
-// bucket is promoted: status='active' and its expiry_at starts counting now
+// renewal line the user has a queued bucket for, if there is no currently-USABLE
+// active head (same queue_key, status='active', not expired, has quota), the
+// oldest queued bucket is promoted: status='active' and its expiry_at starts counting now
 // (now + duration_days). Idempotent — a usable head means no change. Returns
 // whether anything was promoted so callers can trigger a config rebuild.
 func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
-	rows, err := tx.Query(`SELECT DISTINCT package_id FROM user_plans
+	rows, err := tx.Query(`SELECT DISTINCT queue_key FROM user_plans
 		WHERE user_id=? AND kind='plan' AND status='queued' AND package_id>0`, userID)
 	if err != nil {
 		return false, err
 	}
-	var pkgIDs []int64
+	var queueKeys []string
 	for rows.Next() {
-		var p int64
-		if err := rows.Scan(&p); err != nil {
+		var key string
+		if err := rows.Scan(&key); err != nil {
 			rows.Close()
 			return false, err
 		}
-		pkgIDs = append(pkgIDs, p)
+		queueKeys = append(queueKeys, key)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -172,22 +171,22 @@ func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
 	}
 
 	changed := false
-	for _, pkgID := range pkgIDs {
+	for _, queueKey := range queueKeys {
 		// A usable active head blocks promotion: not expired AND has quota.
 		var usable int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM user_plans h
-			WHERE h.user_id=? AND h.package_id=? AND `+usableHeadPredicate,
-			userID, pkgID, now).Scan(&usable); err != nil {
+			WHERE h.user_id=? AND h.queue_key=? AND `+usableHeadPredicate,
+			userID, queueKey, now).Scan(&usable); err != nil {
 			return changed, err
 		}
 		if usable > 0 {
 			continue
 		}
-		// Promote the oldest queued bucket for this package.
+		// Promote the oldest queued bucket for this renewal line.
 		var id, dur int64
 		err := tx.QueryRow(`SELECT id, duration_days FROM user_plans
-			WHERE user_id=? AND kind='plan' AND package_id=? AND status='queued'
-			ORDER BY id LIMIT 1`, userID, pkgID).Scan(&id, &dur)
+			WHERE user_id=? AND kind='plan' AND queue_key=? AND status='queued'
+			ORDER BY id LIMIT 1`, userID, queueKey).Scan(&id, &dur)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -203,10 +202,10 @@ func advanceUserQueues(tx txLike, userID, now int64) (bool, error) {
 			return changed, err
 		}
 		// Retire whoever was holding the slot. Nothing is moved: the credentials
-		// live on the subscription line, so the份 taking over already has them.
+		// live on the user, so the份 taking over already has them.
 		if _, err := tx.Exec(`UPDATE user_plans SET status=?, updated_at=?
-			WHERE user_id=? AND kind='plan' AND package_id=? AND status='active' AND id<>?`,
-			StatusRetired, now, userID, pkgID, id); err != nil {
+			WHERE user_id=? AND kind='plan' AND queue_key=? AND status='active' AND id<>?`,
+			StatusRetired, now, userID, queueKey, id); err != nil {
 			return changed, err
 		}
 		changed = true
@@ -362,7 +361,7 @@ func reversePlanBucket(tx txLike, userID, packageID, trafficBytes, durationDays,
 // reverseOrderBucket undoes ONE order's plan entitlement on refund. In the queue
 // model each purchase is its own bucket, so a refund removes exactly that bucket
 // (found by order_id) and then advances the queue — if the removed bucket was the
-// active head, the next queued same-package bucket takes over. Falls back to the
+// active head, the next queued bucket in its renewal line takes over. Falls back to the
 // legacy package-based clamped reversal (reversePlanBucket) when no bucket carries
 // this order_id (a pre-queue account) or when the matched bucket still holds more
 // than this one order's quota (a legacy merged bucket whose order_id points here),
@@ -396,10 +395,13 @@ func addToPool(tx txLike, userID int64, username string, addBytes, now int64) er
 	var id int64
 	err := tx.QueryRow(`SELECT id FROM user_plans WHERE user_id=? AND kind='pool' ORDER BY id LIMIT 1`, userID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		uu, ss := genBucketCreds()
+		_, _, cerr := ensureUserProtocolCredential(tx, userID, username, now)
+		if cerr != nil {
+			return cerr
+		}
 		_, err = insertBucket(tx, &Bucket{
 			UserID: userID, Kind: "pool", Name: "通用流量",
-			ClientName: fmt.Sprintf("qz_%s_pool", username), ClientUUID: uu, ClientSecret: ss,
+			ClientName:   fmt.Sprintf("qz_%s_pool", username),
 			TrafficLimit: addBytes, CreatedAt: now,
 		})
 		return err
@@ -506,10 +508,13 @@ func (s *Store) EnsureFreeBucket(userID int64, username string) error {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	uu, ss := genBucketCreds()
+	_, _, err = ensureUserProtocolCredential(s.db, userID, username, time.Now().Unix())
+	if err != nil {
+		return err
+	}
 	_, err = insertBucket(s.db, &Bucket{
 		UserID: userID, Kind: KindFree, Name: "免费流量",
-		ClientName: fmt.Sprintf("qz_%s_free", username), ClientUUID: uu, ClientSecret: ss,
+		ClientName: fmt.Sprintf("qz_%s_free", username),
 	})
 	return err
 }
@@ -552,10 +557,13 @@ func (s *Store) EnsureWelcomeBucket(userID int64, username string, traffic, expi
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}
-	uu, ss := genBucketCreds()
+	_, _, err = ensureUserProtocolCredential(tx, userID, username, time.Now().Unix())
+	if err != nil {
+		return err
+	}
 	if _, err = insertBucket(tx, &Bucket{
 		UserID: userID, Kind: "plan", PackageID: WelcomePackageID, Name: "注册赠送",
-		ClientName: fmt.Sprintf("qz_%s_welcome", username), ClientUUID: uu, ClientSecret: ss,
+		ClientName:   fmt.Sprintf("qz_%s_welcome", username),
 		TrafficLimit: traffic, ExpiryAt: expiry,
 	}); err != nil {
 		return err
@@ -573,6 +581,12 @@ func (s *Store) EnsureWelcomeBucket(userID int64, username string, traffic, expi
 // EnsurePoolBucket creates the user's pool bucket with the given identity if it
 // has none yet (called when a new user is provisioned).
 func (s *Store) EnsurePoolBucket(userID int64, name, clientUUID, clientSecret string) error {
+	// Provisioning normally wrote users first and the pool second. Keep this
+	// helper safe for imports/tests/admin flows that arrive in the opposite order:
+	// the first supplied credential becomes the user's stable protocol identity.
+	if _, _, err := ensureSpecificUserProtocolCredential(s.db, userID, name, clientUUID, clientSecret, time.Now().Unix()); err != nil {
+		return err
+	}
 	var id int64
 	err := s.db.QueryRow(`SELECT id FROM user_plans WHERE user_id=? AND kind='pool' ORDER BY id LIMIT 1`, userID).Scan(&id)
 	if err == nil {
@@ -583,19 +597,20 @@ func (s *Store) EnsurePoolBucket(userID int64, name, clientUUID, clientSecret st
 	}
 	_, err = insertBucket(s.db, &Bucket{
 		UserID: userID, Kind: "pool", Name: "通用流量",
-		ClientName: name, ClientUUID: clientUUID, ClientSecret: clientSecret,
+		ClientName: name,
 	})
 	return err
 }
 
 // Bucket is an independently-metered unit a user holds: a purchased plan
-// (Kind="plan") or the shared traffic-package pool (Kind="pool"). Each carries
-// its own sing-box identity so per-identity stats give per-bucket usage.
+// (Kind="plan") or the shared traffic-package pool (Kind="pool"). ClientName is
+// its stats identity; ClientUUID/ClientSecret resolve to the stable user pair.
 type Bucket struct {
 	ID           int64  `json:"id"`
 	UserID       int64  `json:"user_id"`
 	Kind         string `json:"kind"` // plan | pool
 	PackageID    int64  `json:"package_id"`
+	QueueKey     string `json:"queue_key,omitempty"`
 	Name         string `json:"name"`
 	ClientName   string `json:"-"`
 	ClientUUID   string `json:"-"`
@@ -609,7 +624,7 @@ type Bucket struct {
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
 	// Status is the queue state of a plan bucket: 'active' (the current head that
-	// meters/renders) or 'queued' (a same-package purchase waiting its turn; not
+	// meters/renders) or 'queued' (a same-queue purchase waiting its turn; not
 	// yet counting down and not in any config). pool/free are always 'active'.
 	// DurationDays is the package duration a queued bucket applies to its expiry
 	// when it is promoted to active.
@@ -677,11 +692,9 @@ func (b *Bucket) Active(now int64) bool {
 
 // bucketCols selects a bucket with its credentials already resolved.
 //
-// For a plan份 the credentials come from plan_identities — the subscription line
-// it belongs to — so every份 of the same (user, package) reports the SAME
-// identity no matter how many times the queue has advanced. p.client_* is the
-// fallback, which is what pool/free/grant buckets (one per user, never handed
-// over) use, and what a plan份 uses until the identity row exists.
+// The internal stats name still comes from the package line (or the bucket for
+// pool/free/grants), while UUID/secret always come from users. Thus a queue or
+// node owner can change without changing the credential already in the client.
 //
 // Resolving here rather than at each call site means everything downstream —
 // config generation, link building, ownership — keeps reading b.ClientUUID and
@@ -691,9 +704,9 @@ func (b *Bucket) Active(now int64) bool {
 // plain COALESCE would not do, because an identity row stores an empty string
 // rather than NULL for "no proxy account", and empty is a value — it would shadow
 // account still sitting on the bucket row instead of falling through to it.
-const bucketCols = `p.id, p.user_id, p.kind, p.package_id, p.name,
-	COALESCE(i.client_name, p.client_name), COALESCE(i.client_uuid, p.client_uuid),
-	COALESCE(i.client_secret, p.client_secret),
+const bucketCols = `p.id, p.user_id, p.kind, p.package_id, p.queue_key, p.name,
+	COALESCE(i.client_name, p.client_name),
+	COALESCE(u.client_uuid,''), COALESCE(u.client_secret,''),
 	p.traffic_limit, p.used_up, p.used_down, p.expiry_at, p.last_online_at, p.order_id,
 	p.created_at, p.updated_at,
 	CASE WHEN COALESCE(i.proxy_username,'')<>'' THEN i.proxy_username ELSE p.proxy_username END,
@@ -702,15 +715,16 @@ const bucketCols = `p.id, p.user_id, p.kind, p.package_id, p.name,
 	p.status, p.duration_days`
 
 // bucketFrom is the FROM clause bucketCols expects. The join is scoped to real
-// plan份 (package_id>0); pool/free and the package-less grants keep their own row
-// credentials.
+// plan份 (package_id>0); pool/free and package-less grants keep their row stats
+// names. The users join supplies protocol authentication for every kind.
 const bucketFrom = ` FROM user_plans p
 	LEFT JOIN plan_identities i
-	  ON i.user_id=p.user_id AND i.package_id=p.package_id AND p.kind='plan' AND p.package_id>0`
+	  ON i.user_id=p.user_id AND i.package_id=p.package_id AND p.kind='plan' AND p.package_id>0
+	LEFT JOIN users u ON u.id=p.user_id`
 
 func scanBucket(sc scanner) (*Bucket, error) {
 	var b Bucket
-	err := sc.Scan(&b.ID, &b.UserID, &b.Kind, &b.PackageID, &b.Name, &b.ClientName, &b.ClientUUID,
+	err := sc.Scan(&b.ID, &b.UserID, &b.Kind, &b.PackageID, &b.QueueKey, &b.Name, &b.ClientName, &b.ClientUUID,
 		&b.ClientSecret, &b.TrafficLimit, &b.UsedUp, &b.UsedDown, &b.ExpiryAt, &b.LastOnlineAt,
 		&b.OrderID, &b.CreatedAt, &b.UpdatedAt,
 		&b.ProxyUsername, &b.ProxyPassword, &b.ProxyExpiresAt, &b.Status, &b.DurationDays)
@@ -864,7 +878,7 @@ func (s *Store) DeleteBucket(userID, bucketID int64) (*Bucket, error) {
 //
 // Shrinking an active head onto (or below) its used bytes exhausts it, so
 // advanceUserQueues runs in the same transaction and promotes the next queued
-// same-package份 — otherwise the user would sit over-quota with a paid份 waiting
+// same-renewal-line份 — otherwise the user would sit over-quota with a paid份 waiting
 // until the periodic ticker noticed.
 func (s *Store) AdjustBucketTraffic(userID, bucketID, delta int64) (*Bucket, error) {
 	if delta == 0 {
@@ -940,9 +954,7 @@ func (s *Store) AdjustBucketTraffic(userID, bucketID, delta int64) (*Bucket, err
 // resolveStatsIdentity would — the one in service — rather than whichever row the
 // query happened to return first.
 func (s *Store) BucketByClientName(name string) (*Bucket, error) {
-	if base, ok := baseRouteIdentity(name); ok {
-		name = base
-	}
+	name, _ = canonicalStatsIdentity(name)
 	return scanBucket(s.db.QueryRow(`SELECT `+bucketCols+bucketFrom+`
 		WHERE COALESCE(i.client_name, p.client_name)=?
 		ORDER BY `+usableExpr("p")+` DESC, p.id DESC
@@ -1060,10 +1072,10 @@ func insertBucket(ex execer, b *Bucket) (int64, error) {
 		status = "active" // pool/free/grant buckets are active on creation
 	}
 	res, err := ex.Exec(`INSERT INTO user_plans
-		(user_id, kind, package_id, name, client_name, client_uuid, client_secret,
+		(user_id, kind, package_id, queue_key, name, client_name,
 		 traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, status, duration_days, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.UserID, b.Kind, b.PackageID, b.Name, b.ClientName, b.ClientUUID, b.ClientSecret,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.UserID, b.Kind, b.PackageID, b.QueueKey, b.Name, b.ClientName,
 		b.TrafficLimit, b.UsedUp, b.UsedDown, b.ExpiryAt, b.LastOnlineAt, b.OrderID, status, b.DurationDays, b.CreatedAt, now)
 	if err != nil {
 		return 0, err
@@ -1079,9 +1091,7 @@ func (s *Store) AddBucketUsage(statName string, up, down int64) error {
 	if statName == "" || (up == 0 && down == 0) {
 		return nil
 	}
-	if base, ok := baseRouteIdentity(statName); ok {
-		statName = base
-	}
+	statName, _ = canonicalStatsIdentity(statName)
 	now := time.Now().Unix()
 	// One transaction: the bucket counter, the mirrored user aggregate, and the
 	// time-series sample must all land together (they may otherwise run on
@@ -1144,9 +1154,7 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 	// bucket/account identity before resolving and writing usage.
 	canonical := make(map[string]UsageDelta, len(deltas))
 	for name, d := range deltas {
-		if base, ok := baseRouteIdentity(name); ok {
-			name = base
-		}
+		name, _ = canonicalStatsIdentity(name)
 		cur := canonical[name]
 		cur.Up += d.Up
 		cur.Down += d.Down
@@ -1462,7 +1470,8 @@ func (s *Store) mergeDuplicatePlanBuckets() error {
 // backfillUserPlans seeds the bucket model from the legacy single-plan columns
 // on first run (idempotent: skipped once any bucket exists). Existing clients
 // keep working because a plan bucket reuses the user's current identity; the
-// pool gets a fresh identity and starts empty.
+// pool starts empty. Protocol credentials now live on users; the legacy bucket
+// credential columns are deliberately left empty on new writes.
 func (s *Store) backfillUserPlans() error {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM user_plans`).Scan(&n); err != nil || n > 0 {
@@ -1501,30 +1510,29 @@ func (s *Store) backfillUserPlans() error {
 			primaryName = fmt.Sprintf("qz_%s", u.username)
 		}
 		if u.planID.Valid && u.planID.Int64 > 0 {
-			// Existing identity becomes the migrated plan; pool is new & empty.
+			// The migrated plan keeps its stats name; the pool is new and empty.
 			name := "套餐"
 			if p, _ := s.GetPackage(u.planID.Int64); p != nil {
 				name = p.Name
 			}
 			if _, err := insertBucket(s.db, &Bucket{
 				UserID: u.id, Kind: "plan", PackageID: u.planID.Int64, Name: name,
-				ClientName: primaryName, ClientUUID: u.cuuid.String, ClientSecret: u.csecret.String,
+				ClientName:   primaryName,
 				TrafficLimit: u.limit, UsedUp: u.up, UsedDown: u.down, ExpiryAt: u.expiry,
 			}); err != nil {
 				return err
 			}
-			pu, ps := genBucketCreds()
 			if _, err := insertBucket(s.db, &Bucket{
 				UserID: u.id, Kind: "pool", Name: "通用流量",
-				ClientName: primaryName + "_pool", ClientUUID: pu, ClientSecret: ps,
+				ClientName: primaryName + "_pool",
 			}); err != nil {
 				return err
 			}
 		} else {
-			// No plan: existing identity becomes the pool, carrying any balance.
+			// No plan: the pool carries the legacy balance and stats name.
 			if _, err := insertBucket(s.db, &Bucket{
 				UserID: u.id, Kind: "pool", Name: "通用流量",
-				ClientName: primaryName, ClientUUID: u.cuuid.String, ClientSecret: u.csecret.String,
+				ClientName:   primaryName,
 				TrafficLimit: u.limit, UsedUp: u.up, UsedDown: u.down,
 			}); err != nil {
 				return err

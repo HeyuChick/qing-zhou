@@ -19,6 +19,10 @@
           <span v-if="server.price" class="chip">¥{{ server.price }}/月</span>
           <span v-if="server.days_left != null" class="chip" :class="{ danger: server.days_left <= 7 }">剩余 {{ server.days_left }} 天</span>
           <span v-if="server.metrics" class="chip">运行 {{ fmtUptime(server.metrics.uptime) }}</span>
+          <span v-if="server.local" class="chip">面板内置采集 {{ server.probe_version }}</span>
+          <span v-else-if="server.metrics" class="chip" :class="{ danger: server.probe_outdated }">
+            探针 {{ server.probe_version || '版本未知' }}{{ server.probe_outdated ? ` · 待升级至 ${server.probe_target_version}` : '' }}
+          </span>
         </div>
 
         <!-- 实时指标卡 -->
@@ -47,6 +51,11 @@
           <div class="metric-card">
             <span class="m-label">网络下行</span>
             <span class="m-val">{{ fmtBytes(server.metrics.net_rx) }}/s</span>
+          </div>
+          <div class="metric-card">
+            <span class="m-label">所选区间总流量（IN + OUT）</span>
+            <span class="m-val">{{ trafficStatus }}</span>
+            <span class="m-sub">IN {{ trafficReady ? fmtBytes(trafficUsage.rx) : '—' }} / OUT {{ trafficReady ? fmtBytes(trafficUsage.tx) : '—' }}</span>
           </div>
           <div class="metric-card">
             <span class="m-label">系统负载</span>
@@ -98,6 +107,7 @@ const server = ref<any>(null)
 const range = ref('24h')
 const series = ref(['cpu', 'mem', 'net'])
 const chartEl = ref<HTMLElement | null>(null)
+const trafficUsage = ref<any>({})
 let chart: echarts.ECharts | null = null
 let metrics: any[] = []
 let resizeObs: ResizeObserver | null = null
@@ -109,6 +119,11 @@ const ranges = [
 
 const memPct = computed(() => server.value?.metrics ? pct(server.value.metrics.mem_used, server.value.metrics.mem_total) : 0)
 const diskPct = computed(() => server.value?.metrics ? pct(server.value.metrics.disk_used, server.value.metrics.disk_total) : 0)
+const trafficReady = computed(() => (trafficUsage.value?.sample_count || 0) >= 2)
+const trafficStatus = computed(() => {
+  if (trafficReady.value) return fmtBytes(trafficUsage.value.total)
+  return server.value?.metrics?.net_totals_valid ? '采集中' : '需升级探针'
+})
 
 function pctClass(v: number) { return v >= 90 ? 'crit' : v >= 70 ? 'warn' : 'ok' }
 function pctColor(v: number) { return v >= 90 ? '#c2685c' : v >= 70 ? '#bf9540' : '#6f8f76' }
@@ -125,6 +140,7 @@ async function loadChart() {
   try {
     const data = await apiGet<any>(`/api/admin/monitor/servers/${sid}/metrics?range=${range.value}`)
     metrics = data?.data || []
+    trafficUsage.value = data?.traffic_usage || {}
     await nextTick()
     drawChart()
   } catch {}

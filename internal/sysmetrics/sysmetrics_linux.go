@@ -49,6 +49,9 @@ func (s *Sampler) Sample() Metrics {
 
 	curNet, err := readNetDev()
 	if err == nil {
+		m.NetRxTotal = curNet.rx
+		m.NetTxTotal = curNet.tx
+		m.NetTotalsValid = true
 		if s.prevNet != nil && !s.prevAt.IsZero() {
 			m.NetRx, m.NetTx = calcNetSpeed(*s.prevNet, curNet, now.Sub(s.prevAt).Seconds())
 		}

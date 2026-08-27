@@ -14,6 +14,14 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+-- Versioned, one-shot data migrations. Fresh installs run the same migration
+-- chain against an empty DB and record completion; upgrades transform the rows
+-- already present. Runtime business code never branches on installation age.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version    TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   username        TEXT    NOT NULL UNIQUE,
@@ -52,6 +60,11 @@ CREATE TABLE IF NOT EXISTS users (
   -- comped, ...). Panel-side only: never rendered into sing-box config, never
   -- shown to the user themselves.
   remark          TEXT    NOT NULL DEFAULT '',
+  -- Coarse operational telemetry for subscription support. Client is a bounded
+  -- category, never the raw User-Agent; timestamps are throttled by the writer.
+  sub_last_fetched_at INTEGER NOT NULL DEFAULT 0,
+  sub_last_format  TEXT    NOT NULL DEFAULT '',
+  sub_last_client  TEXT    NOT NULL DEFAULT '',
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -60,6 +73,7 @@ CREATE TABLE IF NOT EXISTS packages (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   type          TEXT    NOT NULL,            -- traffic | plan
   name          TEXT    NOT NULL,
+  queue_key     TEXT    NOT NULL DEFAULT '', -- blank = this package's own renewal line
   description   TEXT    NOT NULL DEFAULT '',
   highlights    TEXT    NOT NULL DEFAULT '',   -- JSON array of selling-point bullets
   price_points  INTEGER NOT NULL DEFAULT 0,
@@ -354,9 +368,9 @@ CREATE TABLE IF NOT EXISTS sb_egresses (
 );
 
 -- A "bucket" = an independently-metered unit a user holds: either a purchased
--- subscription plan or the shared traffic-package pool. Each bucket has its OWN
--- sing-box identity (client_name/uuid/secret) so sing-box's per-identity traffic
--- stats give per-bucket usage, its own quota, and its own expiry. Replaces the
+-- subscription plan or the shared traffic-package pool. Each bucket has its own
+-- internal client_name so sing-box's per-identity stats give per-bucket usage;
+-- UUID/secret authenticate the user and are stable across buckets. Replaces the
 -- single users.current_plan_id/traffic_limit/expiry_at model so a user can hold
 -- several plans that expire and run out independently.
 --   kind='plan': package_id → plan_groups; has expiry. kind='pool': package_id=0,
@@ -367,6 +381,7 @@ CREATE TABLE IF NOT EXISTS user_plans (
   user_id        INTEGER NOT NULL,
   kind           TEXT    NOT NULL DEFAULT 'plan',  -- plan | pool
   package_id     INTEGER NOT NULL DEFAULT 0,
+  queue_key      TEXT    NOT NULL DEFAULT '', -- effective renewal-line snapshot
   name           TEXT    NOT NULL DEFAULT '',       -- snapshot, survives pkg delete
   client_name    TEXT    NOT NULL,                  -- sing-box stats identity (unique)
   client_uuid    TEXT    NOT NULL DEFAULT '',
@@ -381,19 +396,14 @@ CREATE TABLE IF NOT EXISTS user_plans (
   updated_at     INTEGER NOT NULL
 );
 
--- The credentials a user's client authenticates with, per subscription line —
--- one row per (user, package), NOT per purchase.
+-- One internal subscription/metering line per (user, package), NOT per purchase.
 --
 -- Each purchase gets its own user_plans row because metering is per份: every月
--- needs its own quota and its own counters. Credentials are the opposite: they
--- must never change, or every client silently stops working the moment one份
--- hands over to the next. Keeping both on the same row forced the credentials to
--- be shuffled between rows at every handoff, which broke whenever the row they
--- were being read from had been deleted (a refund, an admin revoke).
+-- needs its own quota and counters. client_name and optional mixed-proxy fields
+-- stay on the line so usage follows the active份. client_uuid/client_secret are
+-- retained as migration source columns; users.client_* is runtime authority.
 --
--- Splitting them means a handoff is just two status changes. This table is the
--- authority; user_plans.client_* survives only for pool/free/grant buckets,
--- which are one-per-user and never hand over.
+-- Splitting the line from the份 means a handoff is just two status changes.
 CREATE TABLE IF NOT EXISTS plan_identities (
   user_id          INTEGER NOT NULL,
   package_id       INTEGER NOT NULL,
@@ -406,6 +416,23 @@ CREATE TABLE IF NOT EXISTS plan_identities (
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
   PRIMARY KEY (user_id, package_id)
+);
+
+-- Protocol credentials accepted temporarily after a credential/model upgrade.
+-- A fresh installation has no rows. They are deliberately separate from the
+-- user's primary users.client_* pair, so compatibility expires cleanly instead
+-- of becoming a permanent second identity model. source_name is needed to
+-- reproduce credentials of pre-upgrade logical routes, whose old derivation
+-- included the historical stats name.
+CREATE TABLE IF NOT EXISTS user_credential_aliases (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL,
+  source_name   TEXT    NOT NULL,
+  client_uuid   TEXT    NOT NULL DEFAULT '',
+  client_secret TEXT    NOT NULL DEFAULT '',
+  valid_until   INTEGER NOT NULL,
+  created_at    INTEGER NOT NULL,
+  UNIQUE(user_id, source_name, client_uuid, client_secret)
 );
 
 -- Per-user traffic time-series, one row per stats poll that saw traffic. Feeds
@@ -472,11 +499,12 @@ CREATE TABLE IF NOT EXISTS servers (
 
 -- ===== Monitor probe (轻舟探针) =====
 -- Per-server system metrics time-series, one row per agent report.
--- Pruned to a rolling window (default 30 days).
+-- Pruned to a rolling 35-day window (enough for a complete calendar month).
 CREATE TABLE IF NOT EXISTS server_metrics (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   server_id       INTEGER NOT NULL,
   ts              INTEGER NOT NULL,
+  probe_version   TEXT    NOT NULL DEFAULT '',
   cpu_percent     REAL    NOT NULL DEFAULT 0,
   mem_used        INTEGER NOT NULL DEFAULT 0,
   mem_total       INTEGER NOT NULL DEFAULT 0,
@@ -486,6 +514,13 @@ CREATE TABLE IF NOT EXISTS server_metrics (
   disk_total      INTEGER NOT NULL DEFAULT 0,
   net_rx          INTEGER NOT NULL DEFAULT 0,
   net_tx          INTEGER NOT NULL DEFAULT 0,
+  -- Raw /proc/net/dev counters. Unlike net_rx/net_tx (instantaneous B/s),
+  -- successive totals can be differenced into accurate interval usage.
+  net_rx_total    INTEGER NOT NULL DEFAULT 0,
+  net_tx_total    INTEGER NOT NULL DEFAULT 0,
+  net_totals_valid INTEGER NOT NULL DEFAULT 0,
+  net_rx_bytes    INTEGER NOT NULL DEFAULT 0,
+  net_tx_bytes    INTEGER NOT NULL DEFAULT 0,
   load1           REAL    NOT NULL DEFAULT 0,
   load5           REAL    NOT NULL DEFAULT 0,
   load15          REAL    NOT NULL DEFAULT 0,
@@ -621,6 +656,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_client ON user_plans(client_nam
 CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_identities_client ON plan_identities(client_name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_identities_proxy ON plan_identities(proxy_username) WHERE proxy_username <> '';
 CREATE INDEX IF NOT EXISTS idx_user_plans_user ON user_plans(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_plans_queue ON user_plans(user_id, queue_key, status, id);
+CREATE INDEX IF NOT EXISTS idx_credential_aliases_user ON user_credential_aliases(user_id, valid_until);
 CREATE INDEX IF NOT EXISTS idx_traffic_samples_user_ts ON traffic_samples(user_id, ts);
 CREATE INDEX IF NOT EXISTS idx_traffic_samples_ts ON traffic_samples(ts);
 CREATE INDEX IF NOT EXISTS idx_traffic_daily_user_day ON traffic_daily(user_id, day);
@@ -740,6 +777,9 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE node_sources ADD COLUMN group_ids TEXT NOT NULL DEFAULT ''`,
 		// Shop selling-point bullets, stored as a JSON array of strings.
 		`ALTER TABLE packages ADD COLUMN highlights TEXT NOT NULL DEFAULT ''`,
+		// Renewal grouping: blank preserves the historical one-package-per-line
+		// behaviour; user_plans snapshots the effective key when granted.
+		`ALTER TABLE packages ADD COLUMN queue_key TEXT NOT NULL DEFAULT ''`,
 		// Selectable durations (30/90/365天…), JSON array of {days,price_points,traffic_bytes}.
 		// '' keeps the package single-duration, priced by its own columns — which is
 		// exactly what every pre-existing row is.
@@ -781,6 +821,11 @@ func (s *Store) Migrate() error {
 		// list keeps its historical order.
 		`ALTER TABLE sb_tls ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN last_online_at INTEGER NOT NULL DEFAULT 0`,
+		// Last successful subscription response. Store only a bounded client class,
+		// never the raw User-Agent/IP; RecordSubscriptionFetch throttles writes.
+		`ALTER TABLE users ADD COLUMN sub_last_fetched_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN sub_last_format TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN sub_last_client TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN creds_reset_at INTEGER NOT NULL DEFAULT 0`,
 		// Admin-only note on an account. Panel-side metadata; nothing downstream
 		// (sing-box config, subscriptions, the user's own pages) reads it.
@@ -822,6 +867,16 @@ func (s *Store) Migrate() error {
 		// public page. The panel's own machine is the opposite case and is not a
 		// row here: it defaults to hidden, via the monitor_local_public setting.
 		`ALTER TABLE servers ADD COLUMN public_visible INTEGER NOT NULL DEFAULT 1`,
+		// Per-machine traffic accounting. Old probe rows remain explicitly invalid
+		// rather than pretending that their missing cumulative counters were zero.
+		`ALTER TABLE server_metrics ADD COLUMN net_rx_total INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_metrics ADD COLUMN net_tx_total INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_metrics ADD COLUMN net_totals_valid INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_metrics ADD COLUMN net_rx_bytes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_metrics ADD COLUMN net_tx_bytes INTEGER NOT NULL DEFAULT 0`,
+		// Version of the reporting qingzhou-probe binary. Blank identifies probes
+		// from before version reporting existed and lets the UI request an upgrade.
+		`ALTER TABLE server_metrics ADD COLUMN probe_version TEXT NOT NULL DEFAULT ''`,
 		// Prorated refunds: record how much was actually refunded on each order so
 		// admin reporting and idempotent re-reads reflect the real (possibly partial)
 		// amount instead of the original price. refund_ratio is the applied fraction
@@ -852,6 +907,7 @@ func (s *Store) Migrate() error {
 		// Existing rows default to 'active' so their behavior is unchanged.
 		`ALTER TABLE user_plans ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
 		`ALTER TABLE user_plans ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE user_plans ADD COLUMN queue_key TEXT NOT NULL DEFAULT ''`,
 		// A proxy_username must be globally unique (it becomes a stats identity);
 		// partial index so the many empty defaults don't collide.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_proxy_username ON user_plans(proxy_username) WHERE proxy_username <> ''`,
@@ -933,6 +989,12 @@ func (s *Store) Migrate() error {
 			log.Printf("migrate: statement failed (continuing): %q: %v", stmt, err)
 		}
 	}
+	// Old rows predate queue_key. Their historical behaviour was one independent
+	// line per package, represented by the same derived default new writes use.
+	if _, err := s.db.Exec(`UPDATE user_plans SET queue_key='pkg:'||package_id
+		WHERE kind='plan' AND package_id>0 AND queue_key=''`); err != nil {
+		return err
+	}
 	// Indexes last, now that every column they can name exists. Statement by
 	// statement, and a failure is logged rather than returned: an index is a
 	// lookup aid (uniqueness here is enforced in Go first — see proxyNameTaken),
@@ -971,6 +1033,13 @@ func (s *Store) Migrate() error {
 	// plan_identities, taking them from the份 in service so nobody's client is
 	// disconnected by the upgrade (idempotent).
 	if err := s.backfillPlanIdentities(); err != nil {
+		return err
+	}
+	// Move protocol authentication to the user's stable credential. On an
+	// upgraded DB this captures every credential clients may already hold as a
+	// time-limited alias; on a fresh DB there are no rows to capture and only the
+	// migration marker is written.
+	if err := s.migrateStableProtocolCredentials(); err != nil {
 		return err
 	}
 	// Collapse duplicate plan buckets left by pre-renewal repurchases (idempotent).

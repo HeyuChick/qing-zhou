@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"qingzhou/internal/intervalcfg"
 )
 
 // ServerAlert represents one alert *episode* for a server: a condition that
@@ -292,7 +294,7 @@ func (s *Store) CheckProbeAlerts() error {
 		servers = append(servers, local)
 	}
 	now := time.Now()
-	twoMinAgo := now.Add(-2 * time.Minute).Unix()
+	freshSince := now.Add(-intervalcfg.OnlineWindow(s)).Unix()
 	threeDaysLater := now.AddDate(0, 0, 3)
 
 	// Thresholds are configurable via settings (alert_cpu/mem/disk_threshold).
@@ -340,8 +342,8 @@ func (s *Store) CheckProbeAlerts() error {
 			_, _ = s.InsertAlert(ServerAlert{ServerID: sv.ID, Type: typ, Message: msg})
 		}
 
-		// Offline: last_seen > 2 minutes ago
-		if sv.LastSeen > 0 && sv.LastSeen < twoMinAgo {
+		// Offline: last_seen older than the live cadence-aware freshness window.
+		if sv.LastSeen > 0 && sv.LastSeen < freshSince {
 			raise("offline", fmt.Sprintf("服务器「%s」离线，最后上报: %s", sv.Name, time.Unix(sv.LastSeen, 0).Format("2006-01-02 15:04")))
 		}
 
@@ -360,7 +362,7 @@ func (s *Store) CheckProbeAlerts() error {
 		// unknown, so they are neither raised nor resolved (the offline alert
 		// already covers that case).
 		m, _ := s.GetLatestMetrics(sv.ID)
-		fresh := m != nil && m.Ts >= twoMinAgo
+		fresh := m != nil && m.Ts >= freshSince
 		if fresh {
 			if m.CPUPercent > float64(cpuThreshold) {
 				raise("high_cpu", fmt.Sprintf("服务器「%s」CPU 使用率 %.1f%%", sv.Name, m.CPUPercent))
