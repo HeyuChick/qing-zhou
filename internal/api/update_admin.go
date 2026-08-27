@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -112,4 +113,21 @@ func (a *API) handleUpdateRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ok(w, J{"started": true})
+}
+
+// StartHostedProbeSync aligns QZ_PROBE_DIR with this panel's own release after
+// boot. In-panel self-update used to replace only the panel binary, so the
+// first start of a version that knows how to refresh probes is when the hosted
+// agents actually catch up. Failures are logged; they must not delay listen.
+func (a *API) StartHostedProbeSync(ctx context.Context) {
+	if a == nil || a.updater == nil {
+		return
+	}
+	go func() {
+		c, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		if note := a.updater.SyncHostedProbes(c); note != "" {
+			log.Printf("hosted probe sync: %s", note)
+		}
+	}()
 }

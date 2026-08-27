@@ -118,7 +118,7 @@
           </div>
         </template>
         <template #header-extra>
-          <n-space :size="4" align="center">
+          <n-space :size="4" align="center" wrap>
             <n-tooltip trigger="hover">
               <template #trigger>
                 <n-switch :value="s.public_visible" size="small" :loading="visSaving === s.id" @update:value="(v:boolean) => setPublicVisible(s, v)" />
@@ -692,13 +692,37 @@ onUnmounted(() => {
 .spacer { flex: 1; }
 .cnt { font-size: 12px; color: var(--text-3); }
 
-/* 服务器卡 */
+/* 服务器卡
+   n-card 自带 word-break:break-word，CJK 的 min-content 宽就是一字。
+   header-extra 里按钮一多，标题列被挤成单字宽，名字就竖排下来。 */
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
-.srv-head { display: flex; align-items: center; gap: 8px; }
+.srv-card { word-break: normal; overflow-wrap: break-word; }
+.srv-card :deep(.n-card-header) {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+.srv-card :deep(.n-card-header__main) {
+  flex: 1 1 16rem;
+  min-width: min(100%, 12rem);
+}
+.srv-card :deep(.n-card-header__extra) {
+  flex: 0 0 auto;
+  max-width: 100%;
+}
+.srv-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .dot.online { background: #10b981; box-shadow: 0 0 8px rgba(16,185,129,.5); }
 .dot.offline { background: #ef4444; }
-.srv-name { font-weight: 650; cursor: pointer; }
+.srv-name {
+  font-weight: 650;
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: keep-all;
+}
 .srv-name:hover { text-decoration: underline; }
 
 .asset-line { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }

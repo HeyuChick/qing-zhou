@@ -103,6 +103,7 @@ func main() {
 	app.StartSourceSync(ctx, time.Hour)
 	app.StartMaintenance(ctx, time.Hour)
 	app.StartMonitorTasks(ctx)
+	app.StartHostedProbeSync(ctx)
 	app.StartCertRenew(ctx, 12*time.Hour)
 	// Tracked in bgWG for the same reason the controller is: it opens write
 	// transactions, so shutdown must let an in-flight sweep finish before the

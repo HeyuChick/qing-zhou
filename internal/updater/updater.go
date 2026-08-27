@@ -40,6 +40,10 @@ func assetName() string {
 	return fmt.Sprintf("qingzhou-%s-%s", runtime.GOOS, runtime.GOARCH)
 }
 
+func probeAssetName(arch string) string {
+	return "probe-linux-" + arch
+}
+
 // Status is a coarse phase of an in-flight update.
 type Status string
 
@@ -100,6 +104,7 @@ type Manager struct {
 	mu      sync.Mutex
 	state   State
 	running bool
+	probeMu sync.Mutex
 }
 
 // New builds a Manager. repoFn/tokenFn may be nil; sensible defaults are used.
@@ -558,6 +563,14 @@ func (m *Manager) run(pinned string) {
 		return
 	}
 
+	// One-click probe install copies whatever sits in QZ_PROBE_DIR. In-panel
+	// self-update used to replace only the panel binary, so a later "一键升级"
+	// still pushed the old agent (no -version flag). Refreshing here keeps the
+	// hosted probes on the same release as the panel about to start.
+	if note := refreshHostedProbes(ctx, m, rel, target); note != "" {
+		m.setState(StatusInstalling, note, 100, target)
+	}
+
 	m.setState(StatusRestarting, "更新完成，正在重启服务…", 100, target)
 	// Give the HTTP layer a beat to flush any in-flight status poll, then
 	// re-exec. On success this call does not return.
@@ -618,6 +631,10 @@ func (m *Manager) fetchSignature(ctx context.Context, url string) ([]byte, error
 // download streams url into dst, returning the lowercase hex sha256 of the body
 // and updating progress from the known content length.
 func (m *Manager) download(ctx context.Context, url, dst string, size int64) (string, error) {
+	return m.downloadFile(ctx, url, dst, size, true)
+}
+
+func (m *Manager) downloadFile(ctx context.Context, url, dst string, size int64, reportProgress bool) (string, error) {
 	req, err := m.newRequest(ctx, url)
 	if err != nil {
 		return "", err
@@ -643,11 +660,14 @@ func (m *Manager) download(ctx context.Context, url, dst string, size int64) (st
 	defer f.Close()
 
 	h := sha256.New()
-	pw := &progressWriter{m: m, total: size}
+	writers := []io.Writer{f, h}
+	if reportProgress {
+		writers = append(writers, &progressWriter{m: m, total: size})
+	}
 	// Bounded: see maxAssetBytes. Read one byte past the cap so an oversized
 	// body is reported as such instead of silently truncating into a digest
 	// mismatch (a confusing "tampered" message for what is really a bad repo).
-	n, err := io.Copy(io.MultiWriter(f, h, pw), io.LimitReader(resp.Body, maxAssetBytes+1))
+	n, err := io.Copy(io.MultiWriter(writers...), io.LimitReader(resp.Body, maxAssetBytes+1))
 	if err != nil {
 		return "", err
 	}
@@ -701,4 +721,125 @@ func parseSHA256(d string) string {
 		return ""
 	}
 	return strings.ToLower(d)
+}
+
+// probeDir is the directory this panel serves probe binaries from. Empty means
+// the operator never configured hosting (QZ_PROBE_DIR unset and no default
+// dist), so there is nothing for an in-panel update to refresh.
+func probeDir() string {
+	if dir := strings.TrimSpace(os.Getenv("QZ_PROBE_DIR")); dir != "" {
+		return dir
+	}
+	return ""
+}
+
+// errProbeCurrent means the file on disk already matches the release digest,
+// so there is nothing to download. Distinguishes "already good" from a failure
+// so a boot-time sync stays quiet when install.sh (or a previous sync) did the
+// work, without looking like a skipped asset.
+var errProbeCurrent = errors.New("hosted probe already current")
+
+// SyncHostedProbes aligns QZ_PROBE_DIR with the running panel's own release.
+// In-panel self-update used to replace only the panel binary; the first boot
+// of a version that knows how to refresh probes is therefore the moment the
+// hosted agents actually catch up. Dev builds have no tag to fetch.
+func (m *Manager) SyncHostedProbes(ctx context.Context) string {
+	if m == nil || version.IsDev() {
+		return ""
+	}
+	if probeDir() == "" {
+		return ""
+	}
+	tag := strings.TrimSpace(version.Current())
+	if !validTag(tag) {
+		return ""
+	}
+	rel, err := m.releaseByTag(ctx, tag)
+	if err != nil {
+		return "同步托管探针失败: " + err.Error()
+	}
+	return refreshHostedProbes(ctx, m, rel, tag)
+}
+
+// refreshHostedProbes copies probe-linux-amd64/arm64 from the same release as
+// the panel just installed. Failures are returned as a status note rather than
+// aborting the update: the new panel is already on disk, and a missing probe
+// asset must not undo that. Callers that need a hard failure use
+// installHostedProbe directly in tests.
+func refreshHostedProbes(ctx context.Context, m *Manager, rel *ghRelease, target string) string {
+	if m == nil {
+		return ""
+	}
+	m.probeMu.Lock()
+	defer m.probeMu.Unlock()
+	dir := probeDir()
+	if dir == "" {
+		return ""
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return "面板已更新；探针目录不可用，一键安装仍会下发旧探针"
+	}
+	var ok, skipped []string
+	for _, arch := range []string{"amd64", "arm64"} {
+		name := probeAssetName(arch)
+		asset := findAsset(rel, name)
+		if asset == nil {
+			skipped = append(skipped, name+" 缺失")
+			continue
+		}
+		dst := filepath.Join(dir, name)
+		if err := installHostedProbe(ctx, m, asset, dst); err != nil {
+			if errors.Is(err, errProbeCurrent) {
+				continue
+			}
+			skipped = append(skipped, name+"："+err.Error())
+			continue
+		}
+		ok = append(ok, name)
+	}
+	if len(ok) == 0 && len(skipped) == 0 {
+		return ""
+	}
+	msg := "面板 " + target + " 已安装"
+	if len(ok) > 0 {
+		msg += "；已刷新探针 " + strings.Join(ok, "、")
+	}
+	if len(skipped) > 0 {
+		msg += "；未刷新 " + strings.Join(skipped, "、")
+	}
+	return msg
+}
+
+func installHostedProbe(ctx context.Context, m *Manager, asset *ghAsset, dst string) error {
+	if asset == nil {
+		return errors.New("缺少探针资产")
+	}
+	wantDigest := parseSHA256(asset.Digest)
+	if wantDigest == "" {
+		return errors.New("资产缺少 sha256 摘要")
+	}
+	if sum, _, err := fileSHA256(dst); err == nil && strings.EqualFold(sum, wantDigest) {
+		return errProbeCurrent
+	}
+	tmp := dst + ".new"
+	sum, err := m.downloadFile(ctx, asset.BrowserDownloadURL, tmp, asset.Size, false)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if !strings.EqualFold(sum, wantDigest) {
+		_ = os.Remove(tmp)
+		return errors.New("sha256 校验不匹配")
+	}
+	// Probe assets are not signed in the release workflow (only the panel
+	// binary is). Digest check is the same bar install.sh already uses.
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

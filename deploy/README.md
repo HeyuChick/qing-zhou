@@ -51,7 +51,7 @@ curl -fsSL https://<你的面板域名>/install-singbox.sh | bash
 ### 脚本一键安装（推荐）
 仓库根目录的 `install.sh` 会自动识别架构、下载最新 release 并校验 SHA-256、交互式引导写出
 `qingzhou.env`（密钥自动生成、可选托管探针二进制）、装好 systemd 并启动；已安装时则升级
-（配置不动、二进制原子替换，并顺带刷新 `QZ_PROBE_DIR` 里的探针）：
+（配置不动、二进制原子替换，并顺带刷新 `QZ_PROBE_DIR` 里的探针；面板「在线更新」以及新版本启动时同样会把该目录对齐到当前 release，避免一键安装仍下发旧探针）：
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/mllt992/qing-zhou/main/install.sh)
 # 选项：--version vX.Y.Z | --force | --proxy https://mirror.ghproxy.com/
