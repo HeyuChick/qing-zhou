@@ -22,11 +22,6 @@ on:
 
 permissions:
   contents: write
-  # 合并上游 release 时可能携带 .github/workflows 改动（如 v0.2.70 的 docker.yml），
-  # 没有 workflows 权限的 GITHUB_TOKEN 会在 Push merge 一步被 GitHub 拒收：
-  # "refusing to allow a GitHub App to create or update workflow ... without
-  # workflows permission" —— 2026-08-26 20:01 UTC 的定时任务就停在这里。
-  workflows: write
 
 concurrency:
   group: build-custom-release
@@ -53,8 +48,20 @@ jobs:
           echo "上游最新 release: $UP_TAG"
           git remote add upstream https://github.com/mllt992/qing-zhou.git
           git fetch upstream "refs/tags/$UP_TAG:refs/tags/$UP_TAG" --no-tags
+          BEFORE=$(git rev-parse HEAD)
           # 冲突会让本步骤失败（任务红色），需手动解决
           git merge "$UP_TAG" -m "merge upstream $UP_TAG"
+          # 本仓库 workflow 目录不跟随上游：GITHUB_TOKEN（GitHub App 令牌）在 permissions
+          # 里根本没有 workflows 这个键，无论怎么给权限都推不动 workflow 文件——
+          # 上游 release 一旦携带 .github/workflows 改动（如 v0.2.70 的 docker.yml），
+          # Push merge 一步就会被拒："refusing to allow a GitHub App to create or update
+          # workflow ... without workflows permission"（2026-08-26 20:01 UTC 定时任务
+          # 失败根因）。fork 用自己的 build-custom-release 流水线，上游 workflow 变更
+          # 本就不该进来；用 rm+checkout 钉回合并前状态（rm 先行，上游新增的 workflow
+          # 文件也不会留下）。
+          git rm -q -r .github/workflows
+          git checkout "$BEFORE" -- .github/workflows
+          git diff --cached --quiet || git commit -m "chore: workflow 目录钉在 fork 自有版本，不跟随上游"
           echo "MERGED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Decide tag / skip
