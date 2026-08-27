@@ -22,6 +22,11 @@ on:
 
 permissions:
   contents: write
+  # 合并上游 release 时可能携带 .github/workflows 改动（如 v0.2.70 的 docker.yml），
+  # 没有 workflows 权限的 GITHUB_TOKEN 会在 Push merge 一步被 GitHub 拒收：
+  # "refusing to allow a GitHub App to create or update workflow ... without
+  # workflows permission" —— 2026-08-26 20:01 UTC 的定时任务就停在这里。
+  workflows: write
 
 concurrency:
   group: build-custom-release
