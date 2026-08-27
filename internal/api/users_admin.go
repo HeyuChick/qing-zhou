@@ -11,6 +11,7 @@ import (
 
 	"qingzhou/internal/auth"
 	"qingzhou/internal/idgen"
+	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/store"
 )
 
@@ -103,11 +104,18 @@ func adminPlanRollupOf(buckets []*store.Bucket) adminPlanRollup {
 // nil only when they genuinely could not be read — the view then omits `traffic`
 // rather than reporting a zero the caller would render as "0 B / 0 B".
 func adminUserView(u *store.User, groupIDs []int64, buckets []*store.Bucket) J {
+	return adminUserViewWithWindow(u, groupIDs, buckets, 0)
+}
+
+func adminUserViewWithWindow(u *store.User, groupIDs []int64, buckets []*store.Bucket, onlineWindow int64) J {
 	if groupIDs == nil {
 		groupIDs = []int64{}
 	}
+	if onlineWindow <= 0 {
+		onlineWindow = int64(intervalcfg.UserOnlineWindow(nil) / time.Second)
+	}
 	// online is computed here rather than in the frontend so the whole panel
-	// shares one definition of the window (see onlineWindow in stats.go).
+	// shares one definition of the window (see UserOnlineWindow).
 	v := J{
 		"id":             u.ID,
 		"username":       u.Username,
@@ -168,7 +176,7 @@ func (a *API) adminUserViewLoadGroups(u *store.User) J {
 	if err != nil {
 		buckets = nil
 	}
-	return adminUserView(u, gids, buckets)
+	return adminUserViewWithWindow(u, gids, buckets, a.st.UserOnlineWindowSec())
 }
 
 // POST /api/admin/users — admin creates a user directly (no registration gate,
@@ -530,6 +538,7 @@ func (a *API) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "读取套餐失败")
 		return
 	}
+	win := a.st.UserOnlineWindowSec()
 	out := make([]J, 0, len(users))
 	for _, u := range users {
 		// A user with no buckets still gets a (zero) roll-up: "holds nothing" is a
@@ -538,7 +547,7 @@ func (a *API) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		if bs == nil {
 			bs = []*store.Bucket{}
 		}
-		out = append(out, adminUserView(u, groups[u.ID], bs))
+		out = append(out, adminUserViewWithWindow(u, groups[u.ID], bs, win))
 	}
 	ok(w, out)
 }

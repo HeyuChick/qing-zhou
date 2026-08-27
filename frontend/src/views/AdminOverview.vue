@@ -535,7 +535,7 @@ async function loadUsers(resetPage = true) {
   } catch (e: any) { message.error(e.message) } finally { loadingUsers.value = false }
 }
 
-function isOnline(u: any) { return u.last_online_at && Date.now() / 1000 - u.last_online_at < 300 }
+function isOnline(u: any) { return !!u.online }
 function expiryClass(ts: number) {
   if (!ts) return 'muted'
   const left = ts - Date.now() / 1000

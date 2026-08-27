@@ -71,3 +71,15 @@ func TestOnlineWindowTracksProbeInterval(t *testing.T) {
 		t.Fatalf("online window = %v", got)
 	}
 }
+
+func TestUserOnlineWindowTracksStatsInterval(t *testing.T) {
+	t.Setenv(EnvStatsInterval, "")
+	f := fakeSettings{SettingStatsMinutes: "10"}
+	if got := UserOnlineWindow(f); got != 20*time.Minute+30*time.Second {
+		t.Fatalf("user online window = %v", got)
+	}
+	f[SettingStatsMinutes] = "1"
+	if got := UserOnlineWindow(f); got != 2*time.Minute+30*time.Second {
+		t.Fatalf("1-minute stats window = %v", got)
+	}
+}

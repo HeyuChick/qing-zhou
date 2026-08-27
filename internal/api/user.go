@@ -390,7 +390,7 @@ func (a *API) credsResetEnabled() bool {
 //     a disabled button is not an access control.
 //   - a 30-day cooldown per user, enforced inside the rotation's transaction so
 //     two concurrent requests cannot both slip through.
-//   - no explicit rebuild. The controller's periodic pass (every minute by
+//   - no explicit rebuild. The controller's periodic pass (every ten minutes by
 //     default) picks the change up and batches it with whatever else changed,
 //     so a rotation adds no extra sing-box restart of its own. The cost is that
 //     the new credentials take up to one interval to work.

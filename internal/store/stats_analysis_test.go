@@ -169,6 +169,66 @@ func TestUserStats_Filters(t *testing.T) {
 	}
 }
 
+// last_online_at is only bumped by the stats poll. With the default 10-minute
+// cadence a user seen 8 minutes ago is still online; the old 5-minute window
+// would have painted the whole panel as 0 在线.
+func TestUserStats_OnlineTracksStatsInterval(t *testing.T) {
+	t.Setenv("QZ_SINGBOX_STATS_INTERVAL", "")
+	st := newStatsStore(t)
+	now := time.Now().Unix()
+	alice, err := st.CreateUser(NewUser{Username: "alice", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := st.CreateUser(NewUser{Username: "bob", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(`UPDATE users SET last_online_at=? WHERE id=?`, now-8*60, alice); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(`UPDATE users SET last_online_at=? WHERE id=?`, now-25*60, bob); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := st.OnlineCount(st.UserOnlineWindowSec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("OnlineCount = %d, want 1 (alice 8 minutes ago, 10-minute poll)", n)
+	}
+
+	rows, total, err := st.UserStats(UserStatFilter{Online: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(rows) != 1 || rows[0].Username != "alice" {
+		t.Fatalf("online filter = %v total=%d, want [alice]", rows, total)
+	}
+	if !rows[0].Online {
+		t.Fatal("alice.online = false, want true")
+	}
+
+	if err := st.SetSetting("singbox_stats_interval_minutes", "1"); err != nil {
+		t.Fatal(err)
+	}
+	n, err = st.OnlineCount(st.UserOnlineWindowSec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("after shortening stats interval, OnlineCount = %d, want 0", n)
+	}
+	rows, total, err = st.UserStats(UserStatFilter{Online: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("after shortening stats interval, online filter still returned %v", rows)
+	}
+}
+
 // The sort key comes straight off the query string. It must be whitelisted, not
 // interpolated — an unknown key falls back instead of reaching the SQL.
 func TestUserStats_RejectsUnknownSort(t *testing.T) {

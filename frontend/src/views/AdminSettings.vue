@@ -466,7 +466,7 @@
             <div style="width:100%;">
               <n-input-number v-model:value="statsIntervalMinutes" :min="1" :max="60" :step="1"
                               :disabled="envLocked('singbox_stats_interval_minutes')" style="width:220px;" />
-              <p class="form-hint">范围 1–60 分钟，默认 10 分钟。间隔越大，面板用量、超额停用和到期剔除的生效延迟越长。</p>
+              <p class="form-hint">范围 1–60 分钟，默认 10 分钟。间隔越大，面板用量、超额停用和到期剔除的生效延迟越长。用户「在线」窗口跟着这个间隔走：当前约 {{ userOnlineWindowMinutes }} 分钟（两次轮询加 30 秒）。保存后立即生效，不必重启面板。</p>
             </div>
           </n-form-item>
           <n-form-item label="完整健康检查（分钟）">
@@ -784,6 +784,11 @@ const alertStreak = ref(2)
 const probeIntervalSeconds = ref(60)
 const statsIntervalMinutes = ref(10)
 const reconcileIntervalMinutes = ref(60)
+const userOnlineWindowMinutes = computed(() => {
+  const n = Number(statsIntervalMinutes.value) || 10
+  const seconds = Math.max(120, n * 120 + 30)
+  return Math.round(seconds / 60 * 10) / 10
+})
 const refundMode = ref('prorated')
 const refundBasis = ref('min')
 const refundFee = ref(0)

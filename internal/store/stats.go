@@ -3,6 +3,8 @@ package store
 import (
 	"strings"
 	"time"
+
+	"qingzhou/internal/intervalcfg"
 )
 
 type Overview struct {
@@ -360,6 +362,7 @@ type UserStat struct {
 	TrafficLimit int64  `json:"traffic_limit"`
 	ExpiryAt     int64  `json:"expiry_at"`
 	LastOnlineAt int64  `json:"last_online_at"`
+	Online       bool   `json:"online"`
 	Spend        int64  `json:"spend"`
 	Points       int64  `json:"points"`
 	CreatedAt    int64  `json:"created_at"`
@@ -396,6 +399,7 @@ var userStatSorts = map[string]string{
 // paging, so the UI can show "共 N 人" without a second round trip.
 func (s *Store) UserStats(f UserStatFilter) ([]UserStat, int64, error) {
 	now := time.Now().Unix()
+	onlineWindow := int64(intervalcfg.UserOnlineWindow(s) / time.Second)
 	days := f.Days
 	if days <= 0 {
 		days = 30
@@ -431,7 +435,7 @@ func (s *Store) UserStats(f UserStatFilter) ([]UserStat, int64, error) {
 	}
 	if f.Online {
 		where = append(where, "u.last_online_at>=?")
-		args = append(args, now-onlineWindowSec)
+		args = append(args, now-onlineWindow)
 	}
 	cond := "WHERE " + strings.Join(where, " AND ")
 
@@ -479,11 +483,14 @@ func (s *Store) UserStats(f UserStatFilter) ([]UserStat, int64, error) {
 			&u.TrafficLimit, &u.ExpiryAt, &u.LastOnlineAt, &u.Spend, &u.Points, &u.CreatedAt); err != nil {
 			return nil, 0, err
 		}
+		u.Online = u.LastOnlineAt > 0 && now-u.LastOnlineAt <= onlineWindow
 		out = append(out, u)
 	}
 	return out, total, rows.Err()
 }
 
-// onlineWindowSec mirrors the API's online window. Duplicated as a constant here
-// rather than imported, since store must not depend on the api package.
-const onlineWindowSec = 300
+// UserOnlineWindowSec is how recently last_online_at must have been bumped for
+// a user to count as online. It tracks the live stats-poll cadence.
+func (s *Store) UserOnlineWindowSec() int64 {
+	return int64(intervalcfg.UserOnlineWindow(s) / time.Second)
+}
