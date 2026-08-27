@@ -137,6 +137,18 @@ func OnlineWindow(g Getter) time.Duration {
 	return w
 }
 
+// UserOnlineWindow is how recently a user must have transferred traffic to
+// count as "online". last_online_at is only bumped by the stats poll, so this
+// must track Stats() — a fixed five-minute window with the default ten-minute
+// poll painted every live user offline between ticks.
+func UserOnlineWindow(g Getter) time.Duration {
+	w := 2*Stats(g) + 30*time.Second
+	if w < 2*time.Minute {
+		return 2 * time.Minute
+	}
+	return w
+}
+
 // EnvSettingValue returns the effective numeric value exposed in the settings
 // form when a host environment variable pins a runtime interval.
 func EnvSettingValue(setting string) (string, bool) {

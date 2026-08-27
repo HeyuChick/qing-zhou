@@ -1169,10 +1169,22 @@ WantedBy=multi-user.target
 		}
 	}
 	ver, err := m.run(ctx, client, "/usr/local/bin/qingzhou-probe -version")
-	if err != nil {
-		return ver, fmt.Errorf("探针已启动，但读取版本失败: %w", err)
+	return probeInstallSummary(ver, err), nil
+}
+
+// probeInstallSummary is the install-job message after systemd already reported
+// the unit active. Version is only a log nicety: old panel-hosted binaries
+// (pre -version flag) exit 2 here with "flag provided but not defined", which
+// used to mark a successful install as failed. Metrics reports carry
+// probe_version once a newer binary is in QZ_PROBE_DIR.
+func probeInstallSummary(ver string, err error) string {
+	if err == nil {
+		if s := strings.TrimSpace(ver); s != "" {
+			return "探针安装完成：" + s
+		}
+		return "探针安装完成"
 	}
-	return "探针安装完成：" + strings.TrimSpace(ver), nil
+	return "探针安装完成（二进制已启动，版本将在首次上报后显示）"
 }
 
 // ──────────────────────────────────────────────────────────────

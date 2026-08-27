@@ -98,6 +98,7 @@ func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	all[intervalcfg.SettingProbeSeconds] = strconv.FormatInt(int64(intervalcfg.Probe(a.st)/time.Second), 10)
 	all[intervalcfg.SettingStatsMinutes] = strconv.FormatInt(int64(intervalcfg.Stats(a.st)/time.Minute), 10)
 	all[intervalcfg.SettingReconcileMinutes] = strconv.FormatInt(int64(intervalcfg.Reconcile(a.st)/time.Minute), 10)
+	all["_user_online_window_seconds"] = strconv.FormatInt(a.st.UserOnlineWindowSec(), 10)
 	for _, k := range intervalcfg.RuntimeSettingKeys {
 		if v, locked := intervalcfg.EnvSettingValue(k); locked {
 			all[k] = v

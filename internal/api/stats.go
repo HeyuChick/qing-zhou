@@ -59,10 +59,6 @@ func fillPoints(rows []store.DayPoint, days int) []store.DayPoint {
 	return out
 }
 
-// onlineWindow is how recently a user must have transferred traffic to count as
-// "online" (the stats poll runs ~every minute).
-const onlineWindow = 300
-
 func rangeDays(r string) int {
 	switch r {
 	case "90d":
@@ -95,8 +91,9 @@ func (a *API) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "读取概览失败")
 		return
 	}
-	online, _ := a.st.OnlineCount(onlineWindow)
-	onlineUsers, _ := a.st.OnlineUsers(onlineWindow, 20)
+	win := a.st.UserOnlineWindowSec()
+	online, _ := a.st.OnlineCount(win)
+	onlineUsers, _ := a.st.OnlineUsers(win, 20)
 	// Period totals alongside the lifetime ones: "累计流量 3.2 TB" is a fact with
 	// no direction, and the operator's actual question is whether this week is up
 	// or down on last week.
@@ -111,6 +108,7 @@ func (a *API) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		"packages_on":   ov.PackagesOn,
 		"online":        online,
 		"online_users":  onlineUsers,
+		"online_window": win,
 		"range_days":    days,
 		"period":        cur,
 		"period_prev":   prev,

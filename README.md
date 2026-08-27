@@ -283,7 +283,7 @@ systemctl daemon-reload && systemctl enable --now qingzhou
 | `QZ_DB` | `qingzhou.db` | SQLite 数据库文件路径（相对路径基于进程工作目录） |
 | `QZ_PUBLIC_BASE` | 设置页/请求推断 | 面板对外地址（订阅链接、探针安装、邮件链接、sing-box 安装命令），如 `https://node.example.com`。也可在「系统设置 → 面板访问地址」填；本变量优先，且设了之后设置页对应字段变只读 |
 | `QZ_TRUSTED_PROXIES` | 空（仅信回环） | 受信任反代的 IP / CIDR，逗号分隔。**反代不在本机时必须设**，否则转发头被忽略，限流与链接生成会拿到反代的 IP |
-| `QZ_PROBE_DIR` | `cmd/probe/dist` | 探针二进制目录，面板据此提供下载。二进制部署须设为绝对目录（放入 `probe-linux-amd64/arm64`），否则探针安装 404 |
+| `QZ_PROBE_DIR` | `cmd/probe/dist` | 探针二进制目录，面板据此提供下载与「一键安装」。二进制部署须设为绝对目录（放入 `probe-linux-amd64/arm64`），否则探针安装 404。`install.sh`、面板「在线更新」、以及新版本启动时都会把该目录对齐到当前 release，避免只升面板、一键安装仍下发旧探针 |
 | `QZ_WEB_DIR` | 空 | 设为 `frontend/dist` 从磁盘读前端；生产留空用内嵌资源 |
 | `QZ_ADMIN_USER` | `mllt992` | 初始管理员用户名（仅首次 seed 生效）。**一键脚本安装时会问，默认写入 `admin`** |
 | `QZ_ADMIN_PASS` | 随机生成 | 初始管理员密码；留空则随机生成并打印到日志 |

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/store"
@@ -39,6 +40,65 @@ func TestRuntimeIntervalsRoundTrip(t *testing.T) {
 		if got, _ := st.GetSetting(key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)
 		}
+	}
+	if !strings.Contains(w.Body.String(), `"_user_online_window_seconds":"1230"`) {
+		t.Fatalf("settings response missing derived online window: %s", w.Body.String())
+	}
+	if got, _ := st.GetSetting("_user_online_window_seconds"); got != "" {
+		t.Fatalf("derived online window was persisted: %q", got)
+	}
+}
+
+func TestUserOnlineWindowFollowsLiveStatsSetting(t *testing.T) {
+	t.Setenv(intervalcfg.EnvProbeInterval, "")
+	t.Setenv(intervalcfg.EnvStatsInterval, "")
+	t.Setenv(intervalcfg.EnvReconcileInterval, "")
+	a, st := newUserEditAPI(t)
+	if err := st.SetSetting(intervalcfg.SettingStatsMinutes, "10"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	uid, err := st.CreateUser(store.NewUser{Username: "alice", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(`UPDATE users SET last_online_at=? WHERE id=?`, now-8*60, uid); err != nil {
+		t.Fatal(err)
+	}
+
+	onlineAt := func() bool {
+		u, err := st.UserByID(uid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := a.adminUserViewLoadGroups(u)
+		on, _ := v["online"].(bool)
+		return on
+	}
+	if !onlineAt() {
+		t.Fatal("8 minutes ago must count as online while stats interval is 10 minutes")
+	}
+
+	w := putSettings(a, `{
+		"monitor_probe_interval_seconds":"60",
+		"singbox_stats_interval_minutes":"1",
+		"singbox_reconcile_interval_minutes":"10"
+	}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"_user_online_window_seconds":"150"`) {
+		t.Fatalf("saved settings did not recompute online window: %s", w.Body.String())
+	}
+	if onlineAt() {
+		t.Fatal("shortening the stats interval must drop the same user out of the online window without a restart")
+	}
+	n, err := st.OnlineCount(st.UserOnlineWindowSec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("OnlineCount = %d, want 0 after live interval change", n)
 	}
 }
 

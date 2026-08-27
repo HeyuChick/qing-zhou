@@ -79,6 +79,19 @@ func TestAdminPlanRollup_CountsAndNextExpiry(t *testing.T) {
 	}
 }
 
+func TestAdminUserView_OnlineTracksStatsWindow(t *testing.T) {
+	now := time.Now().Unix()
+	u := &store.User{ID: 1, Username: "kim", Status: "active", LastOnlineAt: now - 8*60}
+	v := adminUserViewWithWindow(u, nil, []*store.Bucket{}, 20*60+30)
+	if v["online"] != true {
+		t.Fatal("8 minutes ago must still count as online under the default 10-minute stats poll")
+	}
+	v = adminUserViewWithWindow(u, nil, []*store.Bucket{}, 300)
+	if v["online"] != false {
+		t.Fatal("the old 5-minute window must not keep painting a 10-minute poll as online")
+	}
+}
+
 // A user who holds nothing gets a zero roll-up (a fact); a user whose buckets
 // could not be read gets no traffic object at all, so the UI shows "—" instead
 // of a fabricated 0 B / 0 B.
