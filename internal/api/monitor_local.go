@@ -8,6 +8,7 @@ import (
 	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/store"
 	"qingzhou/internal/sysmetrics"
+	"qingzhou/internal/version"
 )
 
 // The panel's own machine is a machine too. Watching it used to mean adding a
@@ -51,11 +52,14 @@ func (a *API) StartLocalMetrics(ctx context.Context) {
 			case <-t.C:
 				m := sampler.Sample()
 				if err := a.st.InsertMetrics(store.LocalNodeID, store.ServerMetrics{
-					CPUPercent: m.CPUPercent, MemUsed: m.MemUsed, MemTotal: m.MemTotal,
+					ProbeVersion: version.Current(),
+					CPUPercent:   m.CPUPercent, MemUsed: m.MemUsed, MemTotal: m.MemTotal,
 					SwapUsed: m.SwapUsed, SwapTotal: m.SwapTotal,
 					DiskUsed: m.DiskUsed, DiskTotal: m.DiskTotal,
 					NetRx: m.NetRx, NetTx: m.NetTx,
-					Load1: m.Load1, Load5: m.Load5, Load15: m.Load15,
+					NetRxTotal: m.NetRxTotal, NetTxTotal: m.NetTxTotal,
+					NetTotalsValid: m.NetTotalsValid,
+					Load1:          m.Load1, Load5: m.Load5, Load15: m.Load15,
 					TCPConnections: m.TCPConnections, ProcessCount: m.ProcessCount,
 					Uptime: m.Uptime, Hostname: m.Hostname, Platform: m.Platform,
 					Kernel: m.Kernel, Arch: m.Arch,

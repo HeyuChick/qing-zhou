@@ -3,9 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -14,6 +14,7 @@ import (
 	"qingzhou/internal/idgen"
 	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/store"
+	"qingzhou/internal/version"
 )
 
 // ---- Agent report (public, token-authenticated) ----
@@ -64,17 +65,15 @@ func (a *API) handleMonitorReport(w http.ResponseWriter, r *http.Request) {
 // handleDownloadAgent serves the pre-compiled probe agent binary.
 func (a *API) handleDownloadAgent(w http.ResponseWriter, r *http.Request) {
 	arch := chi.URLParam(r, "arch") // linux-amd64 or linux-arm64
-	if arch != "linux-amd64" && arch != "linux-arm64" {
-		fail(w, 400, "不支持的架构，可选: linux-amd64, linux-arm64")
+	path, err := probeBinaryPath(arch)
+	if err != nil {
+		if errors.Is(err, errUnsupportedProbeArch) {
+			fail(w, 400, "不支持的架构，可选: linux-amd64, linux-arm64")
+		} else {
+			fail(w, 404, "探针二进制不存在")
+		}
 		return
 	}
-
-	// Try QZ_PROBE_DIR first, then default path.
-	probeDir := os.Getenv("QZ_PROBE_DIR")
-	if probeDir == "" {
-		probeDir = "cmd/probe/dist"
-	}
-	path := probeDir + "/probe-" + arch
 
 	http.ServeFile(w, r, path)
 }
@@ -250,8 +249,15 @@ func (a *API) handleMonitorDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Unix()
+	monthUsage, err := a.st.TrafficUsageForAllSince(monthStart)
+	if err != nil {
+		fail(w, 500, "查询本月流量失败")
+		return
+	}
 	onlineWindow := now.Add(-intervalcfg.OnlineWindow(a.st)).Unix()
 	latest, _ := a.st.GetLatestMetricsForAll() // one query instead of one per server
+	probeJobs := a.probeUpgradeSnapshot()
 	// Return ALL servers (not just probe-enabled) so the UI can manage probes,
 	// with the panel's own machine at the head — it has no servers row and needs
 	// none, but it is the machine the admin is most likely to want to see.
@@ -262,24 +268,32 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type serverResp struct {
-		ID            int64                `json:"id"`
-		Name          string               `json:"name"`
-		Host          string               `json:"host"`
-		Local         bool                 `json:"local"`
-		Enabled       bool                 `json:"enabled"`
-		ProbeEnabled  bool                 `json:"probe_enabled"`
-		ProbeToken    string               `json:"probe_token"`
-		PublicVisible bool                 `json:"public_visible"`
-		Provider      string               `json:"provider"`
-		Location      string               `json:"location"`
-		Spec          string               `json:"spec"`
-		Price         float64              `json:"price"`
-		ExpiryDate    int64                `json:"expiry_date"`
-		DaysLeft      *int                 `json:"days_left"`
-		Status        string               `json:"status"`
-		LastSeen      int64                `json:"last_seen"`
-		Metrics       *store.ServerMetrics `json:"metrics"`
-		Notes         string               `json:"notes"`
+		ID                 int64                    `json:"id"`
+		Name               string                   `json:"name"`
+		Host               string                   `json:"host"`
+		Local              bool                     `json:"local"`
+		Enabled            bool                     `json:"enabled"`
+		ProbeEnabled       bool                     `json:"probe_enabled"`
+		ProbeToken         string                   `json:"probe_token"`
+		ProbeVersion       string                   `json:"probe_version"`
+		ProbeTarget        string                   `json:"probe_target_version"`
+		ProbeOutdated      bool                     `json:"probe_outdated"`
+		ProbeUpgrading     bool                     `json:"probe_upgrading"`
+		ProbeUpgradeError  string                   `json:"probe_upgrade_error"`
+		ProbeUpgradeOutput string                   `json:"probe_upgrade_output"`
+		ProbeUpgradedAt    int64                    `json:"probe_upgraded_at"`
+		PublicVisible      bool                     `json:"public_visible"`
+		Provider           string                   `json:"provider"`
+		Location           string                   `json:"location"`
+		Spec               string                   `json:"spec"`
+		Price              float64                  `json:"price"`
+		ExpiryDate         int64                    `json:"expiry_date"`
+		DaysLeft           *int                     `json:"days_left"`
+		Status             string                   `json:"status"`
+		LastSeen           int64                    `json:"last_seen"`
+		Metrics            *store.ServerMetrics     `json:"metrics"`
+		MonthTraffic       store.ServerTrafficUsage `json:"month_traffic"`
+		Notes              string                   `json:"notes"`
 	}
 
 	var out []serverResp
@@ -293,6 +307,16 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 		if sv.ProbeEnabled {
 			m = latest[sv.ID]
 		}
+		probeVersion := ""
+		if m != nil {
+			probeVersion = m.ProbeVersion
+		}
+		if sv.ID == store.LocalNodeID {
+			probeVersion = version.Current()
+		}
+		probeOutdated := sv.ID != store.LocalNodeID && sv.ProbeEnabled && m != nil &&
+			(probeVersion == "" || (!version.IsDev() && version.Compare(probeVersion, version.Current()) < 0))
+		probeJob := probeJobs[sv.ID]
 		var dl *int
 		if sv.ExpiryDate > 0 {
 			d := int(time.Unix(sv.ExpiryDate, 0).Sub(now).Hours() / 24)
@@ -302,24 +326,32 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 			dl = &d
 		}
 		out = append(out, serverResp{
-			ID:            sv.ID,
-			Name:          sv.Name,
-			Host:          sv.Host,
-			Local:         sv.ID == store.LocalNodeID,
-			Enabled:       sv.Enabled,
-			ProbeEnabled:  sv.ProbeEnabled,
-			ProbeToken:    sv.ProbeToken,
-			PublicVisible: sv.PublicVisible,
-			Provider:      sv.Provider,
-			Location:      sv.Location,
-			Spec:          sv.Spec,
-			Price:         sv.Price,
-			ExpiryDate:    sv.ExpiryDate,
-			DaysLeft:      dl,
-			Status:        status,
-			LastSeen:      sv.LastSeen,
-			Metrics:       m,
-			Notes:         sv.Notes,
+			ID:                 sv.ID,
+			Name:               sv.Name,
+			Host:               sv.Host,
+			Local:              sv.ID == store.LocalNodeID,
+			Enabled:            sv.Enabled,
+			ProbeEnabled:       sv.ProbeEnabled,
+			ProbeToken:         sv.ProbeToken,
+			ProbeVersion:       probeVersion,
+			ProbeTarget:        version.Current(),
+			ProbeOutdated:      probeOutdated,
+			ProbeUpgrading:     probeJob.Running,
+			ProbeUpgradeError:  probeJob.Error,
+			ProbeUpgradeOutput: probeJob.Output,
+			ProbeUpgradedAt:    probeJob.FinishedAt,
+			PublicVisible:      sv.PublicVisible,
+			Provider:           sv.Provider,
+			Location:           sv.Location,
+			Spec:               sv.Spec,
+			Price:              sv.Price,
+			ExpiryDate:         sv.ExpiryDate,
+			DaysLeft:           dl,
+			Status:             status,
+			LastSeen:           sv.LastSeen,
+			Metrics:            m,
+			MonthTraffic:       monthUsage[sv.ID],
+			Notes:              sv.Notes,
 		})
 	}
 	if out == nil {
@@ -360,10 +392,16 @@ func (a *API) handleServerMetrics(w http.ResponseWriter, r *http.Request) {
 	if data == nil {
 		data = []*store.ServerMetrics{}
 	}
+	usageByServer, err := a.st.TrafficUsageForAllSince(sinceTs)
+	if err != nil {
+		fail(w, 500, "查询流量汇总失败")
+		return
+	}
 	ok(w, J{
-		"server_id": id,
-		"range":     rangeStr,
-		"data":      data,
+		"server_id":     id,
+		"range":         rangeStr,
+		"data":          data,
+		"traffic_usage": usageByServer[id],
 	})
 }
 
@@ -909,7 +947,8 @@ func (a *API) StartMonitorTasks(ctx context.Context) {
 				// Prune old restart samples. Open circuits remain latched until a
 				// successful administrator-forced apply explicitly recovers them.
 				a.sweepRestartAlerts()
-				if err := a.st.PruneMetrics(30); err != nil {
+				// Keep enough data for a complete calendar month even on day 31.
+				if err := a.st.PruneMetrics(35); err != nil {
 					log.Printf("metrics prune: %v", err)
 				}
 				// traffic_samples grows one row per active identity per stats poll.

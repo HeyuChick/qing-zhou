@@ -11,6 +11,7 @@ type ServerMetrics struct {
 	ID             int64   `json:"id"`
 	ServerID       int64   `json:"server_id"`
 	Ts             int64   `json:"ts"`
+	ProbeVersion   string  `json:"probe_version"`
 	CPUPercent     float64 `json:"cpu_percent"`
 	MemUsed        int64   `json:"mem_used"`
 	MemTotal       int64   `json:"mem_total"`
@@ -20,6 +21,13 @@ type ServerMetrics struct {
 	DiskTotal      int64   `json:"disk_total"`
 	NetRx          int64   `json:"net_rx"`
 	NetTx          int64   `json:"net_tx"`
+	NetRxTotal     int64   `json:"net_rx_total"`
+	NetTxTotal     int64   `json:"net_tx_total"`
+	NetTotalsValid bool    `json:"net_totals_valid"`
+	// Derived server-side from successive totals; never accepted from a probe or
+	// exposed as a raw metric (range summaries publish the aggregate instead).
+	NetRxBytes     int64   `json:"-"`
+	NetTxBytes     int64   `json:"-"`
 	Load1          float64 `json:"load1"`
 	Load5          float64 `json:"load5"`
 	Load15         float64 `json:"load15"`
@@ -32,12 +40,14 @@ type ServerMetrics struct {
 	Arch           string  `json:"arch"`
 }
 
-const metricsCols = `id, server_id, ts, cpu_percent, mem_used, mem_total, swap_used, swap_total, disk_used, disk_total, net_rx, net_tx, load1, load5, load15, tcp_connections, process_count, uptime, hostname, platform, kernel, arch`
+const metricsCols = `id, server_id, ts, probe_version, cpu_percent, mem_used, mem_total, swap_used, swap_total, disk_used, disk_total, net_rx, net_tx, net_rx_total, net_tx_total, net_totals_valid, net_rx_bytes, net_tx_bytes, load1, load5, load15, tcp_connections, process_count, uptime, hostname, platform, kernel, arch`
 
 func scanMetrics(sc scanner) (*ServerMetrics, error) {
 	var m ServerMetrics
-	err := sc.Scan(&m.ID, &m.ServerID, &m.Ts, &m.CPUPercent, &m.MemUsed, &m.MemTotal,
+	err := sc.Scan(&m.ID, &m.ServerID, &m.Ts, &m.ProbeVersion, &m.CPUPercent, &m.MemUsed, &m.MemTotal,
 		&m.SwapUsed, &m.SwapTotal, &m.DiskUsed, &m.DiskTotal, &m.NetRx, &m.NetTx,
+		&m.NetRxTotal, &m.NetTxTotal, &m.NetTotalsValid,
+		&m.NetRxBytes, &m.NetTxBytes,
 		&m.Load1, &m.Load5, &m.Load15, &m.TCPConnections, &m.ProcessCount, &m.Uptime,
 		&m.Hostname, &m.Platform, &m.Kernel, &m.Arch)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -68,6 +78,8 @@ func (m *ServerMetrics) clamp() {
 	m.SwapUsed, m.SwapTotal = nn(m.SwapUsed), nn(m.SwapTotal)
 	m.DiskUsed, m.DiskTotal = nn(m.DiskUsed), nn(m.DiskTotal)
 	m.NetRx, m.NetTx = nn(m.NetRx), nn(m.NetTx)
+	m.NetRxTotal, m.NetTxTotal = nn(m.NetRxTotal), nn(m.NetTxTotal)
+	m.NetRxBytes, m.NetTxBytes = nn(m.NetRxBytes), nn(m.NetTxBytes)
 	if m.MemTotal > 0 && m.MemUsed > m.MemTotal {
 		m.MemUsed = m.MemTotal
 	}
@@ -91,16 +103,96 @@ func (s *Store) InsertMetrics(serverID int64, m ServerMetrics) error {
 	if m.Ts == 0 {
 		m.Ts = now
 	}
+	if len(m.ProbeVersion) > 64 {
+		m.ProbeVersion = m.ProbeVersion[:64]
+	}
 	m.clamp() // reject nonsense values from a misbehaving/hostile probe
-	_, err := s.db.Exec(`INSERT INTO server_metrics
-		(server_id, ts, cpu_percent, mem_used, mem_total, swap_used, swap_total,
-		 disk_used, disk_total, net_rx, net_tx, load1, load5, load15,
-		 tcp_connections, process_count, uptime, hostname, platform, kernel, arch)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		serverID, m.Ts, m.CPUPercent, m.MemUsed, m.MemTotal, m.SwapUsed, m.SwapTotal,
-		m.DiskUsed, m.DiskTotal, m.NetRx, m.NetTx, m.Load1, m.Load5, m.Load15,
+	// These are trusted derived fields, not part of the probe wire format.
+	m.NetRxBytes, m.NetTxBytes = 0, 0
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Turn raw cumulative counters into a per-row delta once, at ingestion. The
+	// dashboard can then SUM an indexed month instead of re-running a window over
+	// every historical sample every 30 seconds.
+	if m.NetTotalsValid {
+		var prevRx, prevTx, prevUptime int64
+		var prevValid bool
+		err := tx.QueryRow(`SELECT net_rx_total, net_tx_total, net_totals_valid, uptime
+			FROM server_metrics WHERE server_id=? ORDER BY id DESC LIMIT 1`, serverID).
+			Scan(&prevRx, &prevTx, &prevValid, &prevUptime)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil && prevValid {
+			rebooted := m.Uptime < prevUptime
+			if m.NetRxTotal >= prevRx {
+				m.NetRxBytes = m.NetRxTotal - prevRx
+			} else if rebooted {
+				m.NetRxBytes = m.NetRxTotal
+			}
+			if m.NetTxTotal >= prevTx {
+				m.NetTxBytes = m.NetTxTotal - prevTx
+			} else if rebooted {
+				m.NetTxBytes = m.NetTxTotal
+			}
+		}
+	}
+
+	_, err = tx.Exec(`INSERT INTO server_metrics
+		(server_id, ts, probe_version, cpu_percent, mem_used, mem_total, swap_used, swap_total,
+		 disk_used, disk_total, net_rx, net_tx, net_rx_total, net_tx_total, net_totals_valid, net_rx_bytes, net_tx_bytes,
+		 load1, load5, load15, tcp_connections, process_count, uptime, hostname, platform, kernel, arch)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		serverID, m.Ts, m.ProbeVersion, m.CPUPercent, m.MemUsed, m.MemTotal, m.SwapUsed, m.SwapTotal,
+		m.DiskUsed, m.DiskTotal, m.NetRx, m.NetTx, m.NetRxTotal, m.NetTxTotal, m.NetTotalsValid,
+		m.NetRxBytes, m.NetTxBytes,
+		m.Load1, m.Load5, m.Load15,
 		m.TCPConnections, m.ProcessCount, m.Uptime, m.Hostname, m.Platform, m.Kernel, m.Arch)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ServerTrafficUsage is physical-interface traffic observed over a time range.
+// Rx and Tx stay separate because providers differ on whether they bill one
+// direction or both. Total is always Rx+Tx and therefore answers the common
+// "IN+OUT" quota view directly.
+type ServerTrafficUsage struct {
+	Rx            int64 `json:"rx"`
+	Tx            int64 `json:"tx"`
+	Total         int64 `json:"total"`
+	CoverageStart int64 `json:"coverage_start"`
+	CoverageEnd   int64 `json:"coverage_end"`
+	SampleCount   int64 `json:"sample_count"`
+}
+
+// TrafficUsageForAllSince sums the per-report deltas derived from cumulative NIC
+// counters. It intentionally does not integrate sampled B/s rates: missing or
+// delayed reports would make that estimate drift.
+func (s *Store) TrafficUsageForAllSince(since int64) (map[int64]ServerTrafficUsage, error) {
+	rows, err := s.db.Query(`SELECT server_id, COALESCE(SUM(net_rx_bytes),0),
+		COALESCE(SUM(net_tx_bytes),0), MIN(ts), MAX(ts), COUNT(*)
+		FROM server_metrics WHERE ts>=? AND net_totals_valid=1 GROUP BY server_id`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[int64]ServerTrafficUsage)
+	for rows.Next() {
+		var id int64
+		var u ServerTrafficUsage
+		if err := rows.Scan(&id, &u.Rx, &u.Tx, &u.CoverageStart, &u.CoverageEnd, &u.SampleCount); err != nil {
+			return nil, err
+		}
+		u.Total = u.Rx + u.Tx
+		out[id] = u
+	}
+	return out, rows.Err()
 }
 
 // GetLatestMetrics returns the most recent metrics row for a server, or nil.

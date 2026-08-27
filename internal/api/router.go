@@ -44,6 +44,10 @@ type API struct {
 	// In-flight per-node sing-box reinstalls; see nodever_admin.go.
 	upgradeMu   sync.Mutex
 	upgradeJobs map[int64]*nodeUpgradeJob
+	// In-flight remote probe installs/upgrades. Kept separate from sing-box jobs:
+	// they manage different services and expose their state on different pages.
+	probeUpgradeMu   sync.Mutex
+	probeUpgradeJobs map[int64]*nodeUpgradeJob
 
 	// Per-Telegram-user command limiter. The bind token is already gated by
 	// resendRL; this one stops a bound chat from hammering /sub.
@@ -374,6 +378,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/monitor/dashboard", a.handleMonitorDashboard)
 		ar.Get("/api/admin/monitor/servers", a.handleMonitorServers)
 		ar.Get("/api/admin/monitor/servers/{id}/metrics", a.handleServerMetrics)
+		ar.Post("/api/admin/monitor/servers/{id}/probe/upgrade", a.handleAdminProbeUpgrade)
 		ar.Get("/api/admin/monitor/heatmap", a.handleMonitorHeatmap)
 		ar.Get("/api/admin/monitor/alerts", a.handleMonitorAlerts)
 		ar.Post("/api/admin/monitor/alerts/{id}/read", a.handleMarkAlertRead)

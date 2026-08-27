@@ -93,6 +93,31 @@ func TestUpdateServer_ProbeTokenHashStaysInSync(t *testing.T) {
 	}
 }
 
+func TestEnableServerProbeDoesNotRewriteUnrelatedFields(t *testing.T) {
+	st := newRefundStore(t)
+	id, err := st.CreateServer(Server{
+		Name: "before", Host: "192.0.2.10", Port: 2222,
+		SSHUser: "root", SSHPassword: "secret", SingBoxBin: "/opt/sing-box",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnableServerProbe(id, "probe-token"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetServer(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ProbeEnabled || got.ProbeToken != "probe-token" {
+		t.Fatalf("probe access = enabled %v token %q", got.ProbeEnabled, got.ProbeToken)
+	}
+	if got.Name != "before" || got.Host != "192.0.2.10" || got.Port != 2222 ||
+		got.SSHPassword != "secret" || got.SingBoxBin != "/opt/sing-box" {
+		t.Fatalf("unrelated server fields changed: %+v", got)
+	}
+}
+
 // "即将到期" must mean upcoming, not "ever expired". Without a lower bound every
 // long-expired server is counted forever.
 func TestCountProbeServers_ExpiringExcludesAlreadyExpired(t *testing.T) {

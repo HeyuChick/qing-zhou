@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/store"
+	"qingzhou/internal/version"
 )
 
 func sampleLocal(t *testing.T, st *store.Store, cpu float64) {
@@ -90,6 +91,50 @@ func TestLocalNodeAppearsInMonitorList(t *testing.T) {
 	}
 	if !row.ProbeEnabled || row.Status != "online" {
 		t.Fatalf("local node should read as a live, monitored machine: %+v", row)
+	}
+}
+
+func TestMonitorListMarksLegacyProbeForUpgrade(t *testing.T) {
+	a, st := newNodeUpgradeAPI(t)
+	id, err := st.CreateServer(store.Server{Name: "old-probe", Host: "192.0.2.11", ProbeEnabled: true, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertMetrics(id, store.ServerMetrics{CPUPercent: 10}); err != nil {
+		t.Fatal(err)
+	}
+
+	type row struct {
+		ID            int64  `json:"id"`
+		ProbeVersion  string `json:"probe_version"`
+		ProbeTarget   string `json:"probe_target_version"`
+		ProbeOutdated bool   `json:"probe_outdated"`
+	}
+	list := func() row {
+		var body struct {
+			Data []row `json:"data"`
+		}
+		getJSON(t, a.handleMonitorServers, "/api/admin/monitor/servers", &body)
+		for _, got := range body.Data {
+			if got.ID == id {
+				return got
+			}
+		}
+		t.Fatalf("server %d missing from monitor list", id)
+		return row{}
+	}
+
+	legacy := list()
+	if !legacy.ProbeOutdated || legacy.ProbeVersion != "" || legacy.ProbeTarget != version.Current() {
+		t.Fatalf("legacy probe state = %+v, want blank version marked outdated against %q", legacy, version.Current())
+	}
+
+	if err := st.InsertMetrics(id, store.ServerMetrics{CPUPercent: 11, ProbeVersion: version.Current()}); err != nil {
+		t.Fatal(err)
+	}
+	current := list()
+	if current.ProbeOutdated || current.ProbeVersion != version.Current() {
+		t.Fatalf("current probe state = %+v, want current", current)
 	}
 }
 

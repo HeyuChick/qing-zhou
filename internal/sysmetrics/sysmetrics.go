@@ -16,15 +16,22 @@ package sysmetrics
 // Metrics holds one snapshot of system metrics. The JSON tags are the probe's
 // wire format and match store.ServerMetrics.
 type Metrics struct {
-	CPUPercent     float64 `json:"cpu_percent"`
-	MemUsed        int64   `json:"mem_used"`
-	MemTotal       int64   `json:"mem_total"`
-	SwapUsed       int64   `json:"swap_used"`
-	SwapTotal      int64   `json:"swap_total"`
-	DiskUsed       int64   `json:"disk_used"`
-	DiskTotal      int64   `json:"disk_total"`
-	NetRx          int64   `json:"net_rx"`
-	NetTx          int64   `json:"net_tx"`
+	ProbeVersion string  `json:"probe_version"`
+	CPUPercent   float64 `json:"cpu_percent"`
+	MemUsed      int64   `json:"mem_used"`
+	MemTotal     int64   `json:"mem_total"`
+	SwapUsed     int64   `json:"swap_used"`
+	SwapTotal    int64   `json:"swap_total"`
+	DiskUsed     int64   `json:"disk_used"`
+	DiskTotal    int64   `json:"disk_total"`
+	NetRx        int64   `json:"net_rx"`
+	NetTx        int64   `json:"net_tx"`
+	// Net*Total are the kernel's cumulative byte counters. NetRx/NetTx above are
+	// rates and cannot be added reliably when reports are delayed or skipped;
+	// the totals let the panel calculate honest per-machine usage for any range.
+	NetRxTotal     int64   `json:"net_rx_total"`
+	NetTxTotal     int64   `json:"net_tx_total"`
+	NetTotalsValid bool    `json:"net_totals_valid"`
 	Load1          float64 `json:"load1"`
 	Load5          float64 `json:"load5"`
 	Load15         float64 `json:"load15"`

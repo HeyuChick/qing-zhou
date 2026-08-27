@@ -23,6 +23,7 @@ import (
 
 	"qingzhou/internal/intervalcfg"
 	"qingzhou/internal/sysmetrics"
+	"qingzhou/internal/version"
 )
 
 var (
@@ -30,10 +31,15 @@ var (
 	flagToken    = flag.String("token", "", "Probe authentication token (required)")
 	flagInterval = flag.Int("interval", 60, "Initial collection interval in seconds (panel may update it live)")
 	flagInsecure = flag.Bool("insecure", false, "Skip TLS certificate verification")
+	flagVersion  = flag.Bool("version", false, "Print probe version and exit")
 )
 
 func main() {
 	flag.Parse()
+	if *flagVersion {
+		fmt.Println(version.Current())
+		return
+	}
 
 	// Also accept env vars as fallback (useful for systemd EnvironmentFile).
 	server := *flagServer
@@ -85,10 +91,15 @@ func main() {
 	sampler := &sysmetrics.Sampler{}
 	sampler.Sample()
 
-	timer := time.NewTimer(time.Duration(interval) * time.Second)
+	// Report once almost immediately so a one-click install becomes visible in
+	// the panel without waiting a full collection interval. The sampler was
+	// primed above, so even this first report has a real CPU/network delta.
+	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
 	for range timer.C {
-		next, err := report(client, reportURL, token, sampler.Sample())
+		m := sampler.Sample()
+		m.ProbeVersion = version.Current()
+		next, err := report(client, reportURL, token, m)
 		if err != nil {
 			log.Printf("report failed: %v", err)
 		} else if next >= int(intervalcfg.MinProbeSeconds) && next <= int(intervalcfg.MaxProbeSeconds) && next != interval {

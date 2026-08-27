@@ -499,11 +499,12 @@ CREATE TABLE IF NOT EXISTS servers (
 
 -- ===== Monitor probe (轻舟探针) =====
 -- Per-server system metrics time-series, one row per agent report.
--- Pruned to a rolling window (default 30 days).
+-- Pruned to a rolling 35-day window (enough for a complete calendar month).
 CREATE TABLE IF NOT EXISTS server_metrics (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   server_id       INTEGER NOT NULL,
   ts              INTEGER NOT NULL,
+  probe_version   TEXT    NOT NULL DEFAULT '',
   cpu_percent     REAL    NOT NULL DEFAULT 0,
   mem_used        INTEGER NOT NULL DEFAULT 0,
   mem_total       INTEGER NOT NULL DEFAULT 0,
@@ -513,6 +514,13 @@ CREATE TABLE IF NOT EXISTS server_metrics (
   disk_total      INTEGER NOT NULL DEFAULT 0,
   net_rx          INTEGER NOT NULL DEFAULT 0,
   net_tx          INTEGER NOT NULL DEFAULT 0,
+  -- Raw /proc/net/dev counters. Unlike net_rx/net_tx (instantaneous B/s),
+  -- successive totals can be differenced into accurate interval usage.
+  net_rx_total    INTEGER NOT NULL DEFAULT 0,
+  net_tx_total    INTEGER NOT NULL DEFAULT 0,
+  net_totals_valid INTEGER NOT NULL DEFAULT 0,
+  net_rx_bytes    INTEGER NOT NULL DEFAULT 0,
+  net_tx_bytes    INTEGER NOT NULL DEFAULT 0,
   load1           REAL    NOT NULL DEFAULT 0,
   load5           REAL    NOT NULL DEFAULT 0,
   load15          REAL    NOT NULL DEFAULT 0,
@@ -859,6 +867,16 @@ func (s *Store) Migrate() error {
 		// public page. The panel's own machine is the opposite case and is not a
 		// row here: it defaults to hidden, via the monitor_local_public setting.
 		`ALTER TABLE servers ADD COLUMN public_visible INTEGER NOT NULL DEFAULT 1`,
+		// Per-machine traffic accounting. Old probe rows remain explicitly invalid
+		// rather than pretending that their missing cumulative counters were zero.
+		`ALTER TABLE server_metrics ADD COLUMN net_rx_total INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_metrics ADD COLUMN net_tx_total INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_metrics ADD COLUMN net_totals_valid INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_metrics ADD COLUMN net_rx_bytes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE server_metrics ADD COLUMN net_tx_bytes INTEGER NOT NULL DEFAULT 0`,
+		// Version of the reporting qingzhou-probe binary. Blank identifies probes
+		// from before version reporting existed and lets the UI request an upgrade.
+		`ALTER TABLE server_metrics ADD COLUMN probe_version TEXT NOT NULL DEFAULT ''`,
 		// Prorated refunds: record how much was actually refunded on each order so
 		// admin reporting and idempotent re-reads reflect the real (possibly partial)
 		// amount instead of the original price. refund_ratio is the applied fraction
