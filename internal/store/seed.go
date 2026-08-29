@@ -32,6 +32,11 @@ func (s *Store) Seed(cfg *config.Config) (SeedInfo, error) {
 		"default_expiry_days":   "30",
 		"points_per_cny":        "10",
 		"signup_bonus_points":   "0",
+		// User-facing help can use the built-in Markdown document centre or an
+		// externally hosted documentation site. Existing installations keep the
+		// built-in behaviour when these settings are first seeded.
+		"help_docs_mode": "builtin",
+		"help_docs_url":  "",
 		// Runtime collection/synchronisation cadence. These are settings (rather
 		// than deployment-only environment variables) so an administrator can
 		// tune small nodes without logging into the panel host. New releases add
