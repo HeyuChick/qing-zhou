@@ -30,7 +30,7 @@ type ServerAlert struct {
 const reAlertWindow = 24 * time.Hour
 
 // alertTypes are the conditions CheckProbeAlerts evaluates and auto-resolves.
-var alertTypes = []string{"offline", "expiring", "expired", "high_cpu", "high_mem", "disk_full"}
+var alertTypes = []string{"offline", "expiring", "expired", "high_cpu", "high_mem", "disk_full", "traffic_threshold"}
 
 // AlertRestartLoop marks a node that keeps restarting without anyone asking it
 // to — every restart cuts all connections on that node, so a loop is a user-
@@ -277,7 +277,9 @@ func (s *Store) localAlertNode() *Server {
 		// Whatever expiry the admin recorded for this box. Of every machine the
 		// panel warns about, this is the one worth warning about most: a landing
 		// node lapsing costs a node, this one lapsing costs the panel.
-		ExpiryDate: s.LocalAsset().ExpiryDate,
+		ExpiryDate:          s.LocalAsset().ExpiryDate,
+		ExpiryNotifyEnabled: s.LocalAsset().ExpiryNotifyEnabled,
+		ExpiryNotifyDays:    s.LocalAsset().ExpiryNotifyDays,
 	}
 }
 
@@ -295,7 +297,6 @@ func (s *Store) CheckProbeAlerts() error {
 	}
 	now := time.Now()
 	freshSince := now.Add(-intervalcfg.OnlineWindow(s)).Unix()
-	threeDaysLater := now.AddDate(0, 0, 3)
 
 	// Thresholds are configurable via settings (alert_cpu/mem/disk_threshold).
 	cpuThreshold, _ := s.GetSettingInt64("alert_cpu_threshold", 90)
@@ -347,8 +348,14 @@ func (s *Store) CheckProbeAlerts() error {
 			raise("offline", fmt.Sprintf("服务器「%s」离线，最后上报: %s", sv.Name, time.Unix(sv.LastSeen, 0).Format("2006-01-02 15:04")))
 		}
 
-		// Expiring: within 3 days
-		if sv.ExpiryDate > 0 && sv.ExpiryDate <= threeDaysLater.Unix() && sv.ExpiryDate > now.Unix() {
+		// The panel always keeps its historical 3-day visual warning. When a
+		// device-specific Telegram policy is enabled, its lead time also controls
+		// when the panel episode opens so both surfaces agree.
+		expiryDays := 3
+		if sv.ExpiryNotifyEnabled && sv.ExpiryNotifyDays > 0 {
+			expiryDays = sv.ExpiryNotifyDays
+		}
+		if sv.ExpiryDate > 0 && sv.ExpiryDate <= now.AddDate(0, 0, expiryDays).Unix() && sv.ExpiryDate > now.Unix() {
 			days := int(time.Unix(sv.ExpiryDate, 0).Sub(now).Hours() / 24)
 			raise("expiring", fmt.Sprintf("服务器「%s」将在 %d 天后到期", sv.Name, days))
 		}
@@ -376,6 +383,11 @@ func (s *Store) CheckProbeAlerts() error {
 		}
 
 		for _, typ := range alertTypes {
+			// Traffic threshold state belongs to the billing-cycle evaluator; probe
+			// health checks must not resolve it merely because it was not evaluated here.
+			if typ == "traffic_threshold" {
+				continue
+			}
 			if active[typ] {
 				continue
 			}

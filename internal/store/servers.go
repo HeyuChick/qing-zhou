@@ -38,14 +38,26 @@ type Server struct {
 	CreatedAt   int64  `json:"created_at"`
 	UpdatedAt   int64  `json:"updated_at"`
 	// Monitor probe fields
-	ProbeEnabled bool    `json:"probe_enabled"`
-	ProbeToken   string  `json:"probe_token"`
-	ExpiryDate   int64   `json:"expiry_date"`
-	Provider     string  `json:"provider"`
-	Location     string  `json:"location"`
-	Spec         string  `json:"spec"`
-	Price        float64 `json:"price"`
-	Notes        string  `json:"notes"`
+	ProbeEnabled bool   `json:"probe_enabled"`
+	ProbeToken   string `json:"probe_token"`
+	ExpiryDate   int64  `json:"expiry_date"`
+	// Per-device expiry notification policy. Disabled by default so an upgrade
+	// never starts sending asset details to existing ops recipients by surprise.
+	ExpiryNotifyEnabled bool   `json:"expiry_notify_enabled"`
+	ExpiryNotifyDays    int    `json:"expiry_notify_days"`
+	ExpiryNotifyMode    string `json:"expiry_notify_mode"` // count | daily
+	ExpiryNotifyCount   int    `json:"expiry_notify_count"`
+	// Physical-interface monthly traffic budget. ResetMinute is minutes after
+	// local midnight; ResetDay is clamped to the month's last day when needed.
+	TrafficLimitBytes   int64   `json:"traffic_limit_bytes"`
+	TrafficResetDay     int     `json:"traffic_reset_day"`
+	TrafficResetMinute  int     `json:"traffic_reset_minute"`
+	TrafficAlertPercent int     `json:"traffic_alert_percent"`
+	Provider            string  `json:"provider"`
+	Location            string  `json:"location"`
+	Spec                string  `json:"spec"`
+	Price               float64 `json:"price"`
+	Notes               string  `json:"notes"`
 	// PublicVisible controls whether this machine is listed on the
 	// unauthenticated status page. Independent of ProbeEnabled: an admin may
 	// well want to watch a machine without announcing that it exists.
@@ -67,7 +79,7 @@ type Server struct {
 	SSHKeyPath string `json:"ssh_key_path"`
 }
 
-const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, provider, location, spec, price, notes, host_key, public_visible, use_sudo, sudo_password, ssh_key_path`
+const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, expiry_notify_enabled, expiry_notify_days, expiry_notify_mode, expiry_notify_count, traffic_limit_bytes, traffic_reset_day, traffic_reset_minute, traffic_alert_percent, provider, location, spec, price, notes, host_key, public_visible, use_sudo, sudo_password, ssh_key_path`
 
 func (s *Store) ListServers() ([]*Server, error) {
 	rows, err := s.db.Query(`SELECT ` + serverCols + ` FROM servers ORDER BY id`)
@@ -117,17 +129,21 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 	if sv.Status == "" {
 		sv.Status = "unknown"
 	}
+	applyServerMonitorDefaults(&sv)
 	// public_visible is deliberately not listed: the column default (1) applies,
 	// so a newly added machine shows on the status page exactly as every server
 	// did before the flag existed. Hiding one is an explicit act, done through
 	// UpdateServer — and a bool field cannot tell "caller wants it hidden" from
 	// "caller never filled this in", which is the whole reason it isn't here.
-	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, probe_token_hash, expiry_date, provider, location, spec, price, notes, use_sudo, sudo_password, ssh_key_path)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, probe_token_hash, expiry_date, expiry_notify_enabled, expiry_notify_days, expiry_notify_mode, expiry_notify_count, traffic_limit_bytes, traffic_reset_day, traffic_reset_minute, traffic_alert_percent, provider, location, spec, price, notes, use_sudo, sudo_password, ssh_key_path)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
 		b2i(sv.Enabled), sv.Status, sv.LastSeen, now, now,
-		b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes,
+		b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate,
+		b2i(sv.ExpiryNotifyEnabled), sv.ExpiryNotifyDays, sv.ExpiryNotifyMode, sv.ExpiryNotifyCount,
+		sv.TrafficLimitBytes, sv.TrafficResetDay, sv.TrafficResetMinute, sv.TrafficAlertPercent,
+		sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes,
 		b2i(sv.UseSudo), s.encrypt(sv.SudoPassword), sv.SSHKeyPath)
 	if err != nil {
 		return 0, err
@@ -137,10 +153,14 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 
 func (s *Store) UpdateServer(sv Server) error {
 	now := time.Now().Unix()
-	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, provider=?, location=?, spec=?, price=?, notes=?, public_visible=?, use_sudo=?, sudo_password=?, ssh_key_path=? WHERE id=?`,
+	applyServerMonitorDefaults(&sv)
+	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, expiry_notify_enabled=?, expiry_notify_days=?, expiry_notify_mode=?, expiry_notify_count=?, traffic_limit_bytes=?, traffic_reset_day=?, traffic_reset_minute=?, traffic_alert_percent=?, provider=?, location=?, spec=?, price=?, notes=?, public_visible=?, use_sudo=?, sudo_password=?, ssh_key_path=? WHERE id=?`,
 		sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
-		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate, sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, b2i(sv.PublicVisible),
+		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate,
+		b2i(sv.ExpiryNotifyEnabled), sv.ExpiryNotifyDays, sv.ExpiryNotifyMode, sv.ExpiryNotifyCount,
+		sv.TrafficLimitBytes, sv.TrafficResetDay, sv.TrafficResetMinute, sv.TrafficAlertPercent,
+		sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, b2i(sv.PublicVisible),
 		b2i(sv.UseSudo), s.encrypt(sv.SudoPassword), sv.SSHKeyPath, sv.ID)
 	return err
 }
@@ -225,11 +245,13 @@ func (s *Store) TouchProbeSeen(id int64) error {
 
 func scanServer(sc scanner) (*Server, error) {
 	var sv Server
-	var enabled, probeEnabled, publicVisible, useSudo int
+	var enabled, probeEnabled, expiryNotifyEnabled, publicVisible, useSudo int
 	err := sc.Scan(&sv.ID, &sv.Name, &sv.Host, &sv.Port, &sv.SSHUser, &sv.SSHKey, &sv.SSHKeyPass, &sv.SSHPassword,
 		&sv.ConfigPath, &sv.SystemdUnit, &sv.SingBoxBin, &sv.V2rayListen,
 		&enabled, &sv.Status, &sv.LastSeen, &sv.CreatedAt, &sv.UpdatedAt,
-		&probeEnabled, &sv.ProbeToken, &sv.ExpiryDate, &sv.Provider, &sv.Location, &sv.Spec, &sv.Price, &sv.Notes, &sv.HostKey,
+		&probeEnabled, &sv.ProbeToken, &sv.ExpiryDate, &expiryNotifyEnabled, &sv.ExpiryNotifyDays, &sv.ExpiryNotifyMode, &sv.ExpiryNotifyCount,
+		&sv.TrafficLimitBytes, &sv.TrafficResetDay, &sv.TrafficResetMinute, &sv.TrafficAlertPercent,
+		&sv.Provider, &sv.Location, &sv.Spec, &sv.Price, &sv.Notes, &sv.HostKey,
 		&publicVisible, &useSudo, &sv.SudoPassword, &sv.SSHKeyPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -239,9 +261,28 @@ func scanServer(sc scanner) (*Server, error) {
 	}
 	sv.Enabled = enabled == 1
 	sv.ProbeEnabled = probeEnabled == 1
+	sv.ExpiryNotifyEnabled = expiryNotifyEnabled == 1
 	sv.PublicVisible = publicVisible == 1
 	sv.UseSudo = useSudo == 1
 	return &sv, nil
+}
+
+func applyServerMonitorDefaults(sv *Server) {
+	if sv.ExpiryNotifyDays <= 0 {
+		sv.ExpiryNotifyDays = 3
+	}
+	if sv.ExpiryNotifyMode != "daily" {
+		sv.ExpiryNotifyMode = "count"
+	}
+	if sv.ExpiryNotifyCount <= 0 {
+		sv.ExpiryNotifyCount = 1
+	}
+	if sv.TrafficResetDay <= 0 {
+		sv.TrafficResetDay = 1
+	}
+	if sv.TrafficAlertPercent <= 0 {
+		sv.TrafficAlertPercent = 80
+	}
 }
 
 func (s *Store) decryptServer(sv *Server) {
