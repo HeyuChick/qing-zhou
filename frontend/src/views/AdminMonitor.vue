@@ -175,10 +175,13 @@
             <span class="tag-mini">{{ fmtUptime(s.metrics.uptime) }}</span>
           </div>
           <div class="traffic-total">
-            <div class="m-row"><span>本月流量（IN + OUT）</span><b>{{ trafficStatus(s) }}</b></div>
+            <div class="m-row"><span>本周期流量（IN + OUT）</span><b>{{ trafficStatus(s) }}</b></div>
+            <n-progress v-if="s.traffic_limit_bytes > 0" type="line" :percentage="trafficPct(s)" :height="5"
+                        :show-indicator="false" :color="pctColor(trafficPct(s))" style="margin:5px 0 4px;" />
             <div class="traffic-split">
               <span>IN {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.rx) : '—' }}</span>
               <span>OUT {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.tx) : '—' }}</span>
+              <span v-if="s.traffic_limit_bytes > 0">{{ s.traffic_alert_percent }}% 告警 · {{ fmtDateTime(s.traffic_next_reset) }} 重置</span>
             </div>
           </div>
         </template>
@@ -200,12 +203,45 @@
         <n-alert v-if="assetServer?.local" type="info" :bordered="false" style="margin-bottom:12px;">
           面板本机由面板自采集，无需探针。这里记的是这台机器本身 —— 到期提醒尤其值得填：落地机到期只掉一个节点，面板机到期是整站。
         </n-alert>
-        <n-form v-if="assetServer" label-placement="left" label-width="80">
+        <n-form v-if="assetServer" label-placement="left" label-width="105">
           <n-form-item label="提供商"><n-input v-model:value="assetForm.provider" /></n-form-item>
           <n-form-item label="位置"><n-input v-model:value="assetForm.location" /></n-form-item>
           <n-form-item label="规格"><n-input v-model:value="assetForm.spec" /></n-form-item>
           <n-form-item label="月费 (¥)"><n-input-number v-model:value="assetForm.price" :min="0" style="width:100%;" /></n-form-item>
           <n-form-item label="到期时间"><n-input v-model:value="assetExpiry" :input-props="{ type: 'datetime-local' }" style="width:100%;" /></n-form-item>
+          <div class="asset-section-title">Telegram 到期提醒</div>
+          <n-form-item label="启用提醒"><n-switch v-model:value="assetForm.expiry_notify_enabled" /></n-form-item>
+          <template v-if="assetForm.expiry_notify_enabled">
+            <n-form-item label="提前天数">
+              <n-input-number v-model:value="assetForm.expiry_notify_days" :min="1" :max="365" style="width:100%;" />
+            </n-form-item>
+            <n-form-item label="重复方式">
+              <n-select v-model:value="assetForm.expiry_notify_mode" :options="expiryNotifyModes" />
+            </n-form-item>
+            <n-form-item v-if="assetForm.expiry_notify_mode === 'count'" label="提醒总次数">
+              <n-input-number v-model:value="assetForm.expiry_notify_count" :min="1" :max="365" style="width:100%;" />
+            </n-form-item>
+            <p class="asset-form-hint">首次进入提前提醒范围时发送；重复提醒最多每天一次。定次数包含首次提醒。</p>
+          </template>
+
+          <div class="asset-section-title">月流量上限</div>
+          <n-form-item label="上限 (GB)">
+            <n-input-number v-model:value="assetTrafficGB" :min="0" :precision="2" style="width:100%;" />
+          </n-form-item>
+          <template v-if="assetTrafficGB > 0">
+            <n-form-item label="每月重置日">
+              <n-input-number v-model:value="assetForm.traffic_reset_day" :min="1" :max="31" style="width:100%;" />
+            </n-form-item>
+            <n-form-item label="重置时间">
+              <n-input v-model:value="assetResetTime" :input-props="{ type: 'time' }" style="width:100%;" />
+            </n-form-item>
+            <n-form-item label="告警阈值">
+              <n-input-number v-model:value="assetForm.traffic_alert_percent" :min="1" :max="100" style="width:100%;">
+                <template #suffix>%</template>
+              </n-input-number>
+            </n-form-item>
+            <p class="asset-form-hint">统计设备物理网卡 IN + OUT；达到阈值后每个流量周期只通知一次，周期重置后自动重新启用。</p>
+          </template>
           <n-form-item label="备注"><n-input v-model:value="assetForm.notes" type="textarea" :rows="2" /></n-form-item>
           <n-form-item v-if="!assetServer.local" label="启用探针"><n-switch v-model:value="assetForm.probe_enabled" /></n-form-item>
         </n-form>
@@ -257,6 +293,7 @@ const ALERT_META: Record<string, { label: string; kind: 'error' | 'warning'; ran
   high_mem: { label: '内存偏高', kind: 'warning', rank: 4 },
   high_cpu: { label: 'CPU 偏高', kind: 'warning', rank: 5 },
   expiring: { label: '即将到期', kind: 'warning', rank: 6 },
+  traffic_threshold: { label: '流量阈值', kind: 'warning', rank: 3 },
 }
 function alertLabel(t: string) { return ALERT_META[t]?.label || t }
 function alertKind(t: string) { return ALERT_META[t]?.kind || 'warning' }
@@ -301,9 +338,13 @@ function memPct(s: any) { return s.metrics ? pct(s.metrics.mem_used, s.metrics.m
 function diskPct(s: any) { return s.metrics ? pct(s.metrics.disk_used, s.metrics.disk_total) : 0 }
 function trafficReady(t: any) { return (t?.sample_count || 0) >= 2 }
 function trafficStatus(s: any) {
-  if (trafficReady(s.month_traffic)) return fmtBytes(s.month_traffic.total)
+  if (trafficReady(s.month_traffic)) {
+    const used = fmtBytes(s.month_traffic.total)
+    return s.traffic_limit_bytes > 0 ? `${used} / ${fmtBytes(s.traffic_limit_bytes)}` : used
+  }
   return s.metrics?.net_totals_valid ? '采集中' : '需升级探针'
 }
+function trafficPct(s: any) { return pct(s.month_traffic?.total || 0, s.traffic_limit_bytes || 0) }
 function pctColor(v: number) { return v >= 90 ? '#c2685c' : v >= 70 ? '#bf9540' : '#6f8f76' }
 
 // 热力图分类：绿/黄/红
@@ -427,16 +468,49 @@ function renderHeatmap() {
 // --- Asset editing ---
 const showAsset = ref(false)
 const assetServer = ref<any>(null)
-const assetForm = reactive({ provider: '', location: '', spec: '', price: 0, notes: '', probe_enabled: false })
+const GB = 1024 * 1024 * 1024
+const expiryNotifyModes = [
+  { label: '每天一次，共提醒指定次数', value: 'count' },
+  { label: '首次后每天提醒，直到到期', value: 'daily' },
+]
+const assetForm = reactive({
+  provider: '', location: '', spec: '', price: 0, notes: '', probe_enabled: false,
+  expiry_notify_enabled: false, expiry_notify_days: 3, expiry_notify_mode: 'count', expiry_notify_count: 1,
+  traffic_reset_day: 1, traffic_alert_percent: 80,
+})
 const assetExpiry = ref('')
+const assetTrafficGB = ref(0)
+const assetResetTime = ref('00:00')
+function resetTimeOf(minutes: number) {
+  const n = Math.max(0, Math.min(1439, Number(minutes) || 0))
+  return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`
+}
+function resetMinuteOf(value: string) {
+  const [h, m] = String(value || '00:00').split(':').map(Number)
+  return Math.max(0, Math.min(1439, (h || 0) * 60 + (m || 0)))
+}
 function openAsset(s: any) {
   assetServer.value = s
-  Object.assign(assetForm, { provider: s.provider || '', location: s.location || '', spec: s.spec || '', price: s.price || 0, notes: s.notes || '', probe_enabled: s.probe_enabled })
+  Object.assign(assetForm, {
+    provider: s.provider || '', location: s.location || '', spec: s.spec || '', price: s.price || 0,
+    notes: s.notes || '', probe_enabled: s.probe_enabled,
+    expiry_notify_enabled: s.expiry_notify_enabled === true,
+    expiry_notify_days: s.expiry_notify_days || 3,
+    expiry_notify_mode: s.expiry_notify_mode === 'daily' ? 'daily' : 'count',
+    expiry_notify_count: s.expiry_notify_count || 1,
+    traffic_reset_day: s.traffic_reset_day || 1,
+    traffic_alert_percent: s.traffic_alert_percent || 80,
+  })
   assetExpiry.value = toLocalDatetimeInput(s.expiry_date)
+  assetTrafficGB.value = Math.round(((s.traffic_limit_bytes || 0) / GB) * 100) / 100
+  assetResetTime.value = resetTimeOf(s.traffic_reset_minute)
   showAsset.value = true
 }
 async function handleSaveAsset() {
   if (!assetServer.value) return
+  if (assetForm.expiry_notify_enabled && !assetExpiry.value) {
+    message.error('启用到期提醒前请先填写到期时间'); return
+  }
   saving.value = true
   try {
     const body: any = { ...assetForm }
@@ -444,6 +518,8 @@ async function handleSaveAsset() {
     if (assetServer.value.local) delete body.probe_enabled
     // 清空到期时间要能存回去，否则填错了就再也去不掉
     body.expiry_date = assetExpiry.value ? Math.floor(new Date(assetExpiry.value).getTime() / 1000) : 0
+    body.traffic_limit_bytes = Math.round(Math.max(0, assetTrafficGB.value || 0) * GB)
+    body.traffic_reset_minute = resetMinuteOf(assetResetTime.value)
     await apiPut(`/api/admin/servers/${assetServer.value.id}/monitor`, body)
     message.success('保存成功'); showAsset.value = false; await load()
   } catch (e: any) { message.error(e.message) } finally { saving.value = false }
@@ -736,6 +812,8 @@ onUnmounted(() => {
 .info-strip { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .traffic-total { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--border); }
 .traffic-split { display: flex; gap: 14px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.asset-section-title { margin: 10px 0 12px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text); font-size: 13px; font-weight: 650; }
+.asset-form-hint { margin: -4px 0 14px 105px; color: var(--text-3); font-size: 11px; line-height: 1.65; }
 .no-data { text-align: center; color: var(--text-3); padding: 16px; font-size: 13px; }
 .mini-chart-box { margin-top: 12px; }
 .mini-chart { height: 160px; }
@@ -743,6 +821,7 @@ onUnmounted(() => {
 @media (max-width: 768px) {
   .card-grid { grid-template-columns: 1fr; }
   .sum-grid { grid-template-columns: repeat(2, 1fr); }
+  .asset-form-hint { margin-left: 0; }
 }
 @media (min-width: 769px) and (max-width: 1180px) { .sum-grid { grid-template-columns: repeat(3, 1fr); } }
 </style>

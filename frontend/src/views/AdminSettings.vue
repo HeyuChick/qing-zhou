@@ -175,6 +175,29 @@
         </n-form>
       </n-card>
 
+      <n-card v-show="activeSectionId === 'settings-help'" id="settings-help" class="settings-section" size="small">
+        <p class="section-intro">
+          选择用户点击「帮助中心」时使用站内 Markdown 文档，还是跳转到独立部署的外部帮助站点。
+          后台「帮助文档」管理始终保留，切回站内模式后可继续使用原有内容。
+        </p>
+        <n-form label-placement="top">
+          <n-form-item label="帮助文档来源">
+            <n-select v-model:value="form.help_docs_mode" style="width:260px;" :options="[
+              {label:'内置帮助中心',value:'builtin'},
+              {label:'外部帮助文档',value:'external'},
+            ]" />
+          </n-form-item>
+          <n-form-item v-if="form.help_docs_mode === 'external'" label="外部文档 URL">
+            <div style="width:100%;max-width:560px;">
+              <n-input v-model:value="form.help_docs_url" placeholder="https://docs.example.com" />
+              <p style="font-size:12px;color:var(--text-3);margin-top:6px;line-height:1.7;">
+                必须填写完整的 <code>http://</code> 或 <code>https://</code> 地址。用户从菜单或控制台点击时会在新标签页打开。
+              </p>
+            </div>
+          </n-form-item>
+        </n-form>
+      </n-card>
+
       <n-card v-show="activeSectionId === 'settings-smtp'" id="settings-smtp" class="settings-section" size="small">
         <!-- 没配 SMTP 时，依赖邮件的功能会安静地失效：面板日志里有链接，用户那边
              什么都收不到。把后果写出来，而不是留一组空输入框让人以为「可选」。 -->
@@ -565,11 +588,13 @@ import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } 
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { NAlert, NCard, NCheckbox, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useDialog, useMessage } from 'naive-ui'
 import { apiGet, apiPost, apiPut, apiList, apiDownload } from '@/api'
+import { useConfigStore } from '@/stores/config'
 
 const message = useMessage()
 const dialog = useDialog()
 const route = useRoute()
 const router = useRouter()
+const config = useConfigStore()
 const settingsLoaded = ref(false)
 const loadError = ref('')
 type SettingsSection = { id: string; label: string; note: string; description: string; keywords: string }
@@ -579,6 +604,7 @@ const settingsGroups: SettingsGroup[] = [
     { id: 'settings-basic', label: '基本设置', note: '注册与积分', description: '配置站点信息、注册规则和新用户默认权益。', keywords: '站点名称 描述 注册 邮箱验证 积分 流量 免费节点 凭据' },
     { id: 'settings-access', label: '访问地址', note: '面板与节点', description: '设置面板公开地址、节点连接地址和安装命令。', keywords: '域名 public base 节点 IP sing-box 安装 命令' },
     { id: 'settings-home', label: '首页设置', note: '入口展示', description: '选择访客首页显示监控大屏或自定义页面。', keywords: '首页 监控 自定义 URL' },
+    { id: 'settings-help', label: '帮助中心', note: '内置或外部', description: '选择用户使用站内帮助文档或跳转到外部文档站点。', keywords: '帮助 文档 内置 外部 URL 跳转' },
   ] },
   { label: '用户与计费', sections: [
     { id: 'settings-refund', label: '退款策略', note: '比例与手续费', description: '设置管理员退款时采用的比例、计算基准和手续费。', keywords: '订单 退款 流量 时间 手续费' },
@@ -1011,6 +1037,16 @@ async function handleSave() {
     message.error('完整健康检查间隔不能小于流量统计间隔')
     return
   }
+  if (form.help_docs_mode === 'external') {
+    try {
+      const helpURL = new URL(String(form.help_docs_url || '').trim())
+      if (!['http:', 'https:'].includes(helpURL.protocol)) throw new Error()
+    } catch {
+      await selectSettingsSection('settings-help')
+      message.error('外部文档 URL 必须是完整的 http:// 或 https:// 地址')
+      return
+    }
+  }
   let customCommandsJSON = '[]'
   try {
     customCommandsJSON = serializeTelegramCustomCommands()
@@ -1050,6 +1086,7 @@ async function handleSave() {
       telegram_custom_commands: customCommandsJSON,
     }
     await apiPut('/api/admin/settings', body)
+    await config.fetchConfig()
     await reloadOpsRecipients()
     rememberSavedDraft()
     message.success('保存成功')
@@ -1193,6 +1230,8 @@ async function loadSettings() {
       // 从未设置过的键不会出现在响应里，而 n-input 需要一个受控的空串而不是
       // undefined —— 否则第一次输入前它不是一个受控输入。
       form.node_host_override ??= ''
+      form.help_docs_mode = data.help_docs_mode === 'external' ? 'external' : 'builtin'
+      form.help_docs_url ??= ''
       emailVerify.value = data.email_verify_required === 'true'
       pointsRate.value = parseInt(data.points_per_cny) || 10
       signupBonus.value = parseInt(data.signup_bonus_points) || 0

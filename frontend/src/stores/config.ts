@@ -15,6 +15,8 @@ export interface SiteConfig {
   points_per_cny: number
   homepage_mode: string
   homepage_url: string
+  help_docs_mode: string
+  help_docs_url: string
 }
 
 export const useConfigStore = defineStore('config', () => {
@@ -31,6 +33,8 @@ export const useConfigStore = defineStore('config', () => {
     points_per_cny: 10,
     homepage_mode: 'monitor',
     homepage_url: '',
+    help_docs_mode: 'builtin',
+    help_docs_url: '',
   })
 
   async function fetchConfig() {
@@ -38,6 +42,7 @@ export const useConfigStore = defineStore('config', () => {
       const data = await apiGet<SiteConfig>('/api/config')
       if (data) Object.assign(config.value, data)
     } catch {}
+    return config.value
   }
 
   return { config, fetchConfig }

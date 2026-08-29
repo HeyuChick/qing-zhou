@@ -34,7 +34,7 @@
       <div class="onboarding-copy"><b>从这里开始</b><span>当前没有生效中的套餐，完成下面两步即可使用服务。</span></div>
       <button type="button" @click="router.push('/shop')"><i>1</i><span><b>选择套餐</b><small>对比流量、时长与价格</small></span></button>
       <button type="button" @click="router.push('/sub')"><i>2</i><span><b>导入订阅</b><small>复制地址或一键打开客户端</small></span></button>
-      <button type="button" @click="router.push('/help')"><i>?</i><span><b>查看帮助</b><small>安装、连接与常见问题</small></span></button>
+      <button type="button" @click="showHelp"><i>?</i><span><b>查看帮助</b><small>安装、连接与常见问题</small></span></button>
     </div>
 
     <!-- 核心指标 -->
@@ -155,14 +155,17 @@ import { useRouter } from 'vue-router'
 import { NCard, NAlert, NButton, NList, NListItem, NThing, NTag, NRadioGroup, NRadioButton, NModal, NSpace, NSpin, NIcon } from 'naive-ui'
 import { LinkOutline, CartOutline, ReceiptOutline, RefreshOutline } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
+import { useConfigStore } from '@/stores/config'
 import { apiGet, apiList } from '@/api'
 import { fmtBytes, fmtDate, daysLeft, yuan, pct } from '@/utils/format'
 import { mdToHtml } from '@/utils/markdown'
 import { useCountUp } from '@/utils/countup'
 import StatCard from '@/components/StatCard.vue'
 import TrafficTrendChart from '@/components/TrafficTrendChart.vue'
+import { openHelp } from '@/utils/help'
 
-const router = useRouter(); const auth = useAuthStore()
+const router = useRouter(); const auth = useAuthStore(); const config = useConfigStore()
+function showHelp() { openHelp(config.config, router) }
 const dash = ref<any>({}); const notices = ref<any[]>([])
 const trendRange = ref('7d'); const trendData = ref<any[]>([]); const trendLoading = ref(false)
 const refreshing = ref(false)

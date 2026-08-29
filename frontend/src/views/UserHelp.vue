@@ -35,11 +35,14 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { NCard, NEmpty, NInput, NSpin } from 'naive-ui'
 import { apiList } from '@/api'
 import { mdToHtml } from '@/utils/markdown'
+import { useConfigStore } from '@/stores/config'
+import { externalHelpURL } from '@/utils/help'
 
 const docs = ref<any[]>([])
 const activeId = ref<number | null>(null)
 const query = ref('')
 const loading = ref(false)
+const config = useConfigStore()
 
 const activeDoc = computed(() => docs.value.find(d => d.id === activeId.value))
 const filteredDocs = computed(() => {
@@ -52,6 +55,12 @@ watch(filteredDocs, list => {
 })
 
 onMounted(async () => {
+  await config.fetchConfig()
+  const externalURL = externalHelpURL(config.config)
+  if (externalURL) {
+    window.location.replace(externalURL)
+    return
+  }
   loading.value = true
   try { docs.value = await apiList('/api/help') || [] } catch {}
   finally { loading.value = false }

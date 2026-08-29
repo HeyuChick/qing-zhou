@@ -96,6 +96,11 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 		homeMode = "monitor"
 	}
 	homeURL, _ := a.st.GetSetting("homepage_url")
+	helpMode, _ := a.st.GetSetting("help_docs_mode")
+	if helpMode != "external" {
+		helpMode = "builtin"
+	}
+	helpURL, _ := a.st.GetSetting("help_docs_url")
 	ok(w, J{
 		"register_mode":         mode,
 		"registration_open":     mode != "closed",
@@ -113,6 +118,8 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"site_description": siteDesc,
 		"homepage_mode":    homeMode,
 		"homepage_url":     homeURL,
+		"help_docs_mode":   helpMode,
+		"help_docs_url":    helpURL,
 		"app_version":      version.Current(),
 	})
 }

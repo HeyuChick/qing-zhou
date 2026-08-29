@@ -103,6 +103,7 @@ import { useConfigStore } from '@/stores/config'
 import { apiPost } from '@/api'
 import { useMessage } from 'naive-ui'
 import BrandMark from './BrandMark.vue'
+import { openHelp } from '@/utils/help'
 
 const router = useRouter()
 const route = useRoute()
@@ -264,12 +265,14 @@ const adminQuickMenu = [
 
 function handleMenuSelect(key: string) {
   if (key === 'admin-root') return
-  router.push(key)
+  if (key === '/help') openHelp(config.config, router)
+  else router.push(key)
 }
 function goAndClose(key: string) {
   if (key === 'admin-root') return
-  router.push(key)
   drawerShow.value = false
+  if (key === '/help') openHelp(config.config, router)
+  else router.push(key)
 }
 function handleUserSelect(key: string) {
   if (key === 'logout') { auth.logout(); router.push('/login') }
@@ -277,7 +280,8 @@ function handleUserSelect(key: string) {
 function handleAdminSelect(key: string) { router.push(key) }
 function handleSearchSelect(path: string) {
   searchQuery.value = ''
-  router.push(path)
+  if (path === '/help') openHelp(config.config, router)
+  else router.push(path)
 }
 function openFirstSearchResult() {
   const first = searchOptions.value[0]

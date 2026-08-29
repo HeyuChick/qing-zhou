@@ -562,6 +562,18 @@ CREATE TABLE IF NOT EXISTS server_alerts (
   resolved  INTEGER NOT NULL DEFAULT 0
 );
 
+-- Durable delivery cursors for per-device Telegram alerts. cycle_key changes
+-- when an expiry timestamp changes or a new traffic billing cycle starts.
+CREATE TABLE IF NOT EXISTS device_notify_state (
+  server_id     INTEGER NOT NULL,
+  kind          TEXT    NOT NULL,
+  cycle_key     TEXT    NOT NULL,
+  sent_count    INTEGER NOT NULL DEFAULT 0,
+  last_sent_day TEXT    NOT NULL DEFAULT '',
+  updated_at    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (server_id, kind, cycle_key)
+);
+
 -- One Telegram account per panel user. telegram_id is unique so a single chat
 -- cannot be bound to two accounts (and then pull the other user's subscription).
 CREATE TABLE IF NOT EXISTS telegram_binds (
@@ -850,6 +862,16 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE servers ADD COLUMN probe_enabled INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE servers ADD COLUMN probe_token TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE servers ADD COLUMN expiry_date INTEGER NOT NULL DEFAULT 0`,
+		// Per-device expiry and provider-traffic notification policies.
+		// notify_enabled defaults off: upgrades remain silent until an admin opts in.
+		`ALTER TABLE servers ADD COLUMN expiry_notify_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE servers ADD COLUMN expiry_notify_days INTEGER NOT NULL DEFAULT 3`,
+		`ALTER TABLE servers ADD COLUMN expiry_notify_mode TEXT NOT NULL DEFAULT 'count'`,
+		`ALTER TABLE servers ADD COLUMN expiry_notify_count INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE servers ADD COLUMN traffic_limit_bytes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE servers ADD COLUMN traffic_reset_day INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE servers ADD COLUMN traffic_reset_minute INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE servers ADD COLUMN traffic_alert_percent INTEGER NOT NULL DEFAULT 80`,
 		`ALTER TABLE servers ADD COLUMN provider TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE servers ADD COLUMN location TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE servers ADD COLUMN spec TEXT NOT NULL DEFAULT ''`,

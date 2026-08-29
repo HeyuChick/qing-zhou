@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -142,6 +143,10 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		in[telegramCustomCommandsSetting] = normalized
 	}
+	if err := a.validateHelpDocsSettings(in); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	runtimeChanged, err := a.validateRuntimeIntervals(in)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
@@ -207,6 +212,45 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		a.notifyRuntimeIntervalsChanged()
 	}
 	a.handleGetSettings(w, r)
+}
+
+// validateHelpDocsSettings validates the effective pair before any setting is
+// written. That keeps a bad external URL from partially saving the rest of a
+// large settings form and, critically, prevents javascript: URLs from reaching
+// the public config consumed by the browser.
+func (a *API) validateHelpDocsSettings(in map[string]string) error {
+	mode, modeSubmitted := in["help_docs_mode"]
+	if modeSubmitted {
+		mode = strings.TrimSpace(mode)
+		if mode != "builtin" && mode != "external" {
+			return fmt.Errorf("帮助文档模式无效")
+		}
+		in["help_docs_mode"] = mode
+	} else {
+		mode, _ = a.st.GetSetting("help_docs_mode")
+		if mode == "" {
+			mode = "builtin"
+		}
+	}
+
+	rawURL, urlSubmitted := in["help_docs_url"]
+	if urlSubmitted {
+		rawURL = strings.TrimSpace(rawURL)
+		in["help_docs_url"] = rawURL
+	} else {
+		rawURL, _ = a.st.GetSetting("help_docs_url")
+	}
+	if rawURL == "" {
+		if mode == "external" {
+			return fmt.Errorf("选择外部帮助文档时，请填写外部文档 URL")
+		}
+		return nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("外部帮助文档 URL 必须是完整的 http:// 或 https:// 地址")
+	}
+	return nil
 }
 
 type runtimeIntervalSpec struct {
