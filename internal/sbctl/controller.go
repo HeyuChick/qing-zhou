@@ -40,7 +40,7 @@ type ConfigStore interface {
 	BuildUsersByTag(now int64) (map[string][]singbox.User, error)
 	BuildSingboxConfig(base, v2rayListen string, usersByTag map[string][]singbox.User) ([]byte, error)
 	BuildSingboxConfigForServer(serverID int64, base, v2rayListen string, usersByTag map[string][]singbox.User) ([]byte, error)
-	AddUsageBatch(deltas map[string]store.UsageDelta) (int, error)
+	AddUsageBatchesByServer(sources map[int64]map[string]store.UsageDelta) (int, error)
 	ListServers() ([]*store.Server, error)
 	GetServer(id int64) (*store.Server, error)
 	// The capability probe already runs `sing-box version` on every node; these
@@ -868,8 +868,9 @@ func SSHConfigFor(sv *store.Server) *sshctl.ServerConfig {
 // A per-identity sum is correct across servers: bucket client_names are globally
 // unique, and a user reachable on two nodes should be charged for both.
 func (c *Controller) CollectStats(ctx context.Context) (int, error) {
-	deltas := map[string]store.UsageDelta{}
-	add := func(m map[string]*sbstats.Traffic) {
+	sources := map[int64]map[string]store.UsageDelta{}
+	convert := func(m map[string]*sbstats.Traffic) map[string]store.UsageDelta {
+		deltas := map[string]store.UsageDelta{}
 		for name, t := range m {
 			if t.Up == 0 && t.Down == 0 {
 				continue
@@ -879,6 +880,7 @@ func (c *Controller) CollectStats(ctx context.Context) (int, error) {
 			d.Down += t.Down
 			deltas[name] = d
 		}
+		return deltas
 	}
 
 	var errs []error
@@ -886,14 +888,14 @@ func (c *Controller) CollectStats(ctx context.Context) (int, error) {
 	if err != nil {
 		errs = append(errs, fmt.Errorf("local stats: %w", err))
 	} else {
-		add(m)
+		sources[store.LocalNodeID] = convert(m)
 	}
 	for _, rm := range c.remoteStats(ctx) {
 		if rm.err != nil {
 			errs = append(errs, rm.err)
 			continue
 		}
-		add(rm.traffic)
+		sources[rm.serverID] = convert(rm.traffic)
 	}
 
 	// Commit whatever was collected even if some server failed. Each successful
@@ -901,9 +903,9 @@ func (c *Controller) CollectStats(ctx context.Context) (int, error) {
 	// bailing out here would throw that traffic away permanently.
 	//
 	// Apply the whole poll in one transaction (one WAL write-lock acquisition
-	// instead of one per identity). AddUsageBatch isolates each identity in a
+	// instead of one per identity). AddUsageBatchesByServer isolates each identity in a
 	// savepoint, so one bad delta doesn't discard the rest.
-	n, err := c.st.AddUsageBatch(deltas)
+	n, err := c.st.AddUsageBatchesByServer(sources)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -911,8 +913,9 @@ func (c *Controller) CollectStats(ctx context.Context) (int, error) {
 }
 
 type remoteResult struct {
-	traffic map[string]*sbstats.Traffic
-	err     error
+	serverID int64
+	traffic  map[string]*sbstats.Traffic
+	err      error
 }
 
 // remoteStats polls every enabled remote server's stats API through an SSH
@@ -962,7 +965,7 @@ func (c *Controller) remoteStats(ctx context.Context) []remoteResult {
 				err = fmt.Errorf("server %d (%s) stats: %w", sv.ID, sv.Name, err)
 			}
 			mu.Lock()
-			out = append(out, remoteResult{traffic: t, err: err})
+			out = append(out, remoteResult{serverID: sv.ID, traffic: t, err: err})
 			mu.Unlock()
 		}(sv, listen)
 	}

@@ -365,6 +365,8 @@ func (a *API) Router() http.Handler {
 		// server management (multi-server sing-box orchestration)
 		ar.Get("/api/admin/servers", a.handleAdminListServers)
 		ar.Post("/api/admin/servers", a.handleAdminCreateServer)
+		// Before /{id}: chi would otherwise parse "reorder" as a server id.
+		ar.Post("/api/admin/servers/reorder", a.handleAdminReorderServers)
 		ar.Put("/api/admin/servers/{id}", a.handleAdminUpdateServer)
 		ar.Delete("/api/admin/servers/{id}", a.handleAdminDeleteServer)
 		ar.Post("/api/admin/servers/{id}/test", a.handleAdminTestServer)
@@ -379,6 +381,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/monitor/dashboard", a.handleMonitorDashboard)
 		ar.Get("/api/admin/monitor/servers", a.handleMonitorServers)
 		ar.Get("/api/admin/monitor/servers/{id}/metrics", a.handleServerMetrics)
+		ar.Get("/api/admin/monitor/servers/{id}/traffic-analysis", a.handleServerTrafficAnalysis)
 		ar.Post("/api/admin/monitor/servers/{id}/probe/upgrade", a.handleAdminProbeUpgrade)
 		ar.Get("/api/admin/monitor/heatmap", a.handleMonitorHeatmap)
 		ar.Get("/api/admin/monitor/alerts", a.handleMonitorAlerts)

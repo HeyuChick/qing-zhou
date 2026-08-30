@@ -84,6 +84,21 @@ func (a *API) handleAdminCreateServer(w http.ResponseWriter, r *http.Request) {
 	ok(w, created)
 }
 
+func (a *API) handleAdminReorderServers(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.IDs) == 0 {
+		fail(w, http.StatusBadRequest, "服务器顺序不能为空")
+		return
+	}
+	if err := a.st.ReorderServers(body.IDs); err != nil {
+		fail(w, http.StatusInternalServerError, "保存服务器顺序失败")
+		return
+	}
+	ok(w, nil)
+}
+
 func (a *API) handleAdminUpdateServer(w http.ResponseWriter, r *http.Request) {
 	id := atoi(chi.URLParam(r, "id"))
 

@@ -77,9 +77,19 @@ func (s *Store) OnlineUsers(withinSec int64, limit int) ([]NameValue, error) {
 
 // PruneTrafficSamples deletes samples older than `keepDays` days.
 func (s *Store) PruneTrafficSamples(keepDays int) error {
-	_, err := s.db.Exec(`DELETE FROM traffic_samples WHERE ts < ?`,
-		time.Now().AddDate(0, 0, -keepDays).Unix())
-	return err
+	before := time.Now().AddDate(0, 0, -keepDays).Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM traffic_samples WHERE ts < ?`, before); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM server_user_traffic_samples WHERE ts < ?`, before); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Overview() (*Overview, error) {

@@ -97,3 +97,49 @@ func TestAddUsageBatch(t *testing.T) {
 	}
 	check(a, 101, 202)
 }
+
+func TestAddUsageBatchesPreservesServerSource(t *testing.T) {
+	st := newRefundStore(t)
+	carol := mkUser(t, st, "source-carol")
+	dave := mkUser(t, st, "source-dave")
+	if err := st.EnsurePoolBucket(carol, "qz_source_carol", "uuid-a", "sec-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsurePoolBucket(dave, "qz_source_dave", "uuid-b", "sec-b"); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := st.AddUsageBatchesByServer(map[int64]map[string]UsageDelta{
+		1: {"qz_source_carol": {Up: 100, Down: 50}},
+		2: {
+			"qz_source_carol": {Up: 20, Down: 30},
+			"qz_source_dave":  {Up: 10, Down: 10},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 3 {
+		t.Fatalf("applied=%d, want three server/identity deltas", applied)
+	}
+	var up, down int64
+	if err := st.db.QueryRow(`SELECT used_up,used_down FROM users WHERE id=?`, carol).Scan(&up, &down); err != nil {
+		t.Fatal(err)
+	}
+	if up != 120 || down != 80 {
+		t.Fatalf("global billing lost cross-server sum: %d/%d", up, down)
+	}
+	one, err := st.ServerTrafficAttribution(1, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.Total != 150 || one.ActiveUsers != 1 || len(one.Sources) != 1 || one.Sources[0].Username != "source-carol" {
+		t.Fatalf("server 1 attribution = %+v", one)
+	}
+	two, err := st.ServerTrafficAttribution(2, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if two.Total != 70 || two.ActiveUsers != 2 || len(two.Sources) != 2 || two.Sources[0].Total != 50 {
+		t.Fatalf("server 2 attribution = %+v", two)
+	}
+}

@@ -61,10 +61,14 @@
 
     <n-spin :show="loading">
       <div v-if="servers.length" class="card-grid">
-        <div v-for="s in servers" :key="s.id" class="list-card">
+        <div v-for="(s, idx) in servers" :key="s.id" class="list-card">
           <div class="lc-head">
-            <span class="lc-title">{{ s.name || '—' }}</span>
-            <n-tag :type="s.enabled ? 'success' : 'default'" size="small" :bordered="false">{{ s.enabled ? '启用' : '禁用' }}</n-tag>
+            <span class="lc-title"><i class="order-no">{{ idx + 1 }}</i>{{ s.name || '—' }}</span>
+            <span class="lc-order">
+              <n-button size="tiny" quaternary circle :disabled="idx === 0 || reordering" title="前移" @click="moveServer(idx, -1)">←</n-button>
+              <n-button size="tiny" quaternary circle :disabled="idx === servers.length - 1 || reordering" title="后移" @click="moveServer(idx, 1)">→</n-button>
+              <n-tag :type="s.enabled ? 'success' : 'default'" size="small" :bordered="false">{{ s.enabled ? '启用' : '禁用' }}</n-tag>
+            </span>
           </div>
           <div class="lc-meta">
             <span class="kv">主机 <b>{{ s.host }}</b></span>
@@ -72,6 +76,7 @@
             <span class="kv">探针 <n-tag :type="s.probe_enabled ? 'info' : 'default'" size="tiny" :bordered="false">{{ s.probe_enabled ? '开' : '关' }}</n-tag></span>
           </div>
           <div class="lc-foot">
+            <n-button size="tiny" type="primary" secondary @click="openTrafficAnalysis(s)">流量分析</n-button>
             <n-button size="tiny" @click="handleRebuild(s.id)">重建</n-button>
             <n-button size="tiny" @click="openForm(s)">编辑</n-button>
             <n-button size="tiny" :loading="clearing === s.id" @click="handleClearHostKey(s)">清除密钥指纹</n-button>
@@ -132,17 +137,79 @@
         <n-button @click="handleTest" :loading="testing">测试连接</n-button>
       </n-space>
     </n-modal>
+
+    <n-drawer v-model:show="showTraffic" :width="trafficDrawerWidth" placement="right" @after-leave="disposeTrafficChart">
+      <n-drawer-content :title="`周期流量分析${trafficAnalysis?.server_name ? ' · ' + trafficAnalysis.server_name : ''}`" closable>
+        <n-spin :show="trafficLoading">
+          <template v-if="trafficAnalysis">
+            <n-alert v-if="trafficIncomplete" type="warning" :bordered="false" style="margin-bottom:14px;">
+              当前周期的设备流量仅从 {{ fmtDateTime(trafficAnalysis.usage.coverage_start) }} 开始采集；未校准前，周期总量和容量预估可能偏低。
+            </n-alert>
+            <div class="traffic-summary-grid">
+              <div class="traffic-summary-card"><span>本周期已用</span><b>{{ fmtBytes(trafficAnalysis.usage.total) }}</b><small>{{ trafficModeLabel(trafficAnalysis.accounting_mode) }}</small></div>
+              <div class="traffic-summary-card"><span>剩余流量</span><b>{{ trafficAnalysis.limit_bytes > 0 ? fmtBytes(trafficRemaining) : '未设上限' }}</b><small>重置 {{ fmtDateTime(trafficAnalysis.next_reset) }}</small></div>
+              <div class="traffic-summary-card"><span>近期日均</span><b>{{ trafficAnalysis.projection.available ? fmtBytes(trafficAnalysis.projection.daily_rate_bytes) : '—' }}</b><small>{{ trafficAnalysis.projection.available ? `基于 ${trafficAnalysis.projection.sample_days.toFixed(1)} 天` : trafficAnalysis.projection.reason }}</small></div>
+              <div class="traffic-summary-card capacity"><span>预计还能新增</span><b>{{ trafficAnalysis.projection.available ? trafficAnalysis.projection.estimated_additional_users + ' 人' : '—' }}</b><small>保证现有活跃用户用到本周期结束</small></div>
+            </div>
+
+            <div v-if="trafficAnalysis.limit_bytes > 0" class="quota-overview">
+              <div><span>周期额度消耗</span><b>{{ trafficPercent.toFixed(1) }}%</b></div>
+              <n-progress type="line" :percentage="Math.min(trafficPercent, 100)" :show-indicator="false" :height="8" :color="trafficPercent >= 90 ? '#c2685c' : trafficPercent >= 70 ? '#bf9540' : '#5c8b70'" />
+              <p v-if="trafficAnalysis.projection.available">
+                按近期速度，周期结束预计使用 {{ fmtBytes(trafficAnalysis.projection.projected_cycle_total_bytes) }}。
+                <template v-if="trafficAnalysis.projection.estimated_exhaustion_at && trafficAnalysis.projection.estimated_exhaustion_at < trafficAnalysis.next_reset">预计 {{ fmtDateTime(trafficAnalysis.projection.estimated_exhaustion_at) }} 用尽额度。</template>
+              </p>
+            </div>
+
+            <section class="traffic-section">
+              <div class="traffic-section-head"><div><h3>周期流量趋势</h3><p>物理网卡 IN / OUT 按日统计；折线是当前服务商计费口径下的日用量。</p></div></div>
+              <div ref="trafficChartEl" class="traffic-chart" />
+              <n-empty v-if="!trafficAnalysis.daily?.length" description="本周期暂无可绘制的探针数据" style="padding:24px 0;" />
+            </section>
+
+            <section class="traffic-section">
+              <div class="traffic-section-head">
+                <div><h3>流量消耗来源</h3><p>来自本机 sing-box 的用户级统计，不包含系统更新、SSH 等非代理流量。</p></div>
+                <span v-if="trafficAnalysis.attribution.coverage_start" class="coverage-chip">自 {{ fmtDateTime(trafficAnalysis.attribution.coverage_start) }} 归因</span>
+              </div>
+              <div class="source-overview">
+                <span><b>{{ trafficAnalysis.attribution.active_users }}</b> 位活跃用户</span>
+                <span>已归因 <b>{{ fmtBytes(trafficAnalysis.attribution.total) }}</b></span>
+                <span v-if="trafficAnalysis.projection.available">人均日消耗 <b>{{ fmtBytes(trafficAnalysis.projection.per_user_daily_bytes) }}</b></span>
+              </div>
+              <div v-if="trafficAnalysis.attribution.sources?.length" class="traffic-sources">
+                <div v-for="(source, idx) in trafficAnalysis.attribution.sources" :key="source.user_id" class="traffic-source-row">
+                  <span class="source-rank">{{ idx + 1 }}</span>
+                  <div class="source-main">
+                    <div><b>{{ source.username }}</b><span>{{ fmtBytes(source.total) }}</span></div>
+                    <div class="source-track"><i :style="{ width: sourcePercent(source.total) + '%' }" /></div>
+                    <small>上行 {{ fmtBytes(source.up) }} · 下行 {{ fmtBytes(source.down) }}</small>
+                  </div>
+                </div>
+              </div>
+              <n-empty v-else description="尚无按服务器归因的用户流量；升级后会从下一次统计轮询开始积累" style="padding:28px 0;" />
+            </section>
+
+            <n-alert type="info" :bordered="false" style="margin-top:14px;">
+              “预计还能新增”不是人数硬上限：它用归因窗口内的物理流量 ÷ 活跃用户得到人均日消耗，先预留现有用户到重置日的预计用量，再计算剩余额度可承载的同等用户数。归因不足 6 小时时不出数。
+            </n-alert>
+          </template>
+        </n-spin>
+      </n-drawer-content>
+    </n-drawer>
   </div>
 </template>
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, h } from 'vue'
-import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, NCard, NSelect, NRadioGroup, NRadioButton, useMessage, useDialog } from 'naive-ui'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, shallowRef, h } from 'vue'
+import { NSpin, NButton, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch, NSpace, NTag, NEmpty, NCard, NSelect, NRadioGroup, NRadioButton, NDrawer, NDrawerContent, NAlert, NProgress, useMessage, useDialog } from 'naive-ui'
 import { apiList, apiPost, apiPut, apiDelete, apiGet } from '@/api'
-import { fmtDateTime } from '@/utils/format'
+import { fmtBytes, fmtDateTime, pct } from '@/utils/format'
+import * as echarts from 'echarts'
 const message = useMessage()
 const dialog = useDialog()
 const servers = ref<any[]>([])
 const loading = ref(false); const saving = ref(false); const testing = ref(false)
+const reordering = ref(false)
 const showForm = ref(false); const editing = ref<any>(null)
 const mk = () => ({ name:'', host:'', port:22, ssh_user:'root', ssh_password:'', ssh_key:'', ssh_key_pass:'', use_sudo:false, sudo_password:'', ssh_key_path:'', config_path:'/etc/sing-box/config.json', systemd_unit:'sing-box', sing_box_bin:'/usr/local/bin/sing-box', v2ray_listen:'127.0.0.1:18080', enabled:true })
 const form = reactive(mk())
@@ -243,7 +310,64 @@ function handleClearHostKey(s:any){
   })
 }
 async function handleDelete(id:number){ try{await apiDelete(`/api/admin/servers/${id}`);message.success('已删除');await load()}catch(e:any){message.error(e.message)} }
+async function moveServer(idx:number, dir:number){
+  const target = idx + dir
+  if(target < 0 || target >= servers.value.length || reordering.value) return
+  const before = [...servers.value]
+  const next = [...servers.value]
+  ;[next[idx], next[target]] = [next[target], next[idx]]
+  servers.value = next
+  reordering.value = true
+  try{
+    await apiPost('/api/admin/servers/reorder', { ids: next.map(s => s.id) })
+  }catch(e:any){ servers.value = before; message.error(e.message) }
+  finally{ reordering.value = false }
+}
 async function load(){loading.value=true;try{servers.value=await apiList('/api/admin/servers')}catch{}finally{loading.value=false}}
+
+// ---- Provider-cycle traffic analysis ----
+const showTraffic = ref(false)
+const trafficLoading = ref(false)
+const trafficAnalysis = ref<any>(null)
+const trafficChartEl = ref<HTMLElement|null>(null)
+const trafficChart = shallowRef<echarts.ECharts|null>(null)
+const trafficDrawerWidth = computed(() => Math.min(typeof window === 'undefined' ? 820 : window.innerWidth * .94, 820))
+const trafficRemaining = computed(() => Math.max(0, (trafficAnalysis.value?.limit_bytes || 0) - (trafficAnalysis.value?.usage?.total || 0)))
+const trafficPercent = computed(() => pct(trafficAnalysis.value?.usage?.total || 0, trafficAnalysis.value?.limit_bytes || 0))
+const trafficIncomplete = computed(() => {
+  const a = trafficAnalysis.value
+  return !!a && !a.usage?.calibrated && a.usage?.sample_count > 0 && a.usage.coverage_start > a.cycle_start + 3600
+})
+function trafficModeLabel(mode:string){ return ({sum:'IN + OUT',max:'IN / OUT 取大',rx:'仅 IN',tx:'仅 OUT'} as Record<string,string>)[mode] || 'IN + OUT' }
+function sourcePercent(total:number){ const all=trafficAnalysis.value?.attribution?.total||0; return all ? Math.max(2, Math.min(100, total/all*100)) : 0 }
+async function openTrafficAnalysis(s:any){
+  showTraffic.value = true; trafficLoading.value = true; trafficAnalysis.value = null
+  try{
+    trafficAnalysis.value = await apiGet(`/api/admin/monitor/servers/${s.id}/traffic-analysis`)
+    await nextTick(); renderTrafficChart()
+  }catch(e:any){ message.error(e.message) }
+  finally{ trafficLoading.value = false }
+}
+function renderTrafficChart(){
+  if(!trafficChartEl.value || !trafficAnalysis.value?.daily?.length) return
+  if(!trafficChart.value) trafficChart.value = echarts.init(trafficChartEl.value)
+  const rows=trafficAnalysis.value.daily
+  trafficChart.value.setOption({
+    animationDuration:500,
+    tooltip:{trigger:'axis',valueFormatter:(v:any)=>fmtBytes(Number(v)||0)},
+    legend:{top:0,data:['IN','OUT','计费量'],textStyle:{color:'#6b7785',fontSize:11}},
+    grid:{left:12,right:12,top:38,bottom:8,containLabel:true},
+    xAxis:{type:'category',data:rows.map((d:any)=>d.date.slice(5)),axisTick:{show:false},axisLine:{lineStyle:{color:'#dfe4ea'}},axisLabel:{color:'#7b8794'}},
+    yAxis:{type:'value',axisLabel:{formatter:(v:number)=>fmtBytes(v)},splitLine:{lineStyle:{color:'rgba(80,100,120,.09)'}}},
+    series:[
+      {name:'IN',type:'bar',stack:'physical',data:rows.map((d:any)=>d.rx),itemStyle:{color:'#72a7c7',borderRadius:[3,3,0,0]}},
+      {name:'OUT',type:'bar',stack:'physical',data:rows.map((d:any)=>d.tx),itemStyle:{color:'#7fb69b',borderRadius:[3,3,0,0]}},
+      {name:'计费量',type:'line',data:rows.map((d:any)=>d.total),smooth:.28,symbolSize:6,lineStyle:{width:2,color:'#b38439'},itemStyle:{color:'#b38439'}},
+    ],
+  },true)
+  trafficChart.value.resize()
+}
+function disposeTrafficChart(){ trafficChart.value?.dispose(); trafficChart.value=null; trafficAnalysis.value=null }
 
 // ---- 节点 sing-box 版本 ----
 const versions = ref<any[]>([])
@@ -305,6 +429,7 @@ async function pollUpgrade(id:number){
 }
 
 onMounted(() => { load(); loadVersions() })
+onUnmounted(() => trafficChart.value?.dispose())
 </script>
 
 <style scoped>
@@ -330,4 +455,33 @@ onMounted(() => { load(); loadVersions() })
   background:var(--code-bg,rgba(128,128,128,.1)); border-radius:6px; color:var(--text-2);
 }
 .hint{ font-size:12px; line-height:1.6; color:var(--n-text-color-3,#8a8a8a); margin-top:6px; }
+.lc-title { display:flex; align-items:center; gap:7px; }
+.lc-order { display:flex; align-items:center; gap:3px; }
+.order-no { display:inline-grid; place-items:center; width:20px; height:20px; border-radius:6px; background:var(--bg-soft); color:var(--text-3); font-size:10px; font-style:normal; font-variant-numeric:tabular-nums; }
+.traffic-summary-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+.traffic-summary-card { min-width:0; padding:13px 14px; border:1px solid var(--border); border-radius:12px; background:var(--bg-soft); }
+.traffic-summary-card span,.traffic-summary-card small { display:block; color:var(--text-3); font-size:10px; }
+.traffic-summary-card b { display:block; margin:4px 0 2px; color:var(--text); font-size:18px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.traffic-summary-card.capacity { background:linear-gradient(145deg,rgba(91,145,112,.12),rgba(91,145,112,.04)); }
+.quota-overview { margin-top:12px; padding:13px 14px; border:1px solid var(--border); border-radius:12px; }
+.quota-overview>div { display:flex; justify-content:space-between; margin-bottom:7px; font-size:12px; }
+.quota-overview p { margin:7px 0 0; color:var(--text-3); font-size:11px; line-height:1.6; }
+.traffic-section { margin-top:18px; padding-top:16px; border-top:1px solid var(--border); }
+.traffic-section-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+.traffic-section h3 { margin:0; font-size:14px; }
+.traffic-section-head p { margin:3px 0 0; color:var(--text-3); font-size:11px; }
+.traffic-chart { width:100%; height:270px; margin-top:10px; }
+.coverage-chip { padding:3px 7px; border-radius:6px; background:var(--bg-soft); color:var(--text-3); font-size:10px; white-space:nowrap; }
+.source-overview { display:flex; flex-wrap:wrap; gap:8px 18px; margin:12px 0; padding:10px 12px; border-radius:10px; background:var(--bg-soft); color:var(--text-3); font-size:11px; }
+.source-overview b { color:var(--text); }
+.traffic-sources { display:flex; flex-direction:column; gap:10px; }
+.traffic-source-row { display:flex; align-items:flex-start; gap:9px; }
+.source-rank { display:grid; place-items:center; width:22px; height:22px; border-radius:7px; background:var(--bg-soft); color:var(--text-3); font-size:10px; }
+.source-main { flex:1; min-width:0; }
+.source-main>div:first-child { display:flex; justify-content:space-between; gap:12px; font-size:12px; }
+.source-main>div:first-child span { color:var(--text-2); font-variant-numeric:tabular-nums; }
+.source-track { height:5px; margin:5px 0; border-radius:4px; overflow:hidden; background:var(--bg); }
+.source-track i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#6e9fbe,#75aa8f); }
+.source-main small { color:var(--text-3); font-size:10px; }
+@media(max-width:700px){ .traffic-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));} .traffic-chart{height:230px;} }
 </style>
