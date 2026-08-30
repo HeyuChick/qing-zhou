@@ -1146,12 +1146,18 @@ type UsageDelta struct {
 // land rather than being discarded with it. Returns how many identities applied,
 // and (if any failed) an error naming the first.
 func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
-	if len(deltas) == 0 {
-		return 0, nil
-	}
-	// Several logical routes can share one physical inbound. Their auth_user
-	// names carry a reversible node suffix; merge them back into the underlying
-	// bucket/account identity before resolving and writing usage.
+	return s.addUsageBatches(map[int64]map[string]UsageDelta{-1: deltas}, false)
+}
+
+// AddUsageBatchesByServer meters the same deltas as AddUsageBatch while also
+// retaining their collection source (0 = panel machine, >0 = remote server).
+// Billing writes and source attribution share a transaction/savepoint, so a
+// source chart can never claim bytes that failed to reach the user's quota.
+func (s *Store) AddUsageBatchesByServer(sources map[int64]map[string]UsageDelta) (int, error) {
+	return s.addUsageBatches(sources, true)
+}
+
+func canonicalUsageDeltas(deltas map[string]UsageDelta) map[string]UsageDelta {
 	canonical := make(map[string]UsageDelta, len(deltas))
 	for name, d := range deltas {
 		name, _ = canonicalStatsIdentity(name)
@@ -1160,10 +1166,35 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 		cur.Down += d.Down
 		canonical[name] = cur
 	}
-	deltas = canonical
+	return canonical
+}
+
+func (s *Store) addUsageBatches(sources map[int64]map[string]UsageDelta, recordServer bool) (int, error) {
+	if len(sources) == 0 {
+		return 0, nil
+	}
+	// Several logical routes can share one physical inbound. Their auth_user
+	// names carry a reversible node suffix; merge them back into the underlying
+	// bucket/account identity within each collection source. Keep sources apart:
+	// their sum is billable, but their separation is the analysis feature.
+	canonicalSources := make(map[int64]map[string]UsageDelta, len(sources))
+	all := map[string]UsageDelta{}
+	for serverID, deltas := range sources {
+		canonical := canonicalUsageDeltas(deltas)
+		canonicalSources[serverID] = canonical
+		for name, d := range canonical {
+			cur := all[name]
+			cur.Up += d.Up
+			cur.Down += d.Down
+			all[name] = cur
+		}
+	}
+	if len(all) == 0 {
+		return 0, nil
+	}
 	// Before the write lock, not under it: account-level identities need the
 	// owner's whole bucket order to know which份 they spend.
-	acctTargets, acctErr := s.accountTargets(deltas)
+	acctTargets, acctErr := s.accountTargets(all)
 	now := time.Now().Unix()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1181,35 +1212,42 @@ func (s *Store) AddUsageBatch(deltas map[string]UsageDelta) (int, error) {
 	// resolving inside the loop (acctTargets nil) or are simply skipped, and the
 	// rest of the poll must still land.
 	firstErr := acctErr
-	for name, d := range deltas {
-		if name == "" || (d.Up == 0 && d.Down == 0) {
-			continue
-		}
-		bucketID, userID, packageID, kind, rerr := s.resolveStatsIdentity(tx, name, acctTargets)
-		if errors.Is(rerr, sql.ErrNoRows) {
-			continue // unknown / just-removed identity — skip, not a failure
-		}
-		if rerr != nil {
-			if firstErr == nil {
-				firstErr = rerr
+	for serverID, deltas := range canonicalSources {
+		for name, d := range deltas {
+			if name == "" || (d.Up == 0 && d.Down == 0) {
+				continue
 			}
-			failed++
-			continue
-		}
-		if _, err := tx.Exec(`SAVEPOINT usg`); err != nil {
-			return applied, err // savepoint itself failing means the tx is unusable
-		}
-		if werr := applyBucketUsage(tx, bucketID, userID, packageID, kind, d.Up, d.Down, now); werr != nil {
-			_, _ = tx.Exec(`ROLLBACK TO usg`)
+			bucketID, userID, packageID, kind, rerr := s.resolveStatsIdentity(tx, name, acctTargets)
+			if errors.Is(rerr, sql.ErrNoRows) {
+				continue // unknown / just-removed identity — skip, not a failure
+			}
+			if rerr != nil {
+				if firstErr == nil {
+					firstErr = rerr
+				}
+				failed++
+				continue
+			}
+			if _, err := tx.Exec(`SAVEPOINT usg`); err != nil {
+				return applied, err // savepoint itself failing means the tx is unusable
+			}
+			werr := applyBucketUsage(tx, bucketID, userID, packageID, kind, d.Up, d.Down, now)
+			if werr == nil && recordServer {
+				_, werr = tx.Exec(`INSERT INTO server_user_traffic_samples (server_id,user_id,ts,up,down)
+					VALUES (?,?,?,?,?)`, serverID, userID, now, d.Up, d.Down)
+			}
+			if werr != nil {
+				_, _ = tx.Exec(`ROLLBACK TO usg`)
+				_, _ = tx.Exec(`RELEASE usg`)
+				if firstErr == nil {
+					firstErr = werr
+				}
+				failed++
+				continue
+			}
 			_, _ = tx.Exec(`RELEASE usg`)
-			if firstErr == nil {
-				firstErr = werr
-			}
-			failed++
-			continue
+			applied++
 		}
-		_, _ = tx.Exec(`RELEASE usg`)
-		applied++
 	}
 	if err := tx.Commit(); err != nil {
 		return applied, err

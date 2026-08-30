@@ -23,11 +23,13 @@ func (schedFakeStore) BuildSingboxConfig(string, string, map[string][]singbox.Us
 func (schedFakeStore) BuildSingboxConfigForServer(int64, string, string, map[string][]singbox.User) ([]byte, error) {
 	return []byte("{}"), nil
 }
-func (schedFakeStore) AddUsageBatch(map[string]store.UsageDelta) (int, error) { return 0, nil }
-func (schedFakeStore) ListServers() ([]*store.Server, error)                  { return nil, nil }
-func (schedFakeStore) GetServer(int64) (*store.Server, error)                 { return nil, nil }
-func (schedFakeStore) SetNodeSingbox(int64, sbver.Info) error                 { return nil }
-func (schedFakeStore) SetNodeSingboxError(int64, string) error                { return nil }
+func (schedFakeStore) AddUsageBatchesByServer(map[int64]map[string]store.UsageDelta) (int, error) {
+	return 0, nil
+}
+func (schedFakeStore) ListServers() ([]*store.Server, error)   { return nil, nil }
+func (schedFakeStore) GetServer(int64) (*store.Server, error)  { return nil, nil }
+func (schedFakeStore) SetNodeSingbox(int64, sbver.Info) error  { return nil }
+func (schedFakeStore) SetNodeSingboxError(int64, string) error { return nil }
 
 // slowApplier counts applies and sleeps, so a burst of schedules overlaps the
 // first in-flight pass.

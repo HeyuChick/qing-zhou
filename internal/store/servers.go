@@ -21,6 +21,7 @@ func hashProbeToken(tok string) string {
 
 type Server struct {
 	ID          int64  `json:"id"`
+	SortOrder   int64  `json:"sort_order"`
 	Name        string `json:"name"`
 	Host        string `json:"host"`
 	Port        int    `json:"port"`
@@ -86,10 +87,10 @@ type Server struct {
 	SSHKeyPath string `json:"ssh_key_path"`
 }
 
-const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, expiry_notify_enabled, expiry_notify_days, expiry_notify_mode, expiry_notify_count, traffic_limit_bytes, traffic_reset_day, traffic_reset_minute, traffic_alert_percent, traffic_accounting_mode, provider, location, spec, price, notes, host_key, public_visible, public_show_traffic, public_show_price, use_sudo, sudo_password, ssh_key_path`
+const serverCols = `id, sort_order, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, expiry_notify_enabled, expiry_notify_days, expiry_notify_mode, expiry_notify_count, traffic_limit_bytes, traffic_reset_day, traffic_reset_minute, traffic_alert_percent, traffic_accounting_mode, provider, location, spec, price, notes, host_key, public_visible, public_show_traffic, public_show_price, use_sudo, sudo_password, ssh_key_path`
 
 func (s *Store) ListServers() ([]*Server, error) {
-	rows, err := s.db.Query(`SELECT ` + serverCols + ` FROM servers ORDER BY id`)
+	rows, err := s.db.Query(`SELECT ` + serverCols + ` FROM servers ORDER BY sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -143,8 +144,8 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 	// did before the flag existed. Hiding one is an explicit act, done through
 	// UpdateServer — and a bool field cannot tell "caller wants it hidden" from
 	// "caller never filled this in", which is the whole reason it isn't here.
-	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, probe_token_hash, expiry_date, expiry_notify_enabled, expiry_notify_days, expiry_notify_mode, expiry_notify_count, traffic_limit_bytes, traffic_reset_day, traffic_reset_minute, traffic_alert_percent, provider, location, spec, price, notes, use_sudo, sudo_password, ssh_key_path)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	res, err := s.db.Exec(`INSERT INTO servers (name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, probe_token_hash, expiry_date, expiry_notify_enabled, expiry_notify_days, expiry_notify_mode, expiry_notify_count, traffic_limit_bytes, traffic_reset_day, traffic_reset_minute, traffic_alert_percent, provider, location, spec, price, notes, use_sudo, sudo_password, ssh_key_path, sort_order)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM servers))`,
 		sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
 		b2i(sv.Enabled), sv.Status, sv.LastSeen, now, now,
@@ -171,6 +172,39 @@ func (s *Store) UpdateServer(sv Server) error {
 		sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, b2i(sv.PublicVisible), b2i(sv.PublicShowTraffic), b2i(sv.PublicShowPrice),
 		b2i(sv.UseSudo), s.encrypt(sv.SudoPassword), sv.SSHKeyPath, sv.ID)
 	return err
+}
+
+// ReorderServers persists the complete administrator-facing server order.
+// Server identity and inbound bindings use ids, so changing this field is a
+// display-only operation and must never trigger a node rebuild.
+func (s *Store) ReorderServers(ids []int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var total int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM servers`).Scan(&total); err != nil {
+		return err
+	}
+	if len(ids) != total {
+		return fmt.Errorf("server reorder contains %d ids, want %d", len(ids), total)
+	}
+	seen := make(map[int64]bool, len(ids))
+	for i, id := range ids {
+		if seen[id] {
+			return fmt.Errorf("server reorder contains duplicate id %d", id)
+		}
+		seen[id] = true
+		res, err := tx.Exec(`UPDATE servers SET sort_order=? WHERE id=?`, i, id)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("server reorder contains unknown id %d", id)
+		}
+	}
+	return tx.Commit()
 }
 
 // EnableServerProbe updates only the probe authentication fields. One-click
@@ -254,7 +288,7 @@ func (s *Store) TouchProbeSeen(id int64) error {
 func scanServer(sc scanner) (*Server, error) {
 	var sv Server
 	var enabled, probeEnabled, expiryNotifyEnabled, publicVisible, publicShowTraffic, publicShowPrice, useSudo int
-	err := sc.Scan(&sv.ID, &sv.Name, &sv.Host, &sv.Port, &sv.SSHUser, &sv.SSHKey, &sv.SSHKeyPass, &sv.SSHPassword,
+	err := sc.Scan(&sv.ID, &sv.SortOrder, &sv.Name, &sv.Host, &sv.Port, &sv.SSHUser, &sv.SSHKey, &sv.SSHKeyPass, &sv.SSHPassword,
 		&sv.ConfigPath, &sv.SystemdUnit, &sv.SingBoxBin, &sv.V2rayListen,
 		&enabled, &sv.Status, &sv.LastSeen, &sv.CreatedAt, &sv.UpdatedAt,
 		&probeEnabled, &sv.ProbeToken, &sv.ExpiryDate, &expiryNotifyEnabled, &sv.ExpiryNotifyDays, &sv.ExpiryNotifyMode, &sv.ExpiryNotifyCount,

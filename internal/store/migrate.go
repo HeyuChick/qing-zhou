@@ -445,6 +445,19 @@ CREATE TABLE IF NOT EXISTS traffic_samples (
   down    INTEGER NOT NULL DEFAULT 0
 );
 
+-- Per-server attribution of sing-box user traffic. The legacy traffic_samples
+-- table intentionally remains the site-wide source of truth for billing; this
+-- companion table only preserves where each successful stats poll came from so
+-- operators can explain a device's physical traffic and estimate capacity.
+-- It shares traffic_samples' rolling retention window.
+CREATE TABLE IF NOT EXISTS server_user_traffic_samples (
+  server_id INTEGER NOT NULL,
+  user_id   INTEGER NOT NULL,
+  ts        INTEGER NOT NULL,
+  up        INTEGER NOT NULL DEFAULT 0,
+  down      INTEGER NOT NULL DEFAULT 0
+);
+
 -- Per-day, per-bucket traffic rollup. Exists because traffic_samples answers
 -- neither question the usage report asks: it carries no bucket, so "which
 -- package did this traffic belong to" is unanswerable, and it is pruned to 35
@@ -494,7 +507,8 @@ CREATE TABLE IF NOT EXISTS servers (
   updated_at      INTEGER NOT NULL,
   use_sudo        INTEGER NOT NULL DEFAULT 0,
   sudo_password   TEXT    NOT NULL DEFAULT '',
-  ssh_key_path    TEXT    NOT NULL DEFAULT ''
+  ssh_key_path    TEXT    NOT NULL DEFAULT '',
+  sort_order      INTEGER NOT NULL DEFAULT 0
 );
 
 -- ===== Monitor probe (轻舟探针) =====
@@ -534,9 +548,9 @@ CREATE TABLE IF NOT EXISTS server_metrics (
 );
 
 -- Manual provider-usage calibration for the current device billing cycle.
--- offset_bytes is the correction from probe-observed IN+OUT to the provider's
--- displayed total at calibrated_at. A cycle-start mismatch makes it inert, so
--- an old calibration can never leak into the next billing month.
+-- offset_bytes corrects the probe total under accounting_mode to the provider's
+-- displayed total at calibrated_at. Cycle or mode mismatches make it inert, so
+-- an old calibration can never leak into another billing convention/month.
 CREATE TABLE IF NOT EXISTS server_traffic_calibrations (
   server_id     INTEGER PRIMARY KEY,
   cycle_start   INTEGER NOT NULL,
@@ -684,6 +698,8 @@ CREATE INDEX IF NOT EXISTS idx_user_plans_queue ON user_plans(user_id, queue_key
 CREATE INDEX IF NOT EXISTS idx_credential_aliases_user ON user_credential_aliases(user_id, valid_until);
 CREATE INDEX IF NOT EXISTS idx_traffic_samples_user_ts ON traffic_samples(user_id, ts);
 CREATE INDEX IF NOT EXISTS idx_traffic_samples_ts ON traffic_samples(ts);
+CREATE INDEX IF NOT EXISTS idx_server_user_traffic_server_ts ON server_user_traffic_samples(server_id, ts);
+CREATE INDEX IF NOT EXISTS idx_server_user_traffic_server_user_ts ON server_user_traffic_samples(server_id, user_id, ts);
 CREATE INDEX IF NOT EXISTS idx_traffic_daily_user_day ON traffic_daily(user_id, day);
 CREATE INDEX IF NOT EXISTS idx_traffic_daily_day ON traffic_daily(day);
 CREATE INDEX IF NOT EXISTS idx_metrics_server_ts ON server_metrics(server_id, ts);
@@ -835,6 +851,7 @@ func (s *Store) Migrate() error {
 		// migrateServerUseSudo.
 		`ALTER TABLE servers ADD COLUMN sudo_password TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE servers ADD COLUMN ssh_key_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE servers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sb_tls ADD COLUMN server_id INTEGER NOT NULL DEFAULT 0`,
 		// Certificate center: a mode=tls profile references a managed certificate
 		// by id instead of inlining its PEM, so one cert serves many inbounds and a
