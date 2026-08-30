@@ -191,6 +191,73 @@ func TestPublicPageVisibilityDefaults(t *testing.T) {
 	}
 }
 
+func TestPublicTrafficAndPriceDefaultOnAndCanBeHidden(t *testing.T) {
+	a, st := newNodeUpgradeAPI(t)
+	id, err := st.CreateServer(store.Server{Name: "asset-1", Host: "192.0.2.20", ProbeEnabled: true, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv, err := st.GetServer(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sv.PublicShowTraffic || !sv.PublicShowPrice {
+		t.Fatalf("new server public detail defaults = traffic:%v price:%v, want both on", sv.PublicShowTraffic, sv.PublicShowPrice)
+	}
+	sv.Price = 19.5
+	if err := st.UpdateServer(*sv); err != nil {
+		t.Fatal(err)
+	}
+	for i, total := range []int64{100, 180} {
+		if err := st.InsertMetrics(id, store.ServerMetrics{
+			Ts: int64(100 + i), NetTotalsValid: true, NetRxTotal: total, NetTxTotal: total,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.TouchProbeSeen(id); err != nil {
+		t.Fatal(err)
+	}
+
+	type publicRow struct {
+		Name    string   `json:"name"`
+		Price   *float64 `json:"price"`
+		Traffic *struct {
+			UsedBytes int64 `json:"used_bytes"`
+		} `json:"traffic"`
+	}
+	read := func() publicRow {
+		var body struct {
+			Data struct {
+				Servers []publicRow `json:"servers"`
+			} `json:"data"`
+		}
+		getJSON(t, a.handleMonitorPublic, "/api/monitor/public", &body)
+		if len(body.Data.Servers) != 1 {
+			t.Fatalf("public rows = %+v", body.Data.Servers)
+		}
+		return body.Data.Servers[0]
+	}
+	shown := read()
+	if shown.Price == nil || *shown.Price != 19.5 || shown.Traffic == nil {
+		t.Fatalf("default public asset details = %+v, want price and traffic", shown)
+	}
+
+	req := httptest.NewRequest("PUT", "/x", strings.NewReader(`{"public_show_traffic":false,"public_show_price":false}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", strconv.FormatInt(id, 10))
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.handleUpdateServerMonitor(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("hide public details: status %d, body %s", w.Code, w.Body.String())
+	}
+	hidden := read()
+	if hidden.Price != nil || hidden.Traffic != nil {
+		t.Fatalf("hidden public asset details leaked: %+v", hidden)
+	}
+}
+
 func setVisible(t *testing.T, a *API, id int64, v bool) {
 	t.Helper()
 	body := `{"public_visible":` + map[bool]string{true: "true", false: "false"}[v] + `}`

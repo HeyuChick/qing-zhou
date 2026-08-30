@@ -64,6 +64,66 @@ func TestTrafficUsageForDifferentDeviceCycles(t *testing.T) {
 	}
 }
 
+func TestTrafficUsageMatchesProviderAccountingMode(t *testing.T) {
+	st := newRefundStore(t)
+	if _, err := st.db.Exec(`INSERT INTO server_metrics
+		(server_id,ts,net_totals_valid,net_rx_bytes,net_tx_bytes) VALUES (1,100,1,30,70)`); err != nil {
+		t.Fatal(err)
+	}
+	cycles := map[int64]TrafficCycleQuery{
+		1: {Start: 0, AccountingMode: TrafficAccountingSum},
+		2: {Start: 0, AccountingMode: TrafficAccountingMax},
+		3: {Start: 0, AccountingMode: TrafficAccountingRx},
+		4: {Start: 0, AccountingMode: TrafficAccountingTx},
+	}
+	// Give every mode the same raw split.
+	for id := int64(2); id <= 4; id++ {
+		if _, err := st.db.Exec(`INSERT INTO server_metrics
+			(server_id,ts,net_totals_valid,net_rx_bytes,net_tx_bytes) VALUES (?,100,1,30,70)`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := st.TrafficUsageForBillingCycles(cycles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64]int64{1: 100, 2: 70, 3: 30, 4: 70}
+	for id, total := range want {
+		if got[id].Total != total {
+			t.Fatalf("mode %q total = %d, want %d", cycles[id].AccountingMode, got[id].Total, total)
+		}
+	}
+}
+
+func TestTrafficCalibrationIsScopedToAccountingMode(t *testing.T) {
+	st := newRefundStore(t)
+	if _, err := st.db.Exec(`INSERT INTO server_metrics
+		(server_id,ts,net_totals_valid,net_rx_bytes,net_tx_bytes) VALUES (1,100,1,30,70)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetTrafficCalibrationForMode(1, 0, TrafficAccountingMax, 200, 110); err != nil {
+		t.Fatal(err)
+	}
+	maxUsage, err := st.TrafficUsageForBillingCycles(map[int64]TrafficCycleQuery{
+		1: {Start: 0, AccountingMode: TrafficAccountingMax},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := maxUsage[1]; u.Total != 200 || !u.Calibrated {
+		t.Fatalf("max calibration = %+v", u)
+	}
+	sumUsage, err := st.TrafficUsageForBillingCycles(map[int64]TrafficCycleQuery{
+		1: {Start: 0, AccountingMode: TrafficAccountingSum},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := sumUsage[1]; u.Total != 100 || u.Calibrated {
+		t.Fatalf("sum usage reused max-mode calibration: %+v", u)
+	}
+}
+
 func TestTrafficUsageForDay16ExcludesCalendarMonthPrefix(t *testing.T) {
 	st := newRefundStore(t)
 	loc := time.FixedZone("panel", 8*3600)

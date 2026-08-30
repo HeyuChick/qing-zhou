@@ -540,6 +540,7 @@ CREATE TABLE IF NOT EXISTS server_metrics (
 CREATE TABLE IF NOT EXISTS server_traffic_calibrations (
   server_id     INTEGER PRIMARY KEY,
   cycle_start   INTEGER NOT NULL,
+  accounting_mode TEXT NOT NULL DEFAULT 'sum',
   offset_bytes  INTEGER NOT NULL,
   calibrated_at INTEGER NOT NULL
 );
@@ -900,6 +901,15 @@ func (s *Store) Migrate() error {
 		// public page. The panel's own machine is the opposite case and is not a
 		// row here: it defaults to hidden, via the monitor_local_public setting.
 		`ALTER TABLE servers ADD COLUMN public_visible INTEGER NOT NULL DEFAULT 1`,
+		// Public status-page asset details are opt-out and independent of whether
+		// the machine itself is listed. Existing installations therefore gain the
+		// requested visible-by-default behaviour without exposing hidden servers.
+		`ALTER TABLE servers ADD COLUMN public_show_traffic INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE servers ADD COLUMN public_show_price INTEGER NOT NULL DEFAULT 1`,
+		// Providers do not all bill physical traffic the same way. Preserve the
+		// historical IN+OUT total until an admin selects another convention.
+		`ALTER TABLE servers ADD COLUMN traffic_accounting_mode TEXT NOT NULL DEFAULT 'sum'`,
+		`ALTER TABLE server_traffic_calibrations ADD COLUMN accounting_mode TEXT NOT NULL DEFAULT 'sum'`,
 		// Per-machine traffic accounting. Old probe rows remain explicitly invalid
 		// rather than pretending that their missing cumulative counters were zero.
 		`ALTER TABLE server_metrics ADD COLUMN net_rx_total INTEGER NOT NULL DEFAULT 0`,

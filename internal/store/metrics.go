@@ -160,15 +160,16 @@ func (s *Store) InsertMetrics(serverID int64, m ServerMetrics) error {
 
 // ServerTrafficUsage is physical-interface traffic observed over a time range.
 // Rx and Tx stay separate because providers differ on whether they bill one
-// direction or both. Total is always Rx+Tx and therefore answers the common
-// "IN+OUT" quota view directly.
+// direction or both. Total follows AccountingMode and may include a current-
+// cycle provider calibration.
 type ServerTrafficUsage struct {
-	Rx            int64 `json:"rx"`
-	Tx            int64 `json:"tx"`
-	Total         int64 `json:"total"`
-	CoverageStart int64 `json:"coverage_start"`
-	CoverageEnd   int64 `json:"coverage_end"`
-	SampleCount   int64 `json:"sample_count"`
+	Rx             int64  `json:"rx"`
+	Tx             int64  `json:"tx"`
+	Total          int64  `json:"total"`
+	AccountingMode string `json:"accounting_mode"`
+	CoverageStart  int64  `json:"coverage_start"`
+	CoverageEnd    int64  `json:"coverage_end"`
+	SampleCount    int64  `json:"sample_count"`
 	// A calibrated total is provider-entered baseline + probe deltas. Rx/Tx
 	// remain the raw physical-interface split because a single total cannot be
 	// truthfully assigned to either direction.

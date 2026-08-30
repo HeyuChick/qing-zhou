@@ -49,7 +49,7 @@ func TestFilesystemAndInterfaceClassification(t *testing.T) {
 			t.Errorf("%s is a real filesystem and must be counted", fs)
 		}
 	}
-	for _, n := range []string{"eth0", "ens3", "enp0s3", "eno1", "wlan0", "em1"} {
+	for _, n := range []string{"eth0", "ens3", "enp0s3", "enx001122aabbcc", "eno1", "wlan0", "em1", "venet0"} {
 		if !isPhysicalIface(n) {
 			t.Errorf("%s should count as physical", n)
 		}

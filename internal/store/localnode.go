@@ -16,29 +16,36 @@ const settingLocalAsset = "monitor_local_asset"
 // the servers table that still means something for a machine with no SSH
 // credentials, no config path and no systemd unit to manage.
 type LocalNodeAsset struct {
-	Provider            string  `json:"provider"`
-	Location            string  `json:"location"`
-	Spec                string  `json:"spec"`
-	Price               float64 `json:"price"`
-	ExpiryDate          int64   `json:"expiry_date"`
-	ExpiryNotifyEnabled bool    `json:"expiry_notify_enabled"`
-	ExpiryNotifyDays    int     `json:"expiry_notify_days"`
-	ExpiryNotifyMode    string  `json:"expiry_notify_mode"`
-	ExpiryNotifyCount   int     `json:"expiry_notify_count"`
-	TrafficLimitBytes   int64   `json:"traffic_limit_bytes"`
-	TrafficResetDay     int     `json:"traffic_reset_day"`
-	TrafficResetMinute  int     `json:"traffic_reset_minute"`
-	TrafficAlertPercent int     `json:"traffic_alert_percent"`
-	Notes               string  `json:"notes"`
+	Provider              string  `json:"provider"`
+	Location              string  `json:"location"`
+	Spec                  string  `json:"spec"`
+	Price                 float64 `json:"price"`
+	ExpiryDate            int64   `json:"expiry_date"`
+	ExpiryNotifyEnabled   bool    `json:"expiry_notify_enabled"`
+	ExpiryNotifyDays      int     `json:"expiry_notify_days"`
+	ExpiryNotifyMode      string  `json:"expiry_notify_mode"`
+	ExpiryNotifyCount     int     `json:"expiry_notify_count"`
+	TrafficLimitBytes     int64   `json:"traffic_limit_bytes"`
+	TrafficResetDay       int     `json:"traffic_reset_day"`
+	TrafficResetMinute    int     `json:"traffic_reset_minute"`
+	TrafficAlertPercent   int     `json:"traffic_alert_percent"`
+	TrafficAccountingMode string  `json:"traffic_accounting_mode"`
+	PublicShowTraffic     bool    `json:"public_show_traffic"`
+	PublicShowPrice       bool    `json:"public_show_price"`
+	Notes                 string  `json:"notes"`
 }
 
 // LocalAsset returns what the admin recorded about the panel's own machine.
 // A missing or unparsable value reads as "nothing recorded", which is the same
 // thing an empty servers row would say.
 func (s *Store) LocalAsset() LocalNodeAsset {
-	var a LocalNodeAsset
+	// Start new public-detail flags enabled so an older JSON value that predates
+	// them gets the requested default, while an explicit false still survives
+	// json.Unmarshal.
+	a := LocalNodeAsset{PublicShowTraffic: true, PublicShowPrice: true}
 	v, err := s.GetSetting(settingLocalAsset)
 	if err != nil || v == "" {
+		applyLocalAssetDefaults(&a)
 		return a
 	}
 	_ = json.Unmarshal([]byte(v), &a)
@@ -72,4 +79,5 @@ func applyLocalAssetDefaults(a *LocalNodeAsset) {
 	if a.TrafficAlertPercent <= 0 {
 		a.TrafficAlertPercent = 80
 	}
+	a.TrafficAccountingMode = NormalizeTrafficAccountingMode(a.TrafficAccountingMode)
 }

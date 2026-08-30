@@ -260,53 +260,59 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "查询失败")
 		return
 	}
-	cycleStarts := make(map[int64]int64, len(servers))
+	cycles := make(map[int64]store.TrafficCycleQuery, len(servers))
 	for _, sv := range servers {
-		cycleStarts[sv.ID] = store.TrafficCycleStart(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix()
+		cycles[sv.ID] = store.TrafficCycleQuery{
+			Start:          store.TrafficCycleStart(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix(),
+			AccountingMode: sv.TrafficAccountingMode,
+		}
 	}
-	monthUsage, err := a.st.TrafficUsageForCycles(cycleStarts)
+	monthUsage, err := a.st.TrafficUsageForBillingCycles(cycles)
 	if err != nil {
 		fail(w, 500, "查询本周期流量失败")
 		return
 	}
 
 	type serverResp struct {
-		ID                  int64                    `json:"id"`
-		Name                string                   `json:"name"`
-		Host                string                   `json:"host"`
-		Local               bool                     `json:"local"`
-		Enabled             bool                     `json:"enabled"`
-		ProbeEnabled        bool                     `json:"probe_enabled"`
-		ProbeToken          string                   `json:"probe_token"`
-		ProbeVersion        string                   `json:"probe_version"`
-		ProbeTarget         string                   `json:"probe_target_version"`
-		ProbeOutdated       bool                     `json:"probe_outdated"`
-		ProbeUpgrading      bool                     `json:"probe_upgrading"`
-		ProbeUpgradeError   string                   `json:"probe_upgrade_error"`
-		ProbeUpgradeOutput  string                   `json:"probe_upgrade_output"`
-		ProbeUpgradedAt     int64                    `json:"probe_upgraded_at"`
-		PublicVisible       bool                     `json:"public_visible"`
-		Provider            string                   `json:"provider"`
-		Location            string                   `json:"location"`
-		Spec                string                   `json:"spec"`
-		Price               float64                  `json:"price"`
-		ExpiryDate          int64                    `json:"expiry_date"`
-		ExpiryNotifyEnabled bool                     `json:"expiry_notify_enabled"`
-		ExpiryNotifyDays    int                      `json:"expiry_notify_days"`
-		ExpiryNotifyMode    string                   `json:"expiry_notify_mode"`
-		ExpiryNotifyCount   int                      `json:"expiry_notify_count"`
-		TrafficLimitBytes   int64                    `json:"traffic_limit_bytes"`
-		TrafficResetDay     int                      `json:"traffic_reset_day"`
-		TrafficResetMinute  int                      `json:"traffic_reset_minute"`
-		TrafficAlertPercent int                      `json:"traffic_alert_percent"`
-		TrafficCycleStart   int64                    `json:"traffic_cycle_start"`
-		TrafficNextReset    int64                    `json:"traffic_next_reset"`
-		DaysLeft            *int                     `json:"days_left"`
-		Status              string                   `json:"status"`
-		LastSeen            int64                    `json:"last_seen"`
-		Metrics             *store.ServerMetrics     `json:"metrics"`
-		MonthTraffic        store.ServerTrafficUsage `json:"month_traffic"`
-		Notes               string                   `json:"notes"`
+		ID                    int64                    `json:"id"`
+		Name                  string                   `json:"name"`
+		Host                  string                   `json:"host"`
+		Local                 bool                     `json:"local"`
+		Enabled               bool                     `json:"enabled"`
+		ProbeEnabled          bool                     `json:"probe_enabled"`
+		ProbeToken            string                   `json:"probe_token"`
+		ProbeVersion          string                   `json:"probe_version"`
+		ProbeTarget           string                   `json:"probe_target_version"`
+		ProbeOutdated         bool                     `json:"probe_outdated"`
+		ProbeUpgrading        bool                     `json:"probe_upgrading"`
+		ProbeUpgradeError     string                   `json:"probe_upgrade_error"`
+		ProbeUpgradeOutput    string                   `json:"probe_upgrade_output"`
+		ProbeUpgradedAt       int64                    `json:"probe_upgraded_at"`
+		PublicVisible         bool                     `json:"public_visible"`
+		PublicShowTraffic     bool                     `json:"public_show_traffic"`
+		PublicShowPrice       bool                     `json:"public_show_price"`
+		Provider              string                   `json:"provider"`
+		Location              string                   `json:"location"`
+		Spec                  string                   `json:"spec"`
+		Price                 float64                  `json:"price"`
+		ExpiryDate            int64                    `json:"expiry_date"`
+		ExpiryNotifyEnabled   bool                     `json:"expiry_notify_enabled"`
+		ExpiryNotifyDays      int                      `json:"expiry_notify_days"`
+		ExpiryNotifyMode      string                   `json:"expiry_notify_mode"`
+		ExpiryNotifyCount     int                      `json:"expiry_notify_count"`
+		TrafficLimitBytes     int64                    `json:"traffic_limit_bytes"`
+		TrafficResetDay       int                      `json:"traffic_reset_day"`
+		TrafficResetMinute    int                      `json:"traffic_reset_minute"`
+		TrafficAlertPercent   int                      `json:"traffic_alert_percent"`
+		TrafficAccountingMode string                   `json:"traffic_accounting_mode"`
+		TrafficCycleStart     int64                    `json:"traffic_cycle_start"`
+		TrafficNextReset      int64                    `json:"traffic_next_reset"`
+		DaysLeft              *int                     `json:"days_left"`
+		Status                string                   `json:"status"`
+		LastSeen              int64                    `json:"last_seen"`
+		Metrics               *store.ServerMetrics     `json:"metrics"`
+		MonthTraffic          store.ServerTrafficUsage `json:"month_traffic"`
+		Notes                 string                   `json:"notes"`
 	}
 
 	var out []serverResp
@@ -339,42 +345,45 @@ func (a *API) handleMonitorServers(w http.ResponseWriter, r *http.Request) {
 			dl = &d
 		}
 		out = append(out, serverResp{
-			ID:                  sv.ID,
-			Name:                sv.Name,
-			Host:                sv.Host,
-			Local:               sv.ID == store.LocalNodeID,
-			Enabled:             sv.Enabled,
-			ProbeEnabled:        sv.ProbeEnabled,
-			ProbeToken:          sv.ProbeToken,
-			ProbeVersion:        probeVersion,
-			ProbeTarget:         version.Current(),
-			ProbeOutdated:       probeOutdated,
-			ProbeUpgrading:      probeJob.Running,
-			ProbeUpgradeError:   probeJob.Error,
-			ProbeUpgradeOutput:  probeJob.Output,
-			ProbeUpgradedAt:     probeJob.FinishedAt,
-			PublicVisible:       sv.PublicVisible,
-			Provider:            sv.Provider,
-			Location:            sv.Location,
-			Spec:                sv.Spec,
-			Price:               sv.Price,
-			ExpiryDate:          sv.ExpiryDate,
-			ExpiryNotifyEnabled: sv.ExpiryNotifyEnabled,
-			ExpiryNotifyDays:    sv.ExpiryNotifyDays,
-			ExpiryNotifyMode:    sv.ExpiryNotifyMode,
-			ExpiryNotifyCount:   sv.ExpiryNotifyCount,
-			TrafficLimitBytes:   sv.TrafficLimitBytes,
-			TrafficResetDay:     sv.TrafficResetDay,
-			TrafficResetMinute:  sv.TrafficResetMinute,
-			TrafficAlertPercent: sv.TrafficAlertPercent,
-			TrafficCycleStart:   cycleStarts[sv.ID],
-			TrafficNextReset:    store.TrafficCycleNext(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix(),
-			DaysLeft:            dl,
-			Status:              status,
-			LastSeen:            sv.LastSeen,
-			Metrics:             m,
-			MonthTraffic:        monthUsage[sv.ID],
-			Notes:               sv.Notes,
+			ID:                    sv.ID,
+			Name:                  sv.Name,
+			Host:                  sv.Host,
+			Local:                 sv.ID == store.LocalNodeID,
+			Enabled:               sv.Enabled,
+			ProbeEnabled:          sv.ProbeEnabled,
+			ProbeToken:            sv.ProbeToken,
+			ProbeVersion:          probeVersion,
+			ProbeTarget:           version.Current(),
+			ProbeOutdated:         probeOutdated,
+			ProbeUpgrading:        probeJob.Running,
+			ProbeUpgradeError:     probeJob.Error,
+			ProbeUpgradeOutput:    probeJob.Output,
+			ProbeUpgradedAt:       probeJob.FinishedAt,
+			PublicVisible:         sv.PublicVisible,
+			PublicShowTraffic:     sv.PublicShowTraffic,
+			PublicShowPrice:       sv.PublicShowPrice,
+			Provider:              sv.Provider,
+			Location:              sv.Location,
+			Spec:                  sv.Spec,
+			Price:                 sv.Price,
+			ExpiryDate:            sv.ExpiryDate,
+			ExpiryNotifyEnabled:   sv.ExpiryNotifyEnabled,
+			ExpiryNotifyDays:      sv.ExpiryNotifyDays,
+			ExpiryNotifyMode:      sv.ExpiryNotifyMode,
+			ExpiryNotifyCount:     sv.ExpiryNotifyCount,
+			TrafficLimitBytes:     sv.TrafficLimitBytes,
+			TrafficResetDay:       sv.TrafficResetDay,
+			TrafficResetMinute:    sv.TrafficResetMinute,
+			TrafficAlertPercent:   sv.TrafficAlertPercent,
+			TrafficAccountingMode: sv.TrafficAccountingMode,
+			TrafficCycleStart:     cycles[sv.ID].Start,
+			TrafficNextReset:      store.TrafficCycleNext(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix(),
+			DaysLeft:              dl,
+			Status:                status,
+			LastSeen:              sv.LastSeen,
+			Metrics:               m,
+			MonthTraffic:          monthUsage[sv.ID],
+			Notes:                 sv.Notes,
 		})
 	}
 	if out == nil {
@@ -733,22 +742,25 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 
 	// Partial update: only monitor-related fields.
 	var body struct {
-		ProbeEnabled        *bool    `json:"probe_enabled"`
-		PublicVisible       *bool    `json:"public_visible"`
-		ExpiryDate          *int64   `json:"expiry_date"`
-		ExpiryNotifyEnabled *bool    `json:"expiry_notify_enabled"`
-		ExpiryNotifyDays    *int     `json:"expiry_notify_days"`
-		ExpiryNotifyMode    *string  `json:"expiry_notify_mode"`
-		ExpiryNotifyCount   *int     `json:"expiry_notify_count"`
-		TrafficLimitBytes   *int64   `json:"traffic_limit_bytes"`
-		TrafficResetDay     *int     `json:"traffic_reset_day"`
-		TrafficResetMinute  *int     `json:"traffic_reset_minute"`
-		TrafficAlertPercent *int     `json:"traffic_alert_percent"`
-		Provider            *string  `json:"provider"`
-		Location            *string  `json:"location"`
-		Spec                *string  `json:"spec"`
-		Price               *float64 `json:"price"`
-		Notes               *string  `json:"notes"`
+		ProbeEnabled          *bool    `json:"probe_enabled"`
+		PublicVisible         *bool    `json:"public_visible"`
+		PublicShowTraffic     *bool    `json:"public_show_traffic"`
+		PublicShowPrice       *bool    `json:"public_show_price"`
+		ExpiryDate            *int64   `json:"expiry_date"`
+		ExpiryNotifyEnabled   *bool    `json:"expiry_notify_enabled"`
+		ExpiryNotifyDays      *int     `json:"expiry_notify_days"`
+		ExpiryNotifyMode      *string  `json:"expiry_notify_mode"`
+		ExpiryNotifyCount     *int     `json:"expiry_notify_count"`
+		TrafficLimitBytes     *int64   `json:"traffic_limit_bytes"`
+		TrafficResetDay       *int     `json:"traffic_reset_day"`
+		TrafficResetMinute    *int     `json:"traffic_reset_minute"`
+		TrafficAlertPercent   *int     `json:"traffic_alert_percent"`
+		TrafficAccountingMode *string  `json:"traffic_accounting_mode"`
+		Provider              *string  `json:"provider"`
+		Location              *string  `json:"location"`
+		Spec                  *string  `json:"spec"`
+		Price                 *float64 `json:"price"`
+		Notes                 *string  `json:"notes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		fail(w, 400, "请求格式错误")
@@ -782,6 +794,10 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 		fail(w, 400, "流量告警阈值必须在 1–100% 之间")
 		return
 	}
+	if body.TrafficAccountingMode != nil && !store.IsTrafficAccountingMode(*body.TrafficAccountingMode) {
+		fail(w, 400, "流量计费口径无效")
+		return
+	}
 
 	// The panel's own machine has no servers row, so its settable fields live in
 	// settings instead. Everything an admin records about a rented box still
@@ -808,6 +824,12 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 		}
 		if body.Price != nil {
 			asset.Price = *body.Price
+		}
+		if body.PublicShowTraffic != nil {
+			asset.PublicShowTraffic = *body.PublicShowTraffic
+		}
+		if body.PublicShowPrice != nil {
+			asset.PublicShowPrice = *body.PublicShowPrice
 		}
 		if body.ExpiryDate != nil {
 			asset.ExpiryDate = *body.ExpiryDate
@@ -836,6 +858,9 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 		if body.TrafficAlertPercent != nil {
 			asset.TrafficAlertPercent = *body.TrafficAlertPercent
 		}
+		if body.TrafficAccountingMode != nil {
+			asset.TrafficAccountingMode = *body.TrafficAccountingMode
+		}
 		if body.Notes != nil {
 			asset.Notes = *body.Notes
 		}
@@ -860,6 +885,12 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 
 	if body.PublicVisible != nil {
 		sv.PublicVisible = *body.PublicVisible
+	}
+	if body.PublicShowTraffic != nil {
+		sv.PublicShowTraffic = *body.PublicShowTraffic
+	}
+	if body.PublicShowPrice != nil {
+		sv.PublicShowPrice = *body.PublicShowPrice
 	}
 	if body.ProbeEnabled != nil {
 		sv.ProbeEnabled = *body.ProbeEnabled
@@ -899,6 +930,9 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 	}
 	if body.TrafficAlertPercent != nil {
 		sv.TrafficAlertPercent = *body.TrafficAlertPercent
+	}
+	if body.TrafficAccountingMode != nil {
+		sv.TrafficAccountingMode = *body.TrafficAccountingMode
 	}
 	if body.Provider != nil {
 		sv.Provider = *body.Provider
@@ -952,10 +986,11 @@ func (a *API) handleCalibrateServerTraffic(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resetDay, resetMinute := 0, 0
+	resetDay, resetMinute, accountingMode := 0, 0, store.TrafficAccountingSum
 	if id == store.LocalNodeID {
 		asset := a.st.LocalAsset()
 		resetDay, resetMinute = asset.TrafficResetDay, asset.TrafficResetMinute
+		accountingMode = asset.TrafficAccountingMode
 	} else {
 		sv, err := a.st.GetServer(id)
 		if err != nil {
@@ -967,15 +1002,18 @@ func (a *API) handleCalibrateServerTraffic(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		resetDay, resetMinute = sv.TrafficResetDay, sv.TrafficResetMinute
+		accountingMode = sv.TrafficAccountingMode
 	}
 
 	now := time.Now()
 	cycleStart := store.TrafficCycleStart(now, resetDay, resetMinute).Unix()
-	if err := a.st.SetTrafficCalibration(id, cycleStart, *body.UsedBytes, now.Unix()); err != nil {
+	if err := a.st.SetTrafficCalibrationForMode(id, cycleStart, accountingMode, *body.UsedBytes, now.Unix()); err != nil {
 		fail(w, 500, "校准流量失败")
 		return
 	}
-	usage, err := a.st.TrafficUsageForCycles(map[int64]int64{id: cycleStart})
+	usage, err := a.st.TrafficUsageForBillingCycles(map[int64]store.TrafficCycleQuery{id: {
+		Start: cycleStart, AccountingMode: accountingMode,
+	}})
 	if err != nil {
 		fail(w, 500, "读取校准结果失败")
 		return
@@ -1019,6 +1057,16 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 		Arch           string  `json:"arch"`
 	}
 
+	type pubTraffic struct {
+		UsedBytes      int64  `json:"used_bytes"`
+		LimitBytes     int64  `json:"limit_bytes"`
+		CycleStart     int64  `json:"cycle_start"`
+		NextReset      int64  `json:"next_reset"`
+		AccountingMode string `json:"accounting_mode"`
+		SampleCount    int64  `json:"sample_count"`
+		CoverageStart  int64  `json:"coverage_start"`
+		Calibrated     bool   `json:"calibrated"`
+	}
 	type pubServer struct {
 		Name     string      `json:"name"`
 		Status   string      `json:"status"`
@@ -1027,7 +1075,23 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 		Spec     string      `json:"spec"`
 		DaysLeft *int        `json:"days_left"`
 		Metrics  *pubMetrics `json:"metrics"`
+		Price    *float64    `json:"price,omitempty"`
+		Traffic  *pubTraffic `json:"traffic,omitempty"`
 		LastSeen int64       `json:"last_seen"`
+	}
+	cycles := make(map[int64]store.TrafficCycleQuery)
+	for _, sv := range servers {
+		if sv.ProbeEnabled && sv.PublicVisible && sv.PublicShowTraffic {
+			cycles[sv.ID] = store.TrafficCycleQuery{
+				Start:          store.TrafficCycleStart(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix(),
+				AccountingMode: sv.TrafficAccountingMode,
+			}
+		}
+	}
+	usage, err := a.st.TrafficUsageForBillingCycles(cycles)
+	if err != nil {
+		fail(w, 500, "查询本周期流量失败")
+		return
 	}
 
 	latest := latestAll // already fetched above; one query, and this endpoint is unauthenticated/spammable
@@ -1074,6 +1138,22 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 			}
 			dl = &d
 		}
+		var price *float64
+		if sv.PublicShowPrice {
+			p := sv.Price
+			price = &p
+		}
+		var traffic *pubTraffic
+		if cycle, shown := cycles[sv.ID]; shown {
+			u := usage[sv.ID]
+			traffic = &pubTraffic{
+				UsedBytes: u.Total, LimitBytes: sv.TrafficLimitBytes,
+				CycleStart:     cycle.Start,
+				NextReset:      store.TrafficCycleNext(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix(),
+				AccountingMode: u.AccountingMode, SampleCount: u.SampleCount,
+				CoverageStart: u.CoverageStart, Calibrated: u.Calibrated,
+			}
+		}
 		out = append(out, pubServer{
 			Name:     sv.Name,
 			Status:   status,
@@ -1082,6 +1162,8 @@ func (a *API) handleMonitorPublic(w http.ResponseWriter, r *http.Request) {
 			Spec:     sv.Spec,
 			DaysLeft: dl,
 			Metrics:  pm,
+			Price:    price,
+			Traffic:  traffic,
 			LastSeen: sv.LastSeen,
 		})
 	}

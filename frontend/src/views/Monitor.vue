@@ -159,6 +159,7 @@
               <span v-if="s.location" class="tag loc">{{ s.location }}</span>
               <span v-if="s.provider" class="tag">{{ s.provider }}</span>
               <span v-if="s.spec" class="tag spec">{{ s.spec }}</span>
+              <span v-if="s.price != null" class="tag price">¥{{ Number(s.price).toFixed(2) }}/月</span>
               <span v-if="s.days_left != null" class="tag expiry" :class="expiryCls(s.days_left)" title="距离到期剩余天数">
                 <i class="exp-dot" />剩 {{ s.days_left }} 天
               </span>
@@ -239,6 +240,19 @@
               <span>暂无数据</span>
             </div>
 
+            <div v-if="s.traffic" class="public-traffic">
+              <div class="public-traffic-head">
+                <span>本周期流量 · {{ trafficModeLabel(s.traffic.accounting_mode) }}</span>
+                <b>{{ trafficReady(s.traffic) ? fmtBytes(s.traffic.used_bytes) : '采集中' }}<template v-if="s.traffic.limit_bytes > 0"> / {{ fmtBytes(s.traffic.limit_bytes) }}</template></b>
+              </div>
+              <div v-if="s.traffic.limit_bytes > 0" class="public-traffic-track"><i :class="lvl(trafficPct(s.traffic))" :style="{ width: Math.min(trafficPct(s.traffic), 100) + '%' }" /></div>
+              <div class="public-traffic-meta">
+                <span>下次重置 {{ fmtShortDate(s.traffic.next_reset) }}</span>
+                <span v-if="trafficIncomplete(s.traffic)" class="warn-text">数据自 {{ fmtShortDate(s.traffic.coverage_start, true) }} 起</span>
+                <span v-else-if="s.traffic.calibrated">已按服务商用量校准</span>
+              </div>
+            </div>
+
             <div class="card-footer">
               <span class="footer-time">
                 <span class="dot" :class="s.status" />
@@ -272,9 +286,14 @@ interface ServerMetrics {
   uptime: number; platform: string; arch: string
 }
 interface Spark { name: string; cpu: number[]; net_up: number[]; net_down: number[] }
+interface PublicTraffic {
+  used_bytes: number; limit_bytes: number; cycle_start: number; next_reset: number
+  accounting_mode: string; sample_count: number; coverage_start: number; calibrated: boolean
+}
 interface Server {
   name: string; status: 'online' | 'offline'; location: string
   provider: string; spec: string; days_left?: number | null
+  price?: number; traffic?: PublicTraffic
   metrics: ServerMetrics | null; last_seen: number; spark?: Spark | null
 }
 
@@ -334,6 +353,21 @@ function swapPct(s: Server) { return s.metrics ? pct(s.metrics.swap_used, s.metr
 function lvl(v: number) { return v >= 90 ? 'crit' : v >= 70 ? 'warn' : 'ok' }
 // 到期倒计时着色：不足 3 天红、不足 7 天黄、其余绿
 function expiryCls(d: number) { return d < 3 ? 'crit' : d < 7 ? 'warn' : 'ok' }
+function trafficReady(t: PublicTraffic) { return t.calibrated || t.sample_count >= 2 }
+function trafficPct(t: PublicTraffic) { return pct(t.used_bytes || 0, t.limit_bytes || 0) }
+function trafficModeLabel(mode: string) {
+  return ({ sum: 'IN + OUT', max: '双向取大', rx: '仅 IN', tx: '仅 OUT' } as Record<string, string>)[mode] || 'IN + OUT'
+}
+function trafficIncomplete(t: PublicTraffic) {
+  return !t.calibrated && t.sample_count > 0 && t.coverage_start > t.cycle_start + 3600
+}
+function fmtShortDate(ts: number, withTime = false) {
+  if (!ts) return '—'
+  const d = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const date = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return withTime ? `${date} ${pad(d.getHours())}:${pad(d.getMinutes())}` : date
+}
 
 // 仪表盘几何
 const GAUGE_R = 26
@@ -627,6 +661,7 @@ onUnmounted(() => {
 .tag { padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 500; background: var(--bg-soft); color: var(--text-2); white-space: nowrap; }
 .tag.loc { background: var(--accent-soft); color: var(--accent-strong); }
 .tag.spec { font-variant-numeric: tabular-nums; }
+.tag.price { background: #f5efe0; color: #946f24; font-variant-numeric: tabular-nums; }
 .tag.expiry { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
 .tag.expiry .exp-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .tag.expiry.ok { background: var(--success-soft); color: var(--success); }
@@ -675,6 +710,15 @@ onUnmounted(() => {
 .ic-val.ellip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .card-no-data { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 30px 16px; color: var(--text-3); font-size: 13px; }
+
+.public-traffic { padding: 11px 16px 12px; border-top: 1px solid var(--border); }
+.public-traffic-head { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--text-3); }
+.public-traffic-head b { color: var(--text); font-size: 12px; font-weight: 680; font-variant-numeric: tabular-nums; text-align: right; }
+.public-traffic-track { height: 5px; margin: 7px 0 6px; overflow: hidden; border-radius: 4px; background: var(--bg); }
+.public-traffic-track i { display: block; height: 100%; border-radius: inherit; transition: width 1s var(--ease-emphasized); }
+.public-traffic-track i.ok { background: var(--success); } .public-traffic-track i.warn { background: var(--warn); } .public-traffic-track i.crit { background: var(--danger); }
+.public-traffic-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; font-size: 10px; color: var(--text-3); }
+.warn-text { color: var(--warn); }
 
 .card-footer { padding: 9px 16px; border-top: 1px solid var(--border); }
 .footer-time { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); }

@@ -30,20 +30,24 @@ func (a *API) sweepDeviceNotifications(now time.Time) {
 		ExpiryNotifyMode: asset.ExpiryNotifyMode, ExpiryNotifyCount: asset.ExpiryNotifyCount,
 		TrafficLimitBytes: asset.TrafficLimitBytes, TrafficResetDay: asset.TrafficResetDay,
 		TrafficResetMinute: asset.TrafficResetMinute, TrafficAlertPercent: asset.TrafficAlertPercent,
+		TrafficAccountingMode: asset.TrafficAccountingMode,
 	})
 
-	starts := make(map[int64]int64, len(servers))
+	cycles := make(map[int64]store.TrafficCycleQuery, len(servers))
 	for _, sv := range servers {
-		starts[sv.ID] = store.TrafficCycleStart(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix()
+		cycles[sv.ID] = store.TrafficCycleQuery{
+			Start:          store.TrafficCycleStart(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix(),
+			AccountingMode: sv.TrafficAccountingMode,
+		}
 	}
-	usage, err := a.st.TrafficUsageForCycles(starts)
+	usage, err := a.st.TrafficUsageForBillingCycles(cycles)
 	if err != nil {
 		log.Printf("device notify: aggregate traffic: %v", err)
 		return
 	}
 	for _, sv := range servers {
 		a.notifyDeviceExpiry(now, sv)
-		a.notifyDeviceTraffic(now, sv, starts[sv.ID], usage[sv.ID])
+		a.notifyDeviceTraffic(now, sv, cycles[sv.ID].Start, usage[sv.ID])
 	}
 }
 
