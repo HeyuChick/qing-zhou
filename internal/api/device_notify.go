@@ -30,20 +30,24 @@ func (a *API) sweepDeviceNotifications(now time.Time) {
 		ExpiryNotifyMode: asset.ExpiryNotifyMode, ExpiryNotifyCount: asset.ExpiryNotifyCount,
 		TrafficLimitBytes: asset.TrafficLimitBytes, TrafficResetDay: asset.TrafficResetDay,
 		TrafficResetMinute: asset.TrafficResetMinute, TrafficAlertPercent: asset.TrafficAlertPercent,
+		TrafficAccountingMode: asset.TrafficAccountingMode,
 	})
 
-	starts := make(map[int64]int64, len(servers))
+	cycles := make(map[int64]store.TrafficCycleQuery, len(servers))
 	for _, sv := range servers {
-		starts[sv.ID] = store.TrafficCycleStart(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix()
+		cycles[sv.ID] = store.TrafficCycleQuery{
+			Start:          store.TrafficCycleStart(now, sv.TrafficResetDay, sv.TrafficResetMinute).Unix(),
+			AccountingMode: sv.TrafficAccountingMode,
+		}
 	}
-	usage, err := a.st.TrafficUsageForCycles(starts)
+	usage, err := a.st.TrafficUsageForBillingCycles(cycles)
 	if err != nil {
 		log.Printf("device notify: aggregate traffic: %v", err)
 		return
 	}
 	for _, sv := range servers {
 		a.notifyDeviceExpiry(now, sv)
-		a.notifyDeviceTraffic(now, sv, starts[sv.ID], usage[sv.ID])
+		a.notifyDeviceTraffic(now, sv, cycles[sv.ID].Start, usage[sv.ID])
 	}
 }
 
@@ -94,7 +98,8 @@ func (a *API) notifyDeviceTraffic(now time.Time, sv *store.Server, cycleStart in
 	if percent < 1 {
 		percent = 80
 	}
-	reached := usage.SampleCount >= 2 && usage.Total*100 >= sv.TrafficLimitBytes*int64(percent)
+	reached := (usage.Calibrated || usage.SampleCount >= 2) &&
+		deviceTrafficThresholdReached(usage.Total, sv.TrafficLimitBytes, percent)
 	if !reached {
 		_ = a.st.ResolveAlert(sv.ID, "traffic_threshold")
 		return
@@ -118,6 +123,18 @@ func (a *API) notifyDeviceTraffic(now time.Time, sv *store.Server, cycleStart in
 	if err := a.st.MarkDeviceNotifySent(sv.ID, deviceNotifyTraffic, cycleKey, now.Format("2006-01-02"), now.Unix()); err != nil {
 		log.Printf("device notify: save traffic cursor for %d: %v", sv.ID, err)
 	}
+}
+
+// deviceTrafficThresholdReached avoids multiplying full int64 byte counters by
+// a percentage. A manually calibrated value is admin-controlled and can be very
+// large; used*100 would overflow and silently suppress or fabricate an alert.
+func deviceTrafficThresholdReached(used, limit int64, percent int) bool {
+	if used < 0 || limit <= 0 || percent < 1 {
+		return false
+	}
+	p := int64(percent)
+	threshold := (limit/100)*p + ((limit%100)*p+99)/100
+	return used >= threshold
 }
 
 // sendDeviceOps records a delivery only when at least one current management

@@ -106,7 +106,10 @@ func isPseudoFS(fstype string) bool {
 // isPhysicalIface reports whether an interface name looks like real hardware,
 // so loopback and tunnel devices don't inflate the traffic figures.
 func isPhysicalIface(name string) bool {
-	prefixes := []string{"eth", "ens", "enp", "wlan", "em", "eno"}
+	// enx is Linux's MAC-based Ethernet name; venet is the provider-facing
+	// interface on older OpenVZ VPSes. They carry billable traffic just like
+	// eth/ens and must not silently report zero merely because of their name.
+	prefixes := []string{"eth", "ens", "enp", "enx", "wlan", "em", "eno", "venet"}
 	for _, p := range prefixes {
 		if len(name) >= len(p) && name[:len(p)] == p {
 			return true

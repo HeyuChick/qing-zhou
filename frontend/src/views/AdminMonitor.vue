@@ -175,13 +175,18 @@
             <span class="tag-mini">{{ fmtUptime(s.metrics.uptime) }}</span>
           </div>
           <div class="traffic-total">
-            <div class="m-row"><span>本周期流量（IN + OUT）</span><b>{{ trafficStatus(s) }}</b></div>
+            <div class="m-row"><span>本周期流量（{{ trafficModeLabel(s.traffic_accounting_mode) }}）</span><b>{{ trafficStatus(s) }}</b></div>
             <n-progress v-if="s.traffic_limit_bytes > 0" type="line" :percentage="trafficPct(s)" :height="5"
                         :show-indicator="false" :color="pctColor(trafficPct(s))" style="margin:5px 0 4px;" />
             <div class="traffic-split">
-              <span>IN {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.rx) : '—' }}</span>
-              <span>OUT {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.tx) : '—' }}</span>
-              <span v-if="s.traffic_limit_bytes > 0">{{ s.traffic_alert_percent }}% 告警 · {{ fmtDateTime(s.traffic_next_reset) }} 重置</span>
+              <template v-if="!s.month_traffic?.calibrated">
+                <span>IN {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.rx) : '—' }}</span>
+                <span>OUT {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.tx) : '—' }}</span>
+              </template>
+              <span v-else>服务商用量已校准</span>
+              <span v-if="trafficIncomplete(s)" class="traffic-warning">周期数据不完整：仅自 {{ fmtDateTime(s.month_traffic.coverage_start) }} 起</span>
+              <span>周期 {{ fmtDateTime(s.traffic_cycle_start) }} → {{ fmtDateTime(s.traffic_next_reset) }}</span>
+              <span v-if="s.traffic_limit_bytes > 0">{{ s.traffic_alert_percent }}% 告警</span>
             </div>
           </div>
         </template>
@@ -229,6 +234,9 @@
             <n-input-number v-model:value="assetTrafficGB" :min="0" :precision="2" style="width:100%;" />
           </n-form-item>
           <template v-if="assetTrafficGB > 0">
+            <n-form-item label="计费口径">
+              <n-select v-model:value="assetForm.traffic_accounting_mode" :options="trafficAccountingModes" />
+            </n-form-item>
             <n-form-item label="每月重置日">
               <n-input-number v-model:value="assetForm.traffic_reset_day" :min="1" :max="31" style="width:100%;" />
             </n-form-item>
@@ -240,8 +248,21 @@
                 <template #suffix>%</template>
               </n-input-number>
             </n-form-item>
-            <p class="asset-form-hint">统计设备物理网卡 IN + OUT；达到阈值后每个流量周期只通知一次，周期重置后自动重新启用。</p>
+            <n-form-item label="当前已用">
+              <div class="calibration-input">
+                <n-input-number v-model:value="assetUsedGB" :min="0" :precision="2" style="flex:1;">
+                  <template #suffix>GB</template>
+                </n-input-number>
+                <n-button :loading="calibrating" @click="handleCalibrateTraffic">校准</n-button>
+              </div>
+            </n-form-item>
+            <p class="asset-form-hint">填写服务商后台显示的当前周期已用流量。校准时会先保存重置日期和计费口径；校准值只在本周期生效，之后继续叠加探针流量。</p>
+            <p class="asset-form-hint">探针分别采集设备物理网卡 IN / OUT，再按上面的服务商计费口径汇总；达到阈值后每个流量周期只通知一次。</p>
           </template>
+          <div class="asset-section-title">首页监控大屏</div>
+          <n-form-item label="显示流量"><n-switch v-model:value="assetForm.public_show_traffic" /></n-form-item>
+          <n-form-item label="显示价格"><n-switch v-model:value="assetForm.public_show_price" /></n-form-item>
+          <p class="asset-form-hint">两个开关默认开启；仅在该设备已开启“显示在公开状态页”时生效。</p>
           <n-form-item label="备注"><n-input v-model:value="assetForm.notes" type="textarea" :rows="2" /></n-form-item>
           <n-form-item v-if="!assetServer.local" label="启用探针"><n-switch v-model:value="assetForm.probe_enabled" /></n-form-item>
         </n-form>
@@ -336,7 +357,7 @@ const filtered = computed(() => {
 
 function memPct(s: any) { return s.metrics ? pct(s.metrics.mem_used, s.metrics.mem_total) : 0 }
 function diskPct(s: any) { return s.metrics ? pct(s.metrics.disk_used, s.metrics.disk_total) : 0 }
-function trafficReady(t: any) { return (t?.sample_count || 0) >= 2 }
+function trafficReady(t: any) { return t?.calibrated === true || (t?.sample_count || 0) >= 2 }
 function trafficStatus(s: any) {
   if (trafficReady(s.month_traffic)) {
     const used = fmtBytes(s.month_traffic.total)
@@ -345,6 +366,13 @@ function trafficStatus(s: any) {
   return s.metrics?.net_totals_valid ? '采集中' : '需升级探针'
 }
 function trafficPct(s: any) { return pct(s.month_traffic?.total || 0, s.traffic_limit_bytes || 0) }
+function trafficModeLabel(mode: string) {
+  return ({ sum: 'IN + OUT', max: 'IN / OUT 取大', rx: '仅 IN', tx: '仅 OUT' } as Record<string, string>)[mode] || 'IN + OUT'
+}
+function trafficIncomplete(s: any) {
+  const t = s.month_traffic
+  return !t?.calibrated && t?.sample_count > 0 && t.coverage_start > (s.traffic_cycle_start || 0) + 3600
+}
 function pctColor(v: number) { return v >= 90 ? '#c2685c' : v >= 70 ? '#bf9540' : '#6f8f76' }
 
 // 热力图分类：绿/黄/红
@@ -473,14 +501,23 @@ const expiryNotifyModes = [
   { label: '每天一次，共提醒指定次数', value: 'count' },
   { label: '首次后每天提醒，直到到期', value: 'daily' },
 ]
+const trafficAccountingModes = [
+  { label: '双向合计（IN + OUT）', value: 'sum' },
+  { label: '双向取大（MAX IN / OUT）', value: 'max' },
+  { label: '仅入站（IN）', value: 'rx' },
+  { label: '仅出站（OUT）', value: 'tx' },
+]
 const assetForm = reactive({
   provider: '', location: '', spec: '', price: 0, notes: '', probe_enabled: false,
+  public_show_traffic: true, public_show_price: true,
   expiry_notify_enabled: false, expiry_notify_days: 3, expiry_notify_mode: 'count', expiry_notify_count: 1,
-  traffic_reset_day: 1, traffic_alert_percent: 80,
+  traffic_reset_day: 1, traffic_alert_percent: 80, traffic_accounting_mode: 'sum',
 })
 const assetExpiry = ref('')
 const assetTrafficGB = ref(0)
+const assetUsedGB = ref(0)
 const assetResetTime = ref('00:00')
+const calibrating = ref(false)
 function resetTimeOf(minutes: number) {
   const n = Math.max(0, Math.min(1439, Number(minutes) || 0))
   return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`
@@ -494,17 +531,38 @@ function openAsset(s: any) {
   Object.assign(assetForm, {
     provider: s.provider || '', location: s.location || '', spec: s.spec || '', price: s.price || 0,
     notes: s.notes || '', probe_enabled: s.probe_enabled,
+    public_show_traffic: s.public_show_traffic !== false,
+    public_show_price: s.public_show_price !== false,
     expiry_notify_enabled: s.expiry_notify_enabled === true,
     expiry_notify_days: s.expiry_notify_days || 3,
     expiry_notify_mode: s.expiry_notify_mode === 'daily' ? 'daily' : 'count',
     expiry_notify_count: s.expiry_notify_count || 1,
     traffic_reset_day: s.traffic_reset_day || 1,
     traffic_alert_percent: s.traffic_alert_percent || 80,
+    traffic_accounting_mode: ['sum', 'max', 'rx', 'tx'].includes(s.traffic_accounting_mode) ? s.traffic_accounting_mode : 'sum',
   })
   assetExpiry.value = toLocalDatetimeInput(s.expiry_date)
   assetTrafficGB.value = Math.round(((s.traffic_limit_bytes || 0) / GB) * 100) / 100
+  assetUsedGB.value = Math.round(((s.month_traffic?.total || 0) / GB) * 100) / 100
   assetResetTime.value = resetTimeOf(s.traffic_reset_minute)
   showAsset.value = true
+}
+async function handleCalibrateTraffic() {
+  if (!assetServer.value) return
+  calibrating.value = true
+  try {
+    await apiPut(`/api/admin/servers/${assetServer.value.id}/monitor`, {
+      traffic_reset_day: assetForm.traffic_reset_day,
+      traffic_reset_minute: resetMinuteOf(assetResetTime.value),
+      traffic_accounting_mode: assetForm.traffic_accounting_mode,
+    })
+    const data = await apiPut<any>(`/api/admin/servers/${assetServer.value.id}/traffic-calibration`, {
+      used_bytes: Math.round(Math.max(0, assetUsedGB.value || 0) * GB),
+    })
+    if (data?.usage) assetServer.value.month_traffic = data.usage
+    message.success('当前周期流量已校准')
+    await load()
+  } catch (e: any) { message.error(e.message) } finally { calibrating.value = false }
 }
 async function handleSaveAsset() {
   if (!assetServer.value) return
@@ -811,9 +869,11 @@ onUnmounted(() => {
 .m-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
 .info-strip { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .traffic-total { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--border); }
-.traffic-split { display: flex; gap: 14px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.traffic-split { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.traffic-warning { color: var(--warn); }
 .asset-section-title { margin: 10px 0 12px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text); font-size: 13px; font-weight: 650; }
 .asset-form-hint { margin: -4px 0 14px 105px; color: var(--text-3); font-size: 11px; line-height: 1.65; }
+.calibration-input { display: flex; width: 100%; gap: 8px; }
 .no-data { text-align: center; color: var(--text-3); padding: 16px; font-size: 13px; }
 .mini-chart-box { margin-top: 12px; }
 .mini-chart { height: 160px; }

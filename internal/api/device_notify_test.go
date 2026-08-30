@@ -1,12 +1,25 @@
 package api
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"qingzhou/internal/store"
 )
+
+func TestDeviceTrafficThresholdDoesNotOverflow(t *testing.T) {
+	if !deviceTrafficThresholdReached(math.MaxInt64, math.MaxInt64, 100) {
+		t.Fatal("max-int usage should reach a 100% max-int limit")
+	}
+	if deviceTrafficThresholdReached(math.MaxInt64-1, math.MaxInt64, 100) {
+		t.Fatal("one byte below max-int limit must not reach 100%")
+	}
+	if !deviceTrafficThresholdReached(80, 100, 80) || deviceTrafficThresholdReached(79, 100, 80) {
+		t.Fatal("ordinary 80% threshold comparison is wrong")
+	}
+}
 
 func TestDeviceExpiryCountPolicyAndDailyDedup(t *testing.T) {
 	a, st, inbox := newTelegramAPI(t)
@@ -59,6 +72,31 @@ func TestDeviceTrafficAlertsOncePerBillingCycle(t *testing.T) {
 	}
 	if alert := unreadOfAPI(t, st, "traffic_threshold"); alert == nil {
 		t.Fatal("traffic threshold did not appear in panel alerts")
+	}
+}
+
+func TestDeviceTrafficAlertUsesManualCalibration(t *testing.T) {
+	a, st, inbox := newTelegramAPI(t)
+	bindOps(t, st, "calibration_ops", "admin", 7301, true)
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.Local)
+	id, err := st.CreateServer(store.Server{
+		Name: "calibrated-traffic", Host: "203.0.113.10", Enabled: true,
+		TrafficLimitBytes: 1000, TrafficResetDay: 16, TrafficAlertPercent: 80,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycleStart := store.TrafficCycleStart(now, 16, 0).Unix()
+	if err := st.SetTrafficCalibration(id, cycleStart, 900, now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	a.sweepDeviceNotifications(now)
+	if len(*inbox) != 1 {
+		t.Fatalf("sent %d calibrated traffic messages, want 1: %#v", len(*inbox), *inbox)
+	}
+	if !strings.Contains((*inbox)[0].html, "calibrated-traffic") || !strings.Contains((*inbox)[0].html, "0.88 KB") {
+		t.Fatalf("unexpected calibrated traffic message: %q", (*inbox)[0].html)
 	}
 }
 

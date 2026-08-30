@@ -49,19 +49,26 @@ type Server struct {
 	ExpiryNotifyCount   int    `json:"expiry_notify_count"`
 	// Physical-interface monthly traffic budget. ResetMinute is minutes after
 	// local midnight; ResetDay is clamped to the month's last day when needed.
-	TrafficLimitBytes   int64   `json:"traffic_limit_bytes"`
-	TrafficResetDay     int     `json:"traffic_reset_day"`
-	TrafficResetMinute  int     `json:"traffic_reset_minute"`
-	TrafficAlertPercent int     `json:"traffic_alert_percent"`
-	Provider            string  `json:"provider"`
-	Location            string  `json:"location"`
-	Spec                string  `json:"spec"`
-	Price               float64 `json:"price"`
-	Notes               string  `json:"notes"`
+	TrafficLimitBytes   int64 `json:"traffic_limit_bytes"`
+	TrafficResetDay     int   `json:"traffic_reset_day"`
+	TrafficResetMinute  int   `json:"traffic_reset_minute"`
+	TrafficAlertPercent int   `json:"traffic_alert_percent"`
+	// TrafficAccountingMode matches the provider's billing convention:
+	// sum (IN+OUT), max (larger direction), rx (IN), or tx (OUT).
+	TrafficAccountingMode string  `json:"traffic_accounting_mode"`
+	Provider              string  `json:"provider"`
+	Location              string  `json:"location"`
+	Spec                  string  `json:"spec"`
+	Price                 float64 `json:"price"`
+	Notes                 string  `json:"notes"`
 	// PublicVisible controls whether this machine is listed on the
 	// unauthenticated status page. Independent of ProbeEnabled: an admin may
 	// well want to watch a machine without announcing that it exists.
 	PublicVisible bool `json:"public_visible"`
+	// PublicShowTraffic and PublicShowPrice independently control which asset
+	// details are disclosed once this machine is visible on the public page.
+	PublicShowTraffic bool `json:"public_show_traffic"`
+	PublicShowPrice   bool `json:"public_show_price"`
 	// HostKey is the pinned SSH host key (authorized_keys line). Empty until the
 	// first successful connection pins it (TOFU). Never exposed to the client.
 	HostKey string `json:"-"`
@@ -79,7 +86,7 @@ type Server struct {
 	SSHKeyPath string `json:"ssh_key_path"`
 }
 
-const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, expiry_notify_enabled, expiry_notify_days, expiry_notify_mode, expiry_notify_count, traffic_limit_bytes, traffic_reset_day, traffic_reset_minute, traffic_alert_percent, provider, location, spec, price, notes, host_key, public_visible, use_sudo, sudo_password, ssh_key_path`
+const serverCols = `id, name, host, port, ssh_user, ssh_key, ssh_key_pass, ssh_password, config_path, systemd_unit, sing_box_bin, v2ray_listen, enabled, status, last_seen, created_at, updated_at, probe_enabled, probe_token, expiry_date, expiry_notify_enabled, expiry_notify_days, expiry_notify_mode, expiry_notify_count, traffic_limit_bytes, traffic_reset_day, traffic_reset_minute, traffic_alert_percent, traffic_accounting_mode, provider, location, spec, price, notes, host_key, public_visible, public_show_traffic, public_show_price, use_sudo, sudo_password, ssh_key_path`
 
 func (s *Store) ListServers() ([]*Server, error) {
 	rows, err := s.db.Query(`SELECT ` + serverCols + ` FROM servers ORDER BY id`)
@@ -130,7 +137,8 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 		sv.Status = "unknown"
 	}
 	applyServerMonitorDefaults(&sv)
-	// public_visible is deliberately not listed: the column default (1) applies,
+	// Public display flags are deliberately not listed: their column defaults
+	// (1) apply,
 	// so a newly added machine shows on the status page exactly as every server
 	// did before the flag existed. Hiding one is an explicit act, done through
 	// UpdateServer — and a bool field cannot tell "caller wants it hidden" from
@@ -154,13 +162,13 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 func (s *Store) UpdateServer(sv Server) error {
 	now := time.Now().Unix()
 	applyServerMonitorDefaults(&sv)
-	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, expiry_notify_enabled=?, expiry_notify_days=?, expiry_notify_mode=?, expiry_notify_count=?, traffic_limit_bytes=?, traffic_reset_day=?, traffic_reset_minute=?, traffic_alert_percent=?, provider=?, location=?, spec=?, price=?, notes=?, public_visible=?, use_sudo=?, sudo_password=?, ssh_key_path=? WHERE id=?`,
+	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, expiry_notify_enabled=?, expiry_notify_days=?, expiry_notify_mode=?, expiry_notify_count=?, traffic_limit_bytes=?, traffic_reset_day=?, traffic_reset_minute=?, traffic_alert_percent=?, traffic_accounting_mode=?, provider=?, location=?, spec=?, price=?, notes=?, public_visible=?, public_show_traffic=?, public_show_price=?, use_sudo=?, sudo_password=?, ssh_key_path=? WHERE id=?`,
 		sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
 		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate,
 		b2i(sv.ExpiryNotifyEnabled), sv.ExpiryNotifyDays, sv.ExpiryNotifyMode, sv.ExpiryNotifyCount,
-		sv.TrafficLimitBytes, sv.TrafficResetDay, sv.TrafficResetMinute, sv.TrafficAlertPercent,
-		sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, b2i(sv.PublicVisible),
+		sv.TrafficLimitBytes, sv.TrafficResetDay, sv.TrafficResetMinute, sv.TrafficAlertPercent, sv.TrafficAccountingMode,
+		sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, b2i(sv.PublicVisible), b2i(sv.PublicShowTraffic), b2i(sv.PublicShowPrice),
 		b2i(sv.UseSudo), s.encrypt(sv.SudoPassword), sv.SSHKeyPath, sv.ID)
 	return err
 }
@@ -245,14 +253,14 @@ func (s *Store) TouchProbeSeen(id int64) error {
 
 func scanServer(sc scanner) (*Server, error) {
 	var sv Server
-	var enabled, probeEnabled, expiryNotifyEnabled, publicVisible, useSudo int
+	var enabled, probeEnabled, expiryNotifyEnabled, publicVisible, publicShowTraffic, publicShowPrice, useSudo int
 	err := sc.Scan(&sv.ID, &sv.Name, &sv.Host, &sv.Port, &sv.SSHUser, &sv.SSHKey, &sv.SSHKeyPass, &sv.SSHPassword,
 		&sv.ConfigPath, &sv.SystemdUnit, &sv.SingBoxBin, &sv.V2rayListen,
 		&enabled, &sv.Status, &sv.LastSeen, &sv.CreatedAt, &sv.UpdatedAt,
 		&probeEnabled, &sv.ProbeToken, &sv.ExpiryDate, &expiryNotifyEnabled, &sv.ExpiryNotifyDays, &sv.ExpiryNotifyMode, &sv.ExpiryNotifyCount,
-		&sv.TrafficLimitBytes, &sv.TrafficResetDay, &sv.TrafficResetMinute, &sv.TrafficAlertPercent,
+		&sv.TrafficLimitBytes, &sv.TrafficResetDay, &sv.TrafficResetMinute, &sv.TrafficAlertPercent, &sv.TrafficAccountingMode,
 		&sv.Provider, &sv.Location, &sv.Spec, &sv.Price, &sv.Notes, &sv.HostKey,
-		&publicVisible, &useSudo, &sv.SudoPassword, &sv.SSHKeyPath)
+		&publicVisible, &publicShowTraffic, &publicShowPrice, &useSudo, &sv.SudoPassword, &sv.SSHKeyPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -263,6 +271,8 @@ func scanServer(sc scanner) (*Server, error) {
 	sv.ProbeEnabled = probeEnabled == 1
 	sv.ExpiryNotifyEnabled = expiryNotifyEnabled == 1
 	sv.PublicVisible = publicVisible == 1
+	sv.PublicShowTraffic = publicShowTraffic == 1
+	sv.PublicShowPrice = publicShowPrice == 1
 	sv.UseSudo = useSudo == 1
 	return &sv, nil
 }
@@ -283,6 +293,7 @@ func applyServerMonitorDefaults(sv *Server) {
 	if sv.TrafficAlertPercent <= 0 {
 		sv.TrafficAlertPercent = 80
 	}
+	sv.TrafficAccountingMode = NormalizeTrafficAccountingMode(sv.TrafficAccountingMode)
 }
 
 func (s *Store) decryptServer(sv *Server) {

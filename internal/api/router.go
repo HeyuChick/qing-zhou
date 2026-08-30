@@ -373,6 +373,7 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/servers/{id}/clear-host-key", a.handleAdminClearServerHostKey)
 		ar.Get("/api/admin/ssh-keys", a.handleAdminListSSHKeys)
 		ar.Put("/api/admin/servers/{id}/monitor", a.handleUpdateServerMonitor)
+		ar.Put("/api/admin/servers/{id}/traffic-calibration", a.handleCalibrateServerTraffic)
 
 		// monitor probe
 		ar.Get("/api/admin/monitor/dashboard", a.handleMonitorDashboard)
