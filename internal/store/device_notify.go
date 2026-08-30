@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -58,10 +59,14 @@ func (s *Store) TrafficUsageForCycles(starts map[int64]int64) (map[int64]ServerT
 		args = append(args, id, since)
 	}
 	q := `WITH starts(server_id, since) AS (VALUES ` + strings.Join(values, ",") + `)
-		SELECT m.server_id, COALESCE(SUM(m.net_rx_bytes),0), COALESCE(SUM(m.net_tx_bytes),0),
-		MIN(m.ts), MAX(m.ts), COUNT(*)
-		FROM server_metrics m JOIN starts s ON s.server_id=m.server_id AND m.ts>=s.since
-		WHERE m.net_totals_valid=1 GROUP BY m.server_id`
+		SELECT s.server_id, COALESCE(SUM(m.net_rx_bytes),0), COALESCE(SUM(m.net_tx_bytes),0),
+		COALESCE(MIN(m.ts),0), COALESCE(MAX(m.ts),0), COUNT(m.id),
+		COALESCE(c.offset_bytes,0), COALESCE(c.calibrated_at,0),
+		CASE WHEN c.server_id IS NULL THEN 0 ELSE 1 END
+		FROM starts s
+		LEFT JOIN server_metrics m ON m.server_id=s.server_id AND m.ts>=s.since AND m.net_totals_valid=1
+		LEFT JOIN server_traffic_calibrations c ON c.server_id=s.server_id AND c.cycle_start=s.since
+		GROUP BY s.server_id, c.offset_bytes, c.calibrated_at, c.server_id`
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -70,13 +75,42 @@ func (s *Store) TrafficUsageForCycles(starts map[int64]int64) (map[int64]ServerT
 	for rows.Next() {
 		var id int64
 		var u ServerTrafficUsage
-		if err := rows.Scan(&id, &u.Rx, &u.Tx, &u.CoverageStart, &u.CoverageEnd, &u.SampleCount); err != nil {
+		var offset int64
+		var calibrated int
+		if err := rows.Scan(&id, &u.Rx, &u.Tx, &u.CoverageStart, &u.CoverageEnd, &u.SampleCount,
+			&offset, &u.CalibratedAt, &calibrated); err != nil {
 			return nil, err
 		}
 		u.Total = u.Rx + u.Tx
+		if calibrated == 1 {
+			u.Calibrated = true
+			if offset < 0 && u.Total < -offset {
+				u.Total = 0
+			} else {
+				u.Total += offset
+			}
+		}
 		out[id] = u
 	}
 	return out, rows.Err()
+}
+
+// SetTrafficCalibration makes usedBytes the current displayed total for one
+// device billing cycle. Future probe deltas continue increasing it; a different
+// cycleStart ignores it automatically. Keeping this in a separate table also
+// supports LocalNodeID, whose asset metadata has no servers row.
+func (s *Store) SetTrafficCalibration(serverID, cycleStart, usedBytes, calibratedAt int64) error {
+	if usedBytes < 0 {
+		return fmt.Errorf("traffic calibration cannot be negative")
+	}
+	_, err := s.db.Exec(`INSERT INTO server_traffic_calibrations
+		(server_id,cycle_start,offset_bytes,calibrated_at)
+		VALUES (?,?,?-(SELECT COALESCE(SUM(net_rx_bytes+net_tx_bytes),0)
+			FROM server_metrics WHERE server_id=? AND ts>=? AND net_totals_valid=1),?)
+		ON CONFLICT(server_id) DO UPDATE SET cycle_start=excluded.cycle_start,
+		offset_bytes=excluded.offset_bytes, calibrated_at=excluded.calibrated_at`,
+		serverID, cycleStart, usedBytes, serverID, cycleStart, calibratedAt)
+	return err
 }
 
 type DeviceNotifyState struct {

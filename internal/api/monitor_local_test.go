@@ -205,6 +205,50 @@ func setVisible(t *testing.T, a *API, id int64, v bool) {
 	}
 }
 
+func calibrateTrafficRequest(a *API, id, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("PUT", "/x", strings.NewReader(body))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", id)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	a.handleCalibrateServerTraffic(w, req)
+	return w
+}
+
+func TestTrafficCalibrationRequiresExplicitValue(t *testing.T) {
+	a, _ := newNodeUpgradeAPI(t)
+	for _, tc := range []struct {
+		id, body string
+	}{
+		{"0", `{}`},
+		{"not-a-number", `{"used_bytes":1}`},
+		{"0", `{"used_bytes":-1}`},
+	} {
+		if w := calibrateTrafficRequest(a, tc.id, tc.body); w.Code != http.StatusBadRequest {
+			t.Fatalf("id=%q body=%s: status %d, body %s", tc.id, tc.body, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestLocalTrafficCalibrationRoundTrip(t *testing.T) {
+	a, st := newNodeUpgradeAPI(t)
+	if err := st.SetLocalAsset(store.LocalNodeAsset{TrafficResetDay: 16}); err != nil {
+		t.Fatal(err)
+	}
+	if w := calibrateTrafficRequest(a, "0", `{"used_bytes":12345}`); w.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", w.Code, w.Body.String())
+	}
+	now := time.Now()
+	start := store.TrafficCycleStart(now, 16, 0).Unix()
+	usage, err := st.TrafficUsageForCycles(map[int64]int64{store.LocalNodeID: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := usage[store.LocalNodeID]; got.Total != 12345 || !got.Calibrated {
+		t.Fatalf("local calibrated usage = %+v", got)
+	}
+}
+
 // The panel's machine is rented like any other, and its expiry is the one that
 // takes the whole service down rather than a single node — so the asset fields
 // have to be editable for it too, even though it has no servers row to hold

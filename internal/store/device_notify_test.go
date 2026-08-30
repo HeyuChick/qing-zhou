@@ -20,6 +20,27 @@ func TestTrafficCycleClampsShortMonths(t *testing.T) {
 	}
 }
 
+// A provider reset day is the boundary of its billing cycle, not an annotation
+// on a calendar-month total. On August 30, a day-16 machine must start at
+// August 16; before that boundary it must still start at July 16.
+func TestTrafficCycleStartsOnConfiguredDay(t *testing.T) {
+	loc := time.FixedZone("panel", 8*3600)
+	reset := 8 * 60
+
+	before := time.Date(2026, time.August, 15, 23, 59, 0, 0, loc)
+	if got := TrafficCycleStart(before, 16, reset); got != time.Date(2026, time.July, 16, 8, 0, 0, 0, loc) {
+		t.Fatalf("before day-16 reset: got %v", got)
+	}
+
+	after := time.Date(2026, time.August, 30, 12, 0, 0, 0, loc)
+	if got := TrafficCycleStart(after, 16, reset); got != time.Date(2026, time.August, 16, 8, 0, 0, 0, loc) {
+		t.Fatalf("after day-16 reset: got %v", got)
+	}
+	if got := TrafficCycleNext(after, 16, reset); got != time.Date(2026, time.September, 16, 8, 0, 0, 0, loc) {
+		t.Fatalf("next day-16 reset: got %v", got)
+	}
+}
+
 func TestTrafficUsageForDifferentDeviceCycles(t *testing.T) {
 	st := newRefundStore(t)
 	for _, row := range []struct{ id, ts, bytes int64 }{
@@ -40,6 +61,99 @@ func TestTrafficUsageForDifferentDeviceCycles(t *testing.T) {
 	}
 	if got[2].Total != 70 || got[2].SampleCount != 2 {
 		t.Fatalf("server 2 usage = %+v", got[2])
+	}
+}
+
+func TestTrafficUsageForDay16ExcludesCalendarMonthPrefix(t *testing.T) {
+	st := newRefundStore(t)
+	loc := time.FixedZone("panel", 8*3600)
+	serverID := int64(1)
+	for _, row := range []struct {
+		at    time.Time
+		bytes int64
+	}{
+		{time.Date(2026, time.August, 1, 12, 0, 0, 0, loc), 10},
+		{time.Date(2026, time.August, 15, 23, 59, 0, 0, loc), 20},
+		{time.Date(2026, time.August, 16, 8, 0, 0, 0, loc), 30},
+		{time.Date(2026, time.August, 30, 12, 0, 0, 0, loc), 40},
+	} {
+		if _, err := st.db.Exec(`INSERT INTO server_metrics
+			(server_id,ts,net_totals_valid,net_rx_bytes,net_tx_bytes) VALUES (?,?,1,?,0)`,
+			serverID, row.at.Unix(), row.bytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, loc)
+	start := TrafficCycleStart(now, 16, 8*60).Unix()
+	got, err := st.TrafficUsageForCycles(map[int64]int64{serverID: start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := got[serverID]; u.Total != 70 || u.SampleCount != 2 {
+		t.Fatalf("day-16 cycle usage = %+v, want only Aug 16 and Aug 30 (70 bytes)", u)
+	}
+}
+
+func TestTrafficCalibrationAppliesOnlyToCurrentCycle(t *testing.T) {
+	st := newRefundStore(t)
+	serverID := int64(1)
+	for _, row := range []struct{ ts, bytes int64 }{
+		{100, 10}, {200, 20},
+	} {
+		if _, err := st.db.Exec(`INSERT INTO server_metrics
+			(server_id,ts,net_totals_valid,net_rx_bytes,net_tx_bytes) VALUES (?,?,1,?,0)`,
+			serverID, row.ts, row.bytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.SetTrafficCalibration(serverID, 50, 100, 210); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.TrafficUsageForCycles(map[int64]int64{serverID: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := got[serverID]; u.Total != 100 || !u.Calibrated || u.CalibratedAt != 210 {
+		t.Fatalf("calibrated usage = %+v, want total=100 at 210", u)
+	}
+
+	// New physical-interface deltas continue from the provider-entered baseline.
+	if _, err := st.db.Exec(`INSERT INTO server_metrics
+		(server_id,ts,net_totals_valid,net_rx_bytes,net_tx_bytes) VALUES (?,?,1,?,0)`,
+		serverID, 300, 25); err != nil {
+		t.Fatal(err)
+	}
+	got, err = st.TrafficUsageForCycles(map[int64]int64{serverID: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := got[serverID]; u.Total != 125 || !u.Calibrated {
+		t.Fatalf("usage after calibration delta = %+v, want total=125", u)
+	}
+
+	// Once the next billing cycle begins, the old offset is ignored.
+	got, err = st.TrafficUsageForCycles(map[int64]int64{serverID: 250})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := got[serverID]; u.Total != 25 || u.Calibrated {
+		t.Fatalf("next-cycle usage = %+v, want raw total=25 without calibration", u)
+	}
+}
+
+func TestTrafficCalibrationWorksBeforeProbeHasHistory(t *testing.T) {
+	st := newRefundStore(t)
+	if err := st.SetTrafficCalibration(9, 100, 12*giB, 150); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.TrafficUsageForCycles(map[int64]int64{9: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := got[9]; u.Total != 12*giB || !u.Calibrated || u.SampleCount != 0 {
+		t.Fatalf("calibration without history = %+v", u)
 	}
 }
 

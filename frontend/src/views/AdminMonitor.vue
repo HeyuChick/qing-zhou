@@ -179,9 +179,13 @@
             <n-progress v-if="s.traffic_limit_bytes > 0" type="line" :percentage="trafficPct(s)" :height="5"
                         :show-indicator="false" :color="pctColor(trafficPct(s))" style="margin:5px 0 4px;" />
             <div class="traffic-split">
-              <span>IN {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.rx) : '—' }}</span>
-              <span>OUT {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.tx) : '—' }}</span>
-              <span v-if="s.traffic_limit_bytes > 0">{{ s.traffic_alert_percent }}% 告警 · {{ fmtDateTime(s.traffic_next_reset) }} 重置</span>
+              <template v-if="!s.month_traffic?.calibrated">
+                <span>IN {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.rx) : '—' }}</span>
+                <span>OUT {{ trafficReady(s.month_traffic) ? fmtBytes(s.month_traffic.tx) : '—' }}</span>
+              </template>
+              <span v-else>服务商用量已校准</span>
+              <span>周期 {{ fmtDateTime(s.traffic_cycle_start) }} → {{ fmtDateTime(s.traffic_next_reset) }}</span>
+              <span v-if="s.traffic_limit_bytes > 0">{{ s.traffic_alert_percent }}% 告警</span>
             </div>
           </div>
         </template>
@@ -240,6 +244,15 @@
                 <template #suffix>%</template>
               </n-input-number>
             </n-form-item>
+            <n-form-item label="当前已用">
+              <div class="calibration-input">
+                <n-input-number v-model:value="assetUsedGB" :min="0" :precision="2" style="flex:1;">
+                  <template #suffix>GB</template>
+                </n-input-number>
+                <n-button :loading="calibrating" @click="handleCalibrateTraffic">校准</n-button>
+              </div>
+            </n-form-item>
+            <p class="asset-form-hint">填写服务商后台显示的当前周期已用流量。校准值只在本周期生效，之后继续叠加探针流量；修改重置日后请先保存再校准。</p>
             <p class="asset-form-hint">统计设备物理网卡 IN + OUT；达到阈值后每个流量周期只通知一次，周期重置后自动重新启用。</p>
           </template>
           <n-form-item label="备注"><n-input v-model:value="assetForm.notes" type="textarea" :rows="2" /></n-form-item>
@@ -336,7 +349,7 @@ const filtered = computed(() => {
 
 function memPct(s: any) { return s.metrics ? pct(s.metrics.mem_used, s.metrics.mem_total) : 0 }
 function diskPct(s: any) { return s.metrics ? pct(s.metrics.disk_used, s.metrics.disk_total) : 0 }
-function trafficReady(t: any) { return (t?.sample_count || 0) >= 2 }
+function trafficReady(t: any) { return t?.calibrated === true || (t?.sample_count || 0) >= 2 }
 function trafficStatus(s: any) {
   if (trafficReady(s.month_traffic)) {
     const used = fmtBytes(s.month_traffic.total)
@@ -480,7 +493,9 @@ const assetForm = reactive({
 })
 const assetExpiry = ref('')
 const assetTrafficGB = ref(0)
+const assetUsedGB = ref(0)
 const assetResetTime = ref('00:00')
+const calibrating = ref(false)
 function resetTimeOf(minutes: number) {
   const n = Math.max(0, Math.min(1439, Number(minutes) || 0))
   return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`
@@ -503,8 +518,21 @@ function openAsset(s: any) {
   })
   assetExpiry.value = toLocalDatetimeInput(s.expiry_date)
   assetTrafficGB.value = Math.round(((s.traffic_limit_bytes || 0) / GB) * 100) / 100
+  assetUsedGB.value = Math.round(((s.month_traffic?.total || 0) / GB) * 100) / 100
   assetResetTime.value = resetTimeOf(s.traffic_reset_minute)
   showAsset.value = true
+}
+async function handleCalibrateTraffic() {
+  if (!assetServer.value) return
+  calibrating.value = true
+  try {
+    const data = await apiPut<any>(`/api/admin/servers/${assetServer.value.id}/traffic-calibration`, {
+      used_bytes: Math.round(Math.max(0, assetUsedGB.value || 0) * GB),
+    })
+    if (data?.usage) assetServer.value.month_traffic = data.usage
+    message.success('当前周期流量已校准')
+    await load()
+  } catch (e: any) { message.error(e.message) } finally { calibrating.value = false }
 }
 async function handleSaveAsset() {
   if (!assetServer.value) return
@@ -814,6 +842,7 @@ onUnmounted(() => {
 .traffic-split { display: flex; gap: 14px; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
 .asset-section-title { margin: 10px 0 12px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text); font-size: 13px; font-weight: 650; }
 .asset-form-hint { margin: -4px 0 14px 105px; color: var(--text-3); font-size: 11px; line-height: 1.65; }
+.calibration-input { display: flex; width: 100%; gap: 8px; }
 .no-data { text-align: center; color: var(--text-3); padding: 16px; font-size: 13px; }
 .mini-chart-box { margin-top: 12px; }
 .mini-chart { height: 160px; }

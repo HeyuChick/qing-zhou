@@ -533,6 +533,17 @@ CREATE TABLE IF NOT EXISTS server_metrics (
   arch            TEXT    NOT NULL DEFAULT ''
 );
 
+-- Manual provider-usage calibration for the current device billing cycle.
+-- offset_bytes is the correction from probe-observed IN+OUT to the provider's
+-- displayed total at calibrated_at. A cycle-start mismatch makes it inert, so
+-- an old calibration can never leak into the next billing month.
+CREATE TABLE IF NOT EXISTS server_traffic_calibrations (
+  server_id     INTEGER PRIMARY KEY,
+  cycle_start   INTEGER NOT NULL,
+  offset_bytes  INTEGER NOT NULL,
+  calibrated_at INTEGER NOT NULL
+);
+
 -- What sing-box each node is actually running. A separate table rather than
 -- extra columns on the servers table, for two reasons: the panel's own machine
 -- runs sing-box too but has no servers row (it is server_id 0 everywhere else

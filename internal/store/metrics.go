@@ -169,6 +169,11 @@ type ServerTrafficUsage struct {
 	CoverageStart int64 `json:"coverage_start"`
 	CoverageEnd   int64 `json:"coverage_end"`
 	SampleCount   int64 `json:"sample_count"`
+	// A calibrated total is provider-entered baseline + probe deltas. Rx/Tx
+	// remain the raw physical-interface split because a single total cannot be
+	// truthfully assigned to either direction.
+	Calibrated   bool  `json:"calibrated"`
+	CalibratedAt int64 `json:"calibrated_at"`
 }
 
 // TrafficUsageForAllSince sums the per-report deltas derived from cumulative NIC

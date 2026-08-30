@@ -926,6 +926,63 @@ func (a *API) handleUpdateServerMonitor(w http.ResponseWriter, r *http.Request) 
 	ok(w, saved)
 }
 
+// handleCalibrateServerTraffic aligns this cycle's probe-derived IN+OUT with
+// the provider control panel's current-used figure. The correction is keyed to
+// the current cycle start, so it expires naturally at the next reset.
+func (a *API) handleCalibrateServerTraffic(w http.ResponseWriter, r *http.Request) {
+	idParam := strings.TrimSpace(chi.URLParam(r, "id"))
+	id := atoi(idParam)
+	if id < 0 || (id == 0 && idParam != "0") {
+		fail(w, 400, "服务器 ID 无效")
+		return
+	}
+	var body struct {
+		UsedBytes *int64 `json:"used_bytes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		fail(w, 400, "请求格式错误")
+		return
+	}
+	if body.UsedBytes == nil {
+		fail(w, 400, "缺少当前已用流量")
+		return
+	}
+	if *body.UsedBytes < 0 {
+		fail(w, 400, "当前已用流量不能小于 0")
+		return
+	}
+
+	resetDay, resetMinute := 0, 0
+	if id == store.LocalNodeID {
+		asset := a.st.LocalAsset()
+		resetDay, resetMinute = asset.TrafficResetDay, asset.TrafficResetMinute
+	} else {
+		sv, err := a.st.GetServer(id)
+		if err != nil {
+			fail(w, 500, "读取服务器失败")
+			return
+		}
+		if sv == nil {
+			fail(w, 404, "服务器不存在")
+			return
+		}
+		resetDay, resetMinute = sv.TrafficResetDay, sv.TrafficResetMinute
+	}
+
+	now := time.Now()
+	cycleStart := store.TrafficCycleStart(now, resetDay, resetMinute).Unix()
+	if err := a.st.SetTrafficCalibration(id, cycleStart, *body.UsedBytes, now.Unix()); err != nil {
+		fail(w, 500, "校准流量失败")
+		return
+	}
+	usage, err := a.st.TrafficUsageForCycles(map[int64]int64{id: cycleStart})
+	if err != nil {
+		fail(w, 500, "读取校准结果失败")
+		return
+	}
+	ok(w, J{"usage": usage[id], "cycle_start": cycleStart})
+}
+
 // ---- Public monitoring (no auth required) ----
 
 // handleMonitorPublic returns a sanitized view of probe-enabled servers for the
