@@ -146,14 +146,39 @@ func TestSingboxAIRouteIsAutomaticAndOrderedAfterSniff(t *testing.T) {
 	}
 }
 
-func TestDefaultSingboxUsesProxyForPublicTraffic(t *testing.T) {
-	if strings.Contains(DefaultSingboxTemplate, "geosite-cn") || strings.Contains(DefaultSingboxTemplate, "geoip-cn") {
-		t.Fatal("default sing-box template still contains a CN direct bypass")
+// fork 定制：默认模板必须包含中国域名/IP 直连规则（上游默认国内也走代理，
+// 机场用户期望国内流量不绕节点、不耗节点流量）。此测试守住这个定制不被上游
+// 合并悄悄带回「无中国分流」的默认。
+func TestDefaultSingboxDirectsCNTraffic(t *testing.T) {
+	if !strings.Contains(DefaultSingboxTemplate, "geosite-cn") || !strings.Contains(DefaultSingboxTemplate, "geoip-cn") {
+		t.Fatal("默认 sing-box 模板缺少中国直连规则（geosite-cn / geoip-cn）")
 	}
 	doc := renderSingboxDoc(t, "", nodeLinks()...)
 	route, _ := doc["route"].(map[string]any)
 	if route["final"] != tagProxy {
 		t.Errorf("route.final = %v, want proxy", route["final"])
+	}
+	var cnDirect int
+	for _, r := range mapSlice(route["rules"]) {
+		rs, _ := r["rule_set"].(string)
+		if r["outbound"] == "direct" && (rs == "geosite-cn" || rs == "geoip-cn") {
+			cnDirect++
+		}
+	}
+	if cnDirect != 2 {
+		t.Errorf("路由规则中中国直连规则数 = %d，应为 2（geosite-cn + geoip-cn）", cnDirect)
+	}
+	ruleSets := mapSlice(route["rule_set"])
+	for _, want := range []string{"geosite-cn", "geoip-cn"} {
+		found := false
+		for _, rs := range ruleSets {
+			if rs["tag"] == want && rs["download_detour"] == "proxy" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("rule_set 定义缺少 %s（或 download_detour 不为 proxy）", want)
+		}
 	}
 	inbounds := mapSlice(doc["inbounds"])
 	if len(inbounds) == 0 {
