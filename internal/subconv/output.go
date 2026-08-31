@@ -388,10 +388,9 @@ rules:
 `
 
 // DefaultSingboxTemplate carries the sing-box anti-leak dns+route. Ads are
-// rejected, LAN traffic stays direct, and CN domains/IPs go direct so domestic
-// traffic neither burns node bandwidth nor suffers the detour; everything else
-// falls through to the proxy. Rule-sets are fetched once and cached.
-// (中国直连是 fork 定制：上游默认国内流量也走代理。)
+// rejected and LAN traffic stays direct; all public traffic, including CN
+// destinations, otherwise falls through to the proxy. Rule-sets are fetched
+// once and cached.
 //
 // Targets sing-box ≥1.12. The DNS block uses the typed server format that 1.12
 // introduced and that 1.14 makes mandatory — the legacy `address` strings this
@@ -426,17 +425,11 @@ const DefaultSingboxTemplate = `{
       {"action": "sniff"},
       {"protocol": "dns", "action": "hijack-dns"},
       {"rule_set": "geosite-ads", "action": "reject"},
-      {"ip_is_private": true, "outbound": "direct"},
-      {"rule_set": "geosite-cn", "outbound": "direct"},
-      {"rule_set": "geoip-cn", "outbound": "direct"}
+      {"ip_is_private": true, "outbound": "direct"}
     ],
     "rule_set": [
       {"type": "remote", "tag": "geosite-ads", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs"},
-      {"type": "remote", "tag": "geosite-cn", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"},
-      {"type": "remote", "tag": "geoip-cn", "format": "binary", "download_detour": "proxy",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"}
+       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs"}
     ]
   },
   "experimental": {
