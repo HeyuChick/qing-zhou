@@ -25,6 +25,9 @@ func TestSubscriptionProfileLinksAreOptIn(t *testing.T) {
 	}
 }
 
+// fork 定制语义：不带 profile 参数 = cn-direct（机场用户期望国内直连，存量
+// 已导入链接免重导）；带参数但拼写错误 = 上游 legacy 行为（模板原样，不揣测
+// 用户意图）；显式 proxy-all = 全代理。
 func TestPublicSubscriptionProfileDoesNotChangeLegacy(t *testing.T) {
 	a, st := newResetSubAPI(t)
 	_, err := st.CreateUser(store.NewUser{Username: "profile-user", PasswordHash: "x", SubToken: "PROFILE_TOKEN"})
@@ -42,18 +45,31 @@ func TestPublicSubscriptionProfileDoesNotChangeLegacy(t *testing.T) {
 		}
 		return w.Body.String()
 	}
-	legacy := get("?format=clash")
+	def := get("?format=clash")
 	unknown := get("?format=clash&profile=typo")
 	cn := get("?format=clash&profile=cn-direct")
 	all := get("?format=clash&profile=proxy-all")
-	if legacy != unknown {
-		t.Error("unknown profile changed the legacy subscription")
+	if def != cn {
+		t.Error("无参数订阅应与显式 cn-direct 渲染一致（fork 默认）")
 	}
-	if strings.Contains(legacy, "GEOSITE,CN,") || !strings.Contains(cn, "GEOSITE,CN,DIRECT") {
-		t.Error("legacy or cn-direct Clash routing is wrong")
+	if !strings.Contains(def, "GEOSITE,CN,DIRECT") {
+		t.Error("无参数 Clash 订阅缺少中国直连规则（fork 默认 cn-direct）")
+	}
+	if strings.Contains(unknown, "GEOSITE,CN,") {
+		t.Error("拼写错误的 profile 不应被当成 cn-direct 或 proxy-all（维持上游 legacy 行为）")
 	}
 	if !strings.Contains(all, "GEOSITE,CN,✈️ 节点选择") {
 		t.Error("proxy-all Clash routing is missing")
+	}
+
+	// sing-box 侧同理：无参数 → geosite-cn/geoip-cn 直连；显式 proxy-all → 无中国分流
+	sbDef := get("?format=singbox")
+	if !strings.Contains(sbDef, `"tag": "geosite-cn"`) && !strings.Contains(sbDef, `"tag":"geosite-cn"`) {
+		t.Error("无参数 sing-box 订阅缺少 geosite-cn 规则集（fork 默认 cn-direct）")
+	}
+	sbAll := get("?format=singbox&profile=proxy-all")
+	if strings.Contains(sbAll, "geosite-cn") {
+		t.Error("proxy-all sing-box 订阅不应包含中国分流规则")
 	}
 }
 
