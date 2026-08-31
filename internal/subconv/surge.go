@@ -12,6 +12,17 @@ func itoaPort(p int) string { return strconv.Itoa(p) }
 // output is intentionally sparse. subURL, if set, becomes the MANAGED-CONFIG
 // auto-update header.
 func Surge(proxies []*Proxy, subURL string) string {
+	return surgeWithProfile(proxies, subURL, ProfileLegacy)
+}
+
+// SurgeWithProfile changes only the CN rule. Surge resolves proxied domains at
+// the proxy server and DIRECT domains locally, so adding Clash-style split DNS
+// would duplicate its resolver model and can race the user's system DNS.
+func SurgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) string {
+	return surgeWithProfile(proxies, subURL, profile)
+}
+
+func surgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) string {
 	var kept []*Proxy
 	for _, p := range proxies {
 		if surgeProxy(p) != "" {
@@ -57,7 +68,12 @@ func Surge(proxies []*Proxy, subURL string) string {
 		b.WriteString("RULE-SET," + surgeAIRuleURL + "," + grpAIClash + ",update-interval=86400\n")
 	}
 	b.WriteString("DOMAIN-SET,https://raw.githubusercontent.com/Loyalsoldier/surge-rules/release/reject.txt,REJECT\n")
-	b.WriteString("GEOIP,CN,DIRECT\n")
+	// Legacy keeps Surge's historical CN bypass exactly as it was. The explicit
+	// cn-direct profile chooses the same behavior; proxy-all omits the rule so
+	// FINAL sends every public destination to the selected proxy policy.
+	if profile == ProfileLegacy || profile == ProfileCNDirect {
+		b.WriteString("GEOIP,CN,DIRECT\n")
+	}
 	b.WriteString("FINAL," + grpSelectClash + ",dns-failed\n")
 	return b.String()
 }

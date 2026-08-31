@@ -100,6 +100,30 @@ func Render(format string, links []string, aiNodes map[string]bool, clashTpl, si
 	}
 }
 
+// RenderWithProfile renders a newly selected routing profile. A legacy (empty)
+// profile delegates to Render so existing subscription URLs keep their exact
+// pre-profile behavior, including Surge's historical CN bypass and base64's
+// node-only output.
+func RenderWithProfile(format string, links []string, aiNodes map[string]bool, clashTpl, singboxTpl, subURL string, profile RoutingProfile) (body string, contentType string, err error) {
+	if profile == ProfileLegacy {
+		return Render(format, links, aiNodes, clashTpl, singboxTpl, subURL)
+	}
+	switch NormalizeFormat(format) {
+	case FormatClash:
+		out, e := ClashWithProfile(parseWithAI(links, aiNodes), clashTpl, profile)
+		return out, "text/yaml; charset=utf-8", e
+	case FormatSingbox:
+		out, e := SingboxWithProfile(parseWithAI(links, aiNodes), singboxTpl, profile)
+		return out, "application/json; charset=utf-8", e
+	case FormatSurge:
+		return SurgeWithProfile(parseWithAI(links, aiNodes), subURL, profile), "text/plain; charset=utf-8", nil
+	default:
+		// A base64 subscription contains nodes only. Routing belongs to the local
+		// client, so claiming to apply a server-side profile would be misleading.
+		return Base64(links), "text/plain; charset=utf-8", nil
+	}
+}
+
 func parseWithAI(links []string, aiNodes map[string]bool) []*Proxy {
 	ps := ParseLinks(links)
 	if len(aiNodes) > 0 {

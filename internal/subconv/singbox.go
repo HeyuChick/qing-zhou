@@ -11,6 +11,16 @@ import (
 // outbounds, a direct outbound, default tun+mixed inbounds, and the anti-leak
 // dns/route template merged in. Best-effort for the official sing-box client.
 func Singbox(proxies []*Proxy, template string) (string, error) {
+	return singboxWithProfile(proxies, template, ProfileLegacy)
+}
+
+// SingboxWithProfile renders an explicitly selected routing profile while the
+// old Singbox entry point remains the untouched legacy path.
+func SingboxWithProfile(proxies []*Proxy, template string, profile RoutingProfile) (string, error) {
+	return singboxWithProfile(proxies, template, profile)
+}
+
+func singboxWithProfile(proxies []*Proxy, template string, profile RoutingProfile) (string, error) {
 	if strings.TrimSpace(template) == "" {
 		template = DefaultSingboxTemplate
 	}
@@ -92,6 +102,9 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 	all = append(all, outs...)
 	all = append(all, map[string]any{"type": "direct", "tag": "direct"})
 	doc["outbounds"] = all
+	if profile != ProfileLegacy {
+		applySingboxRoutingProfile(doc, profile)
+	}
 	if len(sg.ai) > 0 {
 		injectSingboxAIRoute(doc)
 	}
@@ -145,6 +158,108 @@ func Singbox(proxies []*Proxy, template string) (string, error) {
 
 	b, err := json.MarshalIndent(doc, "", "  ")
 	return string(b), err
+}
+
+const (
+	singboxCNGeositeURL = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+	singboxCNGeoIPURL   = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+)
+
+// applySingboxRoutingProfile owns only the two qingzhou CN route-set tags. The
+// built-in DNS already has a direct `local` resolver and a proxy-detoured
+// `remote` resolver. With fake-IP, keeping the query on `fake` preserves the
+// original domain for routing; once geosite-cn selects DIRECT, sing-box resolves
+// the real destination through route.default_domain_resolver (`local`). Returning
+// a real CN address from the initial DNS query would throw that domain mapping
+// away and make routing depend unnecessarily on GeoIP accuracy.
+func applySingboxRoutingProfile(doc map[string]any, profile RoutingProfile) {
+	route, _ := doc["route"].(map[string]any)
+	if route == nil {
+		route = map[string]any{}
+		doc["route"] = route
+	}
+
+	rules := mapSlice(route["rules"])
+	kept := make([]map[string]any, 0, len(rules)+2)
+	for _, rule := range rules {
+		if isManagedSingboxCNRule(rule) {
+			continue
+		}
+		kept = append(kept, rule)
+	}
+	if profile == ProfileCNDirect {
+		kept = append(kept,
+			map[string]any{"rule_set": "geosite-cn", "outbound": "direct"},
+			map[string]any{"rule_set": "geoip-cn", "outbound": "direct"},
+		)
+		ensureSingboxLocalResolver(doc, route)
+		ensureSingboxCNRuleSets(route)
+	}
+	route["rules"] = kept
+}
+
+func isManagedSingboxCNRule(rule map[string]any) bool {
+	if len(rule) != 2 {
+		return false
+	}
+	if _, ok := rule["outbound"]; !ok {
+		return false
+	}
+	tags := stringSlice(rule["rule_set"])
+	if tag, ok := rule["rule_set"].(string); ok {
+		tags = []string{tag}
+	}
+	if len(tags) == 0 {
+		return false
+	}
+	for _, tag := range tags {
+		if tag != "geosite-cn" && tag != "geoip-cn" {
+			return false
+		}
+	}
+	return true
+}
+
+func ensureSingboxLocalResolver(doc, route map[string]any) {
+	dns, _ := doc["dns"].(map[string]any)
+	if dns == nil {
+		dns = map[string]any{}
+		doc["dns"] = dns
+	}
+	servers := mapSlice(dns["servers"])
+	for _, server := range servers {
+		if server["tag"] == "local" {
+			route["default_domain_resolver"] = "local"
+			return
+		}
+	}
+	servers = append(servers, map[string]any{
+		"tag": "local", "type": "https", "server": "223.5.5.5",
+	})
+	dns["servers"] = servers
+	route["default_domain_resolver"] = "local"
+}
+
+func ensureSingboxCNRuleSets(route map[string]any) {
+	ruleSets := mapSlice(route["rule_set"])
+	kept := make([]map[string]any, 0, len(ruleSets)+2)
+	for _, ruleSet := range ruleSets {
+		tag, _ := ruleSet["tag"].(string)
+		if tag != "geosite-cn" && tag != "geoip-cn" {
+			kept = append(kept, ruleSet)
+		}
+	}
+	kept = append(kept,
+		map[string]any{
+			"type": "remote", "tag": "geosite-cn", "format": "binary",
+			"download_detour": tagProxy, "url": singboxCNGeositeURL,
+		},
+		map[string]any{
+			"type": "remote", "tag": "geoip-cn", "format": "binary",
+			"download_detour": tagProxy, "url": singboxCNGeoIPURL,
+		},
+	)
+	route["rule_set"] = kept
 }
 
 // singboxTemplateSelectorTags returns stable custom tags that generated nodes
