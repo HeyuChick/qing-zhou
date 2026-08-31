@@ -29,20 +29,31 @@
         <span class="sec-title">订阅链接</span>
         <span class="sec-caption">复制后导入客户端，地址包含访问凭据，请勿公开分享</span>
       </template>
+      <div class="routing-choice">
+        <div class="routing-choice-label">代理范围</div>
+        <n-select v-model:value="routingProfile" :options="routingProfileOptions" size="small" class="routing-choice-select" />
+        <div class="routing-choice-note">{{ routingProfileNote }}</div>
+      </div>
       <n-input-group>
-        <n-input :value="sub.url" readonly placeholder="暂无订阅" />
-        <n-button type="primary" @click="copy(sub.url)">复制</n-button>
+        <n-input :value="selectedSubscriptionURL" readonly placeholder="暂无订阅" />
+        <n-button type="primary" @click="copy(selectedSubscriptionURL)">复制</n-button>
       </n-input-group>
+      <div class="routing-compat-note">只影响这次复制并重新导入的链接；已经在使用的订阅不会改变。</div>
       <div class="sub-action-row">
         <span class="sub-action-label">导入格式</span>
-        <n-button size="small" secondary @click="copy(sub.formats?.clash)">Clash</n-button>
-        <n-button size="small" secondary @click="copy(sub.formats?.singbox)">sing-box</n-button>
-        <n-button size="small" secondary @click="copy(sub.formats?.surge)">Surge</n-button>
+        <n-button size="small" secondary @click="copy(selectedFormats?.clash)">Clash</n-button>
+        <n-button size="small" secondary @click="copy(selectedFormats?.singbox)">sing-box</n-button>
+        <n-button size="small" secondary @click="copy(selectedFormats?.surge)">Surge</n-button>
         <!-- formats.base64, not formats.default: default has no ?format= and so
              picks its output from the client's User-Agent, which silently hands
              YAML to anything whose UA contains "clash". This button is for
              v2rayN / NekoBox / Shadowrocket, so it must pin the link list. -->
-        <n-button size="small" secondary @click="copy(sub.formats?.base64 || sub.formats?.default)">通用 / v2rayN</n-button>
+        <n-tooltip trigger="hover">
+          <template #trigger>
+            <n-button size="small" secondary @click="copy(selectedFormats?.base64 || sub.formats?.base64 || sub.formats?.default)">通用 / v2rayN</n-button>
+          </template>
+          通用格式只包含节点，代理范围由客户端本地规则决定
+        </n-tooltip>
         <n-button size="small" @click="showQr=!showQr">{{ showQr?'隐藏':'显示' }}二维码</n-button>
       </div>
       <div class="sub-action-row safety">
@@ -64,7 +75,7 @@
         订阅地址泄露时用「更换订阅地址」：旧地址立即失效，无需重启节点。
         注意它不会使已经导出的节点失效——那需要「重置节点凭据」。
       </div>
-      <div v-if="showQr && sub.url" style="margin-top:12px;text-align:center;">
+      <div v-if="showQr && selectedSubscriptionURL" style="margin-top:12px;text-align:center;">
         <canvas ref="qrCanvas" />
         <div style="font-size:11px;color:var(--text-3);margin-top:4px;">手机扫描导入订阅</div>
       </div>
@@ -346,6 +357,17 @@ const auth = useAuthStore()
 const sub = ref<any>({})
 const proxies = ref<any[]>([])
 const nodes = ref<any[]>([])
+const routingProfile = ref<'cn_direct' | 'proxy_all'>('cn_direct')
+const routingProfileOptions = [
+  { label: '智能分流（推荐）', value: 'cn_direct' },
+  { label: '全部代理', value: 'proxy_all' },
+]
+const selectedProfile = computed<any>(() => sub.value?.profiles?.[routingProfile.value] || {})
+const selectedSubscriptionURL = computed<string>(() => selectedProfile.value?.url || '')
+const selectedFormats = computed<any>(() => selectedProfile.value?.formats || {})
+const routingProfileNote = computed(() => routingProfile.value === 'cn_direct'
+  ? 'AI 走代理，中国大陆直连，其余公网走代理；Clash / sing-box 同步使用国内解析，Surge 遵循系统 DNS。'
+  : 'AI 和所有公网流量都走代理，仅局域网保持直连。')
 // 我的套餐：后端按套餐独立计量（可能多份并存、含排队份），全部列出，不合并
 const plans = ref<any[]>([])
 const activePlanCount = computed(() => plans.value.filter(p => p.status === 'active').length)
@@ -752,11 +774,11 @@ async function copy(text: string) {
   if (await copyText(text)) message.success('已复制'); else message.error('复制失败，请手动选择并复制')
 }
 
-watch(showQr, async (v) => {
-  if (v && sub.value.url) {
+watch([showQr, selectedSubscriptionURL], async ([visible, url]) => {
+  if (visible && url) {
     await nextTick()
     if (qrCanvas.value) {
-      QRCode.toCanvas(qrCanvas.value, sub.value.url, { width: 180, margin: 2 }, (err: any) => {
+      QRCode.toCanvas(qrCanvas.value, url, { width: 180, margin: 2 }, (err: any) => {
         if (err) console.error('QR error:', err)
       })
     }
@@ -779,6 +801,10 @@ onMounted(async () => {
 .sec { margin-bottom: 16px; border-radius: var(--r-sm); }
 .sec-title { font-weight: 650; font-size: 14px; }
 .sec-caption { margin-left: 10px; color: var(--text-3); font-size: 11.5px; font-weight: 400; }
+.routing-choice { display: grid; grid-template-columns: 58px minmax(180px, 240px) 1fr; align-items: center; gap: 8px; margin-bottom: 10px; }
+.routing-choice-label { color: var(--text-3); font-size: 11px; }
+.routing-choice-note, .routing-compat-note { color: var(--text-3); font-size: 11px; line-height: 1.6; }
+.routing-compat-note { margin-top: 5px; }
 .sub-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
 .sub-stat { min-width: 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--shadow-sm); }
 .sub-stat span, .sub-stat small { display: block; color: var(--text-3); font-size: 11px; }
@@ -857,6 +883,8 @@ onMounted(async () => {
 @media (max-width: 900px) { .sub-summary { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) {
   .sub-summary { grid-template-columns: 1fr; }
+  .routing-choice { grid-template-columns: 1fr; gap: 5px; }
+  .routing-choice-select { width: 100%; }
   .sub-action-label { width: 100%; flex-basis: 100%; }
   .sub-security-note { margin-left: 0; }
   .sec-caption { display: block; margin: 3px 0 0; }

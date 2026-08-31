@@ -481,7 +481,7 @@ func (a *API) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		// No token and minting failed. Report nothing rather than the bare
 		// "?format=clash" fragments that concatenating onto "" produces — those
 		// look like links and resolve to the SPA.
-		ok(w, J{"url": "", "formats": J{}, "creds_reset_enabled": a.credsResetEnabled()})
+		ok(w, J{"url": "", "formats": J{}, "profiles": J{}, "creds_reset_enabled": a.credsResetEnabled()})
 		return
 	}
 	ok(w, J{
@@ -501,7 +501,31 @@ func (a *API) handleSubscription(w http.ResponseWriter, r *http.Request) {
 			// This entry pins the format regardless of UA.
 			"base64": base + "?format=base64",
 		},
+		// These are new, opt-in URLs. The legacy url/formats fields above remain
+		// untouched so already imported links and older frontends keep exactly the
+		// same behavior. Profile is encoded in the URL rather than stored per user,
+		// allowing one person to use different routing on different devices.
+		"profiles": J{
+			"cn_direct": subscriptionProfileLinks(base, subconv.ProfileCNDirect),
+			"proxy_all": subscriptionProfileLinks(base, subconv.ProfileProxyAll),
+		},
 	})
+}
+
+func subscriptionProfileLinks(base string, profile subconv.RoutingProfile) J {
+	root := base + "?profile=" + string(profile)
+	return J{
+		"url": root,
+		"formats": J{
+			"default": root,
+			"clash":   root + "&format=clash",
+			"singbox": root + "&format=singbox",
+			"surge":   root + "&format=surge",
+			// base64 carries nodes only; do not append a routing parameter that the
+			// renderer cannot and should not enforce.
+			"base64": base + "?format=base64",
+		},
+	}
 }
 
 // handleUserProxies returns the user's entitled mixed (HTTP/SOCKS5) inbounds as
@@ -931,7 +955,14 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	// Explicit ?format= wins; otherwise auto-detect from the client User-Agent
 	// so Clash/sing-box/Surge each get a native config out of the box.
 	reqFormat := r.URL.Query().Get("format")
+	profile := subconv.NormalizeRoutingProfile(r.URL.Query().Get("profile"))
 	subURL := a.publicBase(r) + r.URL.Path
+	if profile != subconv.ProfileLegacy {
+		// Keep the routing choice in Surge's MANAGED-CONFIG refresh URL and on
+		// the browser info page. Dropping it here would make the first import look
+		// correct and silently revert at the next automatic refresh.
+		subURL += "?profile=" + string(profile)
+	}
 
 	// A person who pasted the link into a browser gets a readable page instead
 	// of a wall of base64. `?format=info` asks for it explicitly.
@@ -954,7 +985,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 		format = subconv.FormatForUA(r.Header.Get("User-Agent"))
 	}
 	format = subconv.NormalizeFormat(format)
-	body, ctype, err := subconv.Render(format, links, aiNodes, clashTpl, singboxTpl, subURL)
+	body, ctype, err := subconv.RenderWithProfile(format, links, aiNodes, clashTpl, singboxTpl, subURL, profile)
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)
 		return
