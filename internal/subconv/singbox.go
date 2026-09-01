@@ -534,6 +534,21 @@ func singboxOutbound(p *Proxy) map[string]any {
 		o["type"] = "hysteria2"
 		o["password"] = p.Password
 		o["tls"] = sbTLS(p, "tls")
+		// 端口跳跃（sing-box >= 1.12）：server_ports 用冒号区间的数组形式，
+		// hop_interval 默认 30s。服务端需把跳跃段 UDP DNAT 到真实监听端口。
+		if m := p.param("mport"); m != "" {
+			ports := []string{}
+			for _, part := range strings.Split(m, ",") {
+				if part = strings.TrimSpace(part); part == "" {
+					continue
+				}
+				ports = append(ports, strings.ReplaceAll(part, "-", ":"))
+			}
+			if len(ports) > 0 {
+				o["server_ports"] = ports
+				o["hop_interval"] = "30s"
+			}
+		}
 	case "anytls":
 		// sing-box >= 1.12.0. tls is required by the outbound constructor.
 		o["type"] = "anytls"

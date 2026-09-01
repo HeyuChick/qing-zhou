@@ -398,6 +398,10 @@ func clashProxy(p *Proxy) map[string]any {
 		if p.tlsInsecure() {
 			m["skip-cert-verify"] = true
 		}
+		// 端口跳跃：mihomo 的 `ports` 字段（逗号分隔的端口/区间列表）。
+		if v := p.param("mport"); v != "" {
+			m["ports"] = v
+		}
 	case "anytls":
 		// Requires mihomo >= v1.19.3. An older core does not skip an unknown
 		// proxy type — ParseProxy returns "unsupport proxy type" and parseProxies

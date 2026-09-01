@@ -35,7 +35,8 @@ type LinkParams struct {
 	Congestion  string // tuic congestion_control
 	ZeroRTT     bool   // tuic 0-RTT handshake (must match the inbound to save a RTT)
 	Insecure    bool
-	Flow        bool // vless reality vision
+	Flow        bool   // vless reality vision
+	HopPorts    string // hysteria2 端口跳跃（如 "20000-50000"）→ 链接 mport / mihomo ports / sing-box server_ports
 
 	// PinSHA256 is the leaf certificate's SHA-256 fingerprint (uppercase hex),
 	// set only for self-signed certificates. It rides along on the hysteria-family
@@ -289,6 +290,10 @@ func BuildShareLink(p LinkParams) string {
 		q := []string{"security=tls"}
 		if p.Insecure {
 			q = append(q, "insecure=1")
+		}
+		if p.HopPorts != "" {
+			// 端口跳跃：需服务端把 UDP 跳跃段 DNAT/REDIRECT 到真实监听端口。
+			q = append(q, "mport="+esc(p.HopPorts))
 		}
 		q = append(q, "fp="+esc(fp), "sni="+esc(p.SNI), "fastopen=0")
 		if p.PinSHA256 != "" {

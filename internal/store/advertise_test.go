@@ -80,6 +80,9 @@ func TestAdvertiseOverrideShapesLinkOnly(t *testing.T) {
 	if _, ok := inbound["advertise_host"]; ok {
 		t.Error("advertise_host leaked into the sing-box inbound config")
 	}
+	if _, ok := inbound["hop_ports"]; ok {
+		t.Error("hop_ports leaked into the sing-box inbound config")
+	}
 	if inbound["listen_port"].(float64) != 10002 {
 		t.Errorf("listen_port = %v, want the real listener port 10002", inbound["listen_port"])
 	}
@@ -87,4 +90,60 @@ func TestAdvertiseOverrideShapesLinkOnly(t *testing.T) {
 	if tr == nil || tr["type"] != "ws" {
 		t.Errorf("ws transport missing from generated config: %v", inbound["transport"])
 	}
+}
+
+
+// 品牌定制守护：hop_ports 渲染为 hysteria2 链接的 mport 参数（v2rayN 等共享链接
+// 客户端）、sing-box 订阅的 server_ports + hop_interval（SFA）、mihomo 的 ports
+// （Clash 系），且不进入节点配置本体。这是「hy2-443端口跳跃」节点按用户计量的前提。
+func TestHopPortsRendersIntoLinks(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "hopuser")
+	pkg := mkPlan(t, st, "跳跃套餐", 10, 100, 30)
+	buy(t, st, uid, pkg)
+
+	_, err := st.SaveSbInbound(&SbInbound{
+		Type: "hysteria2", Tag: "hy2-443", Listen: "::", ListenPort: 443,
+		Options: `{"hop_ports":"20000-50000"}`,
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid, err := st.CreateGroup(NodeGroup{Name: "跳跃组"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetPlanGroups(pkg.ID, []int64{gid}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateNode(Node{Type: "self_built", Name: "hy2-443端口跳跃", InboundTag: "hy2-443", Enabled: true, GroupIDs: []int64{gid}}); err != nil {
+		t.Fatal(err)
+	}
+
+	u, _ := st.UserByID(uid)
+	links := st.BuildSelfBuiltLinks(u, "203.0.113.9")
+	if len(links) != 1 {
+		t.Fatalf("links = %d, want 1", len(links))
+	}
+	l := links[0].Link
+	if !strings.Contains(l, "@203.0.113.9:443?") {
+		t.Errorf("link should keep the real listener port: %s", l)
+	}
+	if !strings.Contains(l, "mport=20000-50000") {
+		t.Errorf("link missing mport: %s", l)
+	}
+
+	users, err := st.BuildUsersByTag(time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := st.BuildSingboxConfig(singbox.DefaultBaseConfig, "", users)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cfg), "hop_ports") {
+		t.Error("hop_ports leaked into the generated sing-box config")
+	}
+
 }

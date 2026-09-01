@@ -163,3 +163,30 @@ func TestDefaultSingboxUsesProxyForPublicTraffic(t *testing.T) {
 		t.Errorf("default tun strict_route = %v, want true", inbounds[0]["strict_route"])
 	}
 }
+
+
+// 品牌定制：hy2 链接的 mport 应渲染为 sing-box outbound 的 server_ports +
+// hop_interval（SFA 端口跳跃），mihomo 则用 ports 字段。
+func TestHy2MportRendersServerPorts(t *testing.T) {
+	doc := renderSingboxDoc(t, "",
+		"hysteria2://pass@203.0.113.9:443?security=tls&insecure=1&sni=hy2.example.com&mport=20000-50000,51000#hop")
+	outs := doc["outbounds"].([]any)
+	for _, o := range outs {
+		m := o.(map[string]any)
+		if m["type"] != "hysteria2" {
+			continue
+		}
+		sp, _ := m["server_ports"].([]any)
+		if len(sp) != 2 || sp[0] != "20000:50000" || sp[1] != "51000" {
+			t.Errorf("server_ports = %v, want [20000:50000 51000]", sp)
+		}
+		if m["hop_interval"] != "30s" {
+			t.Errorf("hop_interval = %v, want 30s", m["hop_interval"])
+		}
+		if m["server_port"].(float64) != 443 {
+			t.Errorf("server_port = %v, want 443 kept as base port", m["server_port"])
+		}
+		return
+	}
+	t.Fatal("no hysteria2 outbound rendered")
+}

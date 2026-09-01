@@ -189,13 +189,14 @@ func (s *Store) DeleteSbTls(id int64) error {
 // emitting the inbound without its TLS block would downgrade it to plaintext and
 // leak all its traffic, which is worse than refusing to build. The caches are
 // per-build to avoid re-decrypting the same profile/cert for every inbound.
-// stripAdvertiseKeys removes the link-only advertise_host / advertise_port
-// hints from an inbound's options before they are merged into the sing-box
-// inbound body. sing-box rejects unknown inbound fields, and these two keys
-// exist only for BuildSelfBuiltLinks — see advertiseIn outbound there.
-func stripAdvertiseKeys(opts map[string]interface{}) {
+// stripLinkOnlyKeys removes link-only hint keys (advertise_host / advertise_port /
+// hop_ports) from an inbound's options before they are merged into the sing-box
+// inbound body. sing-box rejects unknown inbound fields, and these keys exist
+// only for BuildSelfBuiltLinks — see the overrides there.
+func stripLinkOnlyKeys(opts map[string]interface{}) {
 	delete(opts, "advertise_host")
 	delete(opts, "advertise_port")
+	delete(opts, "hop_ports")
 }
 
 func (s *Store) resolveTlsBlock(tlsID int64, tag string, tlsCache map[int64]*SbTls, certCache map[int64]*Cert) (map[string]interface{}, error) {
@@ -621,7 +622,7 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 		if ib.Options != "" && ib.Options != "{}" {
 			var opts map[string]interface{}
 			if err := json.Unmarshal([]byte(ib.Options), &opts); err == nil {
-				stripAdvertiseKeys(opts)
+				stripLinkOnlyKeys(opts)
 				for k, v := range opts {
 					baseMap[k] = v
 				}
@@ -680,7 +681,7 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 		if ib.Options != "" && ib.Options != "{}" {
 			var opts map[string]interface{}
 			if err := json.Unmarshal([]byte(ib.Options), &opts); err == nil {
-				stripAdvertiseKeys(opts)
+				stripLinkOnlyKeys(opts)
 				for k, v := range opts {
 					baseMap[k] = v
 				}
@@ -905,9 +906,12 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		if p := mapInt(opts, "advertise_port"); p != 0 {
 			advPort = p
 		}
+		// hop_ports（如 "20000-50000"）：仅渲染进 hysteria2 链接（mport），配置生成时剔除。
+		// 服务端需自行把该 UDP 段 DNAT/REDIRECT 到真实监听端口。
+		hopPorts := mapStr(opts, "hop_ports")
 		p := singbox.LinkParams{
 			Type: ib.Type, Tag: remark, Host: nodeHost, Port: advPort,
-			UUID: cred.UUID, Password: cred.Password,
+			UUID: cred.UUID, Password: cred.Password, HopPorts: hopPorts,
 			NoUDP:       exit != nil && noUDP(exit.EgressID),
 			TLS:         ib.TlsID != 0,
 			SNI:         mapStr(server, "server_name"),
