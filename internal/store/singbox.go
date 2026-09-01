@@ -189,6 +189,15 @@ func (s *Store) DeleteSbTls(id int64) error {
 // emitting the inbound without its TLS block would downgrade it to plaintext and
 // leak all its traffic, which is worse than refusing to build. The caches are
 // per-build to avoid re-decrypting the same profile/cert for every inbound.
+// stripAdvertiseKeys removes the link-only advertise_host / advertise_port
+// hints from an inbound's options before they are merged into the sing-box
+// inbound body. sing-box rejects unknown inbound fields, and these two keys
+// exist only for BuildSelfBuiltLinks — see advertiseIn outbound there.
+func stripAdvertiseKeys(opts map[string]interface{}) {
+	delete(opts, "advertise_host")
+	delete(opts, "advertise_port")
+}
+
 func (s *Store) resolveTlsBlock(tlsID int64, tag string, tlsCache map[int64]*SbTls, certCache map[int64]*Cert) (map[string]interface{}, error) {
 	if tlsID == 0 {
 		return nil, nil
@@ -612,6 +621,7 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 		if ib.Options != "" && ib.Options != "{}" {
 			var opts map[string]interface{}
 			if err := json.Unmarshal([]byte(ib.Options), &opts); err == nil {
+				stripAdvertiseKeys(opts)
 				for k, v := range opts {
 					baseMap[k] = v
 				}
@@ -670,6 +680,7 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 		if ib.Options != "" && ib.Options != "{}" {
 			var opts map[string]interface{}
 			if err := json.Unmarshal([]byte(ib.Options), &opts); err == nil {
+				stripAdvertiseKeys(opts)
 				for k, v := range opts {
 					baseMap[k] = v
 				}
@@ -881,8 +892,21 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		// 节点名必须稳定：客户端（Clash Verge/v2rayNG）按名字记住手动选中的
 		// 节点，名字带动态剩余流量/天数时每次订阅刷新都会改名，手动选择随即
 		// 失效、分组回退自动选择。剩余流量/到期由 Subscription-Userinfo 头承载。
+		// 品牌定制：入站可用 options.advertise_host / advertise_port 覆盖分享链接
+		// 对外宣告的连接地址（实际监听地址不变）。用于「本机监听 127.0.0.1、
+		// 客户端经 Cloudflare/nginx 反代进入」的 CDN-WS 中转入站：链接必须宣告
+		// cdn 域名与 443 端口，而不是服务器裸 IP 与本机监听端口——否则客户端
+		// 拿到的地址根本连不上反代链路。这两个键在生成 sing-box 配置时会被
+		// stripAdvertiseKeys 剔除，不会写进节点配置。
+		if h := mapStr(opts, "advertise_host"); h != "" {
+			nodeHost = h
+		}
+		advPort := ib.ListenPort
+		if p := mapInt(opts, "advertise_port"); p != 0 {
+			advPort = p
+		}
 		p := singbox.LinkParams{
-			Type: ib.Type, Tag: remark, Host: nodeHost, Port: ib.ListenPort,
+			Type: ib.Type, Tag: remark, Host: nodeHost, Port: advPort,
 			UUID: cred.UUID, Password: cred.Password,
 			NoUDP:       exit != nil && noUDP(exit.EgressID),
 			TLS:         ib.TlsID != 0,
