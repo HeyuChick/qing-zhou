@@ -955,15 +955,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	// Explicit ?format= wins; otherwise auto-detect from the client User-Agent
 	// so Clash/sing-box/Surge each get a native config out of the box.
 	reqFormat := r.URL.Query().Get("format")
-	profileParam := r.URL.Query().Get("profile")
-	profile := subconv.NormalizeRoutingProfile(profileParam)
-	// 品牌定制（fork 默认 cn-direct）：不带 profile 参数的订阅链接默认中国直连。
-	// 上游默认是 legacy（国内也走代理），机场用户期望国内流量不绕节点；存量已
-	// 导入的订阅链接无需重新导入，刷新后即生效。显式 ?profile=proxy-all 仍全代理；
-	// 带了参数但拼写错误则维持上游行为回退 legacy，不揣测用户意图。
-	if profileParam == "" {
-		profile = subconv.ProfileCNDirect
-	}
+	profile := subconv.NormalizeRoutingProfile(r.URL.Query().Get("profile"))
 	subURL := a.publicBase(r) + r.URL.Path
 	if profile != subconv.ProfileLegacy {
 		// Keep the routing choice in Surge's MANAGED-CONFIG refresh URL and on
