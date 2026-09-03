@@ -93,7 +93,7 @@ jobs:
             echo "== panel linux/$arch =="
             GOOS=linux GOARCH=$arch go build -ldflags "$LDFLAGS" -o "out/qingzhou-linux-$arch" .
             echo "== probe linux/$arch =="
-            GOOS=linux GOARCH=$arch go build -ldflags "-s -w" -o "out/probe-linux-$arch" ./cmd/probe
+            GOOS=linux GOARCH=$arch go build -ldflags "-s -w -X qingzhou/internal/version.Version=${TAG}" -o "out/probe-linux-$arch" ./cmd/probe
           done
           ls -lh out
 
