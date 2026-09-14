@@ -7,20 +7,35 @@ import (
 	"strings"
 )
 
+// SingboxOptions tunes sing-box subscription rendering beyond the routing profile.
+type SingboxOptions struct {
+	// LegacyTUNStack emits tun.stack=gvisor for clients still on sing-box ≤1.14.
+	// Default false omits the field: sing-box 1.15 deprecated tun.stack and 1.17
+	// removes it (https://sing-box.sagernet.org/migration/#migrate-tun-stack).
+	// 轻舟 strategy: new/default subscriptions omit stack; 1.14 users opt in via
+	// ?tun_stack=gvisor on the subscription URL.
+	LegacyTUNStack bool
+}
+
 // Singbox renders a sing-box JSON config: a "proxy" selector over the parsed
 // outbounds, a direct outbound, default tun+mixed inbounds, and the anti-leak
 // dns/route template merged in. Best-effort for the official sing-box client.
 func Singbox(proxies []*Proxy, template string) (string, error) {
-	return singboxWithProfile(proxies, template, ProfileLegacy)
+	return singboxWithProfile(proxies, template, ProfileLegacy, SingboxOptions{})
 }
 
 // SingboxWithProfile renders an explicitly selected routing profile while the
 // old Singbox entry point remains the untouched legacy path.
 func SingboxWithProfile(proxies []*Proxy, template string, profile RoutingProfile) (string, error) {
-	return singboxWithProfile(proxies, template, profile)
+	return singboxWithProfile(proxies, template, profile, SingboxOptions{})
 }
 
-func singboxWithProfile(proxies []*Proxy, template string, profile RoutingProfile) (string, error) {
+// SingboxWithOptions is SingboxWithProfile plus render toggles.
+func SingboxWithOptions(proxies []*Proxy, template string, profile RoutingProfile, opt SingboxOptions) (string, error) {
+	return singboxWithProfile(proxies, template, profile, opt)
+}
+
+func singboxWithProfile(proxies []*Proxy, template string, profile RoutingProfile, opt SingboxOptions) (string, error) {
 	if strings.TrimSpace(template) == "" {
 		template = DefaultSingboxTemplate
 	}
@@ -116,35 +131,47 @@ func singboxWithProfile(proxies []*Proxy, template string, profile RoutingProfil
 	}
 
 	if _, ok := doc["inbounds"]; !ok {
-		doc["inbounds"] = []map[string]any{
-			// The IPv6 prefix is not decorative: the DNS template answers AAAA with
-			// a fake address out of fakeip.inet6_range (fc00::/18). Without an
-			// inet6 address on the TUN, auto_route installs no IPv6 route, so that
-			// fake address is unroutable — every AAAA-resolved connection dies with
-			// ENETUNREACH, and an IPv6-only domain (no A record) is simply
-			// unreachable. With it, IPv6 traffic enters the tunnel and the *node*
-			// resolves the domain, so a v4-only node still serves it over v4.
+		// The IPv6 prefix is not decorative: the DNS template answers AAAA with
+		// a fake address out of fakeip.inet6_range (fc00::/18). Without an
+		// inet6 address on the TUN, auto_route installs no IPv6 route, so that
+		// fake address is unroutable — every AAAA-resolved connection dies with
+		// ENETUNREACH, and an IPv6-only domain (no A record) is simply
+		// unreachable. With it, IPv6 traffic enters the tunnel and the *node*
+		// resolves the domain, so a v4-only node still serves it over v4.
+		//
+		// Capturing v6 also closes the leak: with no IPv6 route, anything that
+		// reaches an IPv6 literal without asking DNS — BitTorrent, WebRTC/STUN,
+		// a hardcoded address — bypasses the tunnel out the physical NIC.
+		//
+		// tun.stack: sing-box 1.15 deprecated this field and 1.17 removes it
+		// (Migrate TUN stack). Default subscriptions omit it so ≥1.15 clients
+		// use the upstream stack. Clash/Mihomo templates keep their own stack
+		// field unchanged — this issue only constrains sing-box format.
+		// 1.14 clients that still need gvisor opt in via LegacyTUNStack
+		// (?tun_stack=gvisor on the subscription URL).
+		tun := map[string]any{
+			"type": "tun", "tag": "tun-in",
+			"address":    []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
+			"auto_route": true, "strict_route": true,
+			// Defensive, not load-bearing: auto_route installs ::/0, which
+			// nominally covers link-local and multicast, but the kernel's own
+			// more-specific on-link routes (fe80::/64 dev <if>) win in the main
+			// table either way — so neighbor discovery and mDNS survive with or
+			// without this. Listed explicitly because it costs nothing and makes
+			// the intent legible. (The Clash template omits the equivalent for
+			// the same reason it is safe to omit here.)
 			//
-			// Capturing v6 also closes the leak: with no IPv6 route, anything that
-			// reaches an IPv6 literal without asking DNS — BitTorrent, WebRTC/STUN,
-			// a hardcoded address — bypasses the tunnel out the physical NIC.
-			{"type": "tun", "tag": "tun-in",
-				"address":    []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
-				"auto_route": true, "strict_route": true, "stack": "gvisor",
-				// Defensive, not load-bearing: auto_route installs ::/0, which
-				// nominally covers link-local and multicast, but the kernel's own
-				// more-specific on-link routes (fe80::/64 dev <if>) win in the main
-				// table either way — so neighbor discovery and mDNS survive with or
-				// without this. Listed explicitly because it costs nothing and makes
-				// the intent legible. (The Clash template omits the equivalent for
-				// the same reason it is safe to omit here.)
-				//
-				// fc00::/7 must NOT be listed, however. That one is load-bearing:
-				// fakeip hands out fc00::/18 from inside it, so excluding the parent
-				// prefix would route every fake IPv6 straight back out of the tunnel,
-				// reintroducing the exact breakage the inet6 address above fixes.
-				"route_exclude_address": []string{"fe80::/10", "ff00::/8"},
-			},
+			// fc00::/7 must NOT be listed, however. That one is load-bearing:
+			// fakeip hands out fc00::/18 from inside it, so excluding the parent
+			// prefix would route every fake IPv6 straight back out of the tunnel,
+			// reintroducing the exact breakage the inet6 address above fixes.
+			"route_exclude_address": []string{"fe80::/10", "ff00::/8"},
+		}
+		if opt.LegacyTUNStack {
+			tun["stack"] = "gvisor"
+		}
+		doc["inbounds"] = []map[string]any{
+			tun,
 			{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080},
 		}
 	}
