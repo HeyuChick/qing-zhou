@@ -78,8 +78,14 @@ install -m600 qingzhou.env /opt/qingzhou/qingzhou.env   # 按 env.example 填好
 cp deploy/qingzhou.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now qingzhou
 
-# 3. nginx 反代到 127.0.0.1:8081（HTTPS 证书用 certbot），略
+# 3. nginx 反代到 127.0.0.1:8081。兼容旧系统客户端的当前建议：
+certbot --nginx -d panel.example.com --key-type rsa --rsa-key-size 2048 --preferred-chain "ISRG Root X1"
 ```
+
+`--preferred-chain` 是兼容性偏好，不应代替签发后的核验。上线前请确认实际
+证书域名、有效期、密钥匹配和完整链均正确；若你的用户设备均为现代系统，也可
+按 CA 默认链或使用 ECDSA。证书中心的新申请默认使用可演进的「自动兼容」策略，
+升级不会给已有证书强行换密钥或换链。
 
 ## 更新
 

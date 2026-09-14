@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/acmesh"
+	"qingzhou/internal/certcheck"
 	"qingzhou/internal/singbox"
 	"qingzhou/internal/store"
 )
@@ -48,22 +49,27 @@ func certPublic(c *store.Cert) map[string]interface{} {
 		fingerprint = singbox.CertFingerprintSHA256(c.CertPEM)
 	}
 	return J{
-		"self_signed":    selfSigned,
-		"sha256":         fingerprint,
-		"id":             c.ID,
-		"name":           c.Name,
-		"domain":         c.Domain,
-		"source":         c.Source,
-		"acme_method":    c.AcmeMethod,
-		"not_after":      c.NotAfter,
-		"days_left":      daysLeft,
-		"status":         status,
-		"auto_renew":     c.AutoRenew,
-		"last_renew_at":  c.LastRenewAt,
-		"last_error":     c.LastError,
-		"created_at":     c.CreatedAt,
-		"updated_at":     c.UpdatedAt,
-		"decrypt_failed": c.DecryptFailed,
+		"self_signed":     selfSigned,
+		"sha256":          fingerprint,
+		"id":              c.ID,
+		"name":            c.Name,
+		"domain":          c.Domain,
+		"source":          c.Source,
+		"acme_method":     c.AcmeMethod,
+		"acme_profile":    c.AcmeProfile,
+		"actual_key_type": c.ActualKeyType,
+		"actual_chain":    c.ActualChain,
+		"last_verify_at":  c.LastVerifyAt,
+		"verify_error":    c.VerifyError,
+		"not_after":       c.NotAfter,
+		"days_left":       daysLeft,
+		"status":          status,
+		"auto_renew":      c.AutoRenew,
+		"last_renew_at":   c.LastRenewAt,
+		"last_error":      c.LastError,
+		"created_at":      c.CreatedAt,
+		"updated_at":      c.UpdatedAt,
+		"decrypt_failed":  c.DecryptFailed,
 	}
 }
 
@@ -87,7 +93,7 @@ func (a *API) certDir() string {
 	return path.Join(path.Dir(cfgPath), "certs")
 }
 
-// POST /api/admin/certs/acme {name, domain, method?, webroot?}
+// POST /api/admin/certs/acme {name, domain, method?, webroot?, acme_profile?}
 // Issues a real Let's Encrypt certificate on the PANEL HOST (DNS-01 needs no
 // access to the node) and stores the PEM in the DB as a global certificate any
 // node's inbound can then reference. The Cloudflare token is read from settings,
@@ -98,6 +104,7 @@ func (a *API) handleAdminCertAcme(w http.ResponseWriter, r *http.Request) {
 		Domain  string `json:"domain"`
 		Method  string `json:"method"` // dns-cf (default) | http-01 | webroot
 		Webroot string `json:"webroot"`
+		Profile string `json:"acme_profile"` // auto (default) | compatible | modern
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -113,6 +120,15 @@ func (a *API) handleAdminCertAcme(w http.ResponseWriter, r *http.Request) {
 	if method == "" {
 		method = acmesh.MethodCFDNS
 	}
+	profile := strings.TrimSpace(req.Profile)
+	if profile == "" {
+		profile = acmesh.ProfileAuto
+	}
+	keyLength, preferredChain, err := acmesh.OptionsForProfile(profile)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "证书兼容策略无效")
+		return
+	}
 	cfToken, _ := a.st.GetSetting("cf_api_token")
 	email, _ := a.st.GetSetting("acme_email")
 	if method == acmesh.MethodCFDNS && strings.TrimSpace(cfToken) == "" {
@@ -124,12 +140,14 @@ func (a *API) handleAdminCertAcme(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
 	res, err := acmesh.Issue(ctx, acmesh.LocalRunner{}, acmesh.IssueOpts{
-		Domain:  domain,
-		Method:  method,
-		CFToken: strings.TrimSpace(cfToken),
-		Webroot: strings.TrimSpace(req.Webroot),
-		Email:   strings.TrimSpace(email),
-		CertDir: a.certDir(),
+		Domain:         domain,
+		Method:         method,
+		CFToken:        strings.TrimSpace(cfToken),
+		Webroot:        strings.TrimSpace(req.Webroot),
+		Email:          strings.TrimSpace(email),
+		CertDir:        a.certDir(),
+		KeyLength:      keyLength,
+		PreferredChain: preferredChain,
 		// ReloadCmd intentionally empty: 轻舟 pushes the renewed cert to nodes
 		// itself (see StartCertRenew), rather than relying on a local systemd unit.
 	})
@@ -142,15 +160,24 @@ func (a *API) handleAdminCertAcme(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, "证书已签发，但读取文件失败："+err.Error())
 		return
 	}
+	verified, err := certcheck.Verify(certPEM, keyPEM, domain, time.Now())
+	if err != nil {
+		fail(w, http.StatusBadGateway, "签发结果核验失败，证书未保存、不会下发到节点："+err.Error())
+		return
+	}
 	id, err := a.st.SaveCert(&store.Cert{
-		Name:        name,
-		Domain:      domain,
-		Source:      "acme",
-		AcmeMethod:  string(method),
-		CertPEM:     certPEM,
-		KeyPEM:      keyPEM,
-		AutoRenew:   true,
-		LastRenewAt: time.Now().Unix(),
+		Name:          name,
+		Domain:        domain,
+		Source:        "acme",
+		AcmeMethod:    string(method),
+		AcmeProfile:   profile,
+		CertPEM:       certPEM,
+		KeyPEM:        keyPEM,
+		ActualKeyType: verified.KeyType,
+		ActualChain:   verified.Chain,
+		LastVerifyAt:  verified.VerifiedAt,
+		AutoRenew:     true,
+		LastRenewAt:   time.Now().Unix(),
 	})
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "保存证书失败")

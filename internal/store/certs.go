@@ -15,19 +15,24 @@ import (
 // many sb_tls (mode=tls) profiles reference by id. cert_pem/key_pem are stored
 // encrypted at rest and returned decrypted from these methods.
 type Cert struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Domain      string `json:"domain"`
-	Source      string `json:"source"`      // acme | paste | selfsigned
-	AcmeMethod  string `json:"acme_method"` // dns-cf | http-01 | webroot
-	CertPEM     string `json:"cert_pem"`
-	KeyPEM      string `json:"key_pem"`
-	NotAfter    int64  `json:"not_after"`
-	AutoRenew   bool   `json:"auto_renew"`
-	LastRenewAt int64  `json:"last_renew_at"`
-	LastError   string `json:"last_error"`
-	CreatedAt   int64  `json:"created_at"`
-	UpdatedAt   int64  `json:"updated_at"`
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Domain        string `json:"domain"`
+	Source        string `json:"source"`       // acme | paste | selfsigned
+	AcmeMethod    string `json:"acme_method"`  // dns-cf | http-01 | webroot
+	AcmeProfile   string `json:"acme_profile"` // empty legacy | auto | compatible | modern
+	CertPEM       string `json:"cert_pem"`
+	KeyPEM        string `json:"key_pem"`
+	NotAfter      int64  `json:"not_after"`
+	ActualKeyType string `json:"actual_key_type"`
+	ActualChain   string `json:"actual_chain"`
+	LastVerifyAt  int64  `json:"last_verify_at"`
+	VerifyError   string `json:"verify_error"`
+	AutoRenew     bool   `json:"auto_renew"`
+	LastRenewAt   int64  `json:"last_renew_at"`
+	LastError     string `json:"last_error"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
 	// DecryptFailed is set when cert_pem/key_pem were stored encrypted but could
 	// not be decrypted (wrong/changed QZ_SECRET_KEY). The config builder MUST
 	// refuse to emit an inbound referencing such a cert rather than downgrade it
@@ -52,8 +57,9 @@ func certNotAfter(certPEM string) int64 {
 func (s *Store) scanCert(row interface{ Scan(...any) error }) (*Cert, error) {
 	var c Cert
 	var autoRenew int
-	if err := row.Scan(&c.ID, &c.Name, &c.Domain, &c.Source, &c.AcmeMethod,
-		&c.CertPEM, &c.KeyPEM, &c.NotAfter, &autoRenew, &c.LastRenewAt, &c.LastError,
+	if err := row.Scan(&c.ID, &c.Name, &c.Domain, &c.Source, &c.AcmeMethod, &c.AcmeProfile,
+		&c.CertPEM, &c.KeyPEM, &c.NotAfter, &c.ActualKeyType, &c.ActualChain,
+		&c.LastVerifyAt, &c.VerifyError, &autoRenew, &c.LastRenewAt, &c.LastError,
 		&c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -65,7 +71,7 @@ func (s *Store) scanCert(row interface{ Scan(...any) error }) (*Cert, error) {
 	return &c, nil
 }
 
-const certCols = `id, name, domain, source, acme_method, cert_pem, key_pem, not_after, auto_renew, last_renew_at, last_error, created_at, updated_at`
+const certCols = `id, name, domain, source, acme_method, acme_profile, cert_pem, key_pem, not_after, actual_key_type, actual_chain, last_verify_at, verify_error, auto_renew, last_renew_at, last_error, created_at, updated_at`
 
 func (s *Store) ListCerts() ([]*Cert, error) {
 	rows, err := s.db.Query(`SELECT ` + certCols + ` FROM certificates ORDER BY id`)
@@ -104,9 +110,12 @@ func (s *Store) SaveCert(c *Cert) (int64, error) {
 	encKey := s.encrypt(c.KeyPEM)
 	if c.ID == 0 {
 		res, err := s.db.Exec(`INSERT INTO certificates
-			(name, domain, source, acme_method, cert_pem, key_pem, not_after, auto_renew, last_renew_at, last_error, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-			c.Name, c.Domain, c.Source, c.AcmeMethod, encCert, encKey, c.NotAfter,
+			(name, domain, source, acme_method, acme_profile, cert_pem, key_pem, not_after,
+			 actual_key_type, actual_chain, last_verify_at, verify_error,
+			 auto_renew, last_renew_at, last_error, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			c.Name, c.Domain, c.Source, c.AcmeMethod, c.AcmeProfile, encCert, encKey, c.NotAfter,
+			c.ActualKeyType, c.ActualChain, c.LastVerifyAt, c.VerifyError,
 			b2i(c.AutoRenew), c.LastRenewAt, c.LastError, now, now)
 		if err != nil {
 			return 0, err
@@ -114,9 +123,12 @@ func (s *Store) SaveCert(c *Cert) (int64, error) {
 		return res.LastInsertId()
 	}
 	_, err := s.db.Exec(`UPDATE certificates SET
-		name=?, domain=?, source=?, acme_method=?, cert_pem=?, key_pem=?, not_after=?, auto_renew=?, last_renew_at=?, last_error=?, updated_at=?
+		name=?, domain=?, source=?, acme_method=?, acme_profile=?, cert_pem=?, key_pem=?, not_after=?,
+		actual_key_type=?, actual_chain=?, last_verify_at=?, verify_error=?,
+		auto_renew=?, last_renew_at=?, last_error=?, updated_at=?
 		WHERE id=?`,
-		c.Name, c.Domain, c.Source, c.AcmeMethod, encCert, encKey, c.NotAfter,
+		c.Name, c.Domain, c.Source, c.AcmeMethod, c.AcmeProfile, encCert, encKey, c.NotAfter,
+		c.ActualKeyType, c.ActualChain, c.LastVerifyAt, c.VerifyError,
 		b2i(c.AutoRenew), c.LastRenewAt, c.LastError, now, c.ID)
 	return c.ID, err
 }
@@ -126,6 +138,15 @@ func (s *Store) SaveCert(c *Cert) (int64, error) {
 func (s *Store) SetCertRenewError(id int64, msg string) error {
 	_, err := s.db.Exec(`UPDATE certificates SET last_error=?, updated_at=? WHERE id=?`,
 		msg, time.Now().Unix(), id)
+	return err
+}
+
+// SetCertVerifyError records a rejected candidate without replacing the PEM
+// currently used by live nodes.
+func (s *Store) SetCertVerifyError(id int64, msg string) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`UPDATE certificates SET verify_error=?, last_verify_at=?, updated_at=? WHERE id=?`,
+		msg, now, now, id)
 	return err
 }
 

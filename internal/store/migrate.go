@@ -336,9 +336,14 @@ CREATE TABLE IF NOT EXISTS certificates (
   domain        TEXT    NOT NULL DEFAULT '',        -- primary domain/SAN; used as SNI + for renewal
   source        TEXT    NOT NULL DEFAULT 'acme',     -- acme | paste | selfsigned
   acme_method   TEXT    NOT NULL DEFAULT '',         -- dns-cf | http-01 | webroot
+  acme_profile  TEXT    NOT NULL DEFAULT '',         -- '' legacy | auto | compatible | modern
   cert_pem      TEXT    NOT NULL DEFAULT '',         -- encrypted fullchain PEM
   key_pem       TEXT    NOT NULL DEFAULT '',         -- encrypted private key PEM
   not_after     INTEGER NOT NULL DEFAULT 0,          -- expiry (unix), parsed from cert_pem
+  actual_key_type TEXT  NOT NULL DEFAULT '',         -- verified leaf key, e.g. RSA-2048
+  actual_chain  TEXT    NOT NULL DEFAULT '',         -- verified chain subjects, no PEM bytes
+  last_verify_at INTEGER NOT NULL DEFAULT 0,
+  verify_error  TEXT    NOT NULL DEFAULT '',
   auto_renew    INTEGER NOT NULL DEFAULT 1,
   last_renew_at INTEGER NOT NULL DEFAULT 0,
   last_error    TEXT    NOT NULL DEFAULT '',
@@ -899,6 +904,14 @@ func (s *Store) Migrate() error {
 		// by id instead of inlining its PEM, so one cert serves many inbounds and a
 		// renewal touches a single row. 0 = legacy inline PEM (backfilled below).
 		`ALTER TABLE sb_tls ADD COLUMN cert_id INTEGER NOT NULL DEFAULT 0`,
+		// Certificate policy is opt-in for existing rows: blank means the exact
+		// legacy acme.sh behaviour. New ACME records store a named profile and
+		// verified metadata, so an upgrade cannot rotate a live node's key type.
+		`ALTER TABLE certificates ADD COLUMN acme_profile TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE certificates ADD COLUMN actual_key_type TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE certificates ADD COLUMN actual_chain TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE certificates ADD COLUMN last_verify_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE certificates ADD COLUMN verify_error TEXT NOT NULL DEFAULT ''`,
 		// Display order of the TLS list (sb_inbounds has had one since creation).
 		// All existing rows default to 0 and tie-break by id, so an un-reordered
 		// list keeps its historical order.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"qingzhou/internal/acmesh"
+	"qingzhou/internal/certcheck"
 	"qingzhou/internal/store"
 )
 
@@ -84,11 +85,27 @@ func (a *API) renewOneCert(ctx context.Context, c *store.Cert, cfToken, certDir 
 	}
 	rctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
+	keyLength, preferredChain, err := acmesh.OptionsForProfile(c.AcmeProfile)
+	if err != nil {
+		return err
+	}
+	// A future release may evolve ProfileAuto for newly issued certificates,
+	// but renewal must keep using the key store of the certificate already on
+	// disk. This prevents a policy update from looking in acme.sh's ECC directory
+	// for an existing RSA cert (or vice versa) and disrupting live renewals.
+	switch {
+	case strings.HasPrefix(c.ActualKeyType, "RSA-"):
+		keyLength = "2048"
+	case strings.HasPrefix(c.ActualKeyType, "ECDSA-"):
+		keyLength = "ec-256"
+	}
 	res, err := acmesh.Renew(rctx, acmesh.LocalRunner{}, acmesh.IssueOpts{
-		Domain:  c.Domain,
-		Method:  method,
-		CFToken: strings.TrimSpace(cfToken),
-		CertDir: certDir,
+		Domain:         c.Domain,
+		Method:         method,
+		CFToken:        strings.TrimSpace(cfToken),
+		CertDir:        certDir,
+		KeyLength:      keyLength,
+		PreferredChain: preferredChain,
 	}, force)
 	if err != nil {
 		return err
@@ -97,7 +114,18 @@ func (a *API) renewOneCert(ctx context.Context, c *store.Cert, cfToken, certDir 
 	if err != nil {
 		return err
 	}
+	verified, err := certcheck.Verify(certPEM, keyPEM, c.Domain, time.Now())
+	if err != nil {
+		// The current DB PEM remains untouched, so every deployed node keeps its
+		// last known-good certificate even when the CA/client produced bad files.
+		_ = a.st.SetCertVerifyError(c.ID, err.Error())
+		return fmt.Errorf("新证书核验失败，已保留旧证书且未下发：%w", err)
+	}
 	c.CertPEM, c.KeyPEM = certPEM, keyPEM
+	c.ActualKeyType = verified.KeyType
+	c.ActualChain = verified.Chain
+	c.LastVerifyAt = verified.VerifiedAt
+	c.VerifyError = ""
 	c.LastRenewAt = time.Now().Unix()
 	c.LastError = ""
 	if _, err := a.st.SaveCert(c); err != nil {
