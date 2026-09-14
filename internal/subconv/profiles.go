@@ -26,3 +26,10 @@ func NormalizeRoutingProfile(value string) RoutingProfile {
 		return ProfileLegacy
 	}
 }
+
+// WantSingboxLegacyTUNStack reports whether the subscription query asks for the
+// sing-box ≤1.14 TUN stack compat path (tun.stack=gvisor). Only the explicit
+// value "gvisor" enables it — unknown values keep the default (omit stack).
+func WantSingboxLegacyTUNStack(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "gvisor")
+}
