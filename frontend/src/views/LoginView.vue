@@ -21,6 +21,8 @@
               <n-input v-model:value="loginForm.password" type="password" show-password-on="click" placeholder="请输入密码" @keyup.enter="handleLogin" />
             </n-form-item>
             <n-button type="primary" block :loading="loading" @click="handleLogin">登录</n-button>
+            <!-- 品牌定制：上游 OIDC 登录入口原在 LoginDialog（已删）——移植到独立登录页 -->
+            <n-button v-if="config.config.oauth2_enabled" block secondary :loading="oauthLoading" style="margin-top: 12px" @click="handleOAuth">使用{{ config.config.oauth2_name }}登录</n-button>
           </n-form>
         </n-tab-pane>
 
@@ -78,6 +80,16 @@ const config = useConfigStore()
 const message = useMessage()
 const tab = ref('login')
 const loading = ref(false)
+const oauthLoading = ref(false)
+
+// 品牌定制：从上游 LoginDialog 移植的 OIDC 授权码登录入口
+async function handleOAuth() {
+  oauthLoading.value = true
+  try {
+    const data = await apiPost<{ authorization_url: string }>('/api/auth/oauth2/start', {})
+    window.location.assign(data.authorization_url)
+  } catch (e: any) { message.error(e.message) } finally { oauthLoading.value = false }
+}
 
 const loginForm = reactive({ username: '', password: '' })
 const regForm = reactive({ username: '', password: '', code: '', email: '' })

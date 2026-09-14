@@ -17,9 +17,12 @@ import (
 type ctxKey string
 
 const (
-	ctxUserID ctxKey = "uid"
-	ctxRole   ctxKey = "role"
-	ctxJti    ctxKey = "jti"
+	ctxUserID   ctxKey = "uid"
+	ctxRole     ctxKey = "role"
+	ctxJti      ctxKey = "jti"
+	ctxAuthKind ctxKey = "auth_kind" // "jwt" | "api_token"
+	ctxScopes   ctxKey = "scopes"    // []string when auth_kind=api_token
+	ctxTokenID  ctxKey = "token_id"
 
 	cookieName = "qz_token"
 	tokenTTL   = 7 * 24 * time.Hour
@@ -49,6 +52,10 @@ func clientIP(r *http.Request) string {
 // issueLogin records a login session and returns a JWT bound to it (so it can
 // be listed and revoked). Also sets the auth cookie.
 func (a *API) issueLogin(w http.ResponseWriter, r *http.Request, u *store.User) (string, error) {
+	return a.issueLoginWithSecurity(w, r, u, a.isHTTPS(r))
+}
+
+func (a *API) issueLoginWithSecurity(w http.ResponseWriter, r *http.Request, u *store.User, secure bool) (string, error) {
 	jti, err := idgen.RandToken(12)
 	if err != nil {
 		return "", err
@@ -60,7 +67,7 @@ func (a *API) issueLogin(w http.ResponseWriter, r *http.Request, u *store.User) 
 	if err != nil {
 		return "", err
 	}
-	setAuthCookie(w, tok, a.isHTTPS(r))
+	setAuthCookie(w, tok, secure)
 	return tok, nil
 }
 
@@ -83,6 +90,7 @@ func (a *API) registerMode() string {
 
 // handleConfig exposes public site config the frontend needs before login.
 func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
+	oauth, _ := a.oauthConfig()
 	verify, _ := a.st.GetSettingBool("email_verify_required")
 	rate, _ := a.st.GetSettingInt64("points_per_cny", 10)
 	mode := a.registerMode()
@@ -102,6 +110,8 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	helpURL, _ := a.st.GetSetting("help_docs_url")
 	ok(w, J{
+		"oauth2_enabled":        oauth.Enabled,
+		"oauth2_name":           oauth.Name,
 		"register_mode":         mode,
 		"registration_open":     mode != "closed",
 		"email_verify_required": verify,
@@ -202,6 +212,31 @@ func (a *API) authMiddleware(next http.Handler) http.Handler {
 			fail(w, http.StatusUnauthorized, "未登录")
 			return
 		}
+		// Machine API tokens (Bearer only). Cookie-bound browser sessions stay on JWT.
+		if strings.HasPrefix(tokStr, "qz_at_") && strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			at, err := a.st.LookupAPIToken(tokStr)
+			if err != nil || at == nil {
+				// Same message as a bad JWT — do not advertise token existence.
+				fail(w, http.StatusUnauthorized, "登录已失效，请重新登录")
+				return
+			}
+			// A machine token inherits the authority of its creator; it must not
+			// outlive that authority. Checking the live account also closes gaps
+			// caused by direct database maintenance or future role changes.
+			owner, err := a.st.UserByID(at.CreatedBy)
+			if err != nil || owner == nil || owner.Status != "active" || owner.Role != "admin" {
+				fail(w, http.StatusUnauthorized, "登录已失效，请重新登录")
+				return
+			}
+			a.st.TouchAPIToken(at.ID)
+			ctx := context.WithValue(r.Context(), ctxUserID, at.CreatedBy)
+			ctx = context.WithValue(ctx, ctxRole, "admin")
+			ctx = context.WithValue(ctx, ctxAuthKind, "api_token")
+			ctx = context.WithValue(ctx, ctxScopes, at.Scopes)
+			ctx = context.WithValue(ctx, ctxTokenID, at.ID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		claims, err := auth.Parse(a.secret, tokStr)
 		if err != nil {
 			fail(w, http.StatusUnauthorized, "登录已过期，请重新登录")
@@ -216,6 +251,7 @@ func (a *API) authMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxUserID, claims.UserID)
 		ctx = context.WithValue(ctx, ctxRole, claims.Role)
 		ctx = context.WithValue(ctx, ctxJti, claims.ID)
+		ctx = context.WithValue(ctx, ctxAuthKind, "jwt")
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

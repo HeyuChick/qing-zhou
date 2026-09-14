@@ -534,8 +534,9 @@ func singboxOutbound(p *Proxy) map[string]any {
 		o["type"] = "hysteria2"
 		o["password"] = p.Password
 		o["tls"] = sbTLS(p, "tls")
-		// 端口跳跃（sing-box >= 1.12）：server_ports 用冒号区间的数组形式，
-		// hop_interval 默认 30s。服务端需把跳跃段 UDP DNAT 到真实监听端口。
+		// 端口跳跃（品牌定制，sing-box >= 1.12）：server_ports 用冒号区间的数组
+		// 形式，hop_interval 默认 30s。服务端需把跳跃段 UDP DNAT 到真实监听端口。
+		// 链接显式带 hop-interval 参数时以上游逻辑覆盖默认值。
 		if m := p.param("mport"); m != "" {
 			ports := []string{}
 			for _, part := range strings.Split(m, ",") {
@@ -548,6 +549,33 @@ func singboxOutbound(p *Proxy) map[string]any {
 				o["server_ports"] = ports
 				o["hop_interval"] = "30s"
 			}
+		}
+		if v := p.param("obfs"); v != "" {
+			obfs := map[string]any{"type": v}
+			if pw := p.param("obfs-password"); pw != "" {
+				obfs["password"] = pw
+			}
+			if n := atoi(p.param("obfs-min-packet")); n > 0 {
+				obfs["min_packet_size"] = n
+			}
+			if n := atoi(p.param("obfs-max-packet")); n > 0 {
+				obfs["max_packet_size"] = n
+			}
+			o["obfs"] = obfs
+		}
+		if v := p.param("bbr-profile"); v != "" {
+			o["bbr_profile"] = v
+		}
+		// Client Chrome QUIC parrot is on by default in sing-box 1.14; only
+		// emit the opt-out when the share link asks for it.
+		if p.param("disable-chrome-parrot") == "1" {
+			o["disable_chrome_parrot"] = true
+		}
+		if v := p.param("hop-interval"); v != "" {
+			o["hop_interval"] = v
+		}
+		if v := p.param("hop-interval-max"); v != "" {
+			o["hop_interval_max"] = v
 		}
 	case "anytls":
 		// sing-box >= 1.12.0. tls is required by the outbound constructor.

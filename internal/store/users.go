@@ -414,6 +414,7 @@ func (s *Store) DeleteUser(id int64) error {
 		`DELETE FROM telegram_binds WHERE user_id=?`,
 		`DELETE FROM telegram_bind_tokens WHERE user_id=?`,
 		`DELETE FROM user_notify_log WHERE user_id=?`,
+		`DELETE FROM api_tokens WHERE created_by=?`,
 		`DELETE FROM users WHERE id=?`,
 	} {
 		if _, err := tx.Exec(q, id); err != nil {
@@ -434,7 +435,7 @@ func (s *Store) SetUserRemark(id int64, remark string) error {
 }
 
 // ManualGrant describes an admin's manual "general allowance" for a user. Enabled
-// false removes any existing grant; Traffic 0 = unlimited (plan-bucket semantics);
+// false removes any existing grant; an enabled grant has a positive finite Traffic;
 // Expiry 0 = never. A nil *ManualGrant passed to AdminUpdateUser leaves the grant
 // untouched (for edits that only change status/reset).
 type ManualGrant struct {
@@ -469,6 +470,14 @@ func (s *Store) AdminUpdateUser(id int64, status string, resetUsed bool, manual 
 	if _, err := tx.Exec(`UPDATE users SET status=?, updated_at=? WHERE id=?`, status, now, id); err != nil {
 		return err
 	}
+	if status == "banned" {
+		// Suspending the owner must also retire its long-lived machine
+		// credentials. Keep this in the same transaction as the status change so
+		// neither half can succeed alone; a later unban must not resurrect them.
+		if _, err := tx.Exec(`UPDATE api_tokens SET revoked_at=? WHERE created_by=? AND revoked_at=0`, now, id); err != nil {
+			return err
+		}
+	}
 	if resetUsed {
 		// Zero the authoritative bucket counters (not just the users.* mirror, which a
 		// recompute would immediately overwrite back from the buckets).
@@ -497,6 +506,9 @@ func (s *Store) AdminUpdateUser(id int64, status string, resetUsed bool, manual 
 // applyManualGrant upserts (Enabled) or removes (!Enabled) the user's package_id=0
 // admin-grant bucket within the caller's transaction.
 func applyManualGrant(tx txLike, userID int64, g *ManualGrant, now int64) error {
+	if g.Enabled && g.Traffic <= 0 {
+		return errors.New("管理员额度的流量必须大于 0")
+	}
 	var bid int64
 	qerr := tx.QueryRow(`SELECT id FROM user_plans WHERE user_id=? AND kind='plan' AND package_id=0 ORDER BY id LIMIT 1`, userID).Scan(&bid)
 	switch {

@@ -17,9 +17,10 @@ import (
 
 // secretSettings are never returned in plaintext and cannot be cleared blindly.
 var secretSettings = map[string]bool{
-	"jwt_secret":   true,
-	"smtp_pass":    true,
-	"cf_api_token": true,
+	"oauth2_config": true,
+	"jwt_secret":    true,
+	"smtp_pass":     true,
+	"cf_api_token":  true,
 	// A GitHub PAT. It only lifts the unauthenticated rate limit on release
 	// lookups, but it is still a bearer credential for the admin's account —
 	// it must not come back out of the settings API the way a hostname does.
@@ -54,8 +55,9 @@ var clearableSecrets = map[string]bool{
 // panel's uid, which on a typical deployment is root. It stays overridable via
 // QZ_UPDATE_REPO, which requires host access the attacker doesn't have.
 var immutableSettings = map[string]bool{
-	"jwt_secret":  true, // never rotate the signing key through the API
-	"update_repo": true,
+	"oauth2_config": true, // validated and saved atomically by the dedicated OAuth2 endpoint
+	"jwt_secret":    true, // never rotate the signing key through the API
+	"update_repo":   true,
 }
 
 // settingEnv maps a setting key to the env var that overrides it (env wins in
@@ -115,6 +117,10 @@ func (a *API) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	// admin can see and edit the effective config rather than a blank box.
 	if all["sub_clash_template"] == "" {
 		all["sub_clash_template"] = subconv.DefaultClashTemplate
+	}
+	// Default on: missing key means advertise udp:true (historical behaviour).
+	if all["sub_clash_udp"] == "" {
+		all["sub_clash_udp"] = "1"
 	}
 	if all["sub_singbox_template"] == "" {
 		all["sub_singbox_template"] = subconv.DefaultSingboxTemplate

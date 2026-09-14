@@ -41,6 +41,7 @@
         {{ loadError }}。为防止空表单覆盖原配置，“保存设置”已禁用。请稍候重试；如果持续失败，请检查服务日志和数据库路径。
         <n-button size="small" :loading="loading" class="settings-retry" @click="loadSettings">重新读取</n-button>
       </n-alert>
+    <OAuth2Settings v-show="activeSectionId === 'settings-oauth'" />
     <n-spin :show="loading">
       <n-card v-show="activeSectionId === 'settings-basic'" id="settings-basic" class="settings-section" size="small">
         <n-form label-placement="top">
@@ -450,6 +451,15 @@
       <n-card v-show="activeSectionId === 'settings-template'" id="settings-template" class="settings-section" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">自定义 Clash/sing-box 订阅输出模板。留空使用内置默认模板；改过之后会一直沿用你的版本（升级带来的新版内置模板不会自动生效），点「恢复内置默认」即可清空覆盖、跟随内置。</p>
         <n-form label-placement="top">
+          <n-form-item label="Clash 声明 UDP">
+            <div style="width:100%;">
+              <n-switch :value="form.sub_clash_udp !== '0' && form.sub_clash_udp !== 'false'"
+                        @update:value="(v: boolean) => form.sub_clash_udp = v ? '1' : '0'" />
+              <div style="font-size:12px;color:var(--text-3);margin-top:6px;line-height:1.6;">
+                开启时（默认）Clash 订阅对支持的协议写 <code>udp: true</code>。关闭则省略该字段。入站 egress 阻断 UDP 的节点仍会强制 <code>udp: false</code>。
+              </div>
+            </div>
+          </n-form-item>
           <n-form-item label="Clash 模板 (YAML)">
             <div style="width:100%;">
               <n-input v-model:value="form.sub_clash_template" type="textarea" :rows="8" placeholder="留空用内置模板" style="font-family:monospace;font-size:12px;" />
@@ -584,6 +594,7 @@
 </template>
 
 <script setup lang="ts">
+import OAuth2Settings from '@/components/OAuth2Settings.vue'
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { NAlert, NCard, NCheckbox, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useDialog, useMessage } from 'naive-ui'
@@ -601,6 +612,7 @@ type SettingsSection = { id: string; label: string; note: string; description: s
 type SettingsGroup = { label: string; sections: SettingsSection[] }
 const settingsGroups: SettingsGroup[] = [
   { label: '通用设置', sections: [
+    { id: 'settings-oauth', label: 'OAuth2 / OIDC', note: '认证中心登录', description: '配置认证中心，支持单点登录和已有账号绑定。此分区单独保存。', keywords: 'OAuth2 OIDC auth2 认证中心 Client ID Secret SSO' },
     { id: 'settings-basic', label: '基本设置', note: '注册与积分', description: '配置站点信息、注册规则和新用户默认权益。', keywords: '站点名称 描述 注册 邮箱验证 积分 流量 免费节点 凭据' },
     { id: 'settings-access', label: '访问地址', note: '面板与节点', description: '设置面板公开地址、节点连接地址和安装命令。', keywords: '域名 public base 节点 IP sing-box 安装 命令' },
     { id: 'settings-home', label: '首页设置', note: '入口展示', description: '选择访客首页显示监控大屏或自定义页面。', keywords: '首页 监控 自定义 URL' },
@@ -617,7 +629,7 @@ const settingsGroups: SettingsGroup[] = [
   { label: '节点与安全', sections: [
     { id: 'settings-cert', label: '证书 / ACME', note: 'Cloudflare DNS', description: '配置 Cloudflare DNS 验证所需的令牌与 ACME 邮箱。', keywords: '证书 ACME Cloudflare DNS Token Let’s Encrypt' },
     { id: 'settings-security', label: '出口安全', note: '内网访问防护', description: '控制节点是否阻断内网、链路本地地址和云元数据。', keywords: '安全 内网 元数据 127 192 169 阻断' },
-    { id: 'settings-template', label: '订阅模板', note: '客户端输出', description: '自定义 Clash 和 sing-box 的订阅输出模板。', keywords: '订阅 模板 Clash YAML sing-box JSON' },
+    { id: 'settings-template', label: '订阅模板', note: '客户端输出', description: '自定义 Clash / sing-box 订阅模板与 Clash UDP 声明。', keywords: '订阅 模板 Clash YAML sing-box JSON UDP' },
     { id: 'settings-runtime', label: '采集与同步', note: '节点负载', description: '调整探针采集、流量统计和健康检查频率。', keywords: '探针 采集 流量 统计 健康检查 同步 间隔 重建' },
   ] },
   { label: '系统维护', sections: [

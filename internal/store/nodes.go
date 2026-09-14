@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 )
@@ -12,6 +13,7 @@ type Node struct {
 	ID                     int64   `json:"id"`
 	Type                   string  `json:"type"` // self_built | external
 	Name                   string  `json:"name"`
+	Remark                 string  `json:"remark"`
 	Protocol               string  `json:"protocol"`
 	InboundTag             string  `json:"inbound_tag"`
 	RouteUpstreamInboundID int64   `json:"route_upstream_inbound_id"`
@@ -24,12 +26,12 @@ type Node struct {
 	GroupIDs               []int64 `json:"group_ids,omitempty"`
 }
 
-const nodeCols = `id, type, name, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at`
+const nodeCols = `id, type, name, remark, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at`
 
 func scanNode(sc scanner) (*Node, error) {
 	var n Node
 	var routeBroken int
-	err := sc.Scan(&n.ID, &n.Type, &n.Name, &n.Protocol, &n.InboundTag,
+	err := sc.Scan(&n.ID, &n.Type, &n.Name, &n.Remark, &n.Protocol, &n.InboundTag,
 		&n.RouteUpstreamInboundID, &routeBroken, &n.ShareLink, &n.SourceID, &n.Enabled, &n.SortOrder, &n.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -73,14 +75,15 @@ func (s *Store) ListNodes() ([]*Node, error) {
 	return out, nil
 }
 
-// SelfBuiltNodeNames maps each bound inbound tag to the display name the admin
-// gave that node on the 节点 page. Used as the subscription remark so clients
-// show the configured name instead of the raw inbound tag. A tag bound by more
-// than one node keeps the first (sort_order, id) — the same order the node page
-// lists them in.
+// SelfBuiltNodeNames maps each bound inbound tag to the subscription display
+// name (remark if set, otherwise name). A tag bound by more than one node keeps
+// the first (sort_order, id) — the same order the node page lists them in.
 func (s *Store) SelfBuiltNodeNames() (map[string]string, error) {
-	rows, err := s.db.Query(`SELECT inbound_tag, name FROM nodes
-		WHERE type='self_built' AND inbound_tag != '' AND name != ''
+	rows, err := s.db.Query(`SELECT inbound_tag,
+		CASE WHEN trim(remark) != '' THEN remark ELSE name END
+		FROM nodes
+		WHERE type='self_built' AND inbound_tag != ''
+		  AND (trim(remark) != '' OR name != '')
 		  AND route_upstream_inbound_id=0 AND route_upstream_broken=0
 		ORDER BY sort_order, id`)
 	if err != nil {
@@ -100,11 +103,22 @@ func (s *Store) SelfBuiltNodeNames() (map[string]string, error) {
 	return out, rows.Err()
 }
 
+// NodeDisplayName returns the subscription-facing name: remark preferred, else name.
+func NodeDisplayName(n *Node) string {
+	if n == nil {
+		return ""
+	}
+	if r := strings.TrimSpace(n.Remark); r != "" {
+		return r
+	}
+	return n.Name
+}
+
 func (s *Store) CreateNode(n Node) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO nodes
-		(type, name, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		n.Type, n.Name, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, n.SourceID,
+		(type, name, remark, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		n.Type, n.Name, n.Remark, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, n.SourceID,
 		boolToInt(n.Enabled), n.SortOrder, time.Now().Unix())
 	if err != nil {
 		return 0, err
@@ -120,8 +134,8 @@ func (s *Store) CreateNode(n Node) (int64, error) {
 
 func (s *Store) UpdateNode(n Node) error {
 	_, err := s.db.Exec(`UPDATE nodes SET
-		type=?, name=?, protocol=?, inbound_tag=?, route_upstream_inbound_id=?, route_upstream_broken=?, share_link=?, enabled=?, sort_order=? WHERE id=?`,
-		n.Type, n.Name, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, boolToInt(n.Enabled), n.SortOrder, n.ID)
+		type=?, name=?, remark=?, protocol=?, inbound_tag=?, route_upstream_inbound_id=?, route_upstream_broken=?, share_link=?, enabled=?, sort_order=? WHERE id=?`,
+		n.Type, n.Name, n.Remark, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, boolToInt(n.Enabled), n.SortOrder, n.ID)
 	if err != nil {
 		return err
 	}
@@ -298,30 +312,40 @@ func (s *Store) PlanGroupIDs(packageID int64) ([]int64, error) {
 
 // ---- aggregation ----
 
-// AccessibleGroupIDs returns the groups a user can use: the free group (if set)
-// plus the union of the groups bound to every NON-EXPIRED plan the user holds.
-// (Traffic exhaustion only cuts off metered self-built nodes — enforced per
-// bucket in BuildUsersByTag — so access here is gated by time, not quota, which
-// keeps unmetered external nodes reachable until the plan actually expires.)
+// AccessibleGroupIDs returns the groups a user can use. It deliberately derives
+// access through orderBuckets, the same ownership calculation used for native
+// sing-box inbounds: exhausted plans stop granting groups, while a funded pool
+// or active general grant can cover groups from a positive plan entitlement.
+// A zero-limit plan never establishes that entitlement.
 func (s *Store) AccessibleGroupIDs(u *User) ([]int64, error) {
 	set := map[int64]bool{}
-	if free, _ := s.GetSettingInt64("free_group_id", 0); free > 0 {
+	free, _ := s.GetSettingInt64("free_group_id", 0)
+	if free > 0 {
+		// Preserve legacy external-free-node visibility even if an old account has
+		// not received its separate metering bucket yet.
 		set[free] = true
 	}
 	buckets, err := s.ListBuckets(u.ID)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().Unix()
+	groupsByPackage := map[int64][]int64{}
 	for _, b := range buckets {
-		if b.Kind != "plan" || !b.NotExpired(now) {
+		if b.Kind != "plan" || b.PackageID <= 0 || b.Status == "queued" || b.TrafficLimit <= 0 {
 			continue
 		}
-		gids, err := s.PlanGroupIDs(b.PackageID)
+		if _, ok := groupsByPackage[b.PackageID]; ok {
+			continue
+		}
+		groupsByPackage[b.PackageID], err = s.PlanGroupIDs(b.PackageID)
 		if err != nil {
 			return nil, err
 		}
-		for _, g := range gids {
+	}
+	for _, owned := range orderBuckets(buckets, time.Now().Unix(), free, func(packageID int64) []int64 {
+		return groupsByPackage[packageID]
+	}) {
+		for g := range owned.groups {
 			set[g] = true
 		}
 	}
@@ -329,6 +353,7 @@ func (s *Store) AccessibleGroupIDs(u *User) ([]int64, error) {
 	for g := range set {
 		out = append(out, g)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out, nil
 }
 
@@ -371,7 +396,7 @@ func (s *Store) NodesInGroupsTagged(groupIDs []int64) ([]GroupedNode, error) {
 		var gid int64
 		var isAI bool
 		var routeBroken int
-		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.Protocol, &n.InboundTag, &n.RouteUpstreamInboundID, &routeBroken, &n.ShareLink,
+		if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.Remark, &n.Protocol, &n.InboundTag, &n.RouteUpstreamInboundID, &routeBroken, &n.ShareLink,
 			&n.SourceID, &n.Enabled, &n.SortOrder, &n.CreatedAt, &gid, &isAI); err != nil {
 			return nil, err
 		}
@@ -518,13 +543,28 @@ func (s *Store) DeleteSource(id int64) error {
 }
 
 // ReplaceSourceNodes swaps in freshly-fetched nodes for a source and records the
-// fetch result. groupIDs (optional) are applied to all imported nodes.
+// fetch result. A non-nil groupIDs updates the source binding atomically with
+// its nodes; nil reuses the current stored binding, not an earlier fetch snapshot.
 func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int64, fetchErr string) error {
+	// A failed refresh changes only the diagnostic; the last successful snapshot,
+	// timestamp, count and group memberships remain intact.
+	if fetchErr != "" {
+		_, err := s.db.Exec(`UPDATE node_sources SET last_error=? WHERE id=?`, fetchErr, sourceID)
+		return err
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var storedGroups string
+	if err := tx.QueryRow(`SELECT group_ids FROM node_sources WHERE id=?`, sourceID).Scan(&storedGroups); err != nil {
+		return err // source deleted during fetch: do not recreate orphaned nodes
+	}
+	if groupIDs == nil {
+		groupIDs = unmarshalGroupIDs(storedGroups)
+	}
 	now := time.Now().Unix()
 	if fetchErr == "" {
 		// Group memberships are keyed by node id and are not ON DELETE CASCADE, so
@@ -551,8 +591,8 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int6
 			}
 		}
 	}
-	if _, err := tx.Exec(`UPDATE node_sources SET last_fetched=?, last_count=?, last_error=? WHERE id=?`,
-		now, len(nodes), fetchErr, sourceID); err != nil {
+	if _, err := tx.Exec(`UPDATE node_sources SET last_fetched=?, last_count=?, last_error=?, group_ids=? WHERE id=?`,
+		now, len(nodes), fetchErr, marshalGroupIDs(groupIDs), sourceID); err != nil {
 		return err
 	}
 	return tx.Commit()
