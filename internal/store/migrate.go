@@ -418,6 +418,7 @@ CREATE TABLE IF NOT EXISTS user_plans (
   expiry_at      INTEGER NOT NULL DEFAULT 0,        -- 0 = never
   last_online_at INTEGER NOT NULL DEFAULT 0,
   order_id       INTEGER NOT NULL DEFAULT 0,
+  auto_renew     INTEGER NOT NULL DEFAULT 1,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL
 );
@@ -1023,6 +1024,10 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE user_plans ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
 		`ALTER TABLE user_plans ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE user_plans ADD COLUMN queue_key TEXT NOT NULL DEFAULT ''`,
+		// Renewal preference is stored on every live segment in a queue line. The
+		// default preserves existing subscriptions and makes new purchases opt out
+		// only when the user explicitly disables automatic renewal.
+		`ALTER TABLE user_plans ADD COLUMN auto_renew INTEGER NOT NULL DEFAULT 1`,
 		// A proxy_username must be globally unique (it becomes a stats identity);
 		// partial index so the many empty defaults don't collide.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_proxy_username ON user_plans(proxy_username) WHERE proxy_username <> ''`,

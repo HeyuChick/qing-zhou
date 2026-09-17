@@ -140,7 +140,8 @@
 
         <!-- 服务器卡片 -->
         <div class="server-grid">
-          <div v-for="(s, i) in servers" :key="s.name" class="server-card" :style="{ '--i': i }">
+          <template v-for="(s, i) in servers" :key="s.name">
+          <div class="server-card" :style="{ '--i': i }">
             <div class="card-top-line" :class="s.status" />
 
             <!-- 头部 -->
@@ -260,6 +261,57 @@
               </span>
             </div>
           </div>
+
+          <!-- 上游余额只对管理员加载，避免把供应商账户用量暴露到公开状态页。 -->
+          <div v-if="auth.isAdmin && s.name === '面板本机'" class="server-card upstream-balance-card" :style="{ '--i': i + 1 }">
+            <div class="card-top-line online" />
+            <div class="card-header">
+              <div class="card-title">
+                <span class="status-beacon online" />
+                <span class="server-name">上游余额</span>
+              </div>
+              <span class="status-badge online"><i class="badge-dot" /> 官方数据</span>
+            </div>
+            <div class="tag-line">
+              <span class="tag loc">OCI · Cloudflare</span>
+              <span class="tag spec">每 15 分钟更新</span>
+            </div>
+            <div class="upstream-balance-grid">
+              <div
+                v-for="item in upstreamBalanceItems"
+                :key="item.provider"
+                class="upstream-balance-item"
+                :class="{ dragging: upstreamDragging === item.provider, 'drag-over': upstreamDragOver === item.provider }"
+                draggable="true"
+                @dragstart="handleUpstreamDragStart(item.provider, $event)"
+                @dragover.prevent="handleUpstreamDragOver(item.provider, $event)"
+                @drop.prevent="handleUpstreamDrop(item.provider)"
+                @dragend="handleUpstreamDragEnd"
+              >
+                <div class="upstream-balance-head">
+                  <span class="upstream-provider-mark" :class="item.provider">{{ item.provider === 'oci' ? 'OCI' : 'CF' }}</span>
+                  <span class="upstream-provider-name">{{ item.provider === 'oci' ? 'Oracle Cloud' : 'Cloudflare' }}</span>
+                  <span class="upstream-drag-hint" title="拖动调整余额顺序">⋮⋮</span>
+                </div>
+                <template v-if="item.usage?.success">
+                  <div class="upstream-balance-value">{{ upstreamBalanceValue(item) }}</div>
+                  <div class="upstream-balance-meta">{{ upstreamBalanceMeta(item) }}</div>
+                  <div class="upstream-balance-track"><i :class="upstreamUsageLevel(item.usage)" :style="{ width: upstreamUsagePercent(item.usage) + '%' }" /></div>
+                  <div class="upstream-balance-foot">{{ item.usage.period || '当前周期' }} · {{ fmtUpdated(item.usage.updated_at) }}</div>
+                </template>
+                <template v-else>
+                  <div class="upstream-balance-value muted">{{ item.view.configured ? '查询中' : '未配置' }}</div>
+                  <div class="upstream-balance-meta">{{ item.view.configured ? (item.usage?.error || '等待官方接口返回') : '前往上游管理配置' }}</div>
+                  <div class="upstream-balance-foot">{{ item.provider === 'oci' ? 'OCI Usage API' : 'Cloudflare Analytics GraphQL' }}</div>
+                </template>
+              </div>
+            </div>
+            <div class="card-footer upstream-card-footer">
+              <span class="footer-time"><span class="dot online" />余额卡片可拖动排序</span>
+              <button class="upstream-refresh-link" type="button" :disabled="upstreamRefreshing" @click="refreshUpstreamBalances">刷新</button>
+            </div>
+          </div>
+          </template>
         </div>
       </template>
     </div>
@@ -267,9 +319,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, shallowRef } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, shallowRef, reactive, watch } from 'vue'
 import { NEmpty } from 'naive-ui'
-import { apiGet } from '@/api'
+import { apiGet, apiList, apiPost, apiPut } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import { useConfigStore } from '@/stores/config'
 import { fmtBytes, fmtUptime, timeAgo, pct } from '@/utils/format'
 import { useCountUp } from '@/utils/countup'
@@ -297,11 +350,151 @@ interface Server {
   metrics: ServerMetrics | null; last_seen: number; spark?: Spark | null
 }
 
+type UpstreamProvider = 'oci' | 'cloudflare'
+interface UpstreamView {
+  provider: UpstreamProvider
+  configured: boolean
+  limit: number
+}
+interface UpstreamUsage {
+  configured: boolean
+  success: boolean
+  used: number
+  limit: number
+  remaining: number
+  unit: string
+  period: string
+  source: string
+  updated_at?: string
+  error?: string
+}
+
 const config = useConfigStore()
+const auth = useAuthStore()
 const servers = ref<Server[]>([])
 const loading = ref(false)
 const refreshing = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
+
+const upstreamDefaults: UpstreamProvider[] = ['oci', 'cloudflare']
+const upstreamOrder = ref<UpstreamProvider[]>([...upstreamDefaults])
+const upstreamViews = reactive<Record<UpstreamProvider, UpstreamView>>({
+  oci: { provider: 'oci', configured: false, limit: 10_000_000_000_000 },
+  cloudflare: { provider: 'cloudflare', configured: false, limit: 100_000 },
+})
+const upstreamUsages = reactive<Partial<Record<UpstreamProvider, UpstreamUsage>>>({})
+const upstreamLoading = ref(false)
+const upstreamRefreshing = ref(false)
+const upstreamDragging = ref<UpstreamProvider | null>(null)
+const upstreamDragOver = ref<UpstreamProvider | null>(null)
+let upstreamTimer: ReturnType<typeof setInterval> | null = null
+
+const upstreamBalanceItems = computed(() => upstreamOrder.value.map(provider => ({
+  provider,
+  view: upstreamViews[provider],
+  usage: upstreamUsages[provider],
+})))
+
+function normalizeUpstreamOrder(raw: unknown): UpstreamProvider[] {
+  const values = Array.isArray(raw) ? raw : String(raw || '').split(',')
+  const valid = values.filter((value): value is UpstreamProvider => value === 'oci' || value === 'cloudflare')
+  return [...new Set([...valid, ...upstreamDefaults])]
+}
+function upstreamUsagePercent(usage?: UpstreamUsage) {
+  return usage?.limit ? Math.min(100, Math.max(0, Math.round(usage.used / usage.limit * 1000) / 10)) : 0
+}
+function upstreamUsageLevel(usage?: UpstreamUsage) {
+  const percent = upstreamUsagePercent(usage)
+  return percent >= 90 ? 'crit' : percent >= 70 ? 'warn' : 'ok'
+}
+function upstreamBalanceValue(item: { provider: UpstreamProvider; usage?: UpstreamUsage }) {
+  return item.provider === 'oci' ? fmtBytes(item.usage?.remaining || 0) : fmtRequests(item.usage?.remaining)
+}
+function upstreamBalanceMeta(item: { provider: UpstreamProvider; usage?: UpstreamUsage }) {
+  if (!item.usage) return ''
+  return item.provider === 'oci'
+    ? `总额 ${fmtBytes(item.usage.limit)} − 已用 ${fmtBytes(item.usage.used)}`
+    : `已用 ${fmtRequests(item.usage.used)} / 上限 ${fmtRequests(item.usage.limit)}`
+}
+function fmtRequests(value?: number) { return new Intl.NumberFormat('zh-CN').format(value || 0) + ' 次' }
+function fmtUpdated(value?: string) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚未更新' }
+
+async function refreshUpstream(provider: UpstreamProvider) {
+  const view = upstreamViews[provider]
+  if (!view.configured) {
+    delete upstreamUsages[provider]
+    return
+  }
+  try {
+    upstreamUsages[provider] = await apiPost<UpstreamUsage>(`/api/admin/upstreams/${provider}/refresh`, undefined, { timeoutMs: 30_000 })
+  } catch (error: any) {
+    upstreamUsages[provider] = {
+      configured: true, success: false, used: 0, limit: view.limit, remaining: 0,
+      unit: provider === 'oci' ? 'bytes' : 'requests', period: '', source: '', error: error.message || '查询失败',
+    }
+  }
+}
+async function loadUpstreamBalances() {
+  if (!auth.isAdmin || upstreamLoading.value) return
+  upstreamLoading.value = true
+  try {
+    const [views, settings] = await Promise.all([
+      apiGet<UpstreamView[]>('/api/admin/upstreams'),
+      apiGet<Record<string, string>>('/api/admin/settings'),
+    ])
+    for (const provider of upstreamDefaults) {
+      const view = views?.find(item => item.provider === provider)
+      Object.assign(upstreamViews[provider], view || { provider, configured: false })
+    }
+    upstreamOrder.value = normalizeUpstreamOrder(settings?.admin_upstream_balance_order)
+    await Promise.all(upstreamDefaults.map(refreshUpstream))
+  } catch {
+    // The public monitor must remain usable when an administrator session expires
+    // or a provider request is unavailable.
+  } finally { upstreamLoading.value = false }
+}
+async function refreshUpstreamBalances() {
+  if (!auth.isAdmin || upstreamRefreshing.value) return
+  upstreamRefreshing.value = true
+  try { await Promise.all(upstreamDefaults.map(refreshUpstream)) } finally { upstreamRefreshing.value = false }
+}
+function handleUpstreamDragStart(provider: UpstreamProvider, event: DragEvent) {
+  upstreamDragging.value = provider
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', provider)
+  }
+}
+function handleUpstreamDragOver(provider: UpstreamProvider, event: DragEvent) {
+  if (!upstreamDragging.value || upstreamDragging.value === provider) return
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  upstreamDragOver.value = provider
+}
+async function handleUpstreamDrop(provider: UpstreamProvider) {
+  const source = upstreamDragging.value
+  upstreamDragOver.value = null
+  if (!source || source === provider) return
+  const previous = [...upstreamOrder.value]
+  const next = [...previous]
+  const from = next.indexOf(source), to = next.indexOf(provider)
+  if (from < 0 || to < 0) return
+  const target = next.indexOf(provider)
+  ;[next[from], next[target]] = [next[target], next[from]]
+  upstreamOrder.value = next
+  try {
+    await apiPut('/api/admin/settings', { admin_upstream_balance_order: next.join(',') })
+  } catch {
+    upstreamOrder.value = previous
+  }
+}
+function handleUpstreamDragEnd() {
+  upstreamDragging.value = null
+  upstreamDragOver.value = null
+}
+
+watch(() => auth.isAdmin, enabled => {
+  if (enabled) void loadUpstreamBalances()
+})
 
 // 实时时钟
 const clock = ref('')
@@ -407,13 +600,40 @@ function sparkArea(arr: number[]) {
 
 async function fetchData() {
   try {
-    const [pub, spk] = await Promise.all([
+    const [pub, spk, adminServers] = await Promise.all([
       apiGet<{ servers: Server[] }>('/api/monitor/public'),
       apiGet<{ servers: Spark[] }>('/api/monitor/public/sparklines?range=1h').catch(() => null),
+      auth.isAdmin ? apiList<any>('/api/admin/monitor/servers').catch(() => []) : Promise.resolve([] as any[]),
     ])
     const sparks: Record<string, Spark> = {}
     if (spk?.servers) for (const s of spk.servers) sparks[s.name] = s
-    const list = Array.isArray(pub?.servers) ? pub.servers : []
+    const list = Array.isArray(pub?.servers) ? [...pub.servers] : []
+    // The public endpoint intentionally hides the panel host by default. An
+    // administrator still needs to see the balance card next to 面板本机, so
+    // merge the local row from the authenticated monitor endpoint only.
+    if (auth.isAdmin) {
+      const local = adminServers.find(s => s.local || s.id === 0 || s.name === '面板本机')
+      if (local) {
+        const localServer: Server = {
+          name: local.name || '面板本机', status: local.status === 'online' ? 'online' : 'offline',
+          location: local.location || '', provider: local.provider || '', spec: local.spec || '',
+          days_left: local.days_left ?? null, price: local.price,
+          metrics: local.metrics ? {
+            cpu_percent: local.metrics.cpu_percent || 0, mem_used: local.metrics.mem_used || 0, mem_total: local.metrics.mem_total || 0,
+            swap_used: local.metrics.swap_used || 0, swap_total: local.metrics.swap_total || 0,
+            disk_used: local.metrics.disk_used || 0, disk_total: local.metrics.disk_total || 0,
+            net_up: local.metrics.net_tx || 0, net_down: local.metrics.net_rx || 0,
+            load1: local.metrics.load1 || 0, load5: local.metrics.load5 || 0, load15: local.metrics.load15 || 0,
+            tcp_connections: local.metrics.tcp_connections || 0, process_count: local.metrics.process_count || 0,
+            uptime: local.metrics.uptime || 0, platform: local.metrics.platform || '', arch: local.metrics.arch || '',
+          } : null,
+          last_seen: local.last_seen || 0,
+        }
+        const existing = list.findIndex(server => server.name === localServer.name)
+        if (existing >= 0) list[existing] = localServer
+        else list.unshift(localServer)
+      }
+    }
     for (const s of list) s.spark = sparks[s.name] || null
     servers.value = list
   } catch {}
@@ -530,11 +750,16 @@ onMounted(async () => {
   loading.value = false
   timer = setInterval(fetchData, 30000)
   loadHeatmap('24h')
+  if (auth.isAdmin) void loadUpstreamBalances()
+  upstreamTimer = setInterval(() => {
+    if (document.visibilityState === 'visible' && auth.isAdmin) void refreshUpstreamBalances()
+  }, 15 * 60 * 1000)
   window.addEventListener('resize', onWinResize)
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)
   if (clockTimer) clearInterval(clockTimer)
+  if (upstreamTimer) clearInterval(upstreamTimer)
   window.removeEventListener('resize', onWinResize)
   heatChart.value?.dispose()
 })
@@ -634,6 +859,7 @@ onUnmounted(() => {
 }
 @keyframes cardIn { from { opacity: 0; transform: translateY(11px) scale(.988); filter: blur(3px); } to { opacity: 1; transform: none; filter: none; } }
 .server-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); border-color: var(--border-strong); }
+.upstream-balance-card:hover { transform: translateY(-2px); }
 
 .card-top-line { height: 3px; }
 .card-top-line.online { background: linear-gradient(90deg, #5c7c63, #8fb097); }
@@ -720,6 +946,33 @@ onUnmounted(() => {
 .public-traffic-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; font-size: 10px; color: var(--text-3); }
 .warn-text { color: var(--warn); }
 
+/* 管理员专属上游余额：两个官方数据源合并在一张卡片里，可拖动子卡片调整顺序。 */
+.upstream-balance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 0 12px 12px; }
+.upstream-balance-item {
+  min-width: 0; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-soft);
+  cursor: grab; transition: border-color .2s var(--ease-standard), box-shadow .2s var(--ease-standard), opacity .2s ease, transform .2s ease;
+}
+.upstream-balance-item:active { cursor: grabbing; }
+.upstream-balance-item:hover { border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
+.upstream-balance-item.dragging { opacity: .45; transform: scale(.98); }
+.upstream-balance-item.drag-over { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.upstream-balance-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.upstream-provider-mark { display: inline-grid; place-items: center; width: 28px; height: 22px; border-radius: 6px; font-size: 9px; font-weight: 750; letter-spacing: .02em; flex-shrink: 0; }
+.upstream-provider-mark.oci { background: #f7ead6; color: #9a6e23; }
+.upstream-provider-mark.cloudflare { background: #e7eff7; color: #286c98; }
+.upstream-provider-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 650; color: var(--text-2); }
+.upstream-drag-hint { margin-left: auto; color: var(--text-3); font-size: 14px; line-height: 1; letter-spacing: -3px; opacity: .7; }
+.upstream-balance-value { margin-top: 10px; font-size: 20px; line-height: 1.15; font-weight: 750; color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.upstream-balance-value.muted { color: var(--text-2); font-size: 18px; }
+.upstream-balance-meta { min-height: 30px; margin-top: 4px; color: var(--text-3); font-size: 10.5px; line-height: 1.45; font-variant-numeric: tabular-nums; }
+.upstream-balance-track { height: 4px; margin-top: 7px; overflow: hidden; border-radius: 4px; background: var(--bg); }
+.upstream-balance-track i { display: block; height: 100%; border-radius: inherit; transition: width .5s var(--ease-emphasized); }
+.upstream-balance-track i.ok { background: var(--success); } .upstream-balance-track i.warn { background: var(--warn); } .upstream-balance-track i.crit { background: var(--danger); }
+.upstream-balance-foot { margin-top: 7px; overflow: hidden; color: var(--text-3); font-size: 9.5px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.upstream-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.upstream-refresh-link { padding: 0; border: 0; background: transparent; color: var(--accent-strong); font: inherit; font-size: 11px; cursor: pointer; }
+.upstream-refresh-link:disabled { cursor: wait; opacity: .5; }
+
 .card-footer { padding: 9px 16px; border-top: 1px solid var(--border); }
 .footer-time { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-3); }
 .footer-time .dot { width: 6px; height: 6px; border-radius: 50%; }
@@ -732,6 +985,7 @@ onUnmounted(() => {
   .hero-title { font-size: 20px; }
   .summary-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
   .server-grid { grid-template-columns: 1fr; }
+  .upstream-balance-grid { grid-template-columns: 1fr 1fr; }
   .heat-legend { display: none; }
 }
 @media (max-width: 380px) { .summary-grid { grid-template-columns: 1fr 1fr; } .summary-icon { width: 38px; height: 38px; } .summary-val { font-size: 20px; } }

@@ -571,12 +571,59 @@
 
       <n-card v-show="activeSectionId === 'settings-backup'" id="settings-backup" class="settings-section" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
-          在线导出整库快照（单个 <code>.db</code> 文件，含用户 / 订单 / 节点 / 证书）。数据库跑在 WAL 模式下，
-          <b>直接 <code>scp</code> 拷贝 <code>qingzhou.db</code> 拿到的是残缺副本</b>——已提交的数据可能还在 <code>-wal</code> 里。
-          此处导出由 SQLite 自己在一致性快照上生成，导出期间面板照常读写。
-          文件里的敏感字段仍是加密的，恢复到别处需要同一个 <code>QZ_SECRET_KEY</code>。
+          本地下载仍可生成 SQLite 一致性快照；配置下面的 Cloudflare R2 或其他 S3 兼容对象存储后，
+          面板会把同一份快照自动上传到远端。数据库跑在 WAL 模式下，<b>不要直接拷贝 <code>qingzhou.db</code></b>；
+          远端文件里的敏感字段仍是加密的，恢复到别处需要同一个 <code>QZ_SECRET_KEY</code>。
         </p>
-        <n-button :loading="backingUp" @click="handleBackup">下载数据库备份</n-button>
+        <n-alert v-if="backupError" type="warning" :show-icon="true" :title="backupError" style="margin-bottom:14px;" />
+        <n-form label-placement="top" class="backup-form">
+          <n-form-item label="对象存储 Endpoint">
+            <n-input v-model:value="backupConfig.endpoint" placeholder="https://<account-id>.r2.cloudflarestorage.com" />
+            <div class="form-hint">Cloudflare R2 使用账户专属 S3 Endpoint；其他 S3 兼容服务填写其 API 地址。</div>
+          </n-form-item>
+          <div class="backup-form-grid">
+            <n-form-item label="Region"><n-input v-model:value="backupConfig.region" placeholder="auto" /></n-form-item>
+            <n-form-item label="Bucket"><n-input v-model:value="backupConfig.bucket" placeholder="qingzhou-backups" /></n-form-item>
+            <n-form-item label="Access Key ID"><n-input v-model:value="backupConfig.access_key_id" /></n-form-item>
+            <n-form-item label="Secret Access Key">
+              <n-input v-model:value="backupConfig.secret_access_key" type="password" show-password-on="click" placeholder="留空保留已保存密钥" />
+              <div class="form-hint">{{ backupConfigured ? '已保存；不会回显。留空表示继续使用当前密钥。' : '仅在保存时写入加密设置。' }}</div>
+            </n-form-item>
+          </div>
+          <div class="backup-form-grid backup-form-grid-short">
+            <n-form-item label="对象前缀"><n-input v-model:value="backupConfig.prefix" placeholder="qingzhou" /></n-form-item>
+            <n-form-item label="路径风格">
+              <n-switch v-model:value="backupConfig.force_path_style" />
+              <div class="form-hint">多数 R2 Endpoint 保持关闭；MinIO 等服务可能需要开启。</div>
+            </n-form-item>
+          </div>
+        </n-form>
+        <div class="backup-actions">
+          <n-button type="primary" :loading="savingBackupConfig" @click="saveBackupConfig">保存远端配置</n-button>
+          <n-button :loading="testingBackupConfig" :disabled="!backupConfig.endpoint || !backupConfig.bucket" @click="testBackupConfig">测试连接</n-button>
+          <n-button :loading="backingUp" @click="handleBackup">下载本地快照</n-button>
+        </div>
+
+        <div class="backup-schedule">
+          <div class="backup-subhead"><div><b>自动备份</b><p>定时任务只在远端配置有效时执行；默认每天 03:00 UTC。</p></div><n-switch v-model:value="backupSchedule.enabled" /></div>
+          <div class="backup-form-grid backup-form-grid-short">
+            <n-form-item label="Cron 表达式"><n-input v-model:value="backupSchedule.cron_expr" placeholder="0 3 * * *" /></n-form-item>
+            <n-form-item label="保留天数"><n-input-number v-model:value="backupSchedule.retain_days" :min="0" :max="3650" :show-button="false" /></n-form-item>
+            <n-form-item label="保留份数"><n-input-number v-model:value="backupSchedule.retain_count" :min="0" :max="100" :show-button="false" /></n-form-item>
+          </div>
+          <n-button :loading="savingBackupSchedule" @click="saveBackupSchedule">保存自动备份计划</n-button>
+        </div>
+
+        <div class="backup-history">
+          <div class="backup-subhead"><div><b>远端备份记录</b><p>记录保存在面板数据库；删除记录会同时删除远端对象。</p></div><n-button quaternary size="small" :loading="loadingBackups" @click="loadRemoteBackups">刷新</n-button></div>
+          <div v-if="!remoteBackups.length" class="backup-empty">暂无远端备份记录</div>
+          <div v-for="record in remoteBackups" :key="record.id" class="backup-record">
+            <div class="backup-record-main"><b>{{ record.file_name }}</b><span>{{ backupStatusText(record.status) }} · {{ formatBackupTime(record.started_at) }}</span></div>
+            <div class="backup-record-meta"><span v-if="record.size_bytes">{{ fmtBytes(record.size_bytes) }}</span><code v-if="record.sha256">{{ record.sha256 }}</code><span v-if="record.error" class="backup-error">{{ record.error }}</span></div>
+            <div class="backup-record-actions"><n-button v-if="record.status === 'completed'" size="small" @click="downloadRemoteBackup(record)">下载</n-button><n-button size="small" tertiary type="error" @click="deleteRemoteBackup(record)">删除</n-button></div>
+          </div>
+          <n-button type="primary" :loading="creatingRemoteBackup" :disabled="!backupConfigured" @click="createRemoteBackup">立即备份到远端</n-button>
+        </div>
       </n-card>
 
       <div v-if="hasUnsavedChanges || saving" class="settings-actions">
@@ -598,8 +645,9 @@ import OAuth2Settings from '@/components/OAuth2Settings.vue'
 import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { NAlert, NCard, NCheckbox, NForm, NFormItem, NInput, NInputGroup, NInputNumber, NSelect, NSwitch, NButton, NSpace, NSpin, useDialog, useMessage } from 'naive-ui'
-import { apiGet, apiPost, apiPut, apiList, apiDownload } from '@/api'
+import { apiGet, apiPost, apiPut, apiDelete, apiList, apiDownload } from '@/api'
 import { useConfigStore } from '@/stores/config'
+import { fmtBytes } from '@/utils/format'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -634,7 +682,7 @@ const settingsGroups: SettingsGroup[] = [
   ] },
   { label: '系统维护', sections: [
     { id: 'settings-update', label: '在线更新', note: '版本与令牌', description: '配置在线更新检查使用的 GitHub API 令牌。', keywords: '更新 GitHub Token API 限额' },
-    { id: 'settings-backup', label: '数据备份', note: '一致性快照', description: '导出包含全部业务数据的一致性数据库快照。', keywords: '备份 数据库 SQLite WAL 下载 恢复' },
+    { id: 'settings-backup', label: '数据备份', note: '一致性快照', description: '导出并托管包含全部业务数据的一致性数据库快照。', keywords: '备份 数据库 SQLite WAL 下载 恢复 R2 S3 对象存储 定时' },
   ] },
 ]
 const settingsSections = settingsGroups.flatMap(group => group.sections)
@@ -1179,6 +1227,156 @@ async function handleTestTelegram() {
 }
 
 const backingUp = ref(false)
+type BackupConfig = {
+  endpoint: string
+  region: string
+  bucket: string
+  access_key_id: string
+  secret_access_key: string
+  prefix: string
+  force_path_style: boolean
+}
+type BackupSchedule = { enabled: boolean; cron_expr: string; retain_days: number; retain_count: number }
+type BackupRecord = {
+  id: string
+  status: string
+  file_name: string
+  object_key: string
+  size_bytes: number
+  sha256: string
+  triggered_by: string
+  error?: string
+  started_at: number
+  finished_at?: number
+}
+const backupConfig = reactive<BackupConfig>({ endpoint: '', region: 'auto', bucket: '', access_key_id: '', secret_access_key: '', prefix: 'qingzhou', force_path_style: false })
+const backupSchedule = reactive<BackupSchedule>({ enabled: false, cron_expr: '0 3 * * *', retain_days: 14, retain_count: 10 })
+const backupConfigured = ref(false)
+const backupError = ref('')
+const savingBackupConfig = ref(false)
+const testingBackupConfig = ref(false)
+const savingBackupSchedule = ref(false)
+const loadingBackups = ref(false)
+const creatingRemoteBackup = ref(false)
+const remoteBackups = ref<BackupRecord[]>([])
+
+function applyBackupConfig(data: any) {
+  const cfg = data?.config || {}
+  backupConfigured.value = !!data?.configured
+  backupConfig.endpoint = String(cfg.endpoint || '')
+  backupConfig.region = String(cfg.region || 'auto')
+  backupConfig.bucket = String(cfg.bucket || '')
+  backupConfig.access_key_id = String(cfg.access_key_id || '')
+  backupConfig.secret_access_key = ''
+  backupConfig.prefix = String(cfg.prefix || 'qingzhou')
+  backupConfig.force_path_style = !!cfg.force_path_style
+}
+
+function applyBackupSchedule(data: any) {
+  backupSchedule.enabled = !!data?.enabled
+  backupSchedule.cron_expr = String(data?.cron_expr || '0 3 * * *')
+  backupSchedule.retain_days = Number.isFinite(Number(data?.retain_days)) ? Number(data.retain_days) : 14
+  backupSchedule.retain_count = Number.isFinite(Number(data?.retain_count)) ? Number(data.retain_count) : 10
+}
+
+async function loadRemoteBackups() {
+  loadingBackups.value = true
+  try {
+    const data = await apiGet<{ items?: BackupRecord[] }>('/api/admin/backups')
+    remoteBackups.value = Array.isArray(data?.items) ? data.items : []
+  } catch (e: any) {
+    backupError.value = e?.message || '读取远端备份记录失败'
+  } finally { loadingBackups.value = false }
+}
+
+async function loadBackupSettings() {
+  try {
+    const [cfg, schedule] = await Promise.all([
+      apiGet<any>('/api/admin/backups/config'),
+      apiGet<any>('/api/admin/backups/schedule'),
+    ])
+    applyBackupConfig(cfg)
+    applyBackupSchedule(schedule)
+    await loadRemoteBackups()
+  } catch (e: any) {
+    backupError.value = e?.message || '读取远端备份配置失败'
+  }
+}
+
+async function saveBackupConfig() {
+  savingBackupConfig.value = true
+  backupError.value = ''
+  try {
+    const data = await apiPut<any>('/api/admin/backups/config', { ...backupConfig })
+    applyBackupConfig({ config: data, configured: true })
+    message.success('远端备份配置已保存')
+  } catch (e: any) { backupError.value = e?.message || '保存远端配置失败'; message.error(backupError.value) } finally { savingBackupConfig.value = false }
+}
+
+async function testBackupConfig() {
+  testingBackupConfig.value = true
+  try {
+    const data = await apiPost<{ ok?: boolean; message?: string }>('/api/admin/backups/config/test', { ...backupConfig })
+    if (!data?.ok) throw new Error(data?.message || '连接失败')
+    message.success('对象存储连接成功')
+  } catch (e: any) { message.error(e?.message || '连接测试失败') } finally { testingBackupConfig.value = false }
+}
+
+async function saveBackupSchedule() {
+  savingBackupSchedule.value = true
+  try {
+    const data = await apiPut<BackupSchedule>('/api/admin/backups/schedule', { ...backupSchedule })
+    applyBackupSchedule(data)
+    message.success('自动备份计划已保存')
+  } catch (e: any) { message.error(e?.message || '保存自动备份计划失败') } finally { savingBackupSchedule.value = false }
+}
+
+async function createRemoteBackup() {
+  creatingRemoteBackup.value = true
+  try {
+    const record = await apiPost<BackupRecord>('/api/admin/backups')
+    message.success('远端备份已开始')
+    await loadRemoteBackups()
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await sleep(1000)
+      await loadRemoteBackups()
+      const current = remoteBackups.value.find(item => item.id === record?.id)
+      if (current && current.status !== 'pending') {
+        if (current.status === 'completed') message.success('远端备份完成')
+        else message.error(current.error || '远端备份失败')
+        return
+      }
+    }
+    message.warning('备份仍在执行，可稍后刷新记录')
+  } catch (e: any) { message.error(e?.message || '创建远端备份失败') } finally { creatingRemoteBackup.value = false }
+}
+
+async function downloadRemoteBackup(record: BackupRecord) {
+  try {
+    const data = await apiGet<{ url?: string }>(`/api/admin/backups/${record.id}/download-url`)
+    if (!data?.url) throw new Error('服务端未返回下载链接')
+    window.open(data.url, '_blank', 'noopener,noreferrer')
+  } catch (e: any) { message.error(e?.message || '获取下载链接失败') }
+}
+
+async function deleteRemoteBackup(record: BackupRecord) {
+  if (!window.confirm(`确定删除远端备份 ${record.file_name}？此操作会同时删除对象存储中的文件。`)) return
+  try {
+    await apiDelete(`/api/admin/backups/${record.id}`)
+    remoteBackups.value = remoteBackups.value.filter(item => item.id !== record.id)
+    message.success('远端备份已删除')
+  } catch (e: any) { message.error(e?.message || '删除远端备份失败') }
+}
+
+function formatBackupTime(timestamp?: number) {
+  if (!timestamp) return '—'
+  return new Date(timestamp * 1000).toLocaleString()
+}
+
+function backupStatusText(status: string) {
+  return status === 'completed' ? '已完成' : status === 'failed' ? '失败' : '执行中'
+}
+
 async function handleBackup() {
   backingUp.value = true
   try {
@@ -1233,6 +1431,7 @@ async function loadSettings() {
       apiList<any>('/api/admin/node-groups').catch(() => []),
       apiGet<any>('/api/admin/settings/default-templates').catch(() => null),
       apiGet<any>('/api/admin/ops-recipients').catch(() => null),
+      loadBackupSettings(),
     ])
     applyOpsRecipients(ops)
     if (Array.isArray(defaults?.telegram)) tgTplMeta.value = defaults.telegram
@@ -1316,6 +1515,24 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 .settings-retry { margin-left:10px; }
 .settings-section { margin-bottom:16px; scroll-margin-top:84px; }
 .settings-section :deep(.n-form) { max-width:760px; }
+.backup-form { max-width:760px !important; }
+.backup-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 14px; }
+.backup-form-grid-short { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.backup-actions { display:flex; flex-wrap:wrap; gap:8px; margin:2px 0 20px; }
+.backup-schedule, .backup-history { max-width:760px; padding-top:16px; border-top:1px solid var(--border); }
+.backup-schedule { margin-bottom:20px; }
+.backup-subhead { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:12px; }
+.backup-subhead b { color:var(--text); font-size:13px; }
+.backup-subhead p { margin:3px 0 0; color:var(--text-3); font-size:11.5px; line-height:1.5; }
+.backup-history > .n-button { margin-top:12px; }
+.backup-empty { padding:14px 0; color:var(--text-3); font-size:12px; }
+.backup-record { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(0,1.5fr) auto; align-items:center; gap:10px; padding:10px 0; border-top:1px solid var(--border); }
+.backup-record-main, .backup-record-meta { display:flex; min-width:0; flex-direction:column; gap:3px; }
+.backup-record-main b { overflow:hidden; color:var(--text); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.backup-record-main span, .backup-record-meta span { color:var(--text-3); font-size:11px; }
+.backup-record-meta code { overflow:hidden; color:var(--text-3); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.backup-record-meta .backup-error { color:var(--danger); }
+.backup-record-actions { display:flex; gap:6px; }
 .settings-actions { position:sticky; bottom:14px; z-index:8; display:flex; align-items:center; gap:8px; width:100%; padding:10px 12px; border:1px solid var(--border-strong); border-radius:12px; background:color-mix(in srgb, var(--card) 94%, transparent); box-shadow:0 14px 38px rgba(31,41,55,.15); backdrop-filter:blur(18px); }
 .settings-dirty-copy { display:flex; min-width:0; flex:1; flex-direction:column; }
 .settings-dirty-copy b { color:var(--text); font-size:12.5px; }
@@ -1450,5 +1667,8 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
   .settings-section :deep(.n-input-group) { width:100% !important; max-width:100% !important; }
   .tg-subnav { margin-right:-6px; margin-left:-6px; }
   .restart-condition { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .backup-form-grid, .backup-form-grid-short { grid-template-columns:1fr; }
+  .backup-record { grid-template-columns:1fr; gap:6px; }
+  .backup-record-actions { justify-content:flex-start; }
 }
 </style>

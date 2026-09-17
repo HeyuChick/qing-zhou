@@ -84,6 +84,17 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+// DeleteSetting removes a setting, including any encrypted value. Callers that
+// offer a credential-reset action should use this instead of storing an empty
+// JSON document so stale credentials cannot remain in the database.
+func (s *Store) DeleteSetting(key string) error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key=?`, key)
+	if err == nil {
+		s.invalidateSettingsCache()
+	}
+	return err
+}
+
 // setSettingIfAbsent writes the default only when the key does not yet exist.
 func (s *Store) setSettingIfAbsent(key, value string) error {
 	_, err := s.db.Exec(
