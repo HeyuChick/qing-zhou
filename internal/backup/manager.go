@@ -65,6 +65,7 @@ type Record struct {
 	StartedAt   int64  `json:"started_at"`
 	FinishedAt  int64  `json:"finished_at,omitempty"`
 	ExpiresAt   int64  `json:"expires_at,omitempty"`
+	Format      string `json:"format,omitempty"`
 }
 
 type Manager struct {
@@ -111,6 +112,9 @@ func (c Config) Validate() error {
 	parsed, err := url.ParseRequestURI(endpoint)
 	if err != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" {
 		return fmt.Errorf("Endpoint 必须是完整的 http:// 或 https:// 地址")
+	}
+	if strings.HasSuffix(strings.ToLower(parsed.Host), ".r2.cloudflarestorage.com") && strings.Trim(parsed.Path, "/") != "" {
+		return fmt.Errorf("Cloudflare R2 Endpoint 只填写账户地址，Bucket 请单独填写")
 	}
 	if strings.TrimSpace(c.Bucket) == "" {
 		return fmt.Errorf("Bucket 不能为空")
@@ -352,6 +356,13 @@ func (m *Manager) StartBackup(ctx context.Context, triggeredBy string) (Record, 
 	if err != nil {
 		return Record{}, err
 	}
+	spec, err := loadRecoverySpec()
+	if err != nil {
+		return Record{}, err
+	}
+	if spec != nil && !strings.HasPrefix(cfg.Endpoint, "https://") {
+		return Record{}, fmt.Errorf("完整灾备包含敏感配置，必须使用 HTTPS 私有对象存储")
+	}
 	m.mu.Lock()
 	if m.running {
 		m.mu.Unlock()
@@ -363,12 +374,18 @@ func (m *Manager) StartBackup(ctx context.Context, triggeredBy string) (Record, 
 	if root == nil {
 		root = ctx
 	}
+	now := time.Now().UTC()
 	record := Record{
 		ID:          uuid.NewString(),
 		Status:      "pending",
-		FileName:    "qingzhou-" + time.Now().UTC().Format("20060102-150405") + ".db",
+		FileName:    "qingzhou-" + now.Format("20060102-150405") + ".db",
 		TriggeredBy: triggeredBy,
-		StartedAt:   time.Now().Unix(),
+		StartedAt:   now.Unix(),
+	}
+	record.Format = "sqlite"
+	if spec != nil {
+		record.Format = "tar.gz"
+		record.FileName = "qingzhou-dr-" + now.Format("20060102-150405") + "-" + record.ID + ".tar.gz"
 	}
 	record.ObjectKey = joinKey(cfg.Prefix, record.FileName)
 	records, err := m.loadRecords()
@@ -385,14 +402,14 @@ func (m *Manager) StartBackup(ctx context.Context, triggeredBy string) (Record, 
 	go func() {
 		defer m.wg.Done()
 		defer m.setRunning(false)
-		m.runBackup(root, cfg, record)
+		m.runBackup(root, cfg, record, spec)
 	}()
 	return record, nil
 }
 
 func (m *Manager) setRunning(value bool) { m.mu.Lock(); m.running = value; m.mu.Unlock() }
 
-func (m *Manager) runBackup(root context.Context, cfg Config, record Record) {
+func (m *Manager) runBackup(root context.Context, cfg Config, record Record, spec *RecoverySpec) {
 	ctx, cancel := context.WithTimeout(root, 30*time.Minute)
 	defer cancel()
 	dir, err := os.MkdirTemp(filepath.Dir(m.st.Path()), ".qingzhou-remote-backup-")
@@ -401,12 +418,21 @@ func (m *Manager) runBackup(root context.Context, cfg Config, record Record) {
 		return
 	}
 	defer os.RemoveAll(dir)
-	snapshot := filepath.Join(dir, record.FileName)
+	snapshot := filepath.Join(dir, "snapshot.db")
 	if err := m.st.BackupTo(snapshot); err != nil {
 		m.failRecord(record, err)
 		return
 	}
-	sha, size, err := fileDigest(snapshot)
+	uploadPath, contentType := snapshot, "application/vnd.sqlite3"
+	if spec != nil {
+		uploadPath = filepath.Join(dir, record.FileName)
+		contentType = "application/gzip"
+		if err := m.createRecoveryArchive(ctx, spec, snapshot, uploadPath); err != nil {
+			m.failRecord(record, err)
+			return
+		}
+	}
+	sha, size, err := fileDigest(uploadPath)
 	if err != nil {
 		m.failRecord(record, err)
 		return
@@ -416,7 +442,7 @@ func (m *Manager) runBackup(root context.Context, cfg Config, record Record) {
 		m.failRecord(record, err)
 		return
 	}
-	if _, err := objectStore.PutFile(ctx, record.ObjectKey, snapshot, "application/vnd.sqlite3"); err != nil {
+	if _, err := objectStore.PutFile(ctx, record.ObjectKey, uploadPath, contentType); err != nil {
 		m.failRecord(record, err)
 		return
 	}

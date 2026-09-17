@@ -16,7 +16,7 @@ func (a *API) handleAdminGetBackupConfig(w http.ResponseWriter, r *http.Request)
 		fail(w, http.StatusInternalServerError, "读取远端备份配置失败")
 		return
 	}
-	ok(w, J{"config": cfg, "configured": configured})
+	ok(w, J{"config": cfg, "configured": configured, "recovery": a.remoteBackup.RecoveryInfo()})
 }
 
 func (a *API) handleAdminPutBackupConfig(w http.ResponseWriter, r *http.Request) {

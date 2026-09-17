@@ -572,14 +572,22 @@
       <n-card v-show="activeSectionId === 'settings-backup'" id="settings-backup" class="settings-section" size="small">
         <p style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
           本地下载仍可生成 SQLite 一致性快照；配置下面的 Cloudflare R2 或其他 S3 兼容对象存储后，
-          面板会把同一份快照自动上传到远端。数据库跑在 WAL 模式下，<b>不要直接拷贝 <code>qingzhou.db</code></b>；
-          远端文件里的敏感字段仍是加密的，恢复到别处需要同一个 <code>QZ_SECRET_KEY</code>。
+          面板会自动上传一致性快照，或服务器配置的灾备恢复包。数据库跑在 WAL 模式下，<b>不要直接拷贝 <code>qingzhou.db</code></b>。
         </p>
+        <n-alert v-if="backupRecovery.error" type="error" title="灾备清单不可用" style="margin-bottom:14px;">{{ backupRecovery.error }}</n-alert>
+        <n-alert v-else-if="backupRecovery.enabled" type="warning" title="远端备份：未额外加密的灾备恢复包" style="margin-bottom:14px;">
+          包含数据库快照、下列服务器配置、文件校验清单和恢复说明。配置可能包含密钥；只使用私有桶，不要公开下载链接。数据库字段加密不等于恢复包加密。
+          <ul><li v-for="source in backupRecovery.sources" :key="source.path"><code>{{ source.path }}</code>{{ source.optional ? '（可选；缺失会记入清单）' : '（必需）' }}</li></ul>
+          实际备份范围以成功归档的 manifest.json 为准；R2 恢复凭据须在服务器之外独立保管。
+        </n-alert>
+        <n-alert v-else type="info" title="远端备份：仅数据库" style="margin-bottom:14px;">
+          不包含环境文件、证书或节点配置。恢复需要原 QZ_SECRET_KEY；由服务器运维配置 QZ_BACKUP_MANIFEST 才启用灾备恢复包。
+        </n-alert>
         <n-alert v-if="backupError" type="warning" :show-icon="true" :title="backupError" style="margin-bottom:14px;" />
         <n-form label-placement="top" class="backup-form">
           <n-form-item label="对象存储 Endpoint">
             <n-input v-model:value="backupConfig.endpoint" placeholder="https://<account-id>.r2.cloudflarestorage.com" />
-            <div class="form-hint">Cloudflare R2 使用账户专属 S3 Endpoint；其他 S3 兼容服务填写其 API 地址。</div>
+            <div class="form-hint">Cloudflare R2 使用账户专属 S3 Endpoint，不要附加 Bucket 路径；灾备恢复包要求 HTTPS。</div>
           </n-form-item>
           <div class="backup-form-grid">
             <n-form-item label="Region"><n-input v-model:value="backupConfig.region" placeholder="auto" /></n-form-item>
@@ -618,11 +626,11 @@
           <div class="backup-subhead"><div><b>远端备份记录</b><p>记录保存在面板数据库；删除记录会同时删除远端对象。</p></div><n-button quaternary size="small" :loading="loadingBackups" @click="loadRemoteBackups">刷新</n-button></div>
           <div v-if="!remoteBackups.length" class="backup-empty">暂无远端备份记录</div>
           <div v-for="record in remoteBackups" :key="record.id" class="backup-record">
-            <div class="backup-record-main"><b>{{ record.file_name }}</b><span>{{ backupStatusText(record.status) }} · {{ formatBackupTime(record.started_at) }}</span></div>
+            <div class="backup-record-main"><b>{{ record.file_name }}</b><span>{{ record.format === 'tar.gz' ? '灾备恢复包' : '数据库快照' }} · {{ backupStatusText(record.status) }} · {{ formatBackupTime(record.started_at) }}</span></div>
             <div class="backup-record-meta"><span v-if="record.size_bytes">{{ fmtBytes(record.size_bytes) }}</span><code v-if="record.sha256">{{ record.sha256 }}</code><span v-if="record.error" class="backup-error">{{ record.error }}</span></div>
             <div class="backup-record-actions"><n-button v-if="record.status === 'completed'" size="small" @click="downloadRemoteBackup(record)">下载</n-button><n-button size="small" tertiary type="error" @click="deleteRemoteBackup(record)">删除</n-button></div>
           </div>
-          <n-button type="primary" :loading="creatingRemoteBackup" :disabled="!backupConfigured" @click="createRemoteBackup">立即备份到远端</n-button>
+          <n-button type="primary" :loading="creatingRemoteBackup" :disabled="!backupConfigured || !!backupRecovery.error" @click="createRemoteBackup">立即备份到远端</n-button>
         </div>
       </n-card>
 
@@ -1237,6 +1245,7 @@ type BackupConfig = {
   force_path_style: boolean
 }
 type BackupSchedule = { enabled: boolean; cron_expr: string; retain_days: number; retain_count: number }
+type BackupRecovery = { enabled: boolean; format: string; encrypted: boolean; sources?: { path: string; optional?: boolean }[]; error?: string }
 type BackupRecord = {
   id: string
   status: string
@@ -1248,7 +1257,9 @@ type BackupRecord = {
   error?: string
   started_at: number
   finished_at?: number
+  format?: string
 }
+const backupRecovery = ref<BackupRecovery>({ enabled: false, format: 'sqlite', encrypted: false })
 const backupConfig = reactive<BackupConfig>({ endpoint: '', region: 'auto', bucket: '', access_key_id: '', secret_access_key: '', prefix: 'qingzhou', force_path_style: false })
 const backupSchedule = reactive<BackupSchedule>({ enabled: false, cron_expr: '0 3 * * *', retain_days: 14, retain_count: 10 })
 const backupConfigured = ref(false)
@@ -1261,6 +1272,7 @@ const creatingRemoteBackup = ref(false)
 const remoteBackups = ref<BackupRecord[]>([])
 
 function applyBackupConfig(data: any) {
+  if (data?.recovery) backupRecovery.value = data.recovery
   const cfg = data?.config || {}
   backupConfigured.value = !!data?.configured
   backupConfig.endpoint = String(cfg.endpoint || '')

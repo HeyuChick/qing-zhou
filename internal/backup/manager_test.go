@@ -1,8 +1,13 @@
 package backup
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -139,6 +144,16 @@ func TestConfigIsEncryptedAndLoadConfigIsRedacted(t *testing.T) {
 	}
 }
 
+func TestR2EndpointRejectsBucketPath(t *testing.T) {
+	manager, st := newBackupTestManager(t)
+	defer st.Close()
+	cfg := validConfig()
+	cfg.Endpoint += "/" + cfg.Bucket
+	if _, err := manager.SaveConfig(cfg); err == nil {
+		t.Fatal("R2 Endpoint with a bucket path was accepted")
+	}
+}
+
 func TestSaveScheduleValidatesCron(t *testing.T) {
 	manager, st := newBackupTestManager(t)
 	defer st.Close()
@@ -169,6 +184,128 @@ func TestStartBackupUploadsSnapshotAndRecordsDigest(t *testing.T) {
 	defer fake.mu.Unlock()
 	if len(fake.objects) != 1 || fake.objects[finished.ObjectKey] == nil {
 		t.Fatalf("uploaded objects = %v", fake.objects)
+	}
+}
+
+func TestStartBackupBuildsRecoveryArchiveWhenManifestIsConfigured(t *testing.T) {
+	manager, st := newBackupTestManager(t)
+	defer st.Close()
+	saveValidConfig(t, manager)
+	runtimeDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	envFile := filepath.Join(runtimeDir, "qingzhou.env")
+	unitFile := filepath.Join(runtimeDir, "qingzhou.service")
+	configDir := filepath.Join(runtimeDir, "sing-box")
+	if err := os.Mkdir(configDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for filename, content := range map[string]string{
+		envFile:                                 "QZ_SECRET_KEY=kept-in-archive\n",
+		unitFile:                                "[Service]\nExecStart=/opt/qingzhou/qingzhou\n",
+		filepath.Join(configDir, "config.json"): "{\"inbounds\":[]}",
+	} {
+		if err := os.WriteFile(filename, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	specFile := filepath.Join(runtimeDir, "recovery.json")
+	spec := RecoverySpec{Repository: "https://github.com/example/qingzhou", SingBoxVersion: "1.0.0", Sources: []RecoverySource{{Path: envFile}, {Path: unitFile}, {Path: configDir}, {Path: filepath.Join(runtimeDir, "missing"), Optional: true}}}
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(specFile, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QZ_BACKUP_MANIFEST", specFile)
+	fake := &fakeObjectStore{}
+	manager.factory = func(context.Context, Config) (objectStore, error) { return fake, nil }
+	record, err := manager.StartBackup(context.Background(), "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitForRecord(t, manager, record.ID)
+	if finished.Status != "completed" || finished.Format != "tar.gz" || filepath.Ext(finished.FileName) != ".gz" {
+		t.Fatalf("record = %+v", finished)
+	}
+	fake.mu.Lock()
+	archiveData := append([]byte(nil), fake.objects[finished.ObjectKey]...)
+	fake.mu.Unlock()
+	reader, err := gzip.NewReader(bytes.NewReader(archiveData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	entries := map[string][]byte{}
+	tarReader := tar.NewReader(reader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := io.ReadAll(tarReader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries[header.Name] = payload
+	}
+	for _, name := range []string{"database/qingzhou.db", "manifest.json", "RESTORE.md", "files" + filepath.ToSlash(envFile), "files" + filepath.ToSlash(unitFile), "files" + filepath.ToSlash(filepath.Join(configDir, "config.json"))} {
+		if _, ok := entries[name]; !ok {
+			t.Errorf("recovery archive missing %s", name)
+		}
+	}
+	if !bytes.Contains(entries["manifest.json"], []byte("missing")) {
+		t.Error("manifest did not record missing optional source")
+	}
+	var manifest recoveryManifest
+	if err := json.Unmarshal(entries["manifest.json"], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Encrypted || len(manifest.Files) < 4 || manifest.Files[0].SHA256 == "" {
+		t.Fatalf("unexpected recovery manifest: %+v", manifest)
+	}
+	if !bytes.Contains(entries["RESTORE.md"], []byte("SQLite integrity_check")) {
+		t.Error("recovery instructions do not require integrity check")
+	}
+}
+
+func TestRecoveryArchiveRejectsMissingRequiredSource(t *testing.T) {
+	manager, st := newBackupTestManager(t)
+	defer st.Close()
+	snapshot := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := st.BackupTo(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	err := manager.createRecoveryArchive(context.Background(), &RecoverySpec{Sources: []RecoverySource{{Path: filepath.Join(t.TempDir(), "missing")}}}, snapshot, filepath.Join(t.TempDir(), "recovery.tar.gz"))
+	if err == nil || !os.IsNotExist(err) {
+		t.Fatalf("missing required source error = %v", err)
+	}
+}
+
+func TestRecoveryArchiveRejectsSymlinkSource(t *testing.T) {
+	manager, st := newBackupTestManager(t)
+	defer st.Close()
+	runtimeDir := t.TempDir()
+	snapshot := filepath.Join(runtimeDir, "snapshot.db")
+	if err := st.BackupTo(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(runtimeDir, "target.env")
+	if err := os.WriteFile(target, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(runtimeDir, "linked.env")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	err := manager.createRecoveryArchive(context.Background(), &RecoverySpec{Sources: []RecoverySource{{Path: link}}}, snapshot, filepath.Join(runtimeDir, "recovery.tar.gz"))
+	if err == nil {
+		t.Fatal("symlink source was accepted")
 	}
 }
 

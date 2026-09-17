@@ -23,3 +23,11 @@ const api = await readFile(new URL('../src/api/index.ts', import.meta.url), 'utf
   assert.match(source, /apiDelete\(`\/api\/admin\/backups\/\$\{record\.id\}`\)/)
   assert.match(api, /export function apiDelete/)
  })
+
+test('disaster recovery mode explains unencrypted scope and preserves status when saving config', () => {
+  assert.match(source, /未额外加密的灾备恢复包/)
+  assert.match(source, /QZ_BACKUP_MANIFEST/)
+  assert.match(source, /backupRecovery\.sources/)
+  assert.match(source, /if \(data\?\.recovery\) backupRecovery\.value = data\.recovery/)
+  assert.match(source, /record\.format === 'tar.gz'/)
+})
