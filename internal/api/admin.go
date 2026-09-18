@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +15,16 @@ import (
 	"qingzhou/internal/store"
 	"qingzhou/internal/subconv"
 )
+
+const brandIconSetting = "brand_icon_data_uri"
+
+const maxBrandIconBytes = 512 << 10
+
+var brandIconPrefixes = map[string]string{
+	"data:image/png;base64,":  "png",
+	"data:image/jpeg;base64,": "jpeg",
+	"data:image/webp;base64,": "webp",
+}
 
 // secretSettings are never returned in plaintext and cannot be cleared blindly.
 var secretSettings = map[string]bool{
@@ -155,6 +166,10 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		in[telegramCustomCommandsSetting] = normalized
 	}
+	if err := validateBrandIconSetting(in); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := a.validateHelpDocsSettings(in); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
@@ -224,6 +239,50 @@ func (a *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		a.notifyRuntimeIntervalsChanged()
 	}
 	a.handleGetSettings(w, r)
+}
+
+func validateBrandIconSetting(in map[string]string) error {
+	raw, submitted := in[brandIconSetting]
+	if !submitted {
+		return nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		in[brandIconSetting] = ""
+		return nil
+	}
+	var prefix, format string
+	for candidate, candidateFormat := range brandIconPrefixes {
+		if strings.HasPrefix(raw, candidate) {
+			prefix, format = candidate, candidateFormat
+			break
+		}
+	}
+	if prefix == "" {
+		return fmt.Errorf("站点图标仅支持 PNG、JPEG 或 WebP 图片")
+	}
+	encoded := strings.TrimPrefix(raw, prefix)
+	if encoded == "" || len(encoded) > base64.StdEncoding.EncodedLen(maxBrandIconBytes) {
+		return fmt.Errorf("站点图标不能为空且不能超过 512 KiB")
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) == 0 || len(data) > maxBrandIconBytes || base64.StdEncoding.EncodeToString(data) != encoded {
+		return fmt.Errorf("站点图标编码无效")
+	}
+	valid := false
+	switch format {
+	case "png":
+		valid = len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n"
+	case "jpeg":
+		valid = len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff
+	case "webp":
+		valid = len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
+	}
+	if !valid {
+		return fmt.Errorf("站点图标内容与图片格式不匹配")
+	}
+	in[brandIconSetting] = prefix + encoded
+	return nil
 }
 
 // validateHelpDocsSettings validates the effective pair before any setting is

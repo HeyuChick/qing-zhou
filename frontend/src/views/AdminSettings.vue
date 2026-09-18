@@ -45,7 +45,25 @@
     <n-spin :show="loading">
       <n-card v-show="activeSectionId === 'settings-basic'" id="settings-basic" class="settings-section" size="small">
         <n-form label-placement="top">
-          <n-form-item label="站点名称"><n-input v-model:value="form.site_name" /></n-form-item>
+          <n-form-item label="站点名称">
+            <div class="brand-name-control">
+              <n-input v-model:value="form.site_name" />
+              <n-button @click="openBrandIconPicker">修改图标</n-button>
+            </div>
+          </n-form-item>
+          <n-form-item label="站点图标">
+            <div class="brand-icon-control">
+              <img :src="brandIconPreview" class="brand-icon-preview" alt="站点图标预览">
+              <div class="field-stack">
+                <div class="inline-action">
+                  <n-button @click="openBrandIconPicker">上传 PNG / JPEG / WebP</n-button>
+                  <n-button :disabled="!form.brand_icon_data_uri" @click="resetBrandIcon">恢复默认</n-button>
+                </div>
+                <div class="form-hint">上传一次会同步替换顶部、侧栏、登录页、浏览器标签页和 Apple 触屏图标；最大 512 KiB。保存设置后全站生效。</div>
+              </div>
+              <input ref="brandIconInput" class="brand-icon-input" type="file" accept="image/png,image/jpeg,image/webp" @change="handleBrandIconFile">
+            </div>
+          </n-form-item>
           <n-form-item label="站点描述"><n-input v-model:value="form.site_description" /></n-form-item>
           <n-form-item label="注册模式">
             <n-select v-model:value="form.register_mode" :options="[{label:'开放注册',value:'open'},{label:'邀请码注册',value:'code'},{label:'关闭注册',value:'closed'}]" />
@@ -861,6 +879,40 @@ function insertTgVar(key: string) {
 }
 const rebuilding = ref(false)
 const form = reactive<Record<string, any>>({})
+const brandIconInput = ref<HTMLInputElement | null>(null)
+const brandIconPreview = computed(() => form.brand_icon_data_uri || '/qingzhou-mark.svg')
+
+function openBrandIconPicker() {
+  brandIconInput.value?.click()
+}
+
+function resetBrandIcon() {
+  form.brand_icon_data_uri = ''
+  if (brandIconInput.value) brandIconInput.value.value = ''
+}
+
+function handleBrandIconFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+    message.error('站点图标仅支持 PNG、JPEG 或 WebP 图片')
+    input.value = ''
+    return
+  }
+  if (file.size > 512 * 1024) {
+    message.error('站点图标不能超过 512 KiB')
+    input.value = ''
+    return
+  }
+  const reader = new FileReader()
+  reader.onerror = () => message.error('读取站点图标失败')
+  reader.onload = () => {
+    form.brand_icon_data_uri = String(reader.result || '')
+    input.value = ''
+  }
+  reader.readAsDataURL(file)
+}
 const emailVerify = ref(true)
 const pointsRate = ref(10)
 const signupBonus = ref(0)
@@ -1453,6 +1505,7 @@ async function loadSettings() {
       // 从未设置过的键不会出现在响应里，而 n-input 需要一个受控的空串而不是
       // undefined —— 否则第一次输入前它不是一个受控输入。
       form.node_host_override ??= ''
+      form.brand_icon_data_uri ??= ''
       form.help_docs_mode = data.help_docs_mode === 'external' ? 'external' : 'builtin'
       form.help_docs_url ??= ''
       emailVerify.value = data.email_verify_required === 'true'
@@ -1528,6 +1581,11 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 .settings-section { margin-bottom:16px; scroll-margin-top:84px; }
 .settings-section :deep(.n-form) { max-width:760px; }
 .backup-form { max-width:760px !important; }
+.brand-name-control { display:flex; width:100%; gap:8px; }
+.brand-name-control :deep(.n-input) { min-width:0; flex:1; }
+.brand-icon-control { display:flex; align-items:center; gap:12px; width:100%; }
+.brand-icon-preview { width:52px; height:52px; flex:0 0 auto; padding:5px; border:1px solid var(--border); border-radius:12px; object-fit:contain; background:var(--card); }
+.brand-icon-input { position:absolute; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none; }
 .backup-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 14px; }
 .backup-form-grid-short { grid-template-columns:repeat(3,minmax(0,1fr)); }
 .backup-actions { display:flex; flex-wrap:wrap; gap:8px; margin:2px 0 20px; }
@@ -1680,6 +1738,8 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
   .tg-subnav { margin-right:-6px; margin-left:-6px; }
   .restart-condition { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .backup-form-grid, .backup-form-grid-short { grid-template-columns:1fr; }
+  .brand-name-control, .brand-icon-control { align-items:stretch; flex-direction:column; }
+  .brand-icon-preview { align-self:flex-start; }
   .backup-record { grid-template-columns:1fr; gap:6px; }
   .backup-record-actions { justify-content:flex-start; }
 }

@@ -109,6 +109,7 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 		helpMode = "builtin"
 	}
 	helpURL, _ := a.st.GetSetting("help_docs_url")
+	brandIcon, _ := a.st.GetSetting(brandIconSetting)
 	ok(w, J{
 		"oauth2_enabled":        oauth.Enabled,
 		"oauth2_name":           oauth.Name,
@@ -122,15 +123,16 @@ func (a *API) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"email_enabled": a.mailerConfigured(),
 		// Same non-secret as email_enabled: anyone can observe it by talking
 		// to the bot. The account page uses it to hide a dead bind card.
-		"telegram_enabled": a.telegramConfigured(),
-		"points_per_cny":   rate,
-		"site_name":        siteName,
-		"site_description": siteDesc,
-		"homepage_mode":    homeMode,
-		"homepage_url":     homeURL,
-		"help_docs_mode":   helpMode,
-		"help_docs_url":    helpURL,
-		"app_version":      version.Current(),
+		"telegram_enabled":    a.telegramConfigured(),
+		"points_per_cny":      rate,
+		"site_name":           siteName,
+		"site_description":    siteDesc,
+		"homepage_mode":       homeMode,
+		"homepage_url":        homeURL,
+		"help_docs_mode":      helpMode,
+		"help_docs_url":       helpURL,
+		"brand_icon_data_uri": brandIcon,
+		"app_version":         version.Current(),
 	})
 }
 
