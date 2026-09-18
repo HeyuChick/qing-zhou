@@ -46,7 +46,9 @@ func TestCertStoreAndInjection(t *testing.T) {
 	}
 	certID, err := st.SaveCert(&Cert{
 		Name: "le-cert", Domain: "cert.example.com", Source: "acme",
-		AcmeMethod: "dns-cf", CertPEM: certPEM, KeyPEM: keyPEM, AutoRenew: true,
+		AcmeMethod: "dns-cf", AcmeProfile: "auto", CertPEM: certPEM, KeyPEM: keyPEM,
+		ActualKeyType: "ECDSA-P-256", ActualChain: "cert.example.com",
+		LastVerifyAt: 123, AutoRenew: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +72,9 @@ func TestCertStoreAndInjection(t *testing.T) {
 	}
 	if c.NotAfter == 0 {
 		t.Error("not_after was not parsed from cert_pem")
+	}
+	if c.AcmeProfile != "auto" || c.ActualKeyType != "ECDSA-P-256" || c.ActualChain != "cert.example.com" || c.LastVerifyAt != 123 {
+		t.Errorf("certificate policy metadata did not round-trip: %+v", c)
 	}
 
 	// A TLS profile referencing the cert carries no inline PEM.
@@ -121,6 +126,33 @@ func TestCertStoreAndInjection(t *testing.T) {
 	}
 	if err := st.DeleteCert(certID); err != nil {
 		t.Errorf("DeleteCert after unreference: %v", err)
+	}
+}
+
+func TestMigrateCertificatePolicyPreservesLegacyRows(t *testing.T) {
+	st := newCertTestStore(t)
+	certPEM, keyPEM, err := singbox.GenerateSelfSignedCert("legacy-policy.example.com", 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.SaveCert(&Cert{Name: "legacy", Domain: "legacy-policy.example.com", Source: "acme", CertPEM: certPEM, KeyPEM: keyPEM})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"acme_profile", "actual_key_type", "actual_chain", "last_verify_at", "verify_error"} {
+		if _, err := st.db.Exec(`ALTER TABLE certificates DROP COLUMN ` + col); err != nil {
+			t.Fatalf("drop %s: %v", col, err)
+		}
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	c, err := st.GetCert(id)
+	if err != nil || c == nil {
+		t.Fatalf("GetCert after migration: %v", err)
+	}
+	if c.AcmeProfile != "" || c.ActualKeyType != "" || c.ActualChain != "" || c.LastVerifyAt != 0 || c.VerifyError != "" {
+		t.Fatalf("legacy row was assigned a new policy during migration: %+v", c)
 	}
 }
 

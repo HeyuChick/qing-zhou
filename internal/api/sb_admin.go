@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"qingzhou/internal/acmesh"
+	"qingzhou/internal/certcheck"
 	"qingzhou/internal/sbctl"
 	"qingzhou/internal/sbproc"
 	"qingzhou/internal/singbox"
@@ -158,6 +159,7 @@ func (a *API) handleAdminAcmeCert(w http.ResponseWriter, r *http.Request) {
 		CFToken    string `json:"cf_token"`
 		Webroot    string `json:"webroot"`
 		Email      string `json:"email"`
+		Profile    string `json:"acme_profile"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -177,6 +179,15 @@ func (a *API) handleAdminAcmeCert(w http.ResponseWriter, r *http.Request) {
 	if method == "" {
 		method = acmesh.MethodHTTP01
 	}
+	profile := strings.TrimSpace(req.Profile)
+	if profile == "" {
+		profile = acmesh.ProfileAuto
+	}
+	keyLength, preferredChain, err := acmesh.OptionsForProfile(profile)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "证书兼容策略无效")
+		return
+	}
 
 	unit := a.sbSetting("QZ_SINGBOX_UNIT", "sb_systemd_unit", "sing-box")
 	cfgPath := a.sbSetting("QZ_SINGBOX_CONFIG", "sb_config_path", "/etc/sing-box/config.json")
@@ -186,16 +197,27 @@ func (a *API) handleAdminAcmeCert(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
 	res, err := acmesh.Issue(ctx, acmesh.LocalRunner{}, acmesh.IssueOpts{
-		Domain:    domain,
-		Method:    method,
-		CFToken:   strings.TrimSpace(req.CFToken),
-		Webroot:   strings.TrimSpace(req.Webroot),
-		Email:     strings.TrimSpace(req.Email),
-		CertDir:   certDir,
-		ReloadCmd: "systemctl restart " + unit,
+		Domain:         domain,
+		Method:         method,
+		CFToken:        strings.TrimSpace(req.CFToken),
+		Webroot:        strings.TrimSpace(req.Webroot),
+		Email:          strings.TrimSpace(req.Email),
+		CertDir:        certDir,
+		ReloadCmd:      "systemctl restart " + unit,
+		KeyLength:      keyLength,
+		PreferredChain: preferredChain,
 	})
 	if err != nil {
 		fail(w, http.StatusBadGateway, "证书申请失败："+err.Error())
+		return
+	}
+	certPEM, keyPEM, err := acmesh.ReadPEM(ctx, acmesh.LocalRunner{}, res)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "证书已签发，但读取文件失败："+err.Error())
+		return
+	}
+	if _, err := certcheck.Verify(certPEM, keyPEM, domain, time.Now()); err != nil {
+		fail(w, http.StatusBadGateway, "签发结果核验失败，TLS 配置未保存："+err.Error())
 		return
 	}
 

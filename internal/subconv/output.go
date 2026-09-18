@@ -113,23 +113,27 @@ type RenderOptions struct {
 	Profile RoutingProfile
 	// ClashDisableUDP turns off Clash udp:true advertisement (setting sub_clash_udp=0).
 	ClashDisableUDP bool
+	// SingboxLegacyTUNStack emits tun.stack=gvisor (?tun_stack=gvisor) for
+	// sing-box ≤1.14 clients. Default false omits stack (1.15+ / 1.17 removal).
+	SingboxLegacyTUNStack bool
 }
 
 // RenderWithOptions is the full render entry used by the subscription handler.
 func RenderWithOptions(format string, links []string, aiNodes map[string]bool, clashTpl, singboxTpl, subURL string, opt RenderOptions) (body string, contentType string, err error) {
 	profile := opt.Profile
 	clashOpt := ClashOptions{DisableUDP: opt.ClashDisableUDP}
-	if profile == ProfileLegacy && !opt.ClashDisableUDP {
+	sbOpt := SingboxOptions{LegacyTUNStack: opt.SingboxLegacyTUNStack}
+	if profile == ProfileLegacy && !opt.ClashDisableUDP && !opt.SingboxLegacyTUNStack {
 		return Render(format, links, aiNodes, clashTpl, singboxTpl, subURL)
 	}
 	if profile == ProfileLegacy {
-		// Legacy profile but with Clash UDP overridden — still use ClashWithOptions.
+		// Legacy profile but with Clash UDP / sing-box TUN stack overridden.
 		switch NormalizeFormat(format) {
 		case FormatClash:
 			out, e := ClashWithOptions(parseWithAI(links, aiNodes), clashTpl, ProfileLegacy, clashOpt)
 			return out, "text/yaml; charset=utf-8", e
 		case FormatSingbox:
-			out, e := Singbox(parseWithAI(links, aiNodes), singboxTpl)
+			out, e := SingboxWithOptions(parseWithAI(links, aiNodes), singboxTpl, ProfileLegacy, sbOpt)
 			return out, "application/json; charset=utf-8", e
 		case FormatSurge:
 			return Surge(parseWithAI(links, aiNodes), subURL), "text/plain; charset=utf-8", nil
@@ -142,7 +146,7 @@ func RenderWithOptions(format string, links []string, aiNodes map[string]bool, c
 		out, e := ClashWithOptions(parseWithAI(links, aiNodes), clashTpl, profile, clashOpt)
 		return out, "text/yaml; charset=utf-8", e
 	case FormatSingbox:
-		out, e := SingboxWithProfile(parseWithAI(links, aiNodes), singboxTpl, profile)
+		out, e := SingboxWithOptions(parseWithAI(links, aiNodes), singboxTpl, profile, sbOpt)
 		return out, "application/json; charset=utf-8", e
 	case FormatSurge:
 		return SurgeWithProfile(parseWithAI(links, aiNodes), subURL, profile), "text/plain; charset=utf-8", nil
@@ -428,6 +432,10 @@ rules:
 // 1.11 and 1.14, so the floor moved. Admin-stored templates are rewritten to
 // this shape at render time by modernizeSingboxDNS, so an install that pasted
 // the old default is carried across too.
+//
+// TUN inbound (including tun.stack) is generated in singbox.go, not this
+// template. Default omits stack (1.15 deprecated / 1.17 removed); see
+// SingboxOptions.LegacyTUNStack / ?tun_stack=gvisor for the 1.14 compat path.
 //
 // `independent_cache` and `experimental.cache_file.store_rdrc` below are
 // deprecated as of 1.14 (removal in 1.16) but still honored, and dropping them

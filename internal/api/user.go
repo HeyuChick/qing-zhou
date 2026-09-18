@@ -969,9 +969,12 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	if v, _ := a.st.GetSetting("sub_clash_udp"); strings.TrimSpace(v) == "" {
 		clashUDP = true
 	}
+	// ?tun_stack=gvisor keeps tun.stack for sing-box ≤1.14; default omits it
+	// (1.15 deprecated / 1.17 removed). See issue #52 / SingboxOptions.
 	body, ctype, err := subconv.RenderWithOptions(format, links, aiNodes, clashTpl, singboxTpl, subURL, subconv.RenderOptions{
-		Profile:         profile,
-		ClashDisableUDP: !clashUDP,
+		Profile:               profile,
+		ClashDisableUDP:       !clashUDP,
+		SingboxLegacyTUNStack: subconv.WantSingboxLegacyTUNStack(r.URL.Query().Get("tun_stack")),
 	})
 	if err != nil {
 		http.Error(w, "render error", http.StatusBadGateway)

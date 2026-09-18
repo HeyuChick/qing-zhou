@@ -21,6 +21,43 @@ func TestBuildIssueCmd_HTTP01(t *testing.T) {
 	}
 }
 
+func TestOptionsForProfile(t *testing.T) {
+	for _, tc := range []struct {
+		profile, key, chain string
+	}{
+		{"", "", ""}, // upgraded rows retain legacy behaviour
+		{ProfileAuto, "2048", "ISRG Root X1"},
+		{ProfileCompatible, "2048", "ISRG Root X1"},
+		{ProfileModern, "ec-256", ""},
+	} {
+		key, chain, err := OptionsForProfile(tc.profile)
+		if err != nil || key != tc.key || chain != tc.chain {
+			t.Errorf("OptionsForProfile(%q) = %q, %q, %v", tc.profile, key, chain, err)
+		}
+	}
+	if _, _, err := OptionsForProfile("surprise"); err == nil {
+		t.Error("unknown profile was accepted")
+	}
+}
+
+func TestBuildIssueCmd_CompatibilityOptions(t *testing.T) {
+	cmd, err := buildIssueCmd(IssueOpts{
+		Domain: "proxy.example.com", Method: MethodHTTP01,
+		KeyLength: "2048", PreferredChain: "ISRG Root X1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--keylength '2048'", "--preferred-chain 'ISRG Root X1'"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("cmd %q missing %q", cmd, want)
+		}
+	}
+	if _, err := buildIssueCmd(IssueOpts{Domain: "a.example.com", Method: MethodHTTP01, KeyLength: "4096; touch /tmp/pwn"}); err == nil {
+		t.Error("unsupported key option was accepted")
+	}
+}
+
 func TestBuildIssueCmd_HTTP01RejectsWildcard(t *testing.T) {
 	if _, err := buildIssueCmd(IssueOpts{Domain: "*.example.com", Method: MethodHTTP01}); err == nil {
 		t.Error("expected wildcard to be rejected for http-01")
@@ -162,6 +199,37 @@ func TestBuildInstallCmd(t *testing.T) {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("cmd %q missing %q", cmd, want)
 		}
+	}
+}
+
+func TestBuildInstallCmd_ECCSelectsECCStore(t *testing.T) {
+	cmd := buildInstallCmd(IssueOpts{Domain: "a.example.com", KeyLength: "ec-256"}, "/tmp/a.crt", "/tmp/a.key")
+	if !strings.Contains(cmd, " --ecc") {
+		t.Errorf("ECC install command did not select the ECC cert: %q", cmd)
+	}
+}
+
+func TestRenewAppliesStoredCryptoPolicy(t *testing.T) {
+	var got string
+	r := plainRunnerStub{fn: func(cmd string) { got = cmd }}
+	if _, err := Renew(context.Background(), r, IssueOpts{
+		Domain: "a.example.com", Method: MethodHTTP01, PreferredChain: "ISRG Root X1",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--renew", "--preferred-chain 'ISRG Root X1'", "--force"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renew command %q missing %q", got, want)
+		}
+	}
+
+	if _, err := Renew(context.Background(), r, IssueOpts{
+		Domain: "a.example.com", Method: MethodHTTP01, KeyLength: "ec-256",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, " --ecc") {
+		t.Errorf("modern renewal did not select ECC storage: %q", got)
 	}
 }
 

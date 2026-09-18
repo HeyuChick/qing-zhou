@@ -67,13 +67,71 @@ const (
 
 // IssueOpts describes a certificate request.
 type IssueOpts struct {
-	Domain    string // e.g. proxy.example.com or *.example.com (dns-cf only)
-	Method    Method
-	CFToken   string // Cloudflare API token, required for MethodCFDNS
-	Webroot   string // web root that already serves the domain on :80, required for MethodWebroot
-	Email     string // ACME account email (optional but recommended)
-	CertDir   string // where the installed cert/key land; default /etc/sing-box/certs
-	ReloadCmd string // run by acme.sh after issue and on every renewal
+	Domain         string // e.g. proxy.example.com or *.example.com (dns-cf only)
+	Method         Method
+	CFToken        string // Cloudflare API token, required for MethodCFDNS
+	Webroot        string // web root that already serves the domain on :80, required for MethodWebroot
+	Email          string // ACME account email (optional but recommended)
+	CertDir        string // where the installed cert/key land; default /etc/sing-box/certs
+	ReloadCmd      string // run by acme.sh after issue and on every renewal
+	KeyLength      string // empty keeps legacy acme.sh behaviour; 2048 or ec-256 when policy-managed
+	PreferredChain string // empty follows the CA; currently only ISRG Root X1 is policy-managed
+}
+
+// ACME profiles are stored by the panel, while their concrete settings are
+// resolved here. This keeps records stable when the recommended compatibility
+// policy evolves in a future release. An empty profile is deliberately legacy:
+// upgraded certificates keep the exact acme.sh behaviour they had before this
+// feature instead of silently changing key algorithm during renewal.
+const (
+	ProfileAuto       = "auto"
+	ProfileCompatible = "compatible"
+	ProfileModern     = "modern"
+)
+
+// OptionsForProfile resolves a stored policy into acme.sh parameters.
+func OptionsForProfile(profile string) (keyLength, preferredChain string, err error) {
+	switch strings.TrimSpace(profile) {
+	case "":
+		return "", "", nil
+	case ProfileAuto:
+		// Current conservative recommendation. Unlike ProfileCompatible, this
+		// mapping may evolve as older client trust stores disappear.
+		return "2048", "ISRG Root X1", nil
+	case ProfileCompatible:
+		return "2048", "ISRG Root X1", nil
+	case ProfileModern:
+		return "ec-256", "", nil
+	default:
+		return "", "", fmt.Errorf("unsupported ACME profile %q", profile)
+	}
+}
+
+func validateCryptoOptions(o IssueOpts) error {
+	switch strings.TrimSpace(o.KeyLength) {
+	case "", "2048", "ec-256":
+	default:
+		return fmt.Errorf("unsupported key length %q", o.KeyLength)
+	}
+	switch strings.TrimSpace(o.PreferredChain) {
+	case "", "ISRG Root X1":
+	default:
+		return fmt.Errorf("unsupported preferred chain %q", o.PreferredChain)
+	}
+	return nil
+}
+
+func appendCryptoOptions(cmd string, o IssueOpts) (string, error) {
+	if err := validateCryptoOptions(o); err != nil {
+		return "", err
+	}
+	if v := strings.TrimSpace(o.KeyLength); v != "" {
+		cmd += " --keylength " + shellQuote(v)
+	}
+	if v := strings.TrimSpace(o.PreferredChain); v != "" {
+		cmd += " --preferred-chain " + shellQuote(v)
+	}
+	return cmd, nil
 }
 
 // IssueResult is the on-disk location of the installed certificate.
@@ -132,6 +190,11 @@ func buildIssueCmd(o IssueOpts) (string, error) {
 		return "", fmt.Errorf("domain is required")
 	}
 	base := acmeBin + " --issue -d " + shellQuote(domain) + " --server letsencrypt"
+	var err error
+	base, err = appendCryptoOptions(base, o)
+	if err != nil {
+		return "", err
+	}
 	switch o.Method {
 	case MethodHTTP01:
 		if strings.HasPrefix(domain, "*.") {
@@ -166,6 +229,9 @@ func buildInstallCmd(o IssueOpts, certPath, keyPath string) string {
 	cmd := acmeBin + " --install-cert -d " + shellQuote(strings.TrimSpace(o.Domain)) +
 		" --key-file " + shellQuote(keyPath) +
 		" --fullchain-file " + shellQuote(certPath)
+	if strings.TrimSpace(o.KeyLength) == "ec-256" {
+		cmd += " --ecc"
+	}
 	if rc := strings.TrimSpace(o.ReloadCmd); rc != "" {
 		cmd += " --reloadcmd " + shellQuote(rc)
 	}
@@ -266,6 +332,15 @@ func Renew(ctx context.Context, r Runner, o IssueOpts, force bool) (*IssueResult
 		return nil, fmt.Errorf("domain is required")
 	}
 	cmd := acmeBin + " --renew -d " + shellQuote(domain)
+	if err := validateCryptoOptions(o); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(o.KeyLength) == "ec-256" {
+		cmd += " --ecc"
+	}
+	if v := strings.TrimSpace(o.PreferredChain); v != "" {
+		cmd += " --preferred-chain " + shellQuote(v)
+	}
 	if force {
 		cmd += " --force"
 	}

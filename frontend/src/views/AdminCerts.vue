@@ -38,6 +38,13 @@
             <span class="kv">到期 <b>{{ c.not_after ? fmtDateTime(c.not_after) : '—' }}</b></span>
             <span v-if="c.not_after" class="kv">剩余 <b>{{ c.days_left }} 天</b></span>
           </div>
+          <div v-if="c.source === 'acme'" class="lc-meta">
+            <span class="kv">策略 <b>{{ profileLabel(c.acme_profile) }}</b></span>
+            <span class="kv">实际密钥 <b>{{ c.actual_key_type || '历史证书未记录' }}</b></span>
+          </div>
+          <div v-if="c.actual_chain" class="lc-meta" style="font-size:11px;word-break:break-all;">
+            已核验链：{{ c.actual_chain }}
+          </div>
           <div class="lc-meta">
             <span class="kv">自动续期
               <n-switch size="small" :value="c.auto_renew" :disabled="c.source !== 'acme'" @update:value="v => toggleAuto(c, v)" />
@@ -56,6 +63,9 @@
           </div>
           <div v-if="c.last_error" class="lc-meta" style="color:var(--error-color, #d03050);font-size:11px;word-break:break-all;">
             续期错误：{{ c.last_error }}
+          </div>
+          <div v-if="c.verify_error" class="lc-meta" style="color:var(--error-color, #d03050);font-size:11px;word-break:break-all;">
+            最近核验未通过（仍在使用旧证书）：{{ c.verify_error }}
           </div>
           <div class="lc-foot">
             <n-button v-if="c.source === 'acme'" size="tiny" :loading="renewingId === c.id" @click="renew(c)">立即续期</n-button>
@@ -80,8 +90,15 @@
           ]" />
         </n-form-item>
         <n-form-item v-if="acme.method === 'webroot'" label="网站根目录"><n-input v-model:value="acme.webroot" placeholder="/var/www/html" /></n-form-item>
+        <n-form-item label="兼容策略">
+          <n-select v-model:value="acme.acme_profile" :options="[
+            {label:'自动兼容（推荐，规则可随版本安全演进）',value:'auto'},
+            {label:'最大兼容（固定 RSA 2048 + 优先 ISRG Root X1）',value:'compatible'},
+            {label:'现代优先（ECDSA P-256 + CA 默认链）',value:'modern'},
+          ]" />
+        </n-form-item>
       </n-form>
-      <div style="font-size:12px;color:var(--text-3);">Cloudflare Token 取自系统设置；证书在面板本机签发后写入库，可被任意节点引用并自动续期。<b>DNS 验证通常需要 1-2 分钟</b>，点「申请」后请耐心等待、勿关闭弹窗。</div>
+      <div style="font-size:12px;color:var(--text-3);">Cloudflare Token 取自系统设置；签发后会核验私钥、域名、有效期和完整信任链，全部通过才会保存和下发。自动兼容当前采用 RSA 2048 + 优先 X1 链；已有证书仍沿用原策略。<b>DNS 验证通常需要 1-2 分钟</b>，点「申请」后请耐心等待、勿关闭弹窗。</div>
       <template #footer>
         <n-space justify="end">
           <n-button @click="showAcme = false">取消</n-button>
@@ -168,6 +185,9 @@ function sourceType(s: string): any {
 function sourceLabel(s: string): string {
   return { acme: 'ACME 真实证书', paste: '粘贴导入', selfsigned: '自签' }[s] || s
 }
+function profileLabel(s: string): string {
+  return { auto: '自动兼容', compatible: '最大兼容', modern: '现代优先' }[s] || '旧版沿用'
+}
 
 async function copy(v: string) {
   if (await copyText(v)) message.success('已复制'); else message.error('复制失败，请手动复制')
@@ -175,13 +195,13 @@ async function copy(v: string) {
 
 // 申请 ACME
 const showAcme = ref(false)
-const acme = reactive({ name: '', domain: '', method: 'dns-cf', webroot: '' })
-function openAcme() { acme.name = ''; acme.domain = ''; acme.method = 'dns-cf'; acme.webroot = ''; showAcme.value = true }
+const acme = reactive({ name: '', domain: '', method: 'dns-cf', webroot: '', acme_profile: 'auto' })
+function openAcme() { acme.name = ''; acme.domain = ''; acme.method = 'dns-cf'; acme.webroot = ''; acme.acme_profile = 'auto'; showAcme.value = true }
 async function submitAcme() {
   if (!acme.name.trim() || !acme.domain.trim()) { message.error('名称和域名必填'); return }
   submitting.value = true
   try {
-    await apiPost('/api/admin/certs/acme', { name: acme.name, domain: acme.domain, method: acme.method, webroot: acme.webroot })
+    await apiPost('/api/admin/certs/acme', { name: acme.name, domain: acme.domain, method: acme.method, webroot: acme.webroot, acme_profile: acme.acme_profile })
     message.success('证书申请成功')
     showAcme.value = false
     await load()
