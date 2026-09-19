@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"qingzhou/frontend"
 	"qingzhou/internal/assets"
+	"qingzhou/internal/backup"
 	"qingzhou/internal/mailer"
 	"qingzhou/internal/sbctl"
 	"qingzhou/internal/store"
@@ -26,10 +28,11 @@ const RequestTimeout = 30 * time.Second
 const ServerWriteTimeout = RequestTimeout + 15*time.Second
 
 type API struct {
-	sourceClient  *http.Client
-	pingSlots     chan struct{}
-	oauthSlots    chan struct{}
-	oauthFinalize chan struct{}
+	sourceClient   *http.Client
+	upstreamClient *http.Client
+	pingSlots      chan struct{}
+	oauthSlots     chan struct{}
+	oauthFinalize  chan struct{}
 
 	st       *store.Store
 	secret   []byte
@@ -46,8 +49,9 @@ type API struct {
 	// no cost and no trace. See handleChangePassword.
 	pwRL *rateLimiter
 
-	sbctl   *sbctl.Controller // native sing-box orchestrator; nil if not enabled
-	updater *updater.Manager  // GitHub-release self-updater
+	sbctl        *sbctl.Controller // native sing-box orchestrator; nil if not enabled
+	updater      *updater.Manager  // GitHub-release self-updater
+	remoteBackup *backup.Manager
 
 	linkMu    sync.Mutex
 	linkCache map[int64]linkCacheEntry
@@ -140,20 +144,22 @@ func (a *API) sbScheduleServer(serverIDs ...int64) {
 func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 	a := &API{
 		st: st, secret: secret, mailer: mail,
-		sourceClient:  safeFetchClient(),
-		pingSlots:     make(chan struct{}, 64),
-		oauthSlots:    make(chan struct{}, 8),
-		oauthFinalize: make(chan struct{}, 1),
-		authRL:        newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
-		resendRL:      newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
-		probeRL:       newRateLimiter(60, time.Minute),   // 60 probe reports / IP / min
-		pwRL:          newRateLimiter(5, 10*time.Minute), // 5 修改密码 attempts / user / 10min
+		sourceClient:   safeFetchClient(),
+		upstreamClient: &http.Client{Timeout: 20 * time.Second},
+		pingSlots:      make(chan struct{}, 64),
+		oauthSlots:     make(chan struct{}, 8),
+		oauthFinalize:  make(chan struct{}, 1),
+		authRL:         newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
+		resendRL:       newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
+		probeRL:        newRateLimiter(60, time.Minute),   // 60 probe reports / IP / min
+		pwRL:           newRateLimiter(5, 10*time.Minute), // 5 修改密码 attempts / user / 10min
 		// Each address swap revokes the previous one, so a loop of them — a stuck
 		// retry, a double-click, a misbehaving script — leaves the user with a
 		// subscription that never stays valid long enough to import. Generous
 		// enough that nobody swapping addresses on purpose will notice.
 		subRL:             newRateLimiter(5, 10*time.Minute), // 5 address swaps / user / 10min
 		tgRL:              newRateLimiter(20, time.Minute),   // 20 bot commands / telegram user / min
+		remoteBackup:      backup.New(st),
 		linkCache:         make(map[int64]linkCacheEntry),
 		restartCh:         make(chan restartEvent, restartEventQueue),
 		opsCh:             make(chan string, opsMessageQueue),
@@ -191,6 +197,13 @@ func (a *API) notifyRuntimeIntervalsChanged() {
 	select {
 	case a.monitorIntervalCh <- struct{}{}:
 	default:
+	}
+}
+
+// StartRemoteBackups starts the optional R2/S3-compatible scheduled backup loop.
+func (a *API) StartRemoteBackups(ctx context.Context) {
+	if a.remoteBackup != nil {
+		a.remoteBackup.Start(ctx)
 	}
 }
 
@@ -251,6 +264,7 @@ func (a *API) Router() http.Handler {
 		pr.Get("/api/user/oauth2", a.handleUserOAuth)
 		pr.Post("/api/user/oauth2/bind", a.handleOAuthBind)
 		pr.Get("/api/user/plans", a.handleUserPlans)
+		pr.Put("/api/user/plans/{id}/auto-renew", a.handleUserPlanAutoRenew)
 		pr.Get("/api/user/subscription", a.handleSubscription)
 		pr.Get("/api/user/proxies", a.handleUserProxies)
 		pr.Get("/api/user/proxy-account", a.handleUserProxyAccount)
@@ -305,6 +319,15 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/settings/detect-node-host", a.handleDetectNodeHost)
 		ar.Post("/api/admin/rebuild", a.handleAdminRebuild)
 		ar.Get("/api/admin/backup", a.handleAdminBackup)
+		ar.Get("/api/admin/backups/config", a.handleAdminGetBackupConfig)
+		ar.Put("/api/admin/backups/config", a.handleAdminPutBackupConfig)
+		ar.Post("/api/admin/backups/config/test", a.handleAdminTestBackupConfig)
+		ar.Get("/api/admin/backups/schedule", a.handleAdminGetBackupSchedule)
+		ar.Put("/api/admin/backups/schedule", a.handleAdminPutBackupSchedule)
+		ar.Post("/api/admin/backups", a.handleAdminCreateRemoteBackup)
+		ar.Get("/api/admin/backups", a.handleAdminListRemoteBackups)
+		ar.Get("/api/admin/backups/{id}/download-url", a.handleAdminRemoteBackupDownload)
+		ar.Delete("/api/admin/backups/{id}", a.handleAdminDeleteRemoteBackup)
 		// Which sing-box each node runs, plus a per-node reinstall.
 		ar.Get("/api/admin/nodes/singbox", a.handleAdminNodeVersions)
 		ar.Post("/api/admin/nodes/singbox/refresh", a.handleAdminNodeVersionRefresh)
@@ -456,6 +479,13 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/stats/usage/users", a.handleAdminUsageUsers)
 		ar.Get("/api/admin/stats/usage/packages", a.handleAdminUsagePackages)
 
+		// Upstream provider accounts are configured and queried only by an admin
+		// session. These routes never expose stored credentials.
+		ar.Get("/api/admin/upstreams", a.handleAdminGetUpstreams)
+		ar.Put("/api/admin/upstreams/{provider}", a.handleAdminPutUpstream)
+		ar.Delete("/api/admin/upstreams/{provider}", a.handleAdminDeleteUpstream)
+		ar.Post("/api/admin/upstreams/{provider}/refresh", a.handleAdminRefreshUpstream)
+
 		ar.Get("/api/admin/reg-codes", a.handleAdminListRegCodes)
 		ar.Post("/api/admin/reg-codes/generate", a.handleAdminGenerateRegCodes)
 		ar.Put("/api/admin/reg-codes/{id}", a.handleAdminUpdateRegCode)
@@ -497,5 +527,11 @@ func serveInstallScript(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, assets.InstallScript())
 }
 
-// Close releases idle source connections after handlers and sync have drained.
-func (a *API) Close() { a.sourceClient.CloseIdleConnections() }
+// Close releases background backup workers and idle source connections after
+// handlers and sync have drained.
+func (a *API) Close() {
+	if a.remoteBackup != nil {
+		a.remoteBackup.Stop()
+	}
+	a.sourceClient.CloseIdleConnections()
+}

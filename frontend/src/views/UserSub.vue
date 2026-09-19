@@ -98,7 +98,12 @@
           <div v-if="line.all.length === 1" class="plan-row" :class="{ queued: line.segs[0].status === 'queued' }">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px;">
               <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ line.name }}</span>
-              <n-tag :type="planStatus(line.segs[0]).type" size="small" bordered>{{ planStatus(line.segs[0]).label }}</n-tag>
+              <div class="pl-actions">
+                <n-checkbox v-if="line.autoRenewPlanID" size="small"
+                            :checked="line.autoRenew" :disabled="renewSaving === line.autoRenewPlanID"
+                            @update:checked="enabled => updateAutoRenew(line, enabled)">自动续订</n-checkbox>
+                <n-tag :type="planStatus(line.segs[0]).type" size="small" bordered>{{ planStatus(line.segs[0]).label }}</n-tag>
+              </div>
             </div>
             <n-progress v-if="line.segs[0].status !== 'queued'" type="line" :percentage="planPct(line.segs[0])" :color="planPct(line.segs[0])>90?'#b6413a':'#4f8366'" />
             <div v-else class="pl-stripe"></div>
@@ -114,7 +119,12 @@
           <div v-else class="plan-row line">
             <div class="pl-head">
               <span class="pl-name">{{ line.name }}</span>
-              <span class="pl-sub">{{ line.all.length }} 段 · 累计已用 {{ fmtBytes(line.totalUsed) }}</span>
+              <div class="pl-actions">
+                <n-checkbox v-if="line.autoRenewPlanID" size="small"
+                            :checked="line.autoRenew" :disabled="renewSaving === line.autoRenewPlanID"
+                            @update:checked="enabled => updateAutoRenew(line, enabled)">自动续订</n-checkbox>
+                <span class="pl-sub">{{ line.all.length }} 段 · 累计已用 {{ fmtBytes(line.totalUsed) }}</span>
+              </div>
             </div>
             <!-- 展开键在时间线上方：历史段按时间序插在最前，键放下面的话，点开
                  之后内容在按钮上方冒出来，按钮连同下半页一起被推走。 -->
@@ -344,7 +354,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, h, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NInput, NInputGroup, NButton, NDataTable, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NDatePicker, NProgress, NIcon, NEmpty, useMessage, useDialog } from 'naive-ui'
+import { NCard, NInput, NInputGroup, NButton, NDataTable, NTag, NTooltip, NSelect, NSpace, NModal, NForm, NFormItem, NSwitch, NCheckbox, NDatePicker, NProgress, NIcon, NEmpty, useMessage, useDialog } from 'naive-ui'
 import { SpeedometerOutline } from '@vicons/ionicons5'
 import { apiGet, apiList, apiPost, apiPut } from '@/api'
 import { useAuthStore } from '@/stores/auth'
@@ -420,6 +430,8 @@ type PlanLine = {
   hidden: number   // 被收起的历史段数
   finished: boolean
   totalUsed: number
+  autoRenew: boolean
+  autoRenewPlanID: number
 }
 // 一段落在时间线的哪一档：已结束的在前（过去），使用中居中，排队的在后（将来）。
 function chronoKey(p: any): number {
@@ -455,10 +467,13 @@ const planLines = computed<PlanLine[]>(() => {
     const finished = all.every(p => planSortKey(p) === 2)
     // 整条线都结束时不再收起段落——那张卡片本来就是历史，收了就没内容了。
     const segs = finished || expandedLines.value.includes(key) ? all : all.filter(p => planSortKey(p) !== 2)
+    const renewable = all.find(p => p.status === 'active') || all.find(p => p.status === 'queued')
     out.push({
       key, name: all[0].name || '套餐 #' + all[0].id, all, segs,
       hidden: all.length - segs.length, finished,
       totalUsed: all.reduce((n, p) => n + (p.used || 0), 0),
+      autoRenew: renewable?.auto_renew !== false,
+      autoRenewPlanID: renewable?.id || 0,
     })
   }
   return out
@@ -470,6 +485,19 @@ const canFoldFinished = computed(() => finishedLines.value.length > 0 && finishe
 const showFinished = ref(false)
 const visibleLines = computed<PlanLine[]>(() =>
   showFinished.value || !canFoldFinished.value ? planLines.value : planLines.value.filter(l => !l.finished))
+
+const renewSaving = ref<number | null>(null)
+async function updateAutoRenew(line: PlanLine, enabled: boolean) {
+  if (!line.autoRenewPlanID) return
+  renewSaving.value = line.autoRenewPlanID
+  try {
+    await apiPut(`/api/user/plans/${line.autoRenewPlanID}/auto-renew`, { enabled })
+    for (const plan of plans.value) {
+      if (plan.kind === 'plan' && plan.queue_key === line.key) plan.auto_renew = enabled
+    }
+    message.success(enabled ? '已开启自动续订' : '已关闭自动续订')
+  } catch (e: any) { message.error(e.message || '自动续订设置失败') } finally { renewSaving.value = null }
+}
 
 function segCls(p: any) {
   const k = planSortKey(p)
@@ -844,9 +872,11 @@ onMounted(async () => {
 
 /* 订阅线：整行独占，段落纵向串成时间线（左侧一竖线 + 每段一个圆点） */
 .plan-row.line { grid-column: 1 / -1; }
-.pl-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.pl-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 .pl-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pl-sub { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.pl-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.pl-actions :deep(.n-checkbox__label) { padding-left: 4px; color: var(--text-3); font-size: 11px; }
 .pl-seg { position: relative; padding: 0 0 14px 20px; }
 .pl-seg:last-child { padding-bottom: 0; }
 /* 连接线从圆点下方一直画到下一段，最后一段不画 */

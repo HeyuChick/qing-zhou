@@ -88,7 +88,7 @@ import {
   ReceiptOutline, WalletOutline, MegaphoneOutline, BookOutline,
   PersonOutline, PeopleOutline, PeopleCircleOutline, ArchiveOutline, ServerOutline,
   SettingsOutline, KeyOutline, NotificationsOutline, DocumentTextOutline,
-  PulseOutline, HardwareChipOutline, HomeOutline, LogOutOutline, CloudDownloadOutline,
+  PulseOutline, HardwareChipOutline, HomeOutline, LogOutOutline, CloudDownloadOutline, CloudOutline,
   ShieldCheckmarkOutline, SearchOutline
 } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
@@ -140,6 +140,7 @@ const infoItems: MenuOption[] = [
 ]
 
 const adminOpsItems: MenuOption[] = [
+  { label: '上游管理', key: '/admin/upstreams', icon: renderIcon(CloudOutline) },
   { label: '管理概览', key: '/admin', icon: renderIcon(SpeedometerOutline) },
   { label: '用户管理', key: '/admin/users', icon: renderIcon(PeopleOutline) },
   { label: '用户组', key: '/admin/user-groups', icon: renderIcon(PeopleCircleOutline) },
@@ -187,7 +188,7 @@ const menuOptions = computed<MenuOption[]>(() => {
 const titleMap: Record<string, string> = {
   '/': '首页', '/dashboard': '控制台', '/sub': '订阅管理', '/shop': '积分商城',
   '/orders': '订单记录', '/points': '积分明细', '/notices': '公告通知', '/help': '帮助中心', '/account': '账户设置',
-  '/admin': '管理概览', '/admin/users': '用户管理', '/admin/user-groups': '用户组', '/admin/packages': '套餐管理', '/admin/nodes': '节点管理',
+  '/admin': '管理概览', '/admin/upstreams': '上游管理', '/admin/users': '用户管理', '/admin/user-groups': '用户组', '/admin/packages': '套餐管理', '/admin/nodes': '节点管理',
   '/admin/singbox': 'sing-box', '/admin/certs': '证书管理', '/admin/orders': '订单管理', '/admin/servers': '服务器', '/admin/monitor': '监控管理',
   '/admin/settings': '系统设置', '/admin/reg-codes': '注册码', '/admin/api-tokens': 'API Token', '/admin/announcements': '公告管理', '/admin/manual-notifications': '手动通知', '/admin/help': '帮助文档',
   '/admin/update': '在线更新',
@@ -224,6 +225,7 @@ const userMenu = [
   { label: '退出登录', key: 'logout', icon: () => h(NIcon, null, { default: () => h(LogOutOutline) }) },
 ]
 const adminQuickMenu = [
+  { label: '上游管理', key: '/admin/upstreams' },
   { label: '管理概览', key: '/admin' },
   { label: '用户管理', key: '/admin/users' },
   { label: '系统设置', key: '/admin/settings' },

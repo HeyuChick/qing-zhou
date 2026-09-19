@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { apiGet } from '@/api'
 
 export interface SiteConfig {
@@ -19,6 +19,7 @@ export interface SiteConfig {
   homepage_url: string
   help_docs_mode: string
   help_docs_url: string
+  brand_icon_data_uri: string
 }
 
 export const useConfigStore = defineStore('config', () => {
@@ -39,7 +40,30 @@ export const useConfigStore = defineStore('config', () => {
     homepage_url: '',
     help_docs_mode: 'builtin',
     help_docs_url: '',
+    brand_icon_data_uri: '',
   })
+
+  function applyBrowserBranding() {
+    if (typeof document === 'undefined') return
+    const name = config.value.site_name?.trim() || '轻舟'
+    const icon = config.value.brand_icon_data_uri || '/qingzhou-mark.svg'
+    const type = icon.startsWith('data:image/png') ? 'image/png'
+      : icon.startsWith('data:image/jpeg') ? 'image/jpeg'
+        : icon.startsWith('data:image/webp') ? 'image/webp' : 'image/svg+xml'
+    document.title = name
+    for (const rel of ['icon', 'shortcut icon', 'apple-touch-icon']) {
+      let link = document.querySelector<HTMLLinkElement>(`link[rel="${rel}"]`)
+      if (!link) {
+        link = document.createElement('link')
+        link.rel = rel
+        document.head.appendChild(link)
+      }
+      link.href = icon
+      link.type = type
+    }
+  }
+
+  watch(config, applyBrowserBranding, { deep: true, immediate: true })
 
   async function fetchConfig() {
     try {
@@ -49,5 +73,5 @@ export const useConfigStore = defineStore('config', () => {
     return config.value
   }
 
-  return { config, fetchConfig }
+  return { config, fetchConfig, applyBrowserBranding }
 })
