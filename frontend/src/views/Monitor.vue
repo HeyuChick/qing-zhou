@@ -136,12 +136,61 @@
         </div>
 
         <!-- 空状态 -->
-        <n-empty v-if="!loading && servers.length === 0" description="暂无服务器数据" style="padding: 80px 0;" />
+        <n-empty v-if="!loading && homepageCards.length === 0" description="暂无服务器数据" style="padding: 80px 0;" />
 
         <!-- 服务器卡片 -->
         <div class="server-grid">
-          <template v-for="(s, i) in servers" :key="s.name">
-          <div class="server-card" :style="{ '--i': i }">
+          <template v-for="(s, i) in homepageCards" :key="s.name">
+          <!-- 上游余额独立于面板本机：管理员可在上游管理页开关，不依赖本机卡片是否公开。 -->
+          <div v-if="s.name === UPSTREAM_BALANCE_CARD" class="server-card upstream-balance-card" :style="{ '--i': i }">
+            <div class="card-top-line online" />
+            <div class="card-header">
+              <div class="card-title">
+                <span class="status-beacon online" />
+                <span class="server-name">上游余额</span>
+              </div>
+              <span class="status-badge online"><i class="badge-dot" /> 官方数据</span>
+            </div>
+            <div class="tag-line">
+              <span class="tag loc">OCI · Cloudflare</span>
+              <span class="tag spec">每 15 分钟更新</span>
+            </div>
+            <div class="upstream-balance-grid">
+              <div
+                v-for="item in upstreamBalanceItems"
+                :key="item.provider"
+                class="upstream-balance-item"
+                :class="{ dragging: upstreamDragging === item.provider, 'drag-over': upstreamDragOver === item.provider }"
+                draggable="true"
+                @dragstart="handleUpstreamDragStart(item.provider, $event)"
+                @dragover.prevent="handleUpstreamDragOver(item.provider, $event)"
+                @drop.prevent="handleUpstreamDrop(item.provider)"
+                @dragend="handleUpstreamDragEnd"
+              >
+                <div class="upstream-balance-head">
+                  <span class="upstream-provider-mark" :class="item.provider">{{ item.provider === 'oci' ? 'OCI' : 'CF' }}</span>
+                  <span class="upstream-provider-name">{{ item.provider === 'oci' ? 'Oracle Cloud' : 'Cloudflare' }}</span>
+                  <span class="upstream-drag-hint" title="拖动调整余额顺序">⋮⋮</span>
+                </div>
+                <template v-if="item.usage?.success">
+                  <div class="upstream-balance-value">{{ upstreamBalanceValue(item) }}</div>
+                  <div class="upstream-balance-meta">{{ upstreamBalanceMeta(item) }}</div>
+                  <div class="upstream-balance-track"><i :class="upstreamUsageLevel(item.usage)" :style="{ width: upstreamUsagePercent(item.usage) + '%' }" /></div>
+                  <div class="upstream-balance-foot">{{ item.usage.period || '当前周期' }} · {{ fmtUpdated(item.usage.updated_at) }}</div>
+                </template>
+                <template v-else>
+                  <div class="upstream-balance-value muted">{{ item.view.configured ? '查询中' : '未配置' }}</div>
+                  <div class="upstream-balance-meta">{{ item.view.configured ? (item.usage?.error || '等待官方接口返回') : '前往上游管理配置' }}</div>
+                  <div class="upstream-balance-foot">{{ item.provider === 'oci' ? 'OCI Usage API' : 'Cloudflare Analytics GraphQL' }}</div>
+                </template>
+              </div>
+            </div>
+            <div class="card-footer upstream-card-footer">
+              <span class="footer-time"><span class="dot online" />余额卡片可拖动排序</span>
+              <button class="upstream-refresh-link" type="button" :disabled="upstreamRefreshing" @click="refreshUpstreamBalances">刷新</button>
+            </div>
+          </div>
+          <div v-else class="server-card" :style="{ '--i': i }">
             <div class="card-top-line" :class="s.status" />
 
             <!-- 头部 -->
@@ -261,56 +310,6 @@
               </span>
             </div>
           </div>
-
-          <!-- 上游余额只对管理员加载，避免把供应商账户用量暴露到公开状态页。 -->
-          <div v-if="auth.isAdmin && s.name === '面板本机'" class="server-card upstream-balance-card" :style="{ '--i': i + 1 }">
-            <div class="card-top-line online" />
-            <div class="card-header">
-              <div class="card-title">
-                <span class="status-beacon online" />
-                <span class="server-name">上游余额</span>
-              </div>
-              <span class="status-badge online"><i class="badge-dot" /> 官方数据</span>
-            </div>
-            <div class="tag-line">
-              <span class="tag loc">OCI · Cloudflare</span>
-              <span class="tag spec">每 15 分钟更新</span>
-            </div>
-            <div class="upstream-balance-grid">
-              <div
-                v-for="item in upstreamBalanceItems"
-                :key="item.provider"
-                class="upstream-balance-item"
-                :class="{ dragging: upstreamDragging === item.provider, 'drag-over': upstreamDragOver === item.provider }"
-                draggable="true"
-                @dragstart="handleUpstreamDragStart(item.provider, $event)"
-                @dragover.prevent="handleUpstreamDragOver(item.provider, $event)"
-                @drop.prevent="handleUpstreamDrop(item.provider)"
-                @dragend="handleUpstreamDragEnd"
-              >
-                <div class="upstream-balance-head">
-                  <span class="upstream-provider-mark" :class="item.provider">{{ item.provider === 'oci' ? 'OCI' : 'CF' }}</span>
-                  <span class="upstream-provider-name">{{ item.provider === 'oci' ? 'Oracle Cloud' : 'Cloudflare' }}</span>
-                  <span class="upstream-drag-hint" title="拖动调整余额顺序">⋮⋮</span>
-                </div>
-                <template v-if="item.usage?.success">
-                  <div class="upstream-balance-value">{{ upstreamBalanceValue(item) }}</div>
-                  <div class="upstream-balance-meta">{{ upstreamBalanceMeta(item) }}</div>
-                  <div class="upstream-balance-track"><i :class="upstreamUsageLevel(item.usage)" :style="{ width: upstreamUsagePercent(item.usage) + '%' }" /></div>
-                  <div class="upstream-balance-foot">{{ item.usage.period || '当前周期' }} · {{ fmtUpdated(item.usage.updated_at) }}</div>
-                </template>
-                <template v-else>
-                  <div class="upstream-balance-value muted">{{ item.view.configured ? '查询中' : '未配置' }}</div>
-                  <div class="upstream-balance-meta">{{ item.view.configured ? (item.usage?.error || '等待官方接口返回') : '前往上游管理配置' }}</div>
-                  <div class="upstream-balance-foot">{{ item.provider === 'oci' ? 'OCI Usage API' : 'Cloudflare Analytics GraphQL' }}</div>
-                </template>
-              </div>
-            </div>
-            <div class="card-footer upstream-card-footer">
-              <span class="footer-time"><span class="dot online" />余额卡片可拖动排序</span>
-              <button class="upstream-refresh-link" type="button" :disabled="upstreamRefreshing" @click="refreshUpstreamBalances">刷新</button>
-            </div>
-          </div>
           </template>
         </div>
       </template>
@@ -372,12 +371,26 @@ interface UpstreamUsage {
 const config = useConfigStore()
 const auth = useAuthStore()
 const servers = ref<Server[]>([])
+function localHomeVisibility(local?: { home_visibility?: string; public_visible?: boolean } | null) {
+  if (local?.home_visibility === 'public' || local?.home_visibility === 'admin' || local?.home_visibility === 'hidden') return local.home_visibility
+  return local?.public_visible ? 'public' : 'admin'
+}
 const loading = ref(false)
 const refreshing = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
 const upstreamDefaults: UpstreamProvider[] = ['oci', 'cloudflare']
 const upstreamOrder = ref<UpstreamProvider[]>([...upstreamDefaults])
+const upstreamBalanceVisible = ref(false)
+const UPSTREAM_BALANCE_CARD = '上游余额'
+const homepageCards = computed(() => {
+  const cards = [...servers.value]
+  if (!auth.isAdmin || !upstreamBalanceVisible.value) return cards
+  const localIdx = cards.findIndex(server => server.name === '面板本机')
+  const insertAt = localIdx >= 0 ? localIdx + 1 : 0
+  cards.splice(insertAt, 0, { name: UPSTREAM_BALANCE_CARD } as Server)
+  return cards
+})
 const upstreamViews = reactive<Record<UpstreamProvider, UpstreamView>>({
   oci: { provider: 'oci', configured: false, limit: 10_000_000_000_000 },
   cloudflare: { provider: 'cloudflare', configured: false, limit: 100_000 },
@@ -447,6 +460,11 @@ async function loadUpstreamBalances() {
       Object.assign(upstreamViews[provider], view || { provider, configured: false })
     }
     upstreamOrder.value = normalizeUpstreamOrder(settings?.admin_upstream_balance_order)
+    const configured = Object.values(upstreamViews).some(view => view.configured)
+    const saved = settings?.admin_upstream_balance_visible
+    // 没配过默认关；配了至少一个默认开；管理员手动关过则记住关闭。
+    upstreamBalanceVisible.value = saved === 'true' || (saved !== 'false' && configured)
+    if (!upstreamBalanceVisible.value) return
     await Promise.all(upstreamDefaults.map(refreshUpstream))
   } catch {
     // The public monitor must remain usable when an administrator session expires
@@ -454,7 +472,7 @@ async function loadUpstreamBalances() {
   } finally { upstreamLoading.value = false }
 }
 async function refreshUpstreamBalances() {
-  if (!auth.isAdmin || upstreamRefreshing.value) return
+  if (!auth.isAdmin || !upstreamBalanceVisible.value || upstreamRefreshing.value) return
   upstreamRefreshing.value = true
   try { await Promise.all(upstreamDefaults.map(refreshUpstream)) } finally { upstreamRefreshing.value = false }
 }
@@ -608,12 +626,10 @@ async function fetchData() {
     const sparks: Record<string, Spark> = {}
     if (spk?.servers) for (const s of spk.servers) sparks[s.name] = s
     const list = Array.isArray(pub?.servers) ? [...pub.servers] : []
-    // The public endpoint intentionally hides the panel host by default. An
-    // administrator still needs to see the balance card next to 面板本机, so
-    // merge the local row from the authenticated monitor endpoint only.
+    // 本机三态：public 走公开列表；admin 仅管理员首页注入；hidden 谁都不显示。
     if (auth.isAdmin) {
       const local = adminServers.find(s => s.local || s.id === 0 || s.name === '面板本机')
-      if (local) {
+      if (local && localHomeVisibility(local) !== 'hidden') {
         const localServer: Server = {
           name: local.name || '面板本机', status: local.status === 'online' ? 'online' : 'offline',
           location: local.location || '', provider: local.provider || '', spec: local.spec || '',
@@ -752,7 +768,7 @@ onMounted(async () => {
   loadHeatmap('24h')
   if (auth.isAdmin) void loadUpstreamBalances()
   upstreamTimer = setInterval(() => {
-    if (document.visibilityState === 'visible' && auth.isAdmin) void refreshUpstreamBalances()
+    if (document.visibilityState === 'visible' && auth.isAdmin && upstreamBalanceVisible.value) void refreshUpstreamBalances()
   }, 15 * 60 * 1000)
   window.addEventListener('resize', onWinResize)
 })
