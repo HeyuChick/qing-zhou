@@ -66,6 +66,8 @@ type API struct {
 	// Tests replace Telegram I/O; production leaves these nil.
 	tgSendFn   func(chatID int64, html string) error
 	tgClientFn func(token string) *telegram.Client
+	// Tests replace SMTP I/O for manual email broadcasts; production leaves this nil.
+	mailSendFn func(to []string, subject, html string) error
 
 	// Where server rows may keep SSH private keys as files. Empty disables the
 	// feature; see sshctl/keyfile.go.
@@ -467,6 +469,7 @@ func (a *API) Router() http.Handler {
 		ar.Delete("/api/admin/announcements/{id}", a.handleAdminDeleteAnnouncement)
 
 		ar.Get("/api/admin/manual-notifications/users", a.handleAdminManualNotificationUsers)
+		ar.Get("/api/admin/manual-notifications/vars", a.handleAdminManualNotificationVars)
 		ar.Get("/api/admin/manual-notifications", a.handleAdminListManualNotifications)
 		ar.Post("/api/admin/manual-notifications", a.handleAdminCreateManualNotification)
 		ar.Get("/api/admin/manual-notifications/{id}", a.handleAdminManualNotificationDetail)

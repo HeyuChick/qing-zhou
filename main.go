@@ -111,6 +111,7 @@ func main() {
 	// deferred st.Close() runs.
 	app.StartQueueAdvance(ctx, 2*time.Minute, &bgWG)
 	app.StartTelegram(ctx)
+	app.StartManualNotifications()
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
