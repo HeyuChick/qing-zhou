@@ -24,6 +24,7 @@ const router = createRouter({
         { path: 'help', name: 'help', component: () => import('@/views/UserHelp.vue') },
         { path: 'account', name: 'account', component: () => import('@/views/UserAccount.vue') },
         { path: 'admin', name: 'admin', component: () => import('@/views/AdminOverview.vue'), meta: { requiresAdmin: true } },
+        { path: 'admin/upstreams', name: 'admin-upstreams', component: () => import('@/views/AdminUpstreams.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/users', name: 'admin-users', component: () => import('@/views/AdminUsers.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/packages', name: 'admin-packages', component: () => import('@/views/AdminPackages.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/user-groups', name: 'admin-user-groups', component: () => import('@/views/AdminUserGroups.vue'), meta: { requiresAdmin: true } },

@@ -3,7 +3,7 @@
     <div class="login-brand">
       <div class="login-brand-inner">
         <div class="login-logo"><BrandMark :size="42" /></div>
-        <div class="login-copy"><strong>轻舟</strong><span>安全连接，从这里开始</span></div>
+        <div class="login-copy"><strong>{{ config.config.site_name || '轻舟' }}</strong><span>安全连接，从这里开始</span></div>
       </div>
     </div>
 

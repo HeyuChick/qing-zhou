@@ -42,15 +42,34 @@ func enqueuePlanBucket(tx txLike, userID int64, username string, pkg *Package, o
 	if err := ensurePlanIdentity(tx, userID, pkg.ID, username, now); err != nil {
 		return err
 	}
+	queueKey := effectiveQueueKey(pkg.ID, pkg.QueueKey)
+	autoRenew, err := queueAutoRenew(tx, userID, queueKey)
+	if err != nil {
+		return err
+	}
 	_, err = insertBucket(tx, &Bucket{
 		UserID: userID, Kind: "plan", PackageID: pkg.ID, Name: pkg.Name,
-		QueueKey:     effectiveQueueKey(pkg.ID, pkg.QueueKey),
+		QueueKey:     queueKey,
 		ClientName:   fmt.Sprintf("qz_%s_p%d", username, orderID),
 		TrafficLimit: pkg.TrafficBytes,
 		Status:       "queued", ExpiryAt: 0, DurationDays: pkg.DurationDays,
-		OrderID: orderID, CreatedAt: now,
+		AutoRenew: autoRenew, OrderID: orderID, CreatedAt: now,
 	})
 	return err
+}
+
+// queueAutoRenew carries a user's explicit setting across every purchase in the
+// same renewal line. A new line starts enabled, so existing and newly-purchased
+// plans are renewable unless the user turns that line off.
+func queueAutoRenew(tx txLike, userID int64, queueKey string) (bool, error) {
+	var enabled bool
+	err := tx.QueryRow(`SELECT auto_renew FROM user_plans
+		WHERE user_id=? AND kind='plan' AND queue_key=? AND status<>?
+		ORDER BY id DESC LIMIT 1`, userID, queueKey, StatusRetired).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	return enabled, err
 }
 
 // usableHeadPredicate matches the plan bucket that currently OWNS a package's
@@ -697,6 +716,9 @@ type Bucket struct {
 	// when it is promoted to active.
 	Status       string `json:"status"`
 	DurationDays int64  `json:"duration_days"`
+	// AutoRenew belongs to a renewal line. Every non-retired bucket in that line
+	// is kept in sync so a newly queued purchase cannot silently re-enable it.
+	AutoRenew bool `json:"auto_renew"`
 	// Mixed (HTTP/SOCKS5) proxy credential — a proxy-only account, unrelated to the
 	// login account. Empty ProxyUsername → fall back to ClientName/ClientSecret.
 	// ProxyExpiresAt 0 = permanent. See migrate.go for the schema.
@@ -780,7 +802,7 @@ const bucketCols = `p.id, p.user_id, p.kind, p.package_id, p.queue_key, p.name,
 	CASE WHEN COALESCE(i.proxy_username,'')<>'' THEN i.proxy_username ELSE p.proxy_username END,
 	CASE WHEN COALESCE(i.proxy_username,'')<>'' THEN i.proxy_password ELSE p.proxy_password END,
 	CASE WHEN COALESCE(i.proxy_username,'')<>'' THEN i.proxy_expires_at ELSE p.proxy_expires_at END,
-	p.status, p.duration_days`
+	p.status, p.duration_days, p.auto_renew`
 
 // bucketFrom is the FROM clause bucketCols expects. The join is scoped to real
 // plan份 (package_id>0); pool/free and package-less grants keep their row stats
@@ -795,7 +817,7 @@ func scanBucket(sc scanner) (*Bucket, error) {
 	err := sc.Scan(&b.ID, &b.UserID, &b.Kind, &b.PackageID, &b.QueueKey, &b.Name, &b.ClientName, &b.ClientUUID,
 		&b.ClientSecret, &b.TrafficLimit, &b.UsedUp, &b.UsedDown, &b.ExpiryAt, &b.LastOnlineAt,
 		&b.OrderID, &b.CreatedAt, &b.UpdatedAt,
-		&b.ProxyUsername, &b.ProxyPassword, &b.ProxyExpiresAt, &b.Status, &b.DurationDays)
+		&b.ProxyUsername, &b.ProxyPassword, &b.ProxyExpiresAt, &b.Status, &b.DurationDays, &b.AutoRenew)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1132,10 +1154,10 @@ func insertBucket(ex execer, b *Bucket) (int64, error) {
 	}
 	res, err := ex.Exec(`INSERT INTO user_plans
 		(user_id, kind, package_id, queue_key, name, client_name,
-		 traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, status, duration_days, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 traffic_limit, used_up, used_down, expiry_at, last_online_at, order_id, status, duration_days, auto_renew, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		b.UserID, b.Kind, b.PackageID, b.QueueKey, b.Name, b.ClientName,
-		b.TrafficLimit, b.UsedUp, b.UsedDown, b.ExpiryAt, b.LastOnlineAt, b.OrderID, status, b.DurationDays, b.CreatedAt, now)
+		b.TrafficLimit, b.UsedUp, b.UsedDown, b.ExpiryAt, b.LastOnlineAt, b.OrderID, status, b.DurationDays, b.AutoRenew, b.CreatedAt, now)
 	if err != nil {
 		return 0, err
 	}

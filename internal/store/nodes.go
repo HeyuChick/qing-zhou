@@ -565,6 +565,29 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int6
 	if groupIDs == nil {
 		groupIDs = unmarshalGroupIDs(storedGroups)
 	}
+	preservedOrder := map[string]int64{}
+	rows, err := tx.Query(`SELECT share_link, sort_order FROM nodes WHERE source_id=?`, sourceID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var link string
+		var order int64
+		if err := rows.Scan(&link, &order); err != nil {
+			rows.Close()
+			return err
+		}
+		preservedOrder[link] = order
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	var nextOrder int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(sort_order), -1) + 1 FROM nodes`).Scan(&nextOrder); err != nil {
+		return err
+	}
 	now := time.Now().Unix()
 	if fetchErr == "" {
 		// Group memberships are keyed by node id and are not ON DELETE CASCADE, so
@@ -578,8 +601,13 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int6
 			return err
 		}
 		for _, n := range nodes {
-			res, err := tx.Exec(`INSERT INTO nodes (type, name, protocol, share_link, source_id, enabled, created_at)
-				VALUES ('external', ?, ?, ?, ?, 1, ?)`, n.Name, n.Protocol, n.ShareLink, sourceID, now)
+			sortOrder, exists := preservedOrder[n.ShareLink]
+			if !exists {
+				sortOrder = nextOrder
+				nextOrder++
+			}
+			res, err := tx.Exec(`INSERT INTO nodes (type, name, protocol, share_link, source_id, enabled, sort_order, created_at)
+				VALUES ('external', ?, ?, ?, ?, 1, ?, ?)`, n.Name, n.Protocol, n.ShareLink, sourceID, sortOrder, now)
 			if err != nil {
 				return err
 			}

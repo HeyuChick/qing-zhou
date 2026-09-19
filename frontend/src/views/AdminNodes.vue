@@ -33,7 +33,17 @@
               </template>
               <div v-if="gv.description" class="group-desc">{{ gv.description }}</div>
               <div v-if="gv.nodes.length" class="card-grid">
-                <div v-for="(r, idx) in gv.nodes" :key="r.id" class="list-card">
+                <div
+                  v-for="r in gv.nodes"
+                  :key="r.id"
+                  class="list-card node-sort-card"
+                  :class="{ dragging: draggingNodeId === r.id, 'drag-over': dragOverNodeId === r.id }"
+                  draggable="true"
+                  @dragstart="handleNodeDragStart(r.id, $event)"
+                  @dragover.prevent="handleNodeDragOver(r.id, $event)"
+                  @drop.prevent="handleNodeDrop(r.id, $event)"
+                  @dragend="handleNodeDragEnd"
+                >
                   <div class="lc-head">
                     <span class="lc-title">{{ r.name || '—' }}</span>
                     <n-tag :type="r.enabled ? 'success' : 'default'" size="tiny" :bordered="false">{{ r.enabled ? '启用' : '禁用' }}</n-tag>
@@ -63,10 +73,7 @@
                     <div v-if="cardRoute(r).warning" class="route-warning">{{ cardRoute(r).warning }}</div>
                   </div>
                   <div class="lc-foot">
-                    <span class="order-actions">
-                      <n-button size="tiny" quaternary circle :disabled="idx === 0 || reordering" title="前移（订阅/列表更靠前）" @click="moveNodeInGroup(gv, idx, -1)">←</n-button>
-                      <n-button size="tiny" quaternary circle :disabled="idx === gv.nodes.length - 1 || reordering" title="后移" @click="moveNodeInGroup(gv, idx, 1)">→</n-button>
-                    </span>
+                    <span class="order-hint" title="拖动卡片调整节点顺序">⋮⋮ 拖动排序</span>
                     <span class="node-actions">
                       <n-button size="tiny" quaternary @click="openNode(r)">编辑</n-button>
                       <n-button size="tiny" type="error" quaternary @click="handleDeleteNode(r.id)">删除</n-button>
@@ -334,6 +341,8 @@ const tab = ref('nodes')
 const loading = ref(false)
 const saving = ref(false)
 const reordering = ref(false)
+const draggingNodeId = ref<number | null>(null)
+const dragOverNodeId = ref<number | null>(null)
 
 // 抽屉宽度：移动端全屏，桌面 460px
 const isMobile = ref(false)
@@ -742,26 +751,46 @@ async function handleDeleteNode(id: number) {
   try { await apiDelete(`/api/admin/nodes/${id}`); message.success('已删除'); await load() } catch (e: any) { message.error(e.message) }
 }
 
-// 调整节点在分组内（及订阅/列表中）的顺序。节点按全局 sort_order 排，分组只是按
-// 归属过滤，因此「组内前移/后移」= 把该节点与组内相邻节点在全局数组里对调位置，
-// 再把完整 id 顺序提交后端。乐观更新，失败回滚重载。
-async function moveNodeInGroup(gv: any, idx: number, dir: -1 | 1) {
-  const target = idx + dir
-  if (target < 0 || target >= gv.nodes.length || reordering.value) return
-  const aId = gv.nodes[idx].id
-  const bId = gv.nodes[target].id
-  const arr = [...nodes.value]
-  const gi = arr.findIndex(n => n.id === aId)
-  const gj = arr.findIndex(n => n.id === bId)
-  if (gi < 0 || gj < 0) return
-  ;[arr[gi], arr[gj]] = [arr[gj], arr[gi]]
-  nodes.value = arr
+function handleNodeDragStart(id: number, event: DragEvent) {
+  draggingNodeId.value = id
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(id))
+  }
+}
+function handleNodeDragOver(id: number, event: DragEvent) {
+  if (draggingNodeId.value === null || draggingNodeId.value === id) return
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dragOverNodeId.value = id
+}
+async function handleNodeDrop(targetId: number, event: DragEvent) {
+  const sourceId = draggingNodeId.value
+  dragOverNodeId.value = null
+  if (sourceId === null || sourceId === targetId || reordering.value) return
+  const previous = [...nodes.value]
+  const next = [...previous]
+  const from = next.findIndex(node => node.id === sourceId)
+  const target = next.findIndex(node => node.id === targetId)
+  if (from < 0 || target < 0) return
+  const targetElement = event.currentTarget as HTMLElement | null
+  const dropAfter = !!targetElement && event.clientY > targetElement.getBoundingClientRect().top + targetElement.offsetHeight / 2
+  const [moved] = next.splice(from, 1)
+  const targetAfterRemoval = next.findIndex(node => node.id === targetId)
+  next.splice(targetAfterRemoval + (dropAfter ? 1 : 0), 0, moved)
+  nodes.value = next
   reordering.value = true
   try {
-    await apiPost('/api/admin/nodes/reorder', { ids: arr.map(n => n.id) })
-  } catch (e: any) {
-    message.error(e.message || '排序失败'); await load()
-  } finally { reordering.value = false }
+    await apiPost('/api/admin/nodes/reorder', { ids: next.map(node => node.id) })
+  } catch (error: any) {
+    nodes.value = previous
+    message.error(error.message || '排序失败')
+  } finally {
+    reordering.value = false
+  }
+}
+function handleNodeDragEnd() {
+  draggingNodeId.value = null
+  dragOverNodeId.value = null
 }
 
 // --- Bulk import ---
@@ -911,7 +940,12 @@ async function load() {
 .route-warning { margin-top: 8px; padding-top: 7px; border-top: 1px solid rgba(208, 48, 80, 0.12); color: #d03050; font-size: 11px; line-height: 1.4; }
 .route-preview.warn { background: rgba(208, 48, 80, 0.035); border-color: rgba(208, 48, 80, 0.13); }
 .list-card .lc-foot { justify-content: space-between; gap: 8px; margin-top: 0; padding-top: 2px; }
-.order-actions, .node-actions { display: inline-flex; align-items: center; gap: 3px; }
+.node-sort-card { cursor: grab; transition: opacity .2s ease, transform .2s ease, border-color .2s ease, box-shadow .2s ease; }
+.node-sort-card:active { cursor: grabbing; }
+.node-sort-card.dragging { opacity: .45; transform: scale(.985); }
+.node-sort-card.drag-over { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.order-hint { display: inline-flex; align-items: center; gap: 5px; color: var(--text-3); font-size: 11px; user-select: none; }
+.order-hint:first-letter { letter-spacing: -3px; }
 .node-actions { margin-left: auto; }
 
 /* 完整拓扑：节点块 + 连接线，避免一整行彩色标签和文字箭头。 */

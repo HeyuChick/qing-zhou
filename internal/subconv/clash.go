@@ -1,6 +1,7 @@
 package subconv
 
 import (
+	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -42,6 +43,21 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 	if err := yaml.Unmarshal([]byte(template), &doc); err != nil {
 		doc = map[string]any{}
 	}
+	templateGroupsOnly, _ := doc["x-qingzhou-template-groups"].(bool)
+	delete(doc, "x-qingzhou-template-groups")
+	customNames := map[string]bool{}
+	if templateGroupsOnly {
+		for _, group := range mapSlice(doc["proxy-groups"]) {
+			name, _ := group["name"].(string)
+			if strings.TrimSpace(name) == "" || customNames[name] {
+				return "", fmt.Errorf("template proxy groups require unique nonempty names")
+			}
+			customNames[name] = true
+		}
+		if len(customNames) == 0 {
+			return "", fmt.Errorf("template-only groups require proxy-groups")
+		}
+	}
 
 	// Convert first, then dedupe the kept set so policy groups reference
 	// unique, real node names (clashProxy drops unsupported protocols).
@@ -59,7 +75,7 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 	for i, c := range cs {
 		kept[i] = c.p
 	}
-	dedupeNames(kept)
+	dedupeNamesWithReserved(kept, customNames)
 	list := make([]map[string]any, len(cs))
 	for i, c := range cs {
 		c.m["name"] = c.p.Name // sync after dedupe
@@ -67,18 +83,46 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 	}
 	doc["proxies"] = list
 	sg := buildStrategyGroups(kept)
-	doc["proxy-groups"] = mergeClashGroups(doc["proxy-groups"], clashGroups(sg), kept)
-	if profile != ProfileLegacy {
-		applyClashRoutingProfile(doc, profile)
+	primary := grpSelectClash
+	if templateGroupsOnly {
+		groups := mapSlice(doc["proxy-groups"])
+		primary = groups[0]["name"].(string)
+		for _, group := range groups {
+			expandAllPlaceholder(group, sg.all, "")
+			if proxies, ok := group["proxies"].([]any); ok && len(proxies) == 0 {
+				group["proxies"] = []any{"DIRECT"}
+			}
+		}
+		doc["proxy-groups"] = groups
+	} else {
+		doc["proxy-groups"] = mergeClashGroups(doc["proxy-groups"], clashGroups(sg), kept)
 	}
-	if len(sg.ai) > 0 {
+	var catchAll []any
+	if templateGroupsOnly {
+		rules, _ := doc["rules"].([]any)
+		keptRules := make([]any, 0, len(rules))
+		for _, raw := range rules {
+			rule, _ := raw.(string)
+			if strings.HasPrefix(rule, "MATCH,") {
+				catchAll = append(catchAll, raw)
+			} else {
+				keptRules = append(keptRules, raw)
+			}
+		}
+		doc["rules"] = keptRules
+	}
+	if profile != ProfileLegacy {
+		applyClashRoutingProfile(doc, profile, primary)
+	}
+	if len(sg.ai) > 0 && !templateGroupsOnly {
 		injectClashAIRoute(doc)
 	}
-	// Always append the final catch-all referencing the ACTUAL primary group, so
-	// the rule can never drift from the group name (templates must NOT hardcode
-	// it — a stale "MATCH,<old name>" yields "proxy not found" in the client).
 	rules, _ := doc["rules"].([]interface{})
-	rules = append(rules, "MATCH,"+grpSelectClash)
+	if len(catchAll) > 0 {
+		rules = append(rules, catchAll...)
+	} else {
+		rules = append(rules, "MATCH,"+primary)
+	}
 	doc["rules"] = rules
 
 	// Inject proxy server IPs into tun.route-exclude-address to prevent TUN
@@ -109,7 +153,7 @@ var clashDomesticDNS = []any{
 // direct-nameserver is what mihomo uses when a fake-IP domain is ultimately sent
 // through DIRECT. The GEOIP rule is no-resolve so a foreign fake-IP domain is
 // never resolved locally merely to test whether it is Chinese.
-func applyClashRoutingProfile(doc map[string]any, profile RoutingProfile) {
+func applyClashRoutingProfile(doc map[string]any, profile RoutingProfile, primary string) {
 	rules, _ := doc["rules"].([]any)
 	kept := make([]any, 0, len(rules)+2)
 	for _, raw := range rules {
@@ -120,7 +164,7 @@ func applyClashRoutingProfile(doc map[string]any, profile RoutingProfile) {
 		kept = append(kept, raw)
 	}
 
-	target := grpSelectClash
+	target := primary
 	if profile == ProfileCNDirect {
 		target = "DIRECT"
 	}
@@ -213,7 +257,7 @@ func mergeClashGroups(tpl any, generated []map[string]any, nodes []*Proxy) []map
 			continue
 		}
 		taken[n] = true
-		expandAllPlaceholder(g, names)
+		expandAllPlaceholder(g, names, grpFallbackClash)
 		out = append(out, g)
 	}
 	for _, g := range generated[1:] {
@@ -225,7 +269,7 @@ func mergeClashGroups(tpl any, generated []map[string]any, nodes []*Proxy) []map
 // expandAllPlaceholder replaces the "all" entry of a group's proxies list with
 // every node name. A group left with no proxies at all is given the full set:
 // mihomo rejects an empty proxy-group, which would take down the whole config.
-func expandAllPlaceholder(g map[string]any, names []string) {
+func expandAllPlaceholder(g map[string]any, names []string, legacyFallback string) {
 	raw, ok := g["proxies"].([]any)
 	if !ok {
 		return
@@ -237,11 +281,11 @@ func expandAllPlaceholder(g map[string]any, names []string) {
 				out = append(out, n)
 			}
 			continue
-		} else if ok && s == legacyAutoClash {
+		} else if ok && s == legacyAutoClash && legacyFallback != "" {
 			// Stored templates from before the strategy simplification commonly
 			// referenced the generated auto group. Carry them forward without
 			// leaving a dangling proxy name that makes mihomo reject the config.
-			out = append(out, grpFallbackClash)
+			out = append(out, legacyFallback)
 			continue
 		}
 		out = append(out, e)
