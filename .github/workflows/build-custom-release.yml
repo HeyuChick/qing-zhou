@@ -132,6 +132,14 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
             -ldflags "-s -w -X qingzhou/internal/version.Version=${TAG}" \
             -o qingzhou-linux-amd64 .
+          # 探针：面板「升级探针」从本 release 同步（SyncHostedProbes），不构建则
+          # 升级永远分发旧二进制——「升级成功但版本不变」的根因。版本号注入与
+          # 面板同 TAG，否则探针上报 dev 导致面板永远提示待升级（be9cde1）。
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X qingzhou/internal/version.Version=${TAG}" \
+              -o "probe-linux-$arch" ./cmd/probe
+          done
 
       - name: Create release
         if: env.SKIP != 'true'
@@ -145,4 +153,4 @@ jobs:
             --notes "基于上游 ${UP_TAG} + 自定义修复与品牌定制。
 
           built-from: ${MERGED_SHA}" \
-            qingzhou-linux-amd64
+            qingzhou-linux-amd64 probe-linux-amd64 probe-linux-arm64
