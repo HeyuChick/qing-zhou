@@ -190,3 +190,34 @@ func TestHy2MportRendersServerPorts(t *testing.T) {
 	}
 	t.Fatal("no hysteria2 outbound rendered")
 }
+
+
+// sing-box >= 1.14 对 QUIC 出站（hy2/tuic）禁止 uTLS——fp=chrome 渲染成 utls 块
+// 会让整个出站报 "unsupported usage for uTLS" 拒绝启动。品牌定制守护：hy2 链接
+// 默认带 fp=chrome，subconv 必须按协议跳过 utls；TCP 类协议仍正常下发。
+func TestQUICOutboundHasNoUTLS(t *testing.T) {
+	doc := renderSingboxDoc(t, "",
+		"hysteria2://pass@203.0.113.9:8443?security=tls&insecure=1&sni=h.example.com&fp=chrome#h1",
+		"vless://11111111-1111-1111-1111-111111111111@203.0.113.9:443?security=tls&sni=v.example.com&fp=chrome#v1")
+	seen := map[string]map[string]any{}
+	for _, o := range doc["outbounds"].([]any) {
+		m := o.(map[string]any)
+		if t_ := m["type"]; t_ == "hysteria2" || t_ == "vless" {
+			seen[t_.(string)] = m
+		}
+	}
+	hy := seen["hysteria2"]
+	if hy == nil {
+		t.Fatal("hy2 outbound missing")
+	}
+	if tls := hy["tls"].(map[string]any); tls["utls"] != nil {
+		t.Errorf("hy2 tls must not carry utls (sing-box 1.14 rejects it): %v", tls)
+	}
+	vl := seen["vless"]
+	if vl == nil {
+		t.Fatal("vless outbound missing")
+	}
+	if tls := vl["tls"].(map[string]any); tls["utls"] == nil {
+		t.Error("vless (TCP) tls should keep utls from fp=")
+	}
+}

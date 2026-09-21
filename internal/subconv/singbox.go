@@ -700,6 +700,17 @@ func sbApplyTuning(o map[string]any, t tuning, suppressMux bool) {
 	}
 }
 
+// quicTransport reports whether this proxy rides QUIC (hysteria/hysteria2/tuic).
+// sing-box 1.14 rejects uTLS on QUIC outbounds ("unsupported usage for uTLS"),
+// so fingerprint hints must not become a utls block for them.
+func quicTransport(p *Proxy) bool {
+	switch p.Protocol {
+	case "hysteria", "hysteria2", "tuic":
+		return true
+	}
+	return false
+}
+
 func sbTLS(p *Proxy, sec string) map[string]any {
 	if sec != "tls" && sec != "reality" {
 		return map[string]any{"enabled": false}
@@ -713,7 +724,10 @@ func sbTLS(p *Proxy, sec string) map[string]any {
 	if alpn := p.tlsParam("alpn"); alpn != "" {
 		tls["alpn"] = strings.Split(alpn, ",")
 	}
-	if fp := p.tlsParam("fp"); fp != "" {
+	// sing-box >= 1.14 ：QUIC 传输（hysteria/hysteria2/tuic）的 TLS 不支持 uTLS
+	// ——携带 utls 块的 hy2 出站直接报 “unsupported usage for uTLS” 拒绝启动。
+	// 面板发的 hy2 链接默认带 fp=chrome，所以这里按协议到而不是无差别地下发。
+	if fp := p.tlsParam("fp"); fp != "" && !quicTransport(p) {
 		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
 	}
 	if sec == "reality" {
