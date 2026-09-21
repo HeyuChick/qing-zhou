@@ -73,8 +73,14 @@ func TestExplicitFormatSuppressesInfoPage(t *testing.T) {
 
 func TestContentDispositionCarriesBothForms(t *testing.T) {
 	got := contentDisposition("轻舟", "clash")
-	if !strings.Contains(got, `filename="subscription.yaml"`) {
+	if !strings.Contains(got, `filename="subscription"`) {
 		t.Errorf("missing ASCII fallback: %s", got)
+	}
+	if strings.Contains(got, ".yaml") {
+		t.Errorf("Clash profile name must not carry a YAML suffix: %s", got)
+	}
+	if !strings.Contains(got, `filename*=UTF-8''%E8%BD%BB%E8%88%9F`) {
+		t.Errorf("Clash profile name was not encoded without a suffix: %s", got)
 	}
 	if !strings.Contains(got, `filename*=UTF-8''`) {
 		t.Errorf("missing RFC 5987 form: %s", got)

@@ -8,11 +8,18 @@ import (
 	"time"
 )
 
+const (
+	ManualNotifyTelegram = "telegram"
+	ManualNotifyEmail    = "email"
+	ManualNotifyBoth     = "both"
+)
+
 type ManualNotification struct {
 	ID         int64  `json:"id"`
 	Title      string `json:"title"`
 	Content    string `json:"content"`
 	TargetType string `json:"target_type"`
+	Channel    string `json:"channel"`
 	CreatedBy  int64  `json:"created_by"`
 	CreatedAt  int64  `json:"created_at"`
 	Total      int64  `json:"total"`
@@ -26,17 +33,48 @@ type ManualNotificationRecipient struct {
 	NotificationID int64  `json:"notification_id"`
 	UserID         int64  `json:"user_id"`
 	Username       string `json:"username"`
+	Channel        string `json:"channel"`
 	ChatID         int64  `json:"-"`
+	Email          string `json:"email"`
 	Status         string `json:"status"`
 	Error          string `json:"error"`
 	SentAt         int64  `json:"sent_at"`
+}
+
+func NormalizeManualNotifyChannel(channel string) (string, error) {
+	switch strings.TrimSpace(channel) {
+	case "", ManualNotifyTelegram:
+		return ManualNotifyTelegram, nil
+	case ManualNotifyEmail:
+		return ManualNotifyEmail, nil
+	case ManualNotifyBoth:
+		return ManualNotifyBoth, nil
+	default:
+		return "", errors.New("invalid channel")
+	}
+}
+
+func ManualNotifyChannels(channel string) []string {
+	normalized, err := NormalizeManualNotifyChannel(channel)
+	if err != nil {
+		return nil
+	}
+	if normalized == ManualNotifyBoth {
+		return []string{ManualNotifyTelegram, ManualNotifyEmail}
+	}
+	return []string{normalized}
 }
 
 // CreateManualNotification snapshots all eligible recipients in one transaction.
 // targetType=all means every active non-admin user; selected validates and keeps
 // only active non-admin users named by userIDs. Ineligible selected IDs are
 // rejected so an admin cannot mistake a partial selection for a complete send.
+// channel=telegram|email|both writes one delivery row per selected channel.
 func (s *Store) CreateManualNotification(title, content, targetType string, userIDs []int64, createdBy int64) (*ManualNotification, error) {
+	return s.CreateManualNotificationWithChannel(title, content, targetType, ManualNotifyTelegram, userIDs, createdBy)
+}
+
+func (s *Store) CreateManualNotificationWithChannel(title, content, targetType, channel string, userIDs []int64, createdBy int64) (*ManualNotification, error) {
 	title = strings.TrimSpace(title)
 	content = strings.TrimSpace(content)
 	if title == "" {
@@ -48,6 +86,11 @@ func (s *Store) CreateManualNotification(title, content, targetType string, user
 	if targetType == "selected" && len(userIDs) == 0 {
 		return nil, errors.New("recipients required")
 	}
+	channel, err := NormalizeManualNotifyChannel(channel)
+	if err != nil {
+		return nil, err
+	}
+	channels := ManualNotifyChannels(channel)
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -55,8 +98,8 @@ func (s *Store) CreateManualNotification(title, content, targetType string, user
 	}
 	defer tx.Rollback()
 	now := time.Now().Unix()
-	res, err := tx.Exec(`INSERT INTO manual_notifications (title, content, target_type, created_by, created_at) VALUES (?,?,?,?,?)`,
-		title, content, targetType, createdBy, now)
+	res, err := tx.Exec(`INSERT INTO manual_notifications (title, content, target_type, channel, created_by, created_at) VALUES (?,?,?,?,?,?)`,
+		title, content, targetType, channel, createdBy, now)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +108,7 @@ func (s *Store) CreateManualNotification(title, content, targetType string, user
 		return nil, err
 	}
 
-	q := `SELECT u.id, u.username, COALESCE(t.chat_id,0)
+	q := `SELECT u.id, u.username, COALESCE(t.chat_id,0), COALESCE(u.email,'')
 		FROM users u LEFT JOIN telegram_binds t ON t.user_id=u.id
 		WHERE u.status='active' AND u.role<>'admin'`
 	args := []any{}
@@ -97,14 +140,16 @@ func (s *Store) CreateManualNotification(title, content, targetType string, user
 	type recipient struct {
 		id, chat int64
 		username string
+		email    string
 	}
 	var recipients []recipient
 	for rows.Next() {
 		var r recipient
-		if err := rows.Scan(&r.id, &r.username, &r.chat); err != nil {
+		if err := rows.Scan(&r.id, &r.username, &r.chat, &r.email); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		r.email = strings.TrimSpace(r.email)
 		recipients = append(recipients, r)
 	}
 	if err := rows.Close(); err != nil {
@@ -114,14 +159,23 @@ func (s *Store) CreateManualNotification(title, content, targetType string, user
 		return nil, errors.New("部分用户不存在、已禁用或为管理员")
 	}
 	for _, r := range recipients {
-		status, reason := "pending", ""
-		if r.chat == 0 {
-			status, reason = "skipped", "未绑定 Telegram"
-		}
-		if _, err := tx.Exec(`INSERT INTO manual_notification_recipients
-			(notification_id,user_id,username,chat_id,status,error,sent_at) VALUES (?,?,?,?,?,?,0)`,
-			id, r.id, r.username, r.chat, status, reason); err != nil {
-			return nil, err
+		for _, ch := range channels {
+			status, reason := "pending", ""
+			switch ch {
+			case ManualNotifyTelegram:
+				if r.chat == 0 {
+					status, reason = "skipped", "未绑定 Telegram"
+				}
+			case ManualNotifyEmail:
+				if r.email == "" {
+					status, reason = "skipped", "未绑定邮箱"
+				}
+			}
+			if _, err := tx.Exec(`INSERT INTO manual_notification_recipients
+				(notification_id,user_id,username,channel,chat_id,email,status,error,sent_at) VALUES (?,?,?,?,?,?,?,?,0)`,
+				id, r.id, r.username, ch, r.chat, r.email, status, reason); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -132,7 +186,7 @@ func (s *Store) CreateManualNotification(title, content, targetType string, user
 
 func scanManualNotification(sc scanner) (*ManualNotification, error) {
 	var n ManualNotification
-	err := sc.Scan(&n.ID, &n.Title, &n.Content, &n.TargetType, &n.CreatedBy, &n.CreatedAt,
+	err := sc.Scan(&n.ID, &n.Title, &n.Content, &n.TargetType, &n.Channel, &n.CreatedBy, &n.CreatedAt,
 		&n.Total, &n.Pending, &n.Sent, &n.Failed, &n.Skipped)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -140,7 +194,7 @@ func scanManualNotification(sc scanner) (*ManualNotification, error) {
 	return &n, err
 }
 
-const manualNotificationSelect = `SELECT n.id,n.title,n.content,n.target_type,n.created_by,n.created_at,
+const manualNotificationSelect = `SELECT n.id,n.title,n.content,n.target_type,n.channel,n.created_by,n.created_at,
 	COUNT(r.user_id),
 	COALESCE(SUM(CASE WHEN r.status IN ('pending','sending') THEN 1 ELSE 0 END),0),
 	COALESCE(SUM(CASE WHEN r.status='sent' THEN 1 ELSE 0 END),0),
@@ -173,8 +227,8 @@ func (s *Store) ListManualNotifications(limit int) ([]*ManualNotification, error
 }
 
 func (s *Store) ListManualNotificationRecipients(notificationID int64) ([]*ManualNotificationRecipient, error) {
-	rows, err := s.db.Query(`SELECT notification_id,user_id,username,chat_id,status,error,sent_at
-		FROM manual_notification_recipients WHERE notification_id=? ORDER BY user_id`, notificationID)
+	rows, err := s.db.Query(`SELECT notification_id,user_id,username,channel,chat_id,email,status,error,sent_at
+		FROM manual_notification_recipients WHERE notification_id=? ORDER BY user_id, channel`, notificationID)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +236,7 @@ func (s *Store) ListManualNotificationRecipients(notificationID int64) ([]*Manua
 	out := []*ManualNotificationRecipient{}
 	for rows.Next() {
 		var r ManualNotificationRecipient
-		if err := rows.Scan(&r.NotificationID, &r.UserID, &r.Username, &r.ChatID, &r.Status, &r.Error, &r.SentAt); err != nil {
+		if err := rows.Scan(&r.NotificationID, &r.UserID, &r.Username, &r.Channel, &r.ChatID, &r.Email, &r.Status, &r.Error, &r.SentAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &r)
@@ -196,12 +250,12 @@ func (s *Store) ListManualNotificationRecipients(notificationID int64) ([]*Manua
 func (s *Store) ClaimManualNotificationRecipient(notificationID int64) (*ManualNotificationRecipient, error) {
 	var r ManualNotificationRecipient
 	err := s.db.QueryRow(`UPDATE manual_notification_recipients SET status='sending'
-		WHERE notification_id=? AND user_id=(
-			SELECT user_id FROM manual_notification_recipients
-			WHERE notification_id=? AND status='pending' ORDER BY user_id LIMIT 1
+		WHERE rowid=(
+			SELECT rowid FROM manual_notification_recipients
+			WHERE notification_id=? AND status='pending' ORDER BY user_id, channel LIMIT 1
 		) AND status='pending'
-		RETURNING notification_id,user_id,username,chat_id,status,error,sent_at`, notificationID, notificationID).
-		Scan(&r.NotificationID, &r.UserID, &r.Username, &r.ChatID, &r.Status, &r.Error, &r.SentAt)
+		RETURNING notification_id,user_id,username,channel,chat_id,email,status,error,sent_at`, notificationID).
+		Scan(&r.NotificationID, &r.UserID, &r.Username, &r.Channel, &r.ChatID, &r.Email, &r.Status, &r.Error, &r.SentAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -212,15 +266,24 @@ func (s *Store) ClaimManualNotificationRecipient(notificationID int64) (*ManualN
 }
 
 func (s *Store) SetManualNotificationRecipientResult(notificationID, userID int64, status, reason string) error {
+	return s.SetManualNotificationRecipientChannelResult(notificationID, userID, ManualNotifyTelegram, status, reason)
+}
+
+func (s *Store) SetManualNotificationRecipientChannelResult(notificationID, userID int64, channel, status, reason string) error {
 	if status != "sent" && status != "failed" && status != "skipped" {
 		return fmt.Errorf("invalid notification status %q", status)
+	}
+	channel, err := NormalizeManualNotifyChannel(channel)
+	if err != nil || channel == ManualNotifyBoth {
+		return errors.New("invalid channel")
 	}
 	sentAt := int64(0)
 	if status == "sent" {
 		sentAt = time.Now().Unix()
 	}
 	res, err := s.db.Exec(`UPDATE manual_notification_recipients SET status=?,error=?,sent_at=?
-		WHERE notification_id=? AND user_id=? AND status='sending'`, status, reason, sentAt, notificationID, userID)
+		WHERE notification_id=? AND user_id=? AND channel=? AND status='sending'`,
+		status, reason, sentAt, notificationID, userID, channel)
 	if err != nil {
 		return err
 	}
@@ -232,7 +295,8 @@ func (s *Store) SetManualNotificationRecipientResult(notificationID, userID int6
 
 // FailInterruptedManualNotifications preserves an honest history after restart.
 // Telegram has no caller-supplied idempotency key, so a row left in sending may
-// already have reached Telegram; retrying it could duplicate the message.
+// already have reached Telegram; retrying it could duplicate the message. Email
+// is treated the same way: SMTP has no send-id we can safely replay.
 func (s *Store) FailInterruptedManualNotifications() error {
 	_, err := s.db.Exec(`UPDATE manual_notification_recipients
 		SET status='failed', error='服务重启，实际投递状态未知', sent_at=0

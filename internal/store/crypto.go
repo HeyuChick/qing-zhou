@@ -12,7 +12,15 @@ import (
 const encPrefix = "enc:v1:"
 
 // encKeys are settings stored encrypted at rest.
-var encKeys = map[string]bool{"oauth2_config": true, "smtp_pass": true, "cf_api_token": true, "telegram_bot_token": true}
+var encKeys = map[string]bool{
+	"oauth2_config":              true,
+	"smtp_pass":                  true,
+	"cf_api_token":               true,
+	"telegram_bot_token":         true,
+	"upstream_oci_config":        true,
+	"upstream_cloudflare_config": true,
+	"backup_s3_config":           true,
+}
 
 // SetSecretKey derives the AES key used to encrypt secret settings. Pass
 // QZ_SECRET_KEY (recommended, kept outside the DB) or fall back to jwt_secret.

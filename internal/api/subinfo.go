@@ -292,7 +292,7 @@ func (a *API) writeSubInfoHTML(w http.ResponseWriter, info subInfo) error {
 func subExt(format string) string {
 	switch format {
 	case subconv.FormatClash:
-		return "yaml"
+		return ""
 	case subconv.FormatSingbox:
 		return "json"
 	case subconv.FormatSurge:
@@ -314,12 +314,18 @@ func subExt(format string) string {
 // that understand it. Sending only the UTF-8 form would give the rest mojibake.
 func contentDisposition(siteName, format string) string {
 	ext := subExt(format)
-	ascii := "subscription." + ext
+	ascii := "subscription"
+	if ext != "" {
+		ascii += "." + ext
+	}
 	name := strings.TrimSpace(siteName)
 	if name == "" {
 		return `attachment; filename="` + ascii + `"`
 	}
-	return `attachment; filename="` + ascii + `"; filename*=UTF-8''` + rfc5987Escape(name+"."+ext)
+	if ext != "" {
+		name += "." + ext
+	}
+	return `attachment; filename="` + ascii + `"; filename*=UTF-8''` + rfc5987Escape(name)
 }
 
 // rfc5987Escape percent-encodes for an ext-value, per RFC 5987/8187.

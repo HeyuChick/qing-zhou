@@ -84,6 +84,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	app.StartRemoteBackups(ctx)
 
 	// Native sing-box controller (B2): always active; config/listen/unit
 	// are overridable via env or DB settings.
@@ -111,6 +112,7 @@ func main() {
 	// deferred st.Close() runs.
 	app.StartQueueAdvance(ctx, 2*time.Minute, &bgWG)
 	app.StartTelegram(ctx)
+	app.StartManualNotifications()
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

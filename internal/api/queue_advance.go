@@ -52,18 +52,39 @@ func (a *API) StartQueueAdvance(ctx context.Context, interval time.Duration, wg 
 	}()
 }
 
-// sweepQueues advances every due queue once.
+// sweepQueues first hands off already-purchased queued segments, then renews
+// expired lines whose user has enabled automatic renewal. Both paths can change
+// entitlements, so publish one deduplicated sing-box rebuild per user.
 //
 // A partial sweep still counts: AdvanceAllQueues promotes everyone it can and
 // reports the failures rather than stopping at the first, so the error is logged
 // but the config is still pushed for whoever DID activate.
 func (a *API) sweepQueues() {
-	changed, err := a.st.AdvanceAllQueues()
+	promoted, err := a.st.AdvanceAllQueues()
 	if err != nil {
 		log.Printf("queue advance: %v", err)
 	}
+	renewed, renewErr := a.st.AutoRenewDuePlans()
+	if renewErr != nil {
+		log.Printf("automatic renewal: %v", renewErr)
+	}
+	if len(promoted) > 0 {
+		log.Printf("queue advance: promoted next plan for %d user(s)", len(promoted))
+	}
+	if len(renewed) > 0 {
+		log.Printf("automatic renewal: renewed due plan for %d user(s)", len(renewed))
+	}
+	changed := append(promoted, renewed...)
 	if len(changed) > 0 {
-		log.Printf("queue advance: promoted next plan for %d user(s)", len(changed))
-		a.onQueuePromoted(changed...)
+		seen := make(map[int64]struct{}, len(changed))
+		unique := make([]int64, 0, len(changed))
+		for _, userID := range changed {
+			if _, ok := seen[userID]; ok {
+				continue
+			}
+			seen[userID] = struct{}{}
+			unique = append(unique, userID)
+		}
+		a.onQueuePromoted(unique...)
 	}
 }

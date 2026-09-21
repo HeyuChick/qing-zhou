@@ -418,6 +418,7 @@ CREATE TABLE IF NOT EXISTS user_plans (
   expiry_at      INTEGER NOT NULL DEFAULT 0,        -- 0 = never
   last_online_at INTEGER NOT NULL DEFAULT 0,
   order_id       INTEGER NOT NULL DEFAULT 0,
+  auto_renew     INTEGER NOT NULL DEFAULT 1,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL
 );
@@ -664,14 +665,16 @@ CREATE TABLE IF NOT EXISTS user_notify_log (
   PRIMARY KEY (user_id, kind, subject)
 );
 
--- Admin-created Telegram broadcasts. The recipient table is a snapshot: it
--- preserves who was selected and why delivery did/did not happen even if the
--- user later binds Telegram, changes their name, or is deleted.
+-- Admin-created broadcasts. The recipient table is a snapshot: it preserves
+-- who was selected and why delivery did/did not happen even if the user later
+-- binds Telegram, changes their email, or is deleted. channel is telegram|email;
+-- one notification can write both, so recipients are keyed by (notification, user, channel).
 CREATE TABLE IF NOT EXISTS manual_notifications (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   title        TEXT    NOT NULL,
   content      TEXT    NOT NULL DEFAULT '',
   target_type  TEXT    NOT NULL, -- all | selected
+  channel      TEXT    NOT NULL DEFAULT 'telegram', -- telegram | email | both
   created_by   INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL
 );
@@ -679,11 +682,13 @@ CREATE TABLE IF NOT EXISTS manual_notification_recipients (
   notification_id INTEGER NOT NULL,
   user_id         INTEGER NOT NULL,
   username        TEXT    NOT NULL DEFAULT '',
+  channel         TEXT    NOT NULL DEFAULT 'telegram', -- telegram | email
   chat_id         INTEGER NOT NULL DEFAULT 0,
+  email           TEXT    NOT NULL DEFAULT '',
   status          TEXT    NOT NULL DEFAULT 'pending', -- pending | sending | sent | failed | skipped
   error           TEXT    NOT NULL DEFAULT '',
   sent_at         INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (notification_id, user_id)
+  PRIMARY KEY (notification_id, user_id, channel)
 );
 
 -- Machine API tokens for scripts / Telegram / ops automation. Plaintext is
@@ -833,6 +838,82 @@ func (s *Store) migrateServerUseSudo() error {
 	return tx.Commit()
 }
 
+// migrateManualNotificationChannels adds email as a second delivery path.
+// Existing tables were keyed by (notification_id, user_id); email needs a
+// second row per user, so the primary key must include channel. Fresh
+// installs already have the new schema from CREATE TABLE IF NOT EXISTS.
+func (s *Store) migrateManualNotificationChannels() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var hasChannel int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('manual_notification_recipients') WHERE name='channel'`).Scan(&hasChannel); err != nil {
+		return err
+	}
+	if hasChannel > 0 {
+		var pkHasChannel int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('manual_notification_recipients') WHERE name='channel' AND pk>0`).Scan(&pkHasChannel); err != nil {
+			return err
+		}
+		if pkHasChannel > 0 {
+			return tx.Commit()
+		}
+	}
+
+	if _, err := tx.Exec(`CREATE TABLE manual_notification_recipients_v2 (
+		notification_id INTEGER NOT NULL,
+		user_id         INTEGER NOT NULL,
+		username        TEXT    NOT NULL DEFAULT '',
+		channel         TEXT    NOT NULL DEFAULT 'telegram',
+		chat_id         INTEGER NOT NULL DEFAULT 0,
+		email           TEXT    NOT NULL DEFAULT '',
+		status          TEXT    NOT NULL DEFAULT 'pending',
+		error           TEXT    NOT NULL DEFAULT '',
+		sent_at         INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (notification_id, user_id, channel)
+	)`); err != nil {
+		return err
+	}
+	copySQL := `INSERT INTO manual_notification_recipients_v2
+		(notification_id,user_id,username,channel,chat_id,email,status,error,sent_at)
+		SELECT notification_id,user_id,username,'telegram',chat_id,'',status,error,sent_at
+		FROM manual_notification_recipients`
+	if hasChannel > 0 {
+		copySQL = `INSERT INTO manual_notification_recipients_v2
+			(notification_id,user_id,username,channel,chat_id,email,status,error,sent_at)
+			SELECT notification_id,user_id,username,
+				CASE WHEN channel IN ('telegram','email') THEN channel ELSE 'telegram' END,
+				chat_id, COALESCE(email,''), status, error, sent_at
+			FROM manual_notification_recipients`
+	}
+	if _, err := tx.Exec(copySQL); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE manual_notification_recipients`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`ALTER TABLE manual_notification_recipients_v2 RENAME TO manual_notification_recipients`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_manual_notify_recipients_status ON manual_notification_recipients(notification_id, status)`); err != nil {
+		return err
+	}
+
+	var hasParentChannel int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('manual_notifications') WHERE name='channel'`).Scan(&hasParentChannel); err != nil {
+		return err
+	}
+	if hasParentChannel == 0 {
+		if _, err := tx.Exec(`ALTER TABLE manual_notifications ADD COLUMN channel TEXT NOT NULL DEFAULT 'telegram'`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
@@ -845,6 +926,9 @@ func (s *Store) Migrate() error {
 		return err
 	}
 	if err := s.migrateServerUseSudo(); err != nil {
+		return err
+	}
+	if err := s.migrateManualNotificationChannels(); err != nil {
 		return err
 	}
 	// Additive column migrations for DBs created before these columns existed.
@@ -1023,6 +1107,10 @@ func (s *Store) Migrate() error {
 		`ALTER TABLE user_plans ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
 		`ALTER TABLE user_plans ADD COLUMN duration_days INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE user_plans ADD COLUMN queue_key TEXT NOT NULL DEFAULT ''`,
+		// Renewal preference is stored on every live segment in a queue line. The
+		// default preserves existing subscriptions and makes new purchases opt out
+		// only when the user explicitly disables automatic renewal.
+		`ALTER TABLE user_plans ADD COLUMN auto_renew INTEGER NOT NULL DEFAULT 1`,
 		// A proxy_username must be globally unique (it becomes a stats identity);
 		// partial index so the many empty defaults don't collide.
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_plans_proxy_username ON user_plans(proxy_username) WHERE proxy_username <> ''`,
