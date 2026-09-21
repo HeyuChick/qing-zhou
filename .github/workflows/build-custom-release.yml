@@ -49,8 +49,26 @@ jobs:
           git remote add upstream https://github.com/mllt992/qing-zhou.git
           git fetch upstream "refs/tags/$UP_TAG:refs/tags/$UP_TAG" --no-tags
           BEFORE=$(git rev-parse HEAD)
-          # 冲突会让本步骤失败（任务红色），需手动解决
-          git merge "$UP_TAG" -m "merge upstream $UP_TAG"
+          # fork 已删除、上游仍在改的文件（独立登录页架构替代 LoginDialog）只会
+          # 产生 modify/delete 冲突；冲突集全部命中时按 fork 的删除自动解决，
+          # 出现其他冲突仍然失败（任务红色），需手动解决。
+          KNOWN_DELETED="frontend/src/components/LoginDialog.vue"
+          if ! git merge "$UP_TAG" -m "merge upstream $UP_TAG"; then
+            UNMERGED=$(git diff --name-only --diff-filter=U)
+            AUTO=1
+            for f in $UNMERGED; do
+              case " $KNOWN_DELETED " in
+                *" $f "*) git rm -q -f "$f" ;;
+                *) AUTO=0 ;;
+              esac
+            done
+            if [ "$AUTO" = 1 ]; then
+              git commit --no-edit -m "merge upstream $UP_TAG (fork 删除文件维持删除)"
+            else
+              echo "::error::存在无法自动解决的冲突：$UNMERGED"
+              exit 1
+            fi
+          fi
           # 本仓库 workflow 目录不跟随上游：GITHUB_TOKEN（GitHub App 令牌）在 permissions
           # 里根本没有 workflows 这个键，无论怎么给权限都推不动 workflow 文件——
           # 上游 release 一旦携带 .github/workflows 改动（如 v0.2.70 的 docker.yml），
