@@ -147,3 +147,64 @@ func TestHopPortsRendersIntoLinks(t *testing.T) {
 	}
 
 }
+
+
+// 品牌定制守护：自签证书入站（有 pin）必须同时下发 insecure=1——pin 只是支持
+// pinSHA256 的客户端的加固项，sing-box 订阅渲染不还原 pin，没有 insecure 的
+// 自签节点在 SFA 等客户端直接 x509 校验失败。
+func TestSelfSignedPinAlsoAdvertisesInsecure(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "pinuser")
+	pkg := mkPlan(t, st, "自签套餐", 10, 100, 30)
+	buy(t, st, uid, pkg)
+
+	selfSigned := mustSelfSignedCert(t)
+	tlsID, err := st.SaveSbTls(&SbTls{
+		Name: "自签", Mode: "tls",
+		ServerJSON: `{"enabled":true,"server_name":"pin.example.com","certificate":` + jsonQuote(selfSigned) + `}`,
+		ClientJSON: `{"server_name":"pin.example.com"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.SaveSbInbound(&SbInbound{
+		Type: "hysteria2", Tag: "hy2-pin", Listen: "::", ListenPort: 4567,
+		TlsID: tlsID, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid, _ := st.CreateGroup(NodeGroup{Name: "自签组"})
+	_ = st.SetPlanGroups(pkg.ID, []int64{gid})
+	if _, err := st.CreateNode(Node{Type: "self_built", Name: "hy2-pin节点", InboundTag: "hy2-pin", Enabled: true, GroupIDs: []int64{gid}}); err != nil {
+		t.Fatal(err)
+	}
+
+	u, _ := st.UserByID(uid)
+	links := st.BuildSelfBuiltLinks(u, "203.0.113.9")
+	if len(links) != 1 {
+		t.Fatalf("links = %d, want 1", len(links))
+	}
+	l := links[0].Link
+	if !strings.Contains(l, "insecure=1") {
+		t.Errorf("self-signed pin link must also carry insecure=1: %s", l)
+	}
+	if !strings.Contains(l, "pinSHA256=") {
+		t.Errorf("self-signed link should carry pinSHA256: %s", l)
+	}
+}
+
+func jsonQuote(pem string) string {
+	b, _ := json.Marshal(pem)
+	return string(b)
+}
+
+func mustSelfSignedCert(t *testing.T) string {
+	t.Helper()
+	// 复用 singbox 包的自签生成器，保证与线上证书形态一致。
+	pem, _, err := singbox.GenerateSelfSignedCert("pin.example.com", 365)
+	if err != nil {
+		t.Skipf("no self-signed generator: %v", err)
+	}
+	return pem
+}

@@ -910,6 +910,11 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		// hop_ports（如 "20000-50000"）：仅渲染进 hysteria2 链接（mport），配置生成时剔除。
 		// 服务端需自行把该 UDP 段 DNAT/REDIRECT 到真实监听端口。
 		hopPorts := mapStr(opts, "hop_ports")
+		// 自签证书 ⇒ pin 与 Insecure 同时下发：PinSHA256 仅是“支持 pin 的客户端”
+		// 的加固项（v2rayN 等解析 pinSHA256 参数），不㴰替代 Insecure——不认识
+		// 该参数的客户端会严格校验证书而直接握手失败。两者叠加时认识的客户端
+		// 验 pin，不认识的退回跳过校验，都不会断。
+		insecure := mapBool(client, "insecure") || pin != ""
 		p := singbox.LinkParams{
 			Type: ib.Type, Tag: remark, Host: nodeHost, Port: advPort,
 			UUID: cred.UUID, Password: cred.Password, HopPorts: hopPorts,
@@ -917,7 +922,7 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			TLS:         ib.TlsID != 0,
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
-			Insecure:    mapBool(client, "insecure"),
+			Insecure:    insecure,
 			PinSHA256:   pin,
 			Congestion:  mapStr(opts, "congestion_control"),
 			ZeroRTT:     mapBool(opts, "zero_rtt_handshake"), // tuic 0-RTT
