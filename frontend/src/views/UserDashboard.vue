@@ -22,6 +22,9 @@
       </div>
     </div>
 
+    <!-- 首页设置控制管理员的快捷健康视图；普通用户不会加载探针数据。 -->
+    <MachineHealthStrip v-if="auth.isAdmin && config.config.homepage_machine_health" />
+
     <!-- 状态提醒：按套餐维度判定，不再拿单一 expiry_at 代表整个账号 -->
     <transition-group name="alert" tag="div">
       <n-alert v-for="a in alerts" :key="a.key" :type="a.type" class="dash-alert">
@@ -155,6 +158,7 @@ import { useRouter } from 'vue-router'
 import { NCard, NAlert, NButton, NList, NListItem, NThing, NTag, NRadioGroup, NRadioButton, NModal, NSpace, NSpin, NIcon } from 'naive-ui'
 import { LinkOutline, CartOutline, ReceiptOutline, RefreshOutline } from '@vicons/ionicons5'
 import { useAuthStore } from '@/stores/auth'
+import MachineHealthStrip from '@/components/MachineHealthStrip.vue'
 import { useConfigStore } from '@/stores/config'
 import { apiGet, apiList } from '@/api'
 import { fmtBytes, fmtDate, daysLeft, yuan, pct } from '@/utils/format'

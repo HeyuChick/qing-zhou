@@ -49,6 +49,7 @@ const router = createRouter({
         { path: 'admin/monitor', name: 'admin-monitor', component: () => import('@/views/AdminMonitor.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/monitor/:id', name: 'admin-monitor-detail', component: () => import('@/views/AdminMonitorDetail.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/settings', name: 'admin-settings', component: () => import('@/views/AdminSettings.vue'), meta: { requiresAdmin: true } },
+        { path: 'admin/point-codes', name: 'admin-point-codes', component: () => import('@/views/AdminPointCodes.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/reg-codes', name: 'admin-regcodes', component: () => import('@/views/AdminRegCodes.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/api-tokens', name: 'admin-api-tokens', component: () => import('@/views/AdminAPITokens.vue'), meta: { requiresAdmin: true } },
         { path: 'admin/announcements', name: 'admin-announcements', component: () => import('@/views/AdminAnnouncements.vue'), meta: { requiresAdmin: true } },
@@ -87,6 +88,11 @@ router.beforeEach(async (to) => {
   }
   if (requiresAdmin && !auth.isAdmin) {
     return { name: 'dashboard' }
+  }
+  // Keep saved links to the former overview checklist useful after its move.
+  if (to.name === 'admin' && to.query.checklist === '1') {
+    const { checklist, ...query } = to.query
+    return { name: 'admin-settings', query: { ...query, section: 'onboarding' }, replace: true }
   }
 })
 
