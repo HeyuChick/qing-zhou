@@ -145,7 +145,7 @@ jobs:
       # against the current 1.14.x stable at each release.
       - name: Build sing-box with v2ray_api
         env:
-          SB_VERSION: v1.14.0
+          SB_VERSION: v1.14.2
         run: |
           set -e
           git clone --depth 1 --branch "$SB_VERSION" https://github.com/SagerNet/sing-box.git /tmp/sing-box

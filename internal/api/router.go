@@ -47,7 +47,9 @@ type API struct {
 	// to seize the account permanently — the change kicks every other session,
 	// including the real owner's. Unthrottled it was an online brute force with
 	// no cost and no trace. See handleChangePassword.
-	pwRL *rateLimiter
+	pwRL       *rateLimiter
+	redeemRL   *rateLimiter
+	redeemIPRL *rateLimiter
 
 	sbctl        *sbctl.Controller // native sing-box orchestrator; nil if not enabled
 	updater      *updater.Manager  // GitHub-release self-updater
@@ -154,6 +156,8 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 		authRL:         newRateLimiter(20, time.Minute),   // 20 auth attempts / IP / min
 		resendRL:       newRateLimiter(3, 10*time.Minute), // 3 verify resends / user / 10min
 		probeRL:        newRateLimiter(60, time.Minute),   // 60 probe reports / IP / min
+		redeemRL:       newRateLimiter(10, time.Minute),
+		redeemIPRL:     newRateLimiter(100, 10*time.Minute),
 		pwRL:           newRateLimiter(5, 10*time.Minute), // 5 修改密码 attempts / user / 10min
 		// Each address swap revokes the previous one, so a loop of them — a stuck
 		// retry, a double-click, a misbehaving script — leaves the user with a
@@ -188,6 +192,7 @@ func New(st *store.Store, secret []byte, mail *mailer.Mailer) *API {
 			v, _ := st.GetSetting("update_github_token")
 			return v
 		},
+		st,
 	)
 	return a
 }
@@ -282,6 +287,9 @@ func (a *API) Router() http.Handler {
 		pr.Post("/api/user/password", a.handleChangePassword)
 		pr.Post("/api/user/resend-verify", a.handleResendVerify)
 		pr.Post("/api/user/email", a.handleBindEmail)
+		pr.Post("/api/user/points/redeem", a.handleRedeemPoints)
+		pr.Get("/api/user/notifications/email", a.handleEmailNotifyPrefs)
+		pr.Put("/api/user/notifications/email", a.handleEmailNotifyPrefs)
 		pr.Get("/api/user/telegram", a.handleUserTelegram)
 		pr.Post("/api/user/telegram/bind-token", a.handleTelegramBindToken)
 		pr.Post("/api/user/telegram/unbind", a.handleTelegramUnbind)
@@ -307,6 +315,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/tokens", a.handleAdminListAPITokens)
 		ar.Post("/api/admin/tokens", a.handleAdminCreateAPIToken)
 		ar.Delete("/api/admin/tokens/{id}", a.handleAdminRevokeAPIToken)
+		ar.Get("/api/admin/onboarding", a.handleAdminOnboarding)
 		ar.Get("/api/admin/settings", a.handleGetSettings)
 		ar.With(a.rejectAPIToken, a.requireOAuthAdmin).Get("/api/admin/oauth2", a.handleGetOAuth)
 		ar.With(a.rejectAPIToken, a.requireOAuthAdmin).Put("/api/admin/oauth2", a.handlePutOAuth)
@@ -337,6 +346,8 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/update/check", a.handleUpdateCheck)
 		ar.Get("/api/admin/update/status", a.handleUpdateStatus)
 		ar.Get("/api/admin/update/releases", a.handleUpdateReleases)
+		ar.Get("/api/admin/update/snapshots", a.handleUpdateSnapshots)
+		ar.Get("/api/admin/update/snapshots/{id}/download", a.handleUpdateSnapshotDownload)
 		ar.Get("/api/admin/update/rollback", a.handleUpdateRollbackState)
 		ar.Post("/api/admin/update/rollback", a.handleUpdateRollback)
 		ar.Post("/api/admin/update/apply", a.handleUpdateApply)
@@ -436,6 +447,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/monitor/servers/{id}/traffic-status", a.handleServerTrafficStatus)
 		ar.Get("/api/admin/monitor/servers/{id}/traffic-analysis", a.handleServerTrafficAnalysis)
 		ar.Post("/api/admin/monitor/servers/{id}/probe/upgrade", a.handleAdminProbeUpgrade)
+		ar.Get("/api/admin/monitor/health-timeline", a.handleHealthTimeline)
 		ar.Get("/api/admin/monitor/heatmap", a.handleMonitorHeatmap)
 		ar.Get("/api/admin/monitor/alerts", a.handleMonitorAlerts)
 		ar.Post("/api/admin/monitor/alerts/{id}/read", a.handleMarkAlertRead)
@@ -478,6 +490,9 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/stats/users", a.handleAdminUserStats)
 		ar.Get("/api/admin/stats/user/{id}/traffic", a.handleAdminUserTraffic)
 		// 用量分析：多选用户 × 任意时间范围 × 套餐维度
+		ar.Get("/api/admin/stats/usage/machine", a.handleAdminMachineUsage)
+		ar.Get("/api/admin/stats/audience", a.handleAdminAudience)
+		ar.Get("/api/admin/stats/audience/counts", a.handleAdminAudienceCounts)
 		ar.Get("/api/admin/stats/usage", a.handleAdminUsage)
 		ar.Get("/api/admin/stats/usage/users", a.handleAdminUsageUsers)
 		ar.Get("/api/admin/stats/usage/packages", a.handleAdminUsagePackages)
@@ -489,6 +504,9 @@ func (a *API) Router() http.Handler {
 		ar.Delete("/api/admin/upstreams/{provider}", a.handleAdminDeleteUpstream)
 		ar.Post("/api/admin/upstreams/{provider}/refresh", a.handleAdminRefreshUpstream)
 
+		ar.Get("/api/admin/point-codes", a.handleListPointCodes)
+		ar.Post("/api/admin/point-codes/generate", a.handleGeneratePointCodes)
+		ar.Post("/api/admin/point-codes/disable", a.handleDisablePointCodes)
 		ar.Get("/api/admin/reg-codes", a.handleAdminListRegCodes)
 		ar.Post("/api/admin/reg-codes/generate", a.handleAdminGenerateRegCodes)
 		ar.Put("/api/admin/reg-codes/{id}", a.handleAdminUpdateRegCode)
