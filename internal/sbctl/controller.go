@@ -279,7 +279,6 @@ func (c *Controller) desiredNeedsApply(serverID int64, cfg []byte, force bool) b
 }
 
 func (c *Controller) rememberDesired(serverID int64, cfg []byte) {
-	c.rememberRelayNamespace(serverID, cfg)
 	if metering, ok := c.st.(relayMeteringStore); ok {
 		if err := metering.RecordRelayConfigApplied(serverID, cfg); err != nil {
 			log.Printf("sbctl: could not persist relay readiness for server %d: %v", serverID, err)
@@ -366,6 +365,17 @@ func resolveSingBoxBin(configured string) (string, error) {
 // implement just that), so the richer answer is taken when the real manager is
 // behind the interface.
 func (c *Controller) applyPanel(cfg []byte) (bool, error) {
+	return c.applyWithRelayNamespace(context.Background(), store.LocalNodeID, nil, cfg, func(force bool) (bool, error) {
+		return c.applyPanelRaw(cfg, force)
+	})
+}
+
+func (c *Controller) applyPanelRaw(cfg []byte, force bool) (bool, error) {
+	if r, ok := c.mgr.(interface {
+		ApplyChangedForce([]byte, bool) (bool, error)
+	}); ok {
+		return r.ApplyChangedForce(cfg, force)
+	}
 	if r, ok := c.mgr.(interface {
 		ApplyChanged([]byte) (bool, error)
 	}); ok {
@@ -426,6 +436,10 @@ func panelPathConflict(panelPath string, sv *store.Server, serverCfg, panelCfg [
 // It mirrors sbproc.Manager.Apply but uses the server entry's own config_path
 // and systemd_unit instead of the global defaults.
 func (c *Controller) applyLocal(sv *store.Server, cfg []byte) (bool, error) {
+	return c.applyWithRelayNamespace(context.Background(), sv.ID, sv, cfg, func(force bool) (bool, error) { return c.applyLocalRaw(sv, cfg, force) })
+}
+
+func (c *Controller) applyLocalRaw(sv *store.Server, cfg []byte, force bool) (bool, error) {
 	bin, err := resolveSingBoxBin(sv.SingBoxBin)
 	if err != nil {
 		return false, err
@@ -444,7 +458,7 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) (bool, error) {
 	c.restartMu.Lock()
 	pending := c.restartFailed[sv.ID]
 	c.restartMu.Unlock()
-	if !pending {
+	if !pending && !force {
 		if cur, err := os.ReadFile(configPath); err == nil && bytes.Equal(cur, cfg) {
 			return false, nil
 		}
@@ -759,18 +773,17 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 			record(sv.ID, fmt.Errorf("未配置远程管理器，无法通过 SSH 下发"))
 			continue
 		}
-		serverCfg := SSHConfigFor(sv)
 		// Acquire before spawning: waiting servers do not consume goroutines.
 		_ = c.acquireRemote(context.Background())
 		wg.Add(1)
-		go func(sv *store.Server, serverCfg *sshctl.ServerConfig, cfg []byte) {
+		go func(sv *store.Server, cfg []byte) {
 			defer wg.Done()
 			defer c.releaseRemote()
 			// Bound the apply so one unreachable / half-open node can't block on
 			// session.Wait() indefinitely and wedge Rebuild (which holds c.mu).
 			applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
-			restarted, err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg)
+			restarted, err := c.applyRemoteConfig(applyCtx, sv, cfg)
 			opened := false
 			if restarted {
 				// Every connection on this node was just cut. Say so, once per
@@ -798,7 +811,7 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 				return
 			}
 			record(sv.ID, nil)
-		}(sv, serverCfg, cfg)
+		}(sv, cfg)
 	}
 	wg.Wait()
 
@@ -833,7 +846,7 @@ func (c *Controller) RebuildServer(serverID int64) error {
 		if err != nil {
 			return fmt.Errorf("local build config: %w", err)
 		}
-		if err := c.mgr.Apply(cfg); err != nil {
+		if _, err := c.applyPanel(cfg); err != nil {
 			return fmt.Errorf("local apply: %w", err)
 		}
 		c.rememberDesired(store.LocalNodeID, cfg)
@@ -878,12 +891,11 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	if c.remoteMgr == nil {
 		return fmt.Errorf("remote manager not configured")
 	}
-	serverCfg := SSHConfigFor(sv)
 	_ = c.acquireRemote(context.Background())
 	defer c.releaseRemote()
 	applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	restarted, err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg)
+	restarted, err := c.applyRemoteConfig(applyCtx, sv, cfg)
 	if restarted {
 		log.Printf("sbctl: server %d (%s) 配置有变化，已下发并重启 sing-box（该节点的连接会断一次）", sv.ID, sv.Name)
 	}

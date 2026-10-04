@@ -316,6 +316,12 @@ func (m *RemoteManager) dial(ctx context.Context, cfg *ServerConfig) (*ssh.Clien
 // it a bug that restarts a healthy node on every pass looks exactly like a
 // successful deploy from the outside.
 func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, configJSON []byte) (bool, error) {
+	return m.ApplyConfigForce(ctx, cfg, configJSON, false)
+}
+
+// ApplyConfigForce can deliberately restart matching bytes to establish a
+// verified legacy statistics namespace after an interrupted earlier apply.
+func (m *RemoteManager) ApplyConfigForce(ctx context.Context, cfg *ServerConfig, configJSON []byte, force bool) (bool, error) {
 	// Do not skip the remote check from an in-memory hash. The node can reboot or
 	// sing-box can crash while the panel process (and such a cache) stays alive;
 	// treating the old hash as proof of health would then report a dead node as
@@ -342,7 +348,7 @@ func (m *RemoteManager) ApplyConfig(ctx context.Context, cfg *ServerConfig, conf
 		// observation failure into a disruptive config rewrite and restart.
 		return false, fmt.Errorf("verify current config: %w", err)
 	}
-	if same {
+	if same && !force {
 		return false, nil
 	}
 

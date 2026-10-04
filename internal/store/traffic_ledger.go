@@ -493,7 +493,11 @@ func (s *Store) RecordTrafficCollectionFailure(serverID int64, status string) er
 	default:
 		status = "unavailable"
 	}
-	_, err := s.db.Exec(`INSERT INTO traffic_metering_state(server_id,last_attempt,failures,status,error) VALUES(?,?,1,?,?) ON CONFLICT(server_id) DO UPDATE SET last_attempt=excluded.last_attempt,failures=failures+1,status=excluded.status,error=excluded.error`, serverID, time.Now().Unix(), status, "用户统计未成功采集；缺失不是零流量")
+	message := "用户统计未成功采集；缺失不是零流量"
+	if status == "legacy_identity_unverified" {
+		message = "旧 relay_数字 自定义账号尚无运行配置切换证明；该类流量暂未归属，其他账号继续采集"
+	}
+	_, err := s.db.Exec(`INSERT INTO traffic_metering_state(server_id,last_attempt,failures,status,error) VALUES(?,?,1,?,?) ON CONFLICT(server_id) DO UPDATE SET last_attempt=excluded.last_attempt,failures=failures+1,status=excluded.status,error=excluded.error`, serverID, time.Now().Unix(), status, message)
 	return err
 }
 

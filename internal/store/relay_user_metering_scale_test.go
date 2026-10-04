@@ -78,11 +78,12 @@ func TestMeteringRelayUserScale(t *testing.T) {
 			st.SetSecretKey([]byte("isolated-scale-fixture"))
 			a, _ := st.CreateServer(Server{Name: "entry", Host: "192.0.2.1", Enabled: true})
 			b, _ := st.CreateServer(Server{Name: "landing", Host: "192.0.2.2", Enabled: true})
-			landing, err := st.SaveSbInbound(&SbInbound{ServerID: b, Type: "vless", Tag: "scale-landing", ListenPort: 2443, Options: `{}`, Enabled: true})
+			aAPI, bAPI := fmt.Sprintf("127.0.0.1:%d", meteringTestPort(t)), fmt.Sprintf("127.0.0.1:%d", meteringTestPort(t))
+			landing, err := st.SaveSbInbound(&SbInbound{ServerID: b, Type: "vless", Tag: "scale-landing", Listen: "127.0.0.1", ListenPort: meteringTestPort(t), Options: `{}`, Enabled: true})
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = st.SaveSbInbound(&SbInbound{ServerID: a, Type: "vless", Tag: "scale-entry", ListenPort: 2443, Options: `{}`, Enabled: true, UpstreamInboundID: landing})
+			_, err = st.SaveSbInbound(&SbInbound{ServerID: a, Type: "vless", Tag: "scale-entry", Listen: "127.0.0.1", ListenPort: meteringTestPort(t), Options: `{}`, Enabled: true, UpstreamInboundID: landing})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -105,19 +106,22 @@ func TestMeteringRelayUserScale(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			down, err := st.BuildSingboxConfigForServer(b, singbox.DefaultBaseConfig, "127.0.0.1:19001", users)
+			down, err := st.BuildSingboxConfigForServer(b, singbox.DefaultBaseConfig, bAPI, users)
 			if err != nil {
 				t.Fatal(err)
 			}
+			count.Store(0)
+			started = time.Now()
 			if err = st.RecordRelayConfigApplied(b, down); err != nil {
 				t.Fatal(err)
 			}
+			landingAckTime, landingAckSQL := time.Since(started), count.Load()
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
 			count.Store(0)
 			started = time.Now()
-			up, err := st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, "127.0.0.1:19002", users)
+			up, err := st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, aAPI, users)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -133,15 +137,18 @@ func TestMeteringRelayUserScale(t *testing.T) {
 				t.Fatal(err)
 			}
 			// An unchanged prepare/build must converge to byte-identical configuration.
+			count.Store(0)
+			started = time.Now()
 			if err = st.RecordRelayConfigApplied(a, up); err != nil {
 				t.Fatal(err)
 			}
+			sourceAckTime, sourceAckSQL := time.Since(started), count.Load()
 			count.Store(0)
 			started = time.Now()
 			if err = st.PrepareRelayMetering(); err != nil {
 				t.Fatal(err)
 			}
-			unchanged, err := st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, "127.0.0.1:19002", users)
+			unchanged, err := st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, aAPI, users)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,6 +214,16 @@ func TestMeteringRelayUserScale(t *testing.T) {
 					t.Fatalf("identity lookup scans: %v", details)
 				}
 			}
+			if bin := os.Getenv("QZ_SINGBOX_TEST_BIN"); bin != "" {
+				started = time.Now()
+				landingCore := startMeteringBox(t, bin, down, bAPI)
+				landingStart := time.Since(started)
+				started = time.Now()
+				entryCore := startMeteringBox(t, bin, up, aAPI)
+				entryStart := time.Since(started)
+				t.Logf("synthetic loopback idle cores users=%d landing_check_start=%s landing_RSS_KiB=%d entry_check_start=%s entry_RSS_KiB=%d (instant RSS, not peak or production budget)", size, landingStart, meteringBoxRSSKiB(t, landingCore), entryStart, meteringBoxRSSKiB(t, entryCore))
+			}
+			t.Logf("landing_ack=%s/%dSQL source_ack=%s/%dSQL", landingAckTime, landingAckSQL, sourceAckTime, sourceAckSQL)
 			t.Logf("users=%d prepare=%s/%dSQL compile=%s/%dSQL alloc=%dBytes entry_config=%dBytes landing_config=%dBytes outbounds=%d rules=%d noop=%s/%dSQL ingest=%s/%dSQL report=%s/%dSQL plan=%v", size, prepareTime, prepareSQL, buildTime, buildSQL, after.TotalAlloc-before.TotalAlloc, len(up), len(down), len(cfg.Outbounds), len(cfg.Route.Rules), noopTime, noopSQL, ingestTime, ingestSQL, reportTime, reportSQL, details)
 		})
 	}

@@ -512,6 +512,11 @@ func (s *Store) ConfigureTrafficMetering(links, cumulative bool, perUser ...bool
 	if userMetering && !links {
 		return fmt.Errorf("逐用户机器观测需要保持中转链路计量启用")
 	}
+	if userMetering {
+		if err = s.validateRelayUserMeteringTopology(tx); err != nil {
+			return err
+		}
+	}
 	var started int
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM traffic_metering_state WHERE mode='cumulative'`).Scan(&started); err != nil {
 		return err
@@ -580,6 +585,9 @@ func (s *Store) validateMeteringRoutes(base, listen string, relays []singbox.Rel
 		action, _ := rule["action"].(string)
 		if !routes && action != "route" {
 			continue
+		}
+		if inverted, _ := rule["invert"].(bool); inverted {
+			return fmt.Errorf("已有反向匹配的自定义出口规则可能覆盖中转计量路由，请先明确规则优先级；保持旧配置")
 		}
 		if inbound, ok := rule["inbound"].([]interface{}); ok && len(inbound) > 0 {
 			overlaps := false

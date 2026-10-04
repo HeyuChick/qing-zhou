@@ -50,6 +50,79 @@ func supportedUserMeteringEdge(from, to *SbInbound) error {
 	return nil
 }
 
+// Activation preflight shares the settings transaction. An unsupported existing
+// topology must not save an enabled switch and then block all future rebuilds.
+func (s *Store) validateRelayUserMeteringTopology(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT i.id,i.server_id,i.type,i.tag,i.upstream_inbound_id FROM sb_inbounds i WHERE i.enabled=1 AND i.upstream_inbound_id<>0
+ UNION ALL SELECT i.id,i.server_id,i.type,i.tag,n.route_upstream_inbound_id FROM nodes n JOIN sb_inbounds i ON i.tag=n.inbound_tag WHERE n.enabled=1 AND n.type='self_built' AND n.route_upstream_broken=0 AND n.route_upstream_inbound_id<>0 AND i.enabled=1`)
+	if err != nil {
+		return err
+	}
+	type route struct {
+		from     SbInbound
+		targetID int64
+	}
+	var routes []route
+	for rows.Next() {
+		var edge route
+		if err = rows.Scan(&edge.from.ID, &edge.from.ServerID, &edge.from.Type, &edge.from.Tag, &edge.targetID); err != nil {
+			rows.Close()
+			return err
+		}
+		routes = append(routes, edge)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	graph := map[int64][]int64{}
+	for _, edge := range routes {
+		target, err := meteringInboundWith(tx, edge.targetID)
+		if err != nil {
+			return err
+		}
+		if target == nil || !target.Enabled {
+			return fmt.Errorf("逐用户机器观测无法启用：入口 %s 的落地不存在或已禁用", edge.from.Tag)
+		}
+		if edge.from.ServerID == target.ServerID {
+			return fmt.Errorf("逐用户机器观测无法启用：入口 %s 存在尚不支持的同机多跳", edge.from.Tag)
+		}
+		if err = supportedUserMeteringEdge(&edge.from, target); err != nil {
+			return err
+		}
+		if _, _, _, err = s.relayTargetSpecWith(tx, target); err != nil {
+			return fmt.Errorf("逐用户机器观测无法启用：入口 %s 的落地不可用：%w", edge.from.Tag, err)
+		}
+		graph[edge.from.ServerID] = append(graph[edge.from.ServerID], target.ServerID)
+	}
+	colors := map[int64]int{}
+	var visit func(int64) bool
+	visit = func(serverID int64) bool {
+		if colors[serverID] == 1 {
+			return false
+		}
+		if colors[serverID] == 2 {
+			return true
+		}
+		colors[serverID] = 1
+		for _, target := range graph[serverID] {
+			if !visit(target) {
+				return false
+			}
+		}
+		colors[serverID] = 2
+		return true
+	}
+	for serverID := range graph {
+		if !visit(serverID) {
+			return fmt.Errorf("逐用户机器观测无法启用：现有中转路径存在环路")
+		}
+	}
+	return nil
+}
+
 func scanRelayMeteringUser(row scanner) (*RelayMeteringUser, error) {
 	u := new(RelayMeteringUser)
 	err := row.Scan(&u.ID, &u.LinkID, &u.UserID, &u.Generation, &u.IdentityName, &u.Credential, &u.Enabled, &u.State, &u.CreatedAt, &u.AcceptedAt, &u.ActivatedAt, &u.SourceNames)
@@ -629,11 +702,31 @@ func appliedRelayUserRoutes(rules []map[string]interface{}, wanted map[string]ma
 		if outbound == "" {
 			outbound = "unresolved-route"
 		}
+		if ownedOutbounds[outbound] {
+			// The compiler's user branch is an unconditional positive match on
+			// inbound+auth_user. Additional predicates (including invert) cannot
+			// prove that all traffic for these users takes this observed hop.
+			for field := range rule {
+				switch field {
+				case "inbound", "auth_user", "outbound", "action":
+				default:
+					invalid[outbound] = true
+				}
+			}
+			if action != "" && action != "route" {
+				invalid[outbound] = true
+			}
+		}
 		inbounds := relayRuleStrings(rule["inbound"])
 		if len(inbounds) == 0 {
 			inbounds = allInbounds
 		}
 		auth := relayRuleStrings(rule["auth_user"])
+		if inverted, _ := rule["invert"].(bool); inverted {
+			// Conservatively treat an inverted earlier rule as potentially
+			// selecting any expected identity, rather than narrowing it backwards.
+			inbounds, auth = allInbounds, nil
+		}
 		for _, inbound := range inbounds {
 			users := wanted[inbound]
 			if users == nil {

@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +31,7 @@ func meteringTestPort(t *testing.T) int {
 	ln.Close()
 	return port
 }
-func startMeteringBox(t *testing.T, bin string, raw []byte, api string) {
+func startMeteringBox(t *testing.T, bin string, raw []byte, api string) *exec.Cmd {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -68,12 +70,42 @@ func startMeteringBox(t *testing.T, bin string, raw []byte, api string) {
 		conn, err := net.DialTimeout("tcp", api, 100*time.Millisecond)
 		if err == nil {
 			conn.Close()
-			return
+			return cmd
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
 	output, _ := os.ReadFile(filepath.Join(dir, "box.log"))
 	t.Fatalf("sing-box fixture did not expose stats API: %s", output)
+	return nil
+}
+
+// Only inspect the test process started above. This is a point-in-time Linux
+// RSS measurement, not peak memory or an estimate for a production VPS.
+func meteringBoxRSSKiB(t *testing.T, cmd *exec.Cmd) int64 {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Logf("core RSS measurement unavailable on %s", runtime.GOOS)
+		return 0
+	}
+	if cmd == nil || cmd.Process == nil {
+		t.Fatal("RSS requested without a started fixture core")
+	}
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "VmRSS:" && fields[2] == "kB" {
+			n, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+	}
+	t.Fatal("running fixture core has no VmRSS measurement")
+	return 0
 }
 
 // This is a real two-process TCP relay on loopback only. The generated edge

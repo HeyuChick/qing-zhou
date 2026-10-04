@@ -263,6 +263,12 @@ func (m *Manager) Apply(config []byte) error {
 // which is to say whether every connection on this machine was just cut. The
 // controller counts those to notice a node stuck in a restart loop.
 func (m *Manager) ApplyChanged(config []byte) (bool, error) {
+	return m.ApplyChangedForce(config, false)
+}
+
+// ApplyChangedForce establishes a controlled restart boundary for a legacy
+// numeric statistics namespace even when a crashed prior apply wrote the file.
+func (m *Manager) ApplyChangedForce(config []byte, force bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -273,7 +279,7 @@ func (m *Manager) ApplyChanged(config []byte) (bool, error) {
 	//
 	// Skipped while a reload is outstanding: matching bytes on disk only means
 	// the file was swapped, not that sing-box picked it up.
-	if !m.reloadFailed {
+	if !m.reloadFailed && !force {
 		if cur, err := os.ReadFile(m.configPath); err == nil && bytes.Equal(cur, config) {
 			return false, nil
 		}

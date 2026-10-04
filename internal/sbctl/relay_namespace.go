@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os/exec"
 	"regexp"
-	"strings"
 	"time"
 
+	"qingzhou/internal/sbproc"
+	"qingzhou/internal/sshctl"
 	"qingzhou/internal/store"
 )
 
@@ -40,100 +40,84 @@ func configNeedsRelayNamespaceProof(raw []byte) bool {
 	return false
 }
 
-// The config bytes were successfully applied by the caller. Verify the installed
-// hash and live systemd invocation together before asserting namespace separation.
-// This is never called merely because a desired configuration was generated.
-func (c *Controller) rememberRelayNamespace(serverID int64, raw []byte) {
+// Namespace proof is created only around a controlled successful restart. A
+// matching disk file with an old active core is deliberately insufficient.
+func (c *Controller) applyWithRelayNamespace(ctx context.Context, serverID int64, sv *store.Server, raw []byte, apply func(bool) (bool, error)) (bool, error) {
 	if !configNeedsRelayNamespaceProof(raw) {
-		return
+		return apply(false)
 	}
-	writer, ok := c.st.(interface {
+	proofs, ok := c.st.(interface {
+		RelayNamespaceProofKnown(int64, string, []byte) (bool, error)
 		RecordRelayNamespaceEpoch(int64, string, []byte) error
 	})
 	if !ok {
-		return
+		return apply(false)
 	}
-	var sv *store.Server
-	var err error
-	if serverID != 0 {
-		sv, err = c.st.GetServer(serverID)
-		if err != nil || sv == nil {
-			c.recordTrafficFailure(serverID, "legacy_identity_unverified")
-			return
+	before, inspectErr := c.inspectRelayNamespace(ctx, sv)
+	known := false
+	if inspectErr == nil {
+		var err error
+		known, err = proofs.RelayNamespaceProofKnown(serverID, before.Epoch, raw)
+		if err != nil {
+			return false, err
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	epoch, err := c.verifiedAppliedNamespaceEpoch(ctx, sv, raw)
-	if err == nil {
-		err = writer.RecordRelayNamespaceEpoch(serverID, epoch, raw)
-	}
+	// Only a verifiable managed process can be forced. Unsupported deployments
+	// continue their normal applies without entering an endless restart loop.
+	restarted, err := apply(inspectErr == nil && !known)
 	if err != nil {
-		c.recordTrafficFailure(serverID, "legacy_identity_unverified")
-		log.Printf("sbctl: server %d legacy customer statistics require a verified applied process epoch; attribution remains unavailable", serverID)
+		return restarted, err
 	}
+	after, afterErr := c.inspectRelayNamespace(ctx, sv)
+	expected := namespaceConfigHash(raw)
+	if sv != nil && (sv.Host == "" || !isLocalHostContext(ctx, sv.Host)) {
+		expected = sshctl.InstalledConfigHash(raw)
+	}
+	verified := inspectErr == nil && afterErr == nil && after.ConfigHash == expected
+	if verified && !restarted && known && before.Epoch == after.Epoch {
+		return restarted, nil
+	}
+	if verified && restarted && before.Epoch != after.Epoch {
+		if err = proofs.RecordRelayNamespaceEpoch(serverID, after.Epoch, raw); err == nil {
+			return restarted, nil
+		}
+	}
+	c.recordTrafficFailure(serverID, "legacy_identity_unverified")
+	log.Printf("sbctl: server %d legacy numeric account metering unavailable: requires a verified systemd restart using the managed single config path; ordinary accounts continue", serverID)
+	return restarted, nil
 }
 
-func (c *Controller) verifiedAppliedNamespaceEpoch(ctx context.Context, sv *store.Server, raw []byte) (string, error) {
+func namespaceConfigHash(raw []byte) string {
 	sum := sha256.Sum256(raw)
-	return c.verifyNamespaceConfigHash(ctx, sv, hex.EncodeToString(sum[:]))
+	return hex.EncodeToString(sum[:])
 }
 
-func (c *Controller) verifyNamespaceConfigHash(ctx context.Context, sv *store.Server, hash string) (string, error) {
-	unit, path := "sing-box", c.localConfigPath()
+func (c *Controller) inspectRelayNamespace(ctx context.Context, sv *store.Server) (sbproc.ManagedProcess, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if sv != nil && (sv.Host == "" || !isLocalHostContext(ctx, sv.Host)) {
+		inspector, ok := c.remoteMgr.(interface {
+			InspectManagedProcess(context.Context, *sshctl.ServerConfig) (sbproc.ManagedProcess, error)
+		})
+		if !ok {
+			return sbproc.ManagedProcess{}, fmt.Errorf("remote managed-process verification unavailable")
+		}
+		return inspector.InspectManagedProcess(ctx, SSHConfigFor(sv))
+	}
+	path := c.localConfigPath()
 	if sv != nil {
 		path = serverConfigPath(sv)
-		if sv.SystemdUnit != "" {
-			unit = sv.SystemdUnit
-		}
 	}
-	script := "set -eu; boot=$(cat /proc/sys/kernel/random/boot_id); inv1=$(systemctl show --property=InvocationID --value -- " + quoteEpochUnit(unit) + "); systemctl is-active --quiet -- " + quoteEpochUnit(unit) + "; digest=$(sha256sum -- " + quoteEpochUnit(path) + "); digest=${digest%% *}; inv2=$(systemctl show --property=InvocationID --value -- " + quoteEpochUnit(unit) + "); test \"$inv1\" = \"$inv2\"; test \"$digest\" = " + quoteEpochUnit(hash) + "; printf '%s:%s' \"$boot\" \"$inv1\""
-	var out string
-	var err error
-	if sv != nil && !isLocalHostContext(ctx, sv.Host) {
-		if c.remoteMgr == nil {
-			return "", fmt.Errorf("remote manager unavailable")
-		}
-		out, err = c.remoteMgr.RunCommand(ctx, SSHConfigFor(sv), script)
-	} else {
-		command := exec.CommandContext(ctx, "sh", "-c", script)
-		command.WaitDelay = 2 * time.Second
-		var b []byte
-		b, err = command.Output()
-		out = string(b)
-	}
-	out = strings.TrimSpace(out)
-	if err != nil || !processEpochRE.MatchString(out) {
-		return "", fmt.Errorf("cannot verify applied config and active process epoch")
-	}
-	return out, nil
+	return sbproc.InspectManagedProcess(ctx, c.trafficUnit(sv), path)
 }
 
-func (c *Controller) confirmCurrentRelayNamespace(ctx context.Context, serverID int64, sv *store.Server, epoch string) error {
-	proofs, ok := c.st.(interface {
-		HasLegacyNumericCustomers() (bool, error)
-		RelayNamespaceEpochKnown(int64, string) (bool, error)
-		LatestRelayNamespaceProof(int64) (string, error)
-		ConfirmRelayNamespaceEpoch(int64, string, string) error
+func (c *Controller) applyRemoteConfig(ctx context.Context, sv *store.Server, raw []byte) (bool, error) {
+	return c.applyWithRelayNamespace(ctx, sv.ID, sv, raw, func(force bool) (bool, error) {
+		if manager, ok := c.remoteMgr.(interface {
+			ApplyConfigForce(context.Context, *sshctl.ServerConfig, []byte, bool) (bool, error)
+		}); ok {
+			return manager.ApplyConfigForce(ctx, SSHConfigFor(sv), raw, force)
+		}
+		return c.remoteMgr.ApplyConfig(ctx, SSHConfigFor(sv), raw)
 	})
-	if !ok || epoch == "" {
-		return nil
-	}
-	required, err := proofs.HasLegacyNumericCustomers()
-	if err != nil || !required {
-		return err
-	}
-	known, err := proofs.RelayNamespaceEpochKnown(serverID, epoch)
-	if err != nil || known {
-		return err
-	}
-	hash, err := proofs.LatestRelayNamespaceProof(serverID)
-	if err != nil || hash == "" {
-		return err
-	}
-	verified, err := c.verifyNamespaceConfigHash(ctx, sv, hash)
-	if err != nil || verified != epoch {
-		return fmt.Errorf("legacy account attribution requires a verified applied process epoch")
-	}
-	return proofs.ConfirmRelayNamespaceEpoch(serverID, epoch, hash)
 }

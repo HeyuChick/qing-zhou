@@ -517,6 +517,21 @@ func (s *Store) relayOutboundWithIdentity(landing *SbInbound, serverCache map[in
 	if landing.TlsID == 0 && !inlineTLS && (landing.Type == "vless" || landing.Type == "trojan") {
 		delete(ob, "tls")
 	}
+	if landing.Type == "vless" {
+		// Share-link defaults only encode Vision for Reality. Managed listeners
+		// also support ordinary TLS+Vision: mirror the exact inbound user rule,
+		// including empty transports and explicit flow=none, after conversion.
+		flowSpec := map[string]interface{}{"flow": opts["flow"], "transport": opts["transport"]}
+		if landing.TlsID != 0 || inlineTLS {
+			flowSpec["tls"] = true
+		}
+		if flow := singbox.VLESSUserFlow(flowSpec); flow != "" {
+			ob["flow"] = flow
+			delete(ob, "multiplex") // Vision and outbound multiplex are incompatible
+		} else {
+			delete(ob, "flow")
+		}
+	}
 	ob["tag"] = outboundTag
 	return ob, nil
 }

@@ -56,7 +56,10 @@ func TestLegacyNumericCustomerNeedsVerifiedSeparatedEpoch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = st.ConfirmRelayNamespaceEpoch(sid, "restarted-core", hash); err != nil {
+			if err = st.ConfirmRelayNamespaceEpoch(sid, "restarted-core", hash); err == nil {
+				t.Fatal("an unknown external epoch acquired proof from disk hash alone")
+			}
+			if err = st.RecordRelayNamespaceEpoch(sid, "restarted-core", raw); err != nil {
 				t.Fatal(err)
 			}
 			next := NewTrafficPoll(sid, map[string]UsageDelta{name: {Down: 25}})
@@ -85,5 +88,32 @@ func TestLegacyNamespaceRegistrationDoesNotRequireEncryptionKey(t *testing.T) {
 	}
 	if err = st.ConfirmRelayNamespaceEpoch(4, "unproved", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err == nil {
 		t.Fatal("unseen config hash acquired epoch proof")
+	}
+}
+
+func TestLegacyNamespaceProofIsImmutablePerServerEpoch(t *testing.T) {
+	st := newRefundStore(t)
+	raw := []byte(`{"inbounds":[{"type":"mixed","users":[{"username":"relay_9"}]}]}`)
+	if err := st.RecordRelayNamespaceEpoch(4, "old-epoch", raw); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.RelayNamespaceProofKnown(4, "old-epoch", raw); err != nil || !ok {
+		t.Fatalf("missing proof %v %v", ok, err)
+	}
+	if ok, _ := st.RelayNamespaceProofKnown(5, "old-epoch", raw); ok {
+		t.Fatal("proof crossed server boundary")
+	}
+	changed := []byte(`{"inbounds":[{"type":"mixed","users":[{"username":"relay_10"}]}]}`)
+	if err := st.RecordRelayNamespaceEpoch(4, "old-epoch", changed); err == nil {
+		t.Fatal("existing epoch hash silently changed")
+	}
+	if ok, _ := st.RelayNamespaceProofKnown(4, "old-epoch", raw); !ok {
+		t.Fatal("original historical proof was overwritten")
+	}
+	if err := st.RecordRelayNamespaceEpoch(4, "new-epoch", changed); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := st.RelayNamespaceProofKnown(4, "old-epoch", raw); !ok {
+		t.Fatal("new restart invalidated a delayed old epoch")
 	}
 }

@@ -63,7 +63,7 @@ func quoteEpochUnit(s string) string { return "'" + strings.ReplaceAll(s, "'", "
 
 // systemd InvocationID changes on every service invocation, unlike PID or a
 // config hash. The boot ID guards reuse across host replacement/restarts.
-func (c *Controller) trafficEpoch(ctx context.Context, sv *store.Server) (string, error) {
+func (c *Controller) trafficUnit(sv *store.Server) string {
 	unit := "sing-box"
 	if sv != nil && sv.SystemdUnit != "" {
 		unit = sv.SystemdUnit
@@ -77,6 +77,11 @@ func (c *Controller) trafficEpoch(ctx context.Context, sv *store.Server) (string
 			}
 		}
 	}
+	return unit
+}
+
+func (c *Controller) trafficEpoch(ctx context.Context, sv *store.Server) (string, error) {
+	unit := c.trafficUnit(sv)
 	script := "set -eu; boot=$(cat /proc/sys/kernel/random/boot_id); invocation=$(systemctl show --property=InvocationID --value -- " + quoteEpochUnit(unit) + "); printf '%s:%s' \"$boot\" \"$invocation\""
 	var out string
 	var err error
@@ -123,11 +128,11 @@ func (c *Controller) collectTrafficSnapshot(ctx context.Context, serverID int64,
 	// Every legacy reader shares this lease and rechecks the persisted mode.
 	// This closes the late-reset race across panel processes during handover.
 	if state.Mode != "cumulative" && !c.useTrafficSnapshots() {
+		// The epoch is optional in legacy reset mode. Unverifiable numeric names
+		// are quarantined individually by the journal, never the whole node.
 		epoch := ""
-		if needs, ok := c.st.(interface{ HasLegacyNumericCustomers() (bool, error) }); ok {
-			if required, checkErr := needs.HasLegacyNumericCustomers(); checkErr != nil {
-				return 0, checkErr
-			} else if required {
+		if proofs, ok := c.st.(interface{ HasRelayNamespaceProof(int64) (bool, error) }); ok {
+			if known, err := proofs.HasRelayNamespaceProof(serverID); err == nil && known {
 				epoch, _ = c.trafficEpoch(ctx, sv)
 			}
 		}
@@ -143,10 +148,6 @@ func (c *Controller) collectTrafficSnapshot(ctx context.Context, serverID int64,
 		n, e := c.collectResetTraffic(ctx, journal, serverID, sv, fetch, "", false)
 		c.recordTrafficFailure(serverID, "legacy")
 		return n, e
-	}
-	if err = c.confirmCurrentRelayNamespace(ctx, serverID, sv, before); err != nil {
-		c.recordTrafficFailure(serverID, "legacy_identity_unverified")
-		return 0, err
 	}
 	applied := 0
 	if state.Mode != "cumulative" {
@@ -181,10 +182,6 @@ func (c *Controller) collectTrafficSnapshot(ctx context.Context, serverID int64,
 }
 
 func (c *Controller) collectResetTraffic(ctx context.Context, journal trafficJournal, serverID int64, sv *store.Server, fetch snapshotFetcher, epoch string, transition bool) (int, error) {
-	if err := c.confirmCurrentRelayNamespace(ctx, serverID, sv, epoch); err != nil {
-		c.recordTrafficFailure(serverID, "legacy_identity_unverified")
-		return 0, err
-	}
 	seq, err := journal.NextTrafficSequence()
 	if err != nil {
 		return 0, err

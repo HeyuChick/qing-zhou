@@ -3,15 +3,24 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -21,9 +30,111 @@ import (
 	"qingzhou/internal/singbox"
 )
 
+func relayFixtureTLS(t *testing.T) (string, string, map[string]any) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "loopback-test-only"},
+		DNSNames: []string{"localhost"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IsCA: true, BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	privateKey := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	trustPath := filepath.Join(t.TempDir(), "fixture-ca.pem")
+	if err = os.WriteFile(trustPath, []byte(cert), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Only subprocesses of this subtest see this synthetic trust anchor. No OS
+	// trust store is modified, and certificate verification stays enabled.
+	t.Setenv("SSL_CERT_FILE", trustPath)
+	server, err := json.Marshal(map[string]any{"enabled": true, "server_name": "localhost", "certificate": []string{cert}, "key": []string{privateKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientTLS := map[string]any{"enabled": true, "server_name": "localhost", "certificate": []string{cert}}
+	client, err := json.Marshal(clientTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(server), string(client), clientTLS
+}
+
+func checkRelayFixtureConfig(t *testing.T, bin string, raw []byte) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(bin, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("fixture configuration check: %v %s", err, output)
+	}
+}
+
+func checkRelayFixtureTransport(t *testing.T, raw []byte, mode string) {
+	t.Helper()
+	if mode == "plain" {
+		return
+	}
+	var config map[string]any
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	check := func(endpoint map[string]any, inbound bool) {
+		if endpoint["type"] != "vless" {
+			return
+		}
+		tls, _ := endpoint["tls"].(map[string]any)
+		if tls["enabled"] != true || tls["insecure"] == true {
+			t.Fatal("fixture TLS disabled or certificate verification weakened")
+		}
+		if mode == "ws-tls" {
+			transport, _ := endpoint["transport"].(map[string]any)
+			if transport["type"] != "ws" || transport["path"] != "/fixture" {
+				t.Fatal("fixture WebSocket transport was not preserved")
+			}
+		}
+		checkFlow := func(user map[string]any) {
+			flow, _ := user["flow"].(string)
+			if mode == "tls-vision" && flow != "xtls-rprx-vision" {
+				t.Fatal("ordinary TLS VLESS peer does not match listener Vision flow")
+			}
+			if mode == "ws-tls" && flow != "" {
+				t.Fatal("Vision was incorrectly enabled with WebSocket transport")
+			}
+		}
+		if inbound {
+			users, _ := endpoint["users"].([]any)
+			for _, user := range users {
+				checkFlow(user.(map[string]any))
+			}
+		} else {
+			checkFlow(endpoint)
+		}
+	}
+	for _, side := range []string{"inbounds", "outbounds"} {
+		endpoints, _ := config[side].([]any)
+		for _, endpoint := range endpoints {
+			check(endpoint.(map[string]any), side == "inbounds")
+		}
+	}
+}
+
 // Exercise RFC 1928 UDP ASSOCIATE through the existing mixed listener. No TUN,
 // system routes, production endpoints or third-party proxy clients are used.
-func relayFixtureUDPEcho(proxy, username, password string, target *net.UDPAddr, payload []byte) error {
+func relayFixtureUDPEcho(proxy, username, password string, target *net.UDPAddr, payload []byte, measured func(int, time.Duration)) error {
 	control, err := net.DialTimeout("tcp", proxy, 5*time.Second)
 	if err != nil {
 		return err
@@ -106,6 +217,7 @@ func relayFixtureUDPEcho(proxy, username, password string, target *net.UDPAddr, 
 	packet = binary.BigEndian.AppendUint16(packet, uint16(target.Port))
 	packet = append(packet, payload...)
 	for i := 0; i < 3; i++ {
+		started := time.Now()
 		if _, err = udp.WriteToUDP(packet, bound); err != nil {
 			return err
 		}
@@ -126,6 +238,9 @@ func relayFixtureUDPEcho(proxy, username, password string, target *net.UDPAddr, 
 		if err != nil || !from.IP.Equal(target.IP) || from.Port != target.Port || !bytes.Equal(body, payload) {
 			return fmt.Errorf("UDP echo payload or destination mismatch: %v", err)
 		}
+		if measured != nil {
+			measured(2*len(payload), time.Since(started))
+		}
 	}
 	return nil
 }
@@ -141,12 +256,27 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 	for _, scenario := range []struct {
 		entryType string
 		machines  int
-	}{{"mixed", 2}, {"vless", 2}, {"vless", 3}} {
-		t.Run(fmt.Sprintf("%s/%d-machines", scenario.entryType, scenario.machines), func(t *testing.T) {
+		tlsMode   string
+		checkOnly bool
+	}{
+		{"mixed", 2, "plain", false}, {"vless", 2, "plain", false}, {"vless", 3, "plain", false},
+		{"vless", 2, "tls-vision", true}, {"vless", 2, "tls-vision", false},
+		{"vless", 2, "ws-tls", true}, {"vless", 2, "ws-tls", false},
+	} {
+		phase := "traffic"
+		if scenario.checkOnly {
+			phase = "config-check"
+		}
+		t.Run(fmt.Sprintf("%s/%d-machines/%s/%s", scenario.entryType, scenario.machines, scenario.tlsMode, phase), func(t *testing.T) {
 			st := newRefundStore(t)
 			st.SetSecretKey([]byte("per-user-relay-fixture"))
 			if err := st.SetSetting(SettingBlockPrivateEgress, "0"); err != nil {
 				t.Fatal(err)
+			}
+			var tlsServer, tlsClient string
+			var clientTLS map[string]any
+			if scenario.tlsMode != "plain" {
+				tlsServer, tlsClient, clientTLS = relayFixtureTLS(t)
 			}
 			type machine struct {
 				id      int64
@@ -155,6 +285,7 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				tag     string
 				api     string
 				stats   *sbstats.Client
+				process *exec.Cmd
 			}
 			machines := make([]machine, scenario.machines)
 			for i := range machines {
@@ -175,7 +306,18 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 					upstream = machines[i+1].inbound
 				}
 				var err error
-				m.inbound, err = st.SaveSbInbound(&SbInbound{ServerID: m.id, Type: kind, Tag: m.tag, Listen: "127.0.0.1", ListenPort: m.port, Options: `{}`, Enabled: true, UpstreamInboundID: upstream})
+				var tlsID int64
+				if scenario.tlsMode != "plain" {
+					tlsID, err = st.SaveSbTls(&SbTls{ServerID: m.id, Name: "fixture-tls", Mode: "tls", ServerJSON: tlsServer, ClientJSON: tlsClient})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				options := `{}`
+				if scenario.tlsMode == "ws-tls" {
+					options = `{"transport":{"type":"ws","path":"/fixture"}}`
+				}
+				m.inbound, err = st.SaveSbInbound(&SbInbound{ServerID: m.id, Type: kind, Tag: m.tag, Listen: "127.0.0.1", ListenPort: m.port, TlsID: tlsID, Options: options, Enabled: true, UpstreamInboundID: upstream})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -246,12 +388,21 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				startMeteringBox(t, bin, raw, m.api)
+				checkRelayFixtureTransport(t, raw, scenario.tlsMode)
+				if scenario.checkOnly {
+					// Renderer/ack unit fixture only; this is explicitly not evidence
+					// of a running core or working TLS/transport connections.
+					checkRelayFixtureConfig(t, bin, raw)
+				} else {
+					m.process = startMeteringBox(t, bin, raw, m.api)
+				}
 				if err = st.RecordRelayConfigApplied(m.id, raw); err != nil {
 					t.Fatal(err)
 				}
-				m.stats = sbstats.New(m.api)
-				t.Cleanup(func() { m.stats.Close() })
+				if !scenario.checkOnly {
+					m.stats = sbstats.New(m.api)
+					t.Cleanup(func() { m.stats.Close() })
+				}
 			}
 			// A single physical link per hop must carry both users independently.
 			links, err := st.RelayMeteringLinks()
@@ -300,10 +451,20 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				if scenario.entryType == "vless" || c.entryHop > 0 {
 					proxyPort = meteringTestPort(t)
 					api := fmt.Sprintf("127.0.0.1:%d", meteringTestPort(t))
+					outbound := map[string]any{"type": "vless", "tag": "original-customer", "server": "127.0.0.1", "server_port": machines[c.entryHop].port, "uuid": c.original.ClientUUID.String}
+					if scenario.tlsMode != "plain" {
+						outbound["tls"] = clientTLS
+					}
+					if scenario.tlsMode == "tls-vision" {
+						outbound["flow"] = "xtls-rprx-vision"
+					}
+					if scenario.tlsMode == "ws-tls" {
+						outbound["transport"] = map[string]any{"type": "ws", "path": "/fixture"}
+					}
 					clientConfig := map[string]any{
 						"log":          map[string]any{"level": "warn"},
 						"inbounds":     []any{map[string]any{"type": "mixed", "tag": "fixture-driver", "listen": "127.0.0.1", "listen_port": proxyPort}},
-						"outbounds":    []any{map[string]any{"type": "vless", "tag": "original-customer", "server": "127.0.0.1", "server_port": machines[c.entryHop].port, "uuid": c.original.ClientUUID.String}},
+						"outbounds":    []any{outbound},
 						"route":        map[string]any{"final": "original-customer"},
 						"experimental": map[string]any{"v2ray_api": map[string]any{"listen": api, "stats": map[string]any{"enabled": true, "outbounds": []string{"original-customer"}}}},
 					}
@@ -311,7 +472,11 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					startMeteringBox(t, bin, raw, api)
+					if scenario.checkOnly {
+						checkRelayFixtureConfig(t, bin, raw)
+					} else {
+						startMeteringBox(t, bin, raw, api)
+					}
 					proxy = &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", proxyPort)}
 					c.socksUsername, c.socksPassword = "", ""
 				}
@@ -319,6 +484,10 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				transport := &http.Transport{Proxy: http.ProxyURL(proxy), DisableKeepAlives: true}
 				t.Cleanup(transport.CloseIdleConnections)
 				c.client = &http.Client{Transport: transport, Timeout: 5 * time.Second}
+			}
+			if scenario.checkOnly {
+				t.Log("both user client configurations and both generated machine configurations passed binary check; no traffic executed in this subtest")
+				return
 			}
 			destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
@@ -334,7 +503,10 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				_, _ = w.Write(bytes.Repeat([]byte{'x'}, n))
 			}))
 			defer destination.Close()
+			var metricsMu sync.Mutex
+			var tcpCompletedBytes, udpCompletedBytes int64
 			request := func(c customer) error {
+				started := time.Now()
 				response, err := c.client.Post(fmt.Sprintf("%s/?bytes=%d", destination.URL, c.payload), "application/octet-stream", bytes.NewReader(bytes.Repeat([]byte{'u'}, c.payload/256)))
 				if err != nil {
 					return err
@@ -344,6 +516,12 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				if err != nil || response.StatusCode != http.StatusOK || len(body) != c.payload || !bytes.Equal(body, bytes.Repeat([]byte{'x'}, c.payload)) {
 					return fmt.Errorf("owner %d response status=%s bytes=%d error=%v", c.uid, response.Status, len(body), err)
 				}
+				elapsed := time.Since(started)
+				completed := int64(len(body) + c.payload/256)
+				metricsMu.Lock()
+				tcpCompletedBytes += completed
+				metricsMu.Unlock()
+				t.Logf("synthetic_loopback TCP user=%d completed_application_bytes=%d request_latency=%s", c.uid, completed, elapsed)
 				return nil
 			}
 			type snapshot []map[string]*sbstats.Traffic
@@ -368,6 +546,7 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				}
 				return UsageDelta{Up: v.Up, Down: v.Down}
 			}
+			tcpStarted := time.Now()
 			if err := request(customers[0]); err != nil {
 				t.Fatal(err)
 			}
@@ -424,6 +603,8 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			tcpElapsed := time.Since(tcpStarted)
+			t.Logf("synthetic_loopback TCP completed_application_bytes=%d traffic_phase_elapsed=%s application_MiB_per_second=%.3f (includes sequential probes and concurrent requests; not WAN capacity)", tcpCompletedBytes, tcpElapsed, float64(tcpCompletedBytes)/(1<<20)/tcpElapsed.Seconds())
 			finalTCP := read()
 			echo, err := net.ListenPacket("udp", "127.0.0.1:0")
 			if err != nil {
@@ -443,9 +624,13 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				}
 			}()
 			beforeUDP := finalTCP
+			udpStarted := time.Now()
 			for i, c := range customers {
 				payload := bytes.Repeat([]byte{byte('a' + i)}, 257+i*252)
-				if err = relayFixtureUDPEcho(c.socksAddress, c.socksUsername, c.socksPassword, echo.LocalAddr().(*net.UDPAddr), payload); err != nil {
+				if err = relayFixtureUDPEcho(c.socksAddress, c.socksUsername, c.socksPassword, echo.LocalAddr().(*net.UDPAddr), payload, func(completed int, elapsed time.Duration) {
+					udpCompletedBytes += int64(completed)
+					t.Logf("synthetic_loopback UDP user=%d completed_application_bytes=%d echo_latency=%s", c.uid, completed, elapsed)
+				}); err != nil {
 					t.Fatalf("owner %d UDP: %v", c.uid, err)
 				}
 				afterUDP := read()
@@ -463,6 +648,8 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				}
 				beforeUDP = afterUDP
 			}
+			udpElapsed := time.Since(udpStarted)
+			t.Logf("synthetic_loopback UDP completed_application_bytes=%d traffic_phase_elapsed=%s application_MiB_per_second=%.3f (includes associations and counter reads; not WAN capacity)", udpCompletedBytes, udpElapsed, float64(udpCompletedBytes)/(1<<20)/udpElapsed.Seconds())
 			final := beforeUDP
 			for _, data := range []snapshot{first, second, finalTCP, final} {
 				for i, m := range machines {
@@ -477,6 +664,7 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				}
 			}
 			for i, m := range machines {
+				t.Logf("synthetic_loopback core hop=%d pid=%d resident_memory_KiB=%d (point-in-time RSS, not peak or VPS sizing)", i, m.process.Process.Pid, meteringBoxRSSKiB(t, m.process))
 				report, err := st.ServerServiceTraffic(m.id, 0)
 				if err != nil {
 					t.Fatal(err)

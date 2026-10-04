@@ -108,8 +108,12 @@ func (s *Store) RecordRelayNamespaceEpoch(serverID int64, epoch string, raw []by
 		}
 	}
 	sum := sha256.Sum256(raw)
-	_, err := s.db.Exec(`INSERT INTO relay_namespace_epochs(server_id,epoch,config_hash,applied_at) VALUES(?,?,?,?) ON CONFLICT(server_id,epoch) DO UPDATE SET config_hash=excluded.config_hash,applied_at=excluded.applied_at`, serverID, epoch, hex.EncodeToString(sum[:]), time.Now().Unix())
-	return err
+	hash := hex.EncodeToString(sum[:])
+	_, err := s.db.Exec(`INSERT INTO relay_namespace_epochs(server_id,epoch,config_hash,applied_at) VALUES(?,?,?,?) ON CONFLICT(server_id,epoch) DO NOTHING`, serverID, epoch, hash, time.Now().Unix())
+	if err != nil {
+		return err
+	}
+	return s.ConfirmRelayNamespaceEpoch(serverID, epoch, hash)
 }
 
 func legacyRelayStatsNameWith(db txLike, serverID, inboundID int64) (string, error) {
@@ -121,8 +125,16 @@ func legacyRelayStatsNameWith(db txLike, serverID, inboundID int64) (string, err
 	return name, err
 }
 
-// LatestRelayNamespaceProof gives the last verified separated configuration for
-// revalidating the same managed file after an independently restarted core.
+// RelayNamespaceProofKnown permits a no-op only for this exact previously
+// proven process and desired configuration. Unknown external restarts need a
+// fresh controlled apply, even if the disk file still has an old proven hash.
+func (s *Store) RelayNamespaceProofKnown(serverID int64, epoch string, raw []byte) (bool, error) {
+	sum := sha256.Sum256(raw)
+	var known bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM relay_namespace_epochs WHERE server_id=? AND epoch=? AND config_hash=?)`, serverID, epoch, hex.EncodeToString(sum[:])).Scan(&known)
+	return known, err
+}
+
 func (s *Store) LatestRelayNamespaceProof(serverID int64) (string, error) {
 	var hash string
 	err := s.db.QueryRow(`SELECT config_hash FROM relay_namespace_epochs WHERE server_id=? ORDER BY applied_at DESC,rowid DESC LIMIT 1`, serverID).Scan(&hash)
@@ -136,26 +148,25 @@ func (s *Store) RelayNamespaceEpochKnown(serverID int64, epoch string) (bool, er
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM relay_namespace_epochs WHERE server_id=? AND epoch=?)`, serverID, epoch).Scan(&known)
 	return known, err
 }
+
+// ConfirmRelayNamespaceEpoch checks an existing proof; it cannot promote an
+// unknown epoch based on a reused on-disk hash.
 func (s *Store) ConfirmRelayNamespaceEpoch(serverID int64, epoch, hash string) error {
-	if epoch == "" || len(hash) != 64 {
-		return fmt.Errorf("invalid namespace proof")
-	}
-	result, err := s.db.Exec(`INSERT INTO relay_namespace_epochs(server_id,epoch,config_hash,applied_at) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM relay_namespace_epochs WHERE server_id=? AND config_hash=?) ON CONFLICT(server_id,epoch) DO NOTHING`, serverID, epoch, hash, time.Now().Unix(), serverID, hash)
+	var known bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM relay_namespace_epochs WHERE server_id=? AND epoch=? AND config_hash=?)`, serverID, epoch, hash).Scan(&known)
 	if err != nil {
 		return err
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		known, e := s.RelayNamespaceEpochKnown(serverID, epoch)
-		if e != nil {
-			return e
-		}
-		if !known {
-			return fmt.Errorf("unrecognized separated config hash")
-		}
+	if !known {
+		return fmt.Errorf("unverified process epoch/configuration")
 	}
 	return nil
+}
+
+// HasRelayNamespaceProof scopes legacy epoch reads to nodes on which a numeric
+// customer namespace has actually been deployed, including its delayed history.
+func (s *Store) HasRelayNamespaceProof(serverID int64) (bool, error) {
+	var known bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM relay_namespace_epochs WHERE server_id=?)`, serverID).Scan(&known)
+	return known, err
 }
