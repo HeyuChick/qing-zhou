@@ -39,6 +39,8 @@ type User struct {
 	Name     string // identity used in users[] AND as the v2ray stats key
 	UUID     string // vless / vmess / tuic
 	Password string // hysteria2 / tuic / trojan
+	OwnerID  int64  // panel user ownership; internal metadata, never rendered on the wire
+	Relay    bool   // received from another managed proxy; never a quota-debit authority
 }
 
 // Inbound is one sing-box inbound: its protocol Type, the pre-rendered body

@@ -71,7 +71,12 @@ func relayMeteringLinksWith(db txLike) ([]*RelayMeteringLink, error) {
 func (s *Store) RelayMeteringProgress() (string, error) {
 	var stamp string
 	err := s.db.QueryRow(`SELECT COALESCE(group_concat(id||':'||state||':'||spec_hash,'|'),'') FROM (SELECT id,state,spec_hash FROM relay_metering_links ORDER BY id)`).Scan(&stamp)
-	return stamp, err
+	if err != nil {
+		return "", err
+	}
+	var users string
+	err = s.db.QueryRow(`SELECT COALESCE(group_concat(id||':'||state||':'||enabled,'|'),'') FROM (SELECT id,state,enabled FROM relay_metering_users ORDER BY id)`).Scan(&users)
+	return stamp + "/" + users, err
 }
 
 // PrepareRelayMetering registers an immutable credential before any compiler
@@ -98,21 +103,16 @@ func (s *Store) PrepareRelayMetering() error {
 		byID[ib.ID] = ib
 		byTag[ib.Tag] = ib
 	}
-	type edge struct {
-		from  *SbInbound
-		to    *SbInbound
-		route int64
-	}
-	edges := []edge{}
+	edges := []relayMeteringEdge{}
 	for _, ib := range inbounds {
 		if ib.Enabled && ib.UpstreamInboundID != 0 {
-			edges = append(edges, edge{ib, byID[ib.UpstreamInboundID], 0})
+			edges = append(edges, relayMeteringEdge{ib, byID[ib.UpstreamInboundID], 0})
 		}
 	}
 	for _, n := range nodes {
 		if n.Enabled && n.Type == "self_built" && n.RouteUpstreamInboundID != 0 && !n.RouteUpstreamBroken {
 			if ib := byTag[n.InboundTag]; ib != nil && ib.Enabled {
-				edges = append(edges, edge{ib, byID[n.RouteUpstreamInboundID], n.ID})
+				edges = append(edges, relayMeteringEdge{ib, byID[n.RouteUpstreamInboundID], n.ID})
 			}
 		}
 	}
@@ -128,6 +128,11 @@ func (s *Store) PrepareRelayMetering() error {
 		}
 		if err := supportedMeteringLanding(e.to); err != nil {
 			return err
+		}
+		if s.RelayUserMeteringEnabled() {
+			if err := supportedUserMeteringEdge(e.from, e.to); err != nil {
+				return err
+			}
 		}
 		graph[e.from.ServerID] = append(graph[e.from.ServerID], e.to.ServerID)
 	}
@@ -220,7 +225,7 @@ func (s *Store) PrepareRelayMetering() error {
 			return er
 		}
 	}
-	return nil
+	return s.prepareRelayMeteringUsers(inbounds, edges)
 }
 func supportedMeteringLanding(ib *SbInbound) error {
 	switch ib.Type {
@@ -246,7 +251,7 @@ func (s *Store) meteringRelayUser(r *RelayMeteringLink) (singbox.User, error) {
 		return singbox.User{}, fmt.Errorf("链路 %d 凭据解密失败", r.ID)
 	}
 	id, pw := relayCred(secret)
-	return singbox.User{Name: r.IdentityName, UUID: id, Password: pw}, nil
+	return singbox.User{Name: r.IdentityName, UUID: id, Password: pw, Relay: true}, nil
 }
 func (s *Store) meteredRelayOutbound(from *SbInbound, routeID int64, landing *SbInbound, serverCache map[int64]*Server, tlsCache map[int64]*SbTls) (map[string]interface{}, error) {
 	link, err := scanRelayMetering(s.db.QueryRow(`SELECT `+relayMeteringCols+` FROM relay_metering_links WHERE source_server_id=? AND source_inbound_id=? AND route_node_id=? AND target_server_id=? AND target_inbound_id=?`, from.ServerID, from.ID, routeID, landing.ServerID, landing.ID))
@@ -366,6 +371,9 @@ func (s *Store) RecordRelayConfigApplied(serverID int64, raw []byte) error {
 	if err = s.acknowledgeRelayCredentials(tx, serverID, raw); err != nil {
 		return err
 	}
+	if err = s.acknowledgeRelayMeteringUsers(tx, serverID, raw); err != nil {
+		return err
+	}
 	hash := sha256.Sum256(raw)
 	if _, err = tx.Exec(`INSERT INTO relay_metering_applies(server_id,config_hash,applied_at) VALUES(?,?,?) ON CONFLICT(server_id) DO UPDATE SET config_hash=excluded.config_hash,applied_at=excluded.applied_at`, serverID, hex.EncodeToString(hash[:]), now); err != nil {
 		return err
@@ -384,7 +392,15 @@ func (s *Store) newRelayMeteringCredential(tx *sql.Tx) (string, string, error) {
 	}
 	name := "qzr_l_" + hex.EncodeToString(secret[:12])
 	var collision int
-	err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM users WHERE proxy_username=? OR client_name=?)+(SELECT COUNT(*) FROM user_plans WHERE proxy_username=? OR client_name=?)+(SELECT COUNT(*) FROM plan_identities WHERE proxy_username=? OR client_name=?)`, name, name, name, name, name, name).Scan(&collision)
+	err := tx.QueryRow(`SELECT EXISTS(
+ SELECT 1 FROM users WHERE proxy_username=? AND proxy_username<>''
+ UNION ALL SELECT 1 FROM users WHERE client_name=?
+ UNION ALL SELECT 1 FROM user_plans WHERE proxy_username=? AND proxy_username<>''
+ UNION ALL SELECT 1 FROM user_plans WHERE client_name=?
+ UNION ALL SELECT 1 FROM plan_identities WHERE proxy_username=? AND proxy_username<>''
+ UNION ALL SELECT 1 FROM plan_identities WHERE client_name=?
+ UNION ALL SELECT 1 FROM relay_metering_users WHERE identity_name=?
+ UNION ALL SELECT 1 FROM relay_metering_generations WHERE identity_name=?)`, name, name, name, name, name, name, name, name).Scan(&collision)
 	if err != nil {
 		return "", "", err
 	}
@@ -472,7 +488,10 @@ func (s *Store) relayMeteringAcceptedGenerations() ([]*RelayMeteringLink, error)
 
 // ConfigureTrafficMetering keeps both feature switches atomic. Existing
 // cumulative nodes never re-enter a reset reader through a settings toggle.
-func (s *Store) ConfigureTrafficMetering(links, cumulative bool) error {
+func (s *Store) ConfigureTrafficMetering(links, cumulative bool, perUser ...bool) error {
+	if len(perUser) > 1 {
+		return fmt.Errorf("无效逐用户计量设置")
+	}
 	if links && len(s.secretKey) == 0 {
 		return fmt.Errorf("链路计量需要配置加密密钥")
 	}
@@ -481,6 +500,18 @@ func (s *Store) ConfigureTrafficMetering(links, cumulative bool) error {
 		return err
 	}
 	defer tx.Rollback()
+	var currentPerUser string
+	err = tx.QueryRow(`SELECT value FROM settings WHERE key=?`, RelayUserMeteringSetting).Scan(&currentPerUser)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	userMetering := currentPerUser == "true"
+	if len(perUser) == 1 {
+		userMetering = perUser[0]
+	}
+	if userMetering && !links {
+		return fmt.Errorf("逐用户机器观测需要保持中转链路计量启用")
+	}
 	var started int
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM traffic_metering_state WHERE mode='cumulative'`).Scan(&started); err != nil {
 		return err
@@ -505,7 +536,7 @@ func (s *Store) ConfigureTrafficMetering(links, cumulative bool) error {
 		}
 		return "false"
 	}
-	for k, v := range map[string]bool{RelayMeteringSetting: links, "traffic_cumulative_metering": cumulative} {
+	for k, v := range map[string]bool{RelayMeteringSetting: links, "traffic_cumulative_metering": cumulative, RelayUserMeteringSetting: userMetering} {
 		if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, k, boolString(v)); err != nil {
 			return err
 		}

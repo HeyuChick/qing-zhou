@@ -4,21 +4,37 @@
     <p class="explanation">业务上下行来自本机 sing-box，与网卡 IN＋OUT 口径不同。中转在每台机器分别观测，用户套餐只在入口扣一次</p>
     <div class="service-totals">
       <span>代理业务 <b>{{ fmtBytes(service.total) }}</b></span>
-      <span>本机入口付费计量 <b>{{ fmtBytes(service.billable_total) }}</b></span>
+      <span>本机入口套餐扣量 <b>{{ fmtBytes(service.billable_total) }}</b></span>
       <span>采集模式 <b>{{ service.quality.mode === 'cumulative' ? '累计快照' : '读出清零' }}</b></span>
     </div>
     <p v-if="service.quality.status !== 'ok'" class="warning" role="status">{{ qualityLabel }}。缺少统计不代表零流量</p>
     <p v-if="service.quality.pending_polls" class="warning" role="status">{{ service.quality.pending_polls }} 个采集批次等待入库重试，已成功的记录不会重复扣费</p>
     <p v-if="service.quality.gaps" class="warning">本周期有 {{ service.quality.gaps }} 个统计边界或缺口，不能视为完整覆盖</p>
-    <p v-if="!service.user_coverage_complete" class="explanation">用户来源尚不完整，暂停按人数估算容量；中转汇总不会平均分摊给用户</p>
-    <ul v-if="service.sources.length" class="sources">
+    <p v-if="!service.user_coverage_complete" class="explanation">用户来源或部署覆盖尚不完整，暂停按人数估算容量；中转汇总不会平均分摊给用户</p>
+    <p v-if="service.observed_user_coverage_complete && service.attribution_ready === false" class="explanation">本观察区间的已记录流量均已归属用户；逐用户部署尚未完全就绪，不代表已丢失流量</p>
+    <p v-if="deploymentReasons.length" class="warning">{{ deploymentReasons.join('；') }}</p>
+    <h4>用户在本机的实测流量</h4>
+    <p class="explanation">直连与逐用户中转按同一用户合并；每台机器各自实测，不能把不同机器的合计当作套餐扣量</p>
+    <ul v-if="users.length" class="sources user-sources" aria-label="逐用户本机流量">
+      <li v-for="row in visibleUsers" :key="row.user_id">
+        <div><b>{{ row.name }}</b><span class="kind">用户 #{{ row.user_id }}</span><strong>{{ fmtBytes(row.total) }}</strong></div>
+        <small>上行 {{ fmtBytes(row.up) }} · 下行 {{ fmtBytes(row.down) }}</small>
+        <small>直连 {{ fmtBytes(row.direct_total) }} · 中转 {{ fmtBytes(row.relay_total) }} · 本机入口套餐扣量 {{ row.billable_total === undefined ? '—' : fmtBytes(row.billable_total) }}</small>
+      </li>
+    </ul>
+    <p v-else class="empty">尚无可按用户归属的本机实测记录，不能据此判断没有使用</p>
+    <div v-if="users.length > pageSize" class="pagination" aria-label="用户分页">
+      <button :disabled="userPage === 1" @click="userPage--">上一页</button><span>{{ userPage }} / {{ userPages }}</span><button :disabled="userPage >= userPages" @click="userPage++">下一页</button>
+    </div>
+    <h4 v-if="unallocatedSources.length">未分配与历史部分记录 <span class="unallocated-total">{{ fmtBytes(unallocatedTotal) }}</span></h4>
+    <p v-if="unallocatedSources.length" class="explanation">以下记录已包含在代理业务合计中，不能分摊到上方用户。旧用户记录仅表示当时已识别的部分</p>
+    <ul v-if="unallocatedSources.length" class="sources unallocated-sources" aria-label="未分配与历史记录">
       <li v-for="row in visibleSources" :key="`${row.kind}:${row.link_id}:${row.user_id}`">
         <div><span class="kind">{{ kindLabel(row.kind) }}</span><b>{{ row.name }}</b><strong>{{ fmtBytes(row.total) }}</strong></div>
         <small>上行 {{ fmtBytes(row.up) }} · 下行 {{ fmtBytes(row.down) }}<template v-if="isRelay(row.kind)"> · 仅观测，不重复扣费</template></small>
       </li>
     </ul>
-    <p v-else class="empty">尚无本机代理业务记录，不能据此判断没有使用</p>
-    <div v-if="service.sources.length > pageSize" class="pagination">
+    <div v-if="unallocatedSources.length > pageSize" class="pagination" aria-label="未分配记录分页">
       <button :disabled="page === 1" @click="page--">上一页</button><span>{{ page }} / {{ pages }}</span><button :disabled="page >= pages" @click="page++">下一页</button>
     </div>
     <details v-if="service.outbound_links?.length"><summary>发送侧链路观测（不重复计入上方合计）</summary>
@@ -30,17 +46,42 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { fmtBytes, fmtDateTime } from '@/utils/format'
-interface Source { kind:string; link_id:number; user_id:number; name:string; up:number; down:number; total:number }
-interface Service { total:number; billable_total:number; new_coverage_start:number; user_coverage_complete:boolean; sources:Source[]; outbound_links?:Source[]; quality:{mode:string; status:string; gaps:number; pending_polls:number} }
-const props = defineProps<{service:Service}>()
-const page = ref(1), pageSize = 10
-const pages = computed(() => Math.max(1, Math.ceil(props.service.sources.length / pageSize)))
-const visibleSources = computed(() => props.service.sources.slice((page.value-1)*pageSize,page.value*pageSize))
-watch(() => props.service, () => { page.value=1 })
+import type { ServiceTraffic, ServiceTrafficSource, ServiceTrafficUser } from '@/api/serviceTraffic'
+const props = defineProps<{service:ServiceTraffic}>()
+const page = ref(1), userPage = ref(1), pageSize = 10
+const attributable = (row:ServiceTrafficSource) => ['direct_user', 'relay_user'].includes(row.kind) && row.user_id > 0
+// Older API responses still contain all Sources. Preserve their user breakdown
+// without inferring a quota debit that the older source rows did not report.
+const users = computed(() => {
+  if (props.service.users) return props.service.users
+  const byUser = new Map<number, ServiceTrafficUser>()
+  for (const row of props.service.sources.filter(attributable)) {
+    let user = byUser.get(row.user_id)
+    if (!user) {
+      user = { user_id:row.user_id, name:row.name, up:0, down:0, total:0, direct_total:0, relay_total:0, billable_total:0 }
+      byUser.set(row.user_id, user)
+    }
+    user.up += row.up
+    user.down += row.down
+    user.total += row.total
+    user.direct_total += row.kind === 'direct_user' ? row.total : 0
+    user.relay_total += row.kind === 'relay_user' ? row.total : 0
+    user.billable_total = user.billable_total === undefined || row.billable_total === undefined ? undefined : user.billable_total + row.billable_total
+  }
+  return [...byUser.values()].sort((a,b) => b.total-a.total || a.user_id-b.user_id)
+})
+const unallocatedSources = computed(() => props.service.sources.filter(row => !attributable(row)))
+const unallocatedTotal = computed(() => props.service.unallocated_total ?? unallocatedSources.value.reduce((sum,row) => sum+row.total,0))
+const pages = computed(() => Math.max(1, Math.ceil(unallocatedSources.value.length / pageSize)))
+const userPages = computed(() => Math.max(1, Math.ceil(users.value.length / pageSize)))
+const visibleSources = computed(() => unallocatedSources.value.slice((page.value-1)*pageSize,page.value*pageSize))
+const visibleUsers = computed(() => users.value.slice((userPage.value-1)*pageSize,userPage.value*pageSize))
+watch(() => props.service, () => { page.value=1; userPage.value=1 })
 const qualityLabel = computed(() => (({unknown:'统计状态尚未确认', unavailable:'用户统计采集失败', unsupported:'统计能力未就绪', disabled:'统计未启用', stale:'用户统计已延迟', legacy:'进程代次无法验证，保留旧式采集'} as Record<string,string>)[props.service.quality.status] || '统计需要核查'))
-function kindLabel(kind:string) { return ({direct_user:'直连用户',historical_user:'旧用户记录',relay_link:'中转链路',legacy_shared_relay:'旧共享中转',ambiguous_identity:'身份冲突',unknown:'未知身份'} as Record<string,string>)[kind] || '未知身份' }
-function isRelay(kind:string) { return ['relay_link','legacy_shared_relay','ambiguous_identity','unknown'].includes(kind) }
+const deploymentReasons = computed(() => (props.service.coverage_reasons || []).map(reason => ({per_user_metering_disabled:'逐用户中转计量尚未启用',relay_users_not_active:'部分逐用户中转身份尚未完成入口切换',relay_route_not_ready:'部分中转路径尚未完成入口切换',shared_compatibility_active:'共享兼容身份尚未确认撤除，仍可能承载无法归属用户的流量'} as Record<string,string>)[reason]).filter(Boolean))
+function kindLabel(kind:string) { return ({direct_user:'直连用户',relay_user:'逐用户中转',historical_user:'历史部分记录',relay_link:'共享中转链路',legacy_shared_relay:'旧共享中转',ambiguous_identity:'身份冲突',unknown:'未知身份'} as Record<string,string>)[kind] || '未知身份' }
+function isRelay(kind:string) { return ['relay_user','relay_link','legacy_shared_relay','ambiguous_identity','unknown'].includes(kind) }
 </script>
 <style scoped>
-.service-traffic{padding:24px 0;border-top:1px solid var(--border)}.section-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}.section-head h3{margin:0;font-size:16px}.section-head span,.explanation,.history,.empty{color:var(--text-3);font-size:12px;line-height:1.8}.service-totals{display:flex;flex-wrap:wrap;gap:20px;background:var(--bg-soft);padding:14px;border-radius:10px;font-size:12px}.warning{font-size:12px;color:var(--warning,#a86620);line-height:1.7}.sources{padding:0;list-style:none}.sources li{padding:12px 0;border-bottom:1px solid var(--border)}.sources li>div{display:flex;align-items:center;gap:8px}.sources strong{margin-left:auto;font-size:13px}.sources b{font-size:13px;overflow-wrap:anywhere}.sources small{display:block;color:var(--text-3);margin-top:6px}.kind{font-size:10px;padding:3px 6px;border-radius:4px;background:var(--bg-soft);white-space:nowrap}.pagination{display:flex;justify-content:center;gap:14px;align-items:center;font-size:12px}.pagination button{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px}.pagination button:disabled{opacity:.5}.history{margin-top:18px}
+.service-traffic{padding:24px 0;border-top:1px solid var(--border)}.section-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}.section-head h3{margin:0;font-size:16px}.section-head span,.explanation,.history,.empty{color:var(--text-3);font-size:12px;line-height:1.8}.service-totals{display:flex;flex-wrap:wrap;gap:20px;background:var(--bg-soft);padding:14px;border-radius:10px;font-size:12px}.warning{font-size:12px;color:var(--warning,#a86620);line-height:1.7}.sources{padding:0;list-style:none}.sources li{padding:12px 0;border-bottom:1px solid var(--border)}.sources li>div{display:flex;align-items:center;gap:8px}.sources strong{margin-left:auto;font-size:13px}.sources b{font-size:13px;overflow-wrap:anywhere}.sources small{display:block;color:var(--text-3);margin-top:6px}.kind{font-size:10px;padding:3px 6px;border-radius:4px;background:var(--bg-soft);white-space:nowrap}.pagination{display:flex;justify-content:center;gap:14px;align-items:center;font-size:12px}.pagination button{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px}.pagination button:disabled{opacity:.5}.history{margin-top:18px}.service-traffic h4{font-size:13px;margin:20px 0 8px}.unallocated-total{float:right;font-weight:500}
 </style>

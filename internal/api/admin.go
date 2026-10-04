@@ -71,6 +71,7 @@ var clearableSecrets = map[string]bool{
 // QZ_UPDATE_REPO, which requires host access the attacker doesn't have.
 var immutableSettings = map[string]bool{
 	"relay_link_metering":         true, // explicit staged-rollout confirmation endpoint
+	"relay_user_metering":         true, // per-user identities use the same explicit boundary
 	"traffic_cumulative_metering": true, // counter mode requires a controlled boundary
 	"oauth2_config":               true, // validated and saved atomically by the dedicated OAuth2 endpoint
 	"jwt_secret":                  true, // never rotate the signing key through the API

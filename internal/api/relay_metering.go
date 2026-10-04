@@ -25,7 +25,7 @@ func (a *API) handleGetRelayMetering(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "读取兼容凭据状态失败")
 		return
 	}
-	out := J{"credentials": credentials, "enabled": a.st.RelayMeteringEnabled(), "cumulative_enabled": cumulative == "true", "cumulative_started": started > 0, "links": links, "compatibility_retained": true}
+	out := J{"credentials": credentials, "enabled": a.st.RelayMeteringEnabled(), "per_user_enabled": a.st.RelayUserMeteringEnabled(), "cumulative_enabled": cumulative == "true", "cumulative_started": started > 0, "links": links, "compatibility_retained": true}
 	if a.sbctl != nil {
 		out["sync"] = a.sbctl.SyncStatuses()
 	}
@@ -33,9 +33,10 @@ func (a *API) handleGetRelayMetering(w http.ResponseWriter, r *http.Request) {
 }
 func (a *API) handlePutRelayMetering(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Enabled    bool `json:"enabled"`
-		Cumulative bool `json:"cumulative_enabled"`
-		Confirm    bool `json:"confirm"`
+		Enabled    bool  `json:"enabled"`
+		Cumulative bool  `json:"cumulative_enabled"`
+		Confirm    bool  `json:"confirm"`
+		PerUser    *bool `json:"per_user_enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || !in.Confirm {
 		fail(w, http.StatusBadRequest, "请确认内部凭据生成、配置重启及统计模式变更的影响")
@@ -54,7 +55,11 @@ func (a *API) handlePutRelayMetering(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, "已有节点进入累计采集，不能直接切回清零；请保留累计模式，避免重复扣费")
 		return
 	}
-	if err := a.st.ConfigureTrafficMetering(in.Enabled, in.Cumulative); err != nil {
+	var perUser []bool
+	if in.PerUser != nil {
+		perUser = append(perUser, *in.PerUser)
+	}
+	if err := a.st.ConfigureTrafficMetering(in.Enabled, in.Cumulative, perUser...); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}

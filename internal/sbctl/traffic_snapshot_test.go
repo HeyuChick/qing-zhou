@@ -267,3 +267,109 @@ func TestSnapshotLegacyReaderSharesHandoverLease(t *testing.T) {
 		t.Fatalf("late reset after handover %+v", next.resets)
 	}
 }
+
+// Every destructive read has a durable intent first. A later successful read
+// cannot erase an earlier unknown response; quota-only failure is recoverable.
+func TestSnapshotResetIntentPersistsUntilJournal(t *testing.T) {
+	for _, mode := range []string{"reset", "unsupported_epoch", "transition"} {
+		for _, failure := range []string{"intent", "rpc", "journal", "binding", "quota"} {
+			t.Run(mode+"/"+failure, func(t *testing.T) {
+				c, st, _, sv := snapshotController(t)
+				if mode == "reset" {
+					if err := st.SetSetting(cumulativeMeteringSetting, "false"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode == "unsupported_epoch" {
+					c.remoteMgr = &epochRemote{}
+				}
+				f := &snapshotFixture{responses: []int64{100, 5, 8}}
+				var trigger string
+				switch failure {
+				case "intent":
+					trigger = `CREATE TRIGGER fail_reset BEFORE INSERT ON traffic_metering_gaps BEGIN SELECT RAISE(FAIL,'fixture'); END`
+				case "rpc":
+					f.fail = true
+				case "journal":
+					trigger = `CREATE TRIGGER fail_reset BEFORE INSERT ON traffic_polls BEGIN SELECT RAISE(FAIL,'fixture'); END`
+				case "binding":
+					trigger = `CREATE TRIGGER fail_reset BEFORE INSERT ON traffic_poll_bindings BEGIN SELECT RAISE(FAIL,'fixture'); END`
+				case "quota":
+					trigger = `CREATE TRIGGER fail_reset BEFORE UPDATE OF used_up ON user_plans BEGIN SELECT RAISE(FAIL,'fixture'); END`
+				}
+				if trigger != "" {
+					if _, err := st.DB().Exec(trigger); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := c.collectTrafficSnapshot(context.Background(), sv.ID, sv, f); err == nil {
+					t.Fatal("expected injected failure")
+				}
+				var gaps, polls int
+				if err := st.DB().QueryRow(`SELECT COUNT(*) FROM traffic_metering_gaps WHERE reason='reset_outcome_unknown'`).Scan(&gaps); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.DB().QueryRow(`SELECT COUNT(*) FROM traffic_polls WHERE state='pending'`).Scan(&polls); err != nil {
+					t.Fatal(err)
+				}
+				wantGap := 1
+				if failure == "intent" || failure == "quota" {
+					wantGap = 0
+				}
+				if gaps != wantGap {
+					t.Fatalf("gaps=%d want=%d", gaps, wantGap)
+				}
+				if failure == "intent" && len(f.resets) != 0 {
+					t.Fatal("destructive read despite failed intent")
+				}
+				if failure == "quota" && polls != 1 {
+					t.Fatal("quota failure lost durable poll")
+				}
+				if trigger != "" {
+					if _, err := st.DB().Exec(`DROP TRIGGER fail_reset`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				f.fail = false
+				if _, err := st.RetryPendingTrafficPolls(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := c.collectTrafficSnapshot(context.Background(), sv.ID, sv, f); err != nil {
+					t.Fatal(err)
+				}
+				r, err := st.ServerServiceTraffic(sv.ID, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.Quality.Gaps != wantGap {
+					t.Fatalf("later success changed gaps=%d want=%d", r.Quality.Gaps, wantGap)
+				}
+				if wantGap > 0 && r.UserCoverageComplete {
+					t.Fatal("lost response reported as complete coverage")
+				}
+			})
+		}
+	}
+}
+
+func TestSnapshotInterruptedResetIntentSurvivesReopen(t *testing.T) {
+	c, st, _, sv := snapshotController(t)
+	if err := st.SetSetting(cumulativeMeteringSetting, "false"); err != nil {
+		t.Fatal(err)
+	}
+	p := store.NewTrafficPoll(sv.ID, nil)
+	if err := st.BeginTrafficReset(p); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the process ending after dispatching the request: there is no
+	// response to journal. A newly constructed collector must retain the warning.
+	c = New(st, &countingApplier{}, nil, singbox.DefaultBaseConfig, "")
+	f := &snapshotFixture{responses: []int64{10}}
+	if _, err := c.collectTrafficSnapshot(context.Background(), sv.ID, sv, f); err != nil {
+		t.Fatal(err)
+	}
+	r, err := st.ServerServiceTraffic(sv.ID, 0)
+	if err != nil || r.Quality.Gaps != 1 || r.UserCoverageComplete {
+		t.Fatalf("interruption hidden: %+v %v", r, err)
+	}
+}

@@ -165,7 +165,15 @@ func (s *Store) canRetireRelayCredential(db txLike, v RelayCredentialView) error
 	}
 	var lastPositive int64
 	var pending, successful int
-	if err := db.QueryRow(`SELECT COALESCE(MAX(ts),0) FROM traffic_observations WHERE server_id=? AND counter_name=? AND up+down>0`, v.ServerID, name).Scan(&lastPositive); err != nil {
+	newName := name
+	if v.Kind == "legacy" {
+		var err error
+		newName, err = legacyRelayStatsNameWith(db, v.ServerID, v.InboundID)
+		if err != nil {
+			return err
+		}
+	}
+	if err := db.QueryRow(`SELECT COALESCE(MAX(ts),0) FROM traffic_observations WHERE server_id=? AND counter_name IN (?,?) AND up+down>0`, v.ServerID, name, newName).Scan(&lastPositive); err != nil {
 		return err
 	}
 	if lastPositive > boundary {
@@ -324,7 +332,10 @@ func (s *Store) acknowledgeRelayCredentials(tx *sql.Tx, serverID int64, raw []by
 		return err
 	}
 	for _, c := range pending {
-		name := fmt.Sprintf("relay_%d", c.id)
+		name, err := legacyRelayStatsNameWith(tx, serverID, c.id)
+		if err != nil {
+			return err
+		}
 		state := ""
 		if c.state == "retiring" && !present[name] {
 			state = "retired"

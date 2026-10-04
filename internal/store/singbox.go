@@ -1256,6 +1256,7 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 	out := map[string][]singbox.User{}
 	emit := func(ib *SbInbound, b *Bucket, routeNodeID int64) {
 		addRaw := func(u singbox.User) {
+			u.OwnerID = b.UserID
 			key := inboundUser{ib.Tag, u.Name}
 			if seen[key] {
 				return

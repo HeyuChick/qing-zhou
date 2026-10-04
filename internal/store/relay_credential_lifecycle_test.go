@@ -56,9 +56,7 @@ func TestLegacyRelayRetirementDrainAndSafeRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "relay_"+itoa(bi)) {
-		t.Fatal("retired legacy credential still rendered")
-	}
+	assertLegacyRelayConfigUser(t, st, raw, b, bi, false)
 	if err = st.RecordRelayConfigApplied(b, raw); err != nil {
 		t.Fatal(err)
 	}
@@ -76,9 +74,7 @@ func TestLegacyRelayRetirementDrainAndSafeRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(restored), "relay_"+itoa(bi)) {
-		t.Fatal("legacy restore missing")
-	}
+	assertLegacyRelayConfigUser(t, st, restored, b, bi, true)
 	if err = st.RecordRelayConfigApplied(b, restored); err != nil {
 		t.Fatal(err)
 	}

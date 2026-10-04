@@ -279,6 +279,7 @@ func (c *Controller) desiredNeedsApply(serverID int64, cfg []byte, force bool) b
 }
 
 func (c *Controller) rememberDesired(serverID int64, cfg []byte) {
+	c.rememberRelayNamespace(serverID, cfg)
 	if metering, ok := c.st.(relayMeteringStore); ok {
 		if err := metering.RecordRelayConfigApplied(serverID, cfg); err != nil {
 			log.Printf("sbctl: could not persist relay readiness for server %d: %v", serverID, err)

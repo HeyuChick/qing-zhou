@@ -85,8 +85,8 @@ jobs:
           echo "68472358c9e43a50417beadb6d3ae9207417fdebb296286605dabd71da25a7da  $RUNNER_TEMP/qz-sing-box" | sha256sum --check --strict
           chmod 700 "$RUNNER_TEMP/qz-sing-box"
           "$RUNNER_TEMP/qz-sing-box" version | grep -q with_v2ray_api
-      - name: Relay observation and single quota debit over loopback
+      - name: Shared and per-user relay observation over loopback
         env:
           QZ_SINGBOX_TEST_BIN: ${{ runner.temp }}/qz-sing-box
           QZ_SINGBOX_REQUIRE_STATS: "1"
-        run: go test -race ./internal/store -run '^TestMeteringRelayRealSingboxTraffic$' -count=1 -v
+        run: go test -race ./internal/store -run '^TestMeteringRelayRealSingbox' -count=1 -v
