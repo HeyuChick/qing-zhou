@@ -17,12 +17,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -269,6 +271,23 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 		}
 		t.Run(fmt.Sprintf("%s/%d-machines/%s/%s", scenario.entryType, scenario.machines, scenario.tlsMode, phase), func(t *testing.T) {
 			st := newRefundStore(t)
+			baseConfig := singbox.DefaultBaseConfig
+			logLevel := "warn"
+			if scenario.tlsMode == "tls-vision" {
+				// Diagnostic logging changes no route, load, body-size assertion or
+				// retry behavior in the failing Vision path.
+				logLevel = "trace"
+				var base map[string]any
+				if err := json.Unmarshal([]byte(baseConfig), &base); err != nil {
+					t.Fatal(err)
+				}
+				base["log"] = map[string]any{"level": logLevel, "timestamp": true}
+				raw, err := json.Marshal(base)
+				if err != nil {
+					t.Fatal(err)
+				}
+				baseConfig = string(raw)
+			}
 			st.SetSecretKey([]byte("per-user-relay-fixture"))
 			if err := st.SetSetting(SettingBlockPrivateEgress, "0"); err != nil {
 				t.Fatal(err)
@@ -384,7 +403,7 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 			}
 			for i := len(machines) - 1; i >= 0; i-- {
 				m := &machines[i]
-				raw, err := st.BuildSingboxConfigForServer(m.id, singbox.DefaultBaseConfig, m.api, users)
+				raw, err := st.BuildSingboxConfigForServer(m.id, baseConfig, m.api, users)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -395,6 +414,7 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 					checkRelayFixtureConfig(t, bin, raw)
 				} else {
 					m.process = startMeteringBox(t, bin, raw, m.api)
+					t.Logf("fixture machine hop=%d server_id=%d pid=%d stats=%s transport=%s", i, m.id, m.process.Process.Pid, m.api, scenario.tlsMode)
 				}
 				if err = st.RecordRelayConfigApplied(m.id, raw); err != nil {
 					t.Fatal(err)
@@ -462,7 +482,7 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 						outbound["transport"] = map[string]any{"type": "ws", "path": "/fixture"}
 					}
 					clientConfig := map[string]any{
-						"log":          map[string]any{"level": "warn"},
+						"log":          map[string]any{"level": logLevel, "timestamp": true},
 						"inbounds":     []any{map[string]any{"type": "mixed", "tag": "fixture-driver", "listen": "127.0.0.1", "listen_port": proxyPort}},
 						"outbounds":    []any{outbound},
 						"route":        map[string]any{"final": "original-customer"},
@@ -475,7 +495,8 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 					if scenario.checkOnly {
 						checkRelayFixtureConfig(t, bin, raw)
 					} else {
-						startMeteringBox(t, bin, raw, api)
+						process := startMeteringBox(t, bin, raw, api)
+						t.Logf("fixture client owner=%d pid=%d proxy=127.0.0.1:%d stats=%s entry_hop=%d", c.uid, process.Process.Pid, proxyPort, api, c.entryHop)
 					}
 					proxy = &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", proxyPort)}
 					c.socksUsername, c.socksPassword = "", ""
@@ -490,7 +511,11 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 				return
 			}
 			destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				started := time.Now()
+				requestID := r.Header.Get("X-QZ-Fixture-Request-ID")
+				uploaded, err := io.Copy(io.Discard, r.Body)
+				if err != nil {
+					t.Logf("fixture destination id=%s remote=%s uploaded=%d want_upload=%d upload_error=%v elapsed=%s", requestID, r.RemoteAddr, uploaded, r.ContentLength, err, time.Since(started))
 					http.Error(w, "fixture upload failed", http.StatusBadRequest)
 					return
 				}
@@ -500,28 +525,52 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 					return
 				}
 				w.Header().Set("Content-Length", strconv.Itoa(n))
-				_, _ = w.Write(bytes.Repeat([]byte{'x'}, n))
+				written, writeErr := w.Write(bytes.Repeat([]byte{'x'}, n))
+				t.Logf("fixture destination id=%s remote=%s uploaded=%d want_upload=%d written=%d want_response=%d write_error=%v request_context=%v elapsed=%s", requestID, r.RemoteAddr, uploaded, r.ContentLength, written, n, writeErr, r.Context().Err(), time.Since(started))
 			}))
 			defer destination.Close()
 			var metricsMu sync.Mutex
 			var tcpCompletedBytes, udpCompletedBytes int64
+			var requestSequence atomic.Int64
 			request := func(c customer) error {
 				started := time.Now()
-				response, err := c.client.Post(fmt.Sprintf("%s/?bytes=%d", destination.URL, c.payload), "application/octet-stream", bytes.NewReader(bytes.Repeat([]byte{'u'}, c.payload/256)))
+				requestID := fmt.Sprintf("u%d-r%d", c.uid, requestSequence.Add(1))
+				req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/?bytes=%d", destination.URL, c.payload), bytes.NewReader(bytes.Repeat([]byte{'u'}, c.payload/256)))
 				if err != nil {
 					return err
 				}
-				defer response.Body.Close()
+				req.Header.Set("Content-Type", "application/octet-stream")
+				req.Header.Set("X-QZ-Fixture-Request-ID", requestID)
+				trace := &httptrace.ClientTrace{
+					GotConn: func(info httptrace.GotConnInfo) {
+						t.Logf("fixture client id=%s local=%s remote=%s reused=%t idle=%t idle_time=%s", requestID, info.Conn.LocalAddr(), info.Conn.RemoteAddr(), info.Reused, info.WasIdle, info.IdleTime)
+					},
+					WroteRequest: func(info httptrace.WroteRequestInfo) {
+						t.Logf("fixture client id=%s wrote_request_error=%v elapsed=%s", requestID, info.Err, time.Since(started))
+					},
+					GotFirstResponseByte: func() {
+						t.Logf("fixture client id=%s first_response_byte_elapsed=%s", requestID, time.Since(started))
+					},
+				}
+				req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+				response, err := c.client.Do(req)
+				if err != nil {
+					return fmt.Errorf("request %s owner %d before response, elapsed=%s: %w", requestID, c.uid, time.Since(started), err)
+				}
+				defer func() {
+					t.Logf("fixture client id=%s body_close_error=%v", requestID, response.Body.Close())
+				}()
 				body, err := io.ReadAll(response.Body)
+				t.Logf("fixture client id=%s response_status=%s protocol=%s declared_length=%d actual_length=%d expected_length=%d close=%t transfer_encoding=%v read_error_type=%T read_error=%v elapsed=%s", requestID, response.Status, response.Proto, response.ContentLength, len(body), c.payload, response.Close, response.TransferEncoding, err, err, time.Since(started))
 				if err != nil || response.StatusCode != http.StatusOK || len(body) != c.payload || !bytes.Equal(body, bytes.Repeat([]byte{'x'}, c.payload)) {
-					return fmt.Errorf("owner %d response status=%s bytes=%d error=%v", c.uid, response.Status, len(body), err)
+					return fmt.Errorf("request %s owner %d response status=%s bytes=%d want=%d error=%v", requestID, c.uid, response.Status, len(body), c.payload, err)
 				}
 				elapsed := time.Since(started)
 				completed := int64(len(body) + c.payload/256)
 				metricsMu.Lock()
 				tcpCompletedBytes += completed
 				metricsMu.Unlock()
-				t.Logf("synthetic_loopback TCP user=%d completed_application_bytes=%d request_latency=%s", c.uid, completed, elapsed)
+				t.Logf("synthetic_loopback TCP id=%s user=%d completed_application_bytes=%d request_latency=%s", requestID, c.uid, completed, elapsed)
 				return nil
 			}
 			type snapshot []map[string]*sbstats.Traffic

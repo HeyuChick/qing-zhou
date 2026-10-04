@@ -36,7 +36,9 @@ jobs:
         run: go vet ./...
 
       - name: Test (race)
-        run: go test -race ./...
+        # The complete SQLite-backed store suite exceeds Go's default 10m
+        # package budget with the race detector; retain every test and race check.
+        run: go test -race -timeout=20m ./...
 
   shell:
     runs-on: ubuntu-latest
@@ -85,14 +87,15 @@ jobs:
           echo "68472358c9e43a50417beadb6d3ae9207417fdebb296286605dabd71da25a7da  $RUNNER_TEMP/qz-sing-box" | sha256sum --check --strict
           chmod 700 "$RUNNER_TEMP/qz-sing-box"
           "$RUNNER_TEMP/qz-sing-box" version | grep -q with_v2ray_api
-      - name: Shared and per-user relay observation over loopback
-        env:
-          QZ_SINGBOX_TEST_BIN: ${{ runner.temp }}/qz-sing-box
-          QZ_SINGBOX_REQUIRE_STATS: "1"
-        run: go test -race ./internal/store -run '^(TestMeteringRelayRealSingbox|TestRelayVLESSFlowMatchesListener)' -count=1 -v
       - name: Per-user metering scale diagnostics (isolated 100 and 1000 users)
         env:
           QZ_SINGBOX_TEST_BIN: ${{ runner.temp }}/qz-sing-box
           QZ_SINGBOX_REQUIRE_STATS: "1"
           QZ_METERING_SCALE: "1"
         run: go test ./internal/store -run '^TestMeteringRelayUserScale$' -count=1 -v
+
+      - name: Shared and per-user relay observation over loopback
+        env:
+          QZ_SINGBOX_TEST_BIN: ${{ runner.temp }}/qz-sing-box
+          QZ_SINGBOX_REQUIRE_STATS: "1"
+        run: go test -race ./internal/store -run '^(TestMeteringRelayRealSingbox|TestRelayVLESSFlowMatchesListener)' -count=1 -v
