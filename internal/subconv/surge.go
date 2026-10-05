@@ -1,6 +1,8 @@
 package subconv
 
 import (
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -24,8 +26,18 @@ func SurgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) s
 
 func surgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) string {
 	var kept []*Proxy
+	incompatible, withoutEarlyData := 0, 0
 	for _, p := range proxies {
+		if surgeWSCompatibility(p) != "" {
+			incompatible++
+			continue
+		}
 		if surgeProxy(p) != "" {
+			if p.transportNetwork() == "ws" {
+				if w, err := p.websocket(); err == nil && w.maxEarlyData > 0 {
+					withoutEarlyData++
+				}
+			}
 			p.Name = surgeName(p.Name)
 			kept = append(kept, p)
 		}
@@ -35,6 +47,12 @@ func surgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) s
 	var b strings.Builder
 	if subURL != "" {
 		b.WriteString("#!MANAGED-CONFIG " + subURL + " interval=43200 strict=false\n\n")
+	}
+	if incompatible > 0 {
+		fmt.Fprintf(&b, "# Qingzhou: omitted %d nodes with required settings unsupported by this Surge exporter (plaintext Trojan, multi-value WS headers or delimiter-bearing WS fields); use sing-box format.\n", incompatible)
+	}
+	if withoutEarlyData > 0 {
+		fmt.Fprintf(&b, "# Qingzhou: %d WS nodes use normal WebSocket handshakes; optional early data is not supported by this Surge exporter.\n", withoutEarlyData)
 	}
 	b.WriteString("[Proxy]\n")
 	for _, p := range kept {
@@ -110,6 +128,9 @@ func surgeUDPRelay(p *Proxy) string {
 // surgeProxy returns the right-hand side of a Surge proxy line, or "" if Surge
 // can't express this protocol.
 func surgeProxy(p *Proxy) string {
+	if surgeWSCompatibility(p) != "" {
+		return ""
+	}
 	switch p.Protocol {
 	case "ss":
 		parts := []string{"ss", p.Server, itoaPort(p.Port),
@@ -123,21 +144,20 @@ func surgeProxy(p *Proxy) string {
 		if p.tlsInsecure() {
 			parts = append(parts, "skip-cert-verify=true")
 		}
+		parts = append(parts, surgeWSParams(p)...)
+		if alpn := p.tlsParam("alpn"); alpn != "" {
+			parts = append(parts, "alpn="+strconv.Quote(alpn))
+		}
 		parts = append(parts, surgeUDPRelay(p))
 		return strings.Join(parts, ", ")
 	case "vmess":
 		parts := []string{"vmess", p.Server, itoaPort(p.Port), "username=" + p.UUID}
-		if str(p.VMess["net"]) == "ws" {
-			parts = append(parts, "ws=true")
-			if path := str(p.VMess["path"]); path != "" {
-				parts = append(parts, "ws-path="+path)
-			}
-			if host := str(p.VMess["host"]); host != "" {
-				parts = append(parts, "ws-headers=Host:"+host)
-			}
-		}
+		parts = append(parts, surgeWSParams(p)...)
 		if str(p.VMess["tls"]) == "tls" {
 			parts = append(parts, "tls=true")
+			if alpn := p.tlsParam("alpn"); alpn != "" {
+				parts = append(parts, "alpn="+strconv.Quote(alpn))
+			}
 			if sni := str(p.VMess["sni"]); sni != "" {
 				parts = append(parts, "sni="+sni)
 			}
@@ -172,4 +192,66 @@ func surgeProxy(p *Proxy) string {
 		// policy list covers hysteria2 but not v1.
 		return ""
 	}
+}
+
+// Surge has WS for VMess/Trojan, but no documented V2Ray early-data knobs.
+// ED is optional at the sing-box server: absent early bytes use a normal WS
+// upgrade. Keep that connection mode; never silently replace WS with TCP.
+func surgeWSCompatibility(p *Proxy) string {
+	if p.Protocol == "trojan" && p.param("security") == "none" {
+		return "plaintext Trojan"
+	}
+	if p.transportNetwork() != "ws" || (p.Protocol != "vmess" && p.Protocol != "trojan") {
+		return ""
+	}
+	w, err := p.websocket()
+	if err != nil {
+		return "invalid WS"
+	}
+	if _, ok := w.singleHeaders(); !ok {
+		return "multi-value WS headers"
+	}
+	for _, value := range []string{w.path, p.UUID, p.Password, p.tlsParam("sni"), p.tlsParam("alpn")} {
+		if strings.ContainsAny(value, "\r\n\x00\"") {
+			return "unsafe Surge token"
+		}
+	}
+	if strings.ContainsAny(p.UUID+p.Password+p.tlsParam("sni"), ",|") {
+		return "unrepresentable credential or TLS token"
+	}
+	if strings.ContainsAny(w.path, ",|") {
+		return "unrepresentable WS path"
+	}
+	for key, values := range w.headers {
+		if strings.ContainsAny(key+values[0], ",|\"\r\n\t") {
+			return "unrepresentable WS header"
+		}
+	}
+	return ""
+}
+func surgeWSParams(p *Proxy) []string {
+	if p.transportNetwork() != "ws" {
+		return nil
+	}
+	w, err := p.websocket()
+	if err != nil {
+		return nil
+	}
+	parts := []string{"ws=true"}
+	if w.path != "" {
+		parts = append(parts, "ws-path="+w.path)
+	}
+	keys := make([]string, 0, len(w.headers))
+	for key := range w.headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	values := []string{}
+	for _, key := range keys {
+		values = append(values, key+":"+w.headers[key][0])
+	}
+	if len(values) > 0 {
+		parts = append(parts, "ws-headers="+strings.Join(values, "|"))
+	}
+	return parts
 }

@@ -917,7 +917,16 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 				pin = certPin(t, server)
 			}
 		}
-		_ = json.Unmarshal([]byte(ib.Options), &opts)
+		if ib.Options != "" {
+			if err := json.Unmarshal([]byte(ib.Options), &opts); err != nil {
+				continue
+			}
+		}
+		tlsEnabled, tlsDisabled, effectiveServer, validTLS := shareLinkTLSState(ib.TlsID, server, opts)
+		if !validTLS {
+			continue
+		}
+		server = effectiveServer
 
 		// Remark = node remark (preferred) or name from the 节点 page; the raw
 		// inbound tag is only a fallback for an inbound no node is bound to.
@@ -951,7 +960,8 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			Type: ib.Type, Tag: remark, Host: nodeHost, Port: ib.ListenPort,
 			UUID: cred.UUID, Password: cred.Password,
 			NoUDP:       exit != nil && noUDP(exit.EgressID),
-			TLS:         ib.TlsID != 0,
+			TLS:         tlsEnabled,
+			TLSDisabled: tlsDisabled,
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
 			Insecure:    mapBool(client, "insecure"),
@@ -964,6 +974,9 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			DownMbps:    mapInt(opts, "down_mbps"),
 			TCPFastOpen: mapBool(opts, "tcp_fast_open"),
 			MPTCP:       mapBool(opts, "tcp_multi_path"),
+		}
+		if sni := mapStr(client, "server_name"); sni != "" {
+			p.SNI = sni
 		}
 		// Multiplex + Brutal (vless/vmess/trojan): both are opt-in on the client,
 		// so mirror the inbound's setting onto the link or Brutal does nothing.
@@ -997,10 +1010,23 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			p.ServiceName = mapStr(tr, "service_name")
 			p.WSMaxEarlyData = mapInt(tr, "max_early_data")
 			p.WSEarlyDataHeader = mapStr(tr, "early_data_header_name")
-			if h := mapStr(tr, "host"); h != "" {
-				p.WSHost = h
-			} else if hdr, ok := tr["headers"].(map[string]interface{}); ok {
-				p.WSHost = mapStr(hdr, "Host")
+			if p.Network == "ws" {
+				var err error
+				p.WSHeaders, err = singbox.NormalizeWSHeaders(tr["headers"])
+				// Do not publish a node with lost or ambiguous required headers.
+				if err != nil {
+					continue
+				}
+				if values := p.WSHeaders["Host"]; len(values) > 0 {
+					p.WSHost = values[0]
+				}
+			}
+			if p.WSHost == "" {
+				if h := mapStr(tr, "host"); h != "" {
+					p.WSHost = h
+				} else if hdr, ok := tr["headers"].(map[string]interface{}); ok {
+					p.WSHost = mapStr(hdr, "Host")
+				}
 			}
 			if p.WSHost == "" && (p.Network == "ws" || p.Network == "httpupgrade") {
 				p.WSHost = p.SNI // CDN host defaults to the TLS SNI
@@ -1014,7 +1040,11 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 				p.Flow = true
 			}
 		}
-		if alpn, ok := server["alpn"].([]interface{}); ok {
+		alpnValue := server["alpn"]
+		if value, exists := client["alpn"]; exists {
+			alpnValue = value
+		}
+		if alpn, ok := alpnValue.([]interface{}); ok {
 			parts := make([]string, 0, len(alpn))
 			for _, a := range alpn {
 				if str, ok := a.(string); ok {

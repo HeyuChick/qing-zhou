@@ -535,7 +535,8 @@ func singboxOutbound(p *Proxy) map[string]any {
 		o["alter_id"] = p.AlterID
 		o["security"] = "auto"
 		if str(p.VMess["net"]) == "ws" {
-			o["transport"] = sbWS(str(p.VMess["path"]), str(p.VMess["host"]), 0, "")
+			ws, _ := p.websocket()
+			o["transport"] = ws.singbox()
 		}
 		// Was a hand-rolled block that set only server_name, so alpn / utls
 		// fingerprint / insecure were dropped for vmess alone. sbTLS reads all of
@@ -556,7 +557,9 @@ func singboxOutbound(p *Proxy) map[string]any {
 		if t := sbTransport(p); t != nil {
 			o["transport"] = t
 		}
-		o["tls"] = sbTLS(p, "tls")
+		if p.param("security") != "none" {
+			o["tls"] = sbTLS(p, "tls")
+		}
 	case "hysteria2":
 		o["type"] = "hysteria2"
 		o["password"] = p.Password
@@ -728,8 +731,8 @@ func sbTLS(p *Proxy, sec string) map[string]any {
 func sbTransport(p *Proxy) map[string]any {
 	switch p.param("type") {
 	case "ws":
-		return sbWS(p.param("path"), p.param("host"),
-			atoi(p.param("max_early_data")), p.param("early_data_header_name"))
+		ws, _ := p.websocket()
+		return ws.singbox()
 	case "grpc":
 		t := map[string]any{"type": "grpc"}
 		if v := p.param("serviceName", "servicename"); v != "" {
@@ -756,24 +759,6 @@ func sbTransport(p *Proxy) map[string]any {
 		return t
 	}
 	return nil
-}
-
-func sbWS(path, host string, maxEarlyData int, edHeader string) map[string]any {
-	t := map[string]any{"type": "ws"}
-	if path != "" {
-		t["path"] = path
-	}
-	if host != "" {
-		t["headers"] = map[string]any{"Host": host}
-	}
-	// ws 0-RTT early data (must mirror the inbound).
-	if maxEarlyData > 0 {
-		t["max_early_data"] = maxEarlyData
-		if edHeader != "" {
-			t["early_data_header_name"] = edHeader
-		}
-	}
-	return t
 }
 
 // injectSingboxTunExclude adds proxy server IPs to the TUN inbound's

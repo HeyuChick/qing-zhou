@@ -100,6 +100,11 @@ func validate(p *Proxy) error {
 	if p.Protocol == "anytls" && p.Password == "" {
 		return fmt.Errorf("anytls without password")
 	}
+	if p.transportNetwork() == "ws" {
+		if _, err := p.websocket(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -548,6 +553,12 @@ func (p *Proxy) tlsParam(keys ...string) string {
 	}
 	if p.VMess != nil {
 		for _, k := range keys {
+			if k == "alpn" {
+				if v := alpnStr(p.VMess[k]); v != "" {
+					return v
+				}
+				continue
+			}
 			if v := str(p.VMess[k]); v != "" {
 				return v
 			}
