@@ -519,7 +519,18 @@ func (s *Store) relayMeteringAcceptedGenerations() ([]*RelayMeteringLink, error)
 
 // ConfigureTrafficMetering keeps both feature switches atomic. Existing
 // cumulative nodes never re-enter a reset reader through a settings toggle.
+// PreflightTrafficMetering runs the same validation as the settings save,
+// without persisting switches, relay identities or any acknowledgement. The
+// validation transaction is rolled back; it does not perform remote probes.
+func (s *Store) PreflightTrafficMetering(links, cumulative, perUser bool) error {
+	return s.configureTrafficMetering(links, cumulative, false, perUser)
+}
+
 func (s *Store) ConfigureTrafficMetering(links, cumulative bool, perUser ...bool) error {
+	return s.configureTrafficMetering(links, cumulative, true, perUser...)
+}
+
+func (s *Store) configureTrafficMetering(links, cumulative, apply bool, perUser ...bool) error {
 	if len(perUser) > 1 {
 		return fmt.Errorf("无效逐用户计量设置")
 	}
@@ -564,6 +575,10 @@ func (s *Store) ConfigureTrafficMetering(links, cumulative bool, perUser ...bool
 		if incompatible > 0 {
 			return fmt.Errorf("请先恢复并确认落地的旧共享凭据，再关闭链路计量")
 		}
+	}
+
+	if !apply {
+		return nil
 	}
 
 	boolString := func(v bool) string {
