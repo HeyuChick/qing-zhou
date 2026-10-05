@@ -38,23 +38,26 @@ func (a *API) handleRelayMeteringPreflight(w http.ResponseWriter, r *http.Reques
 	ok(w, J{
 		"valid": len(failures) == 0, "errors": failures, "nodes": nodes,
 		"min_supported": sbver.MinSupported, "vision_fixed_version": sbver.VisionFramingFixVersion,
-		"scope_note": "保存后会检查并重新下发本机及已启用的服务器；配置未改变且服务正常的节点不会因此重启。预检只读取已有记录，不能代替节点实际下发和运行确认。",
+		"transport_fixed_version": sbver.TransportReadBufferFixVersion,
+		"scope_note":              "保存后会检查并重新下发本机及已启用的服务器；配置未改变且服务正常的节点不会因此重启。预检只读取已有记录，不能代替节点实际下发和运行确认。",
 	})
 }
 
 type relayMeteringPreflightNode struct {
-	ServerID            int64    `json:"server_id"`
-	Name                string   `json:"name"`
-	MeteringParticipant bool     `json:"metering_participant"`
-	Version             string   `json:"version"`
-	HasV2RayAPI         bool     `json:"has_v2ray_api"`
-	HasVisionFramingFix bool     `json:"has_vision_framing_fix"`
-	VisionRequired      bool     `json:"vision_required"`
-	CheckedAt           int64    `json:"checked_at"`
-	Error               string   `json:"error,omitempty"`
-	RequiresReinstall   bool     `json:"requires_reinstall"`
-	RequiresCheck       bool     `json:"requires_check"`
-	Reasons             []string `json:"reasons"`
+	ServerID                  int64    `json:"server_id"`
+	Name                      string   `json:"name"`
+	MeteringParticipant       bool     `json:"metering_participant"`
+	Version                   string   `json:"version"`
+	HasV2RayAPI               bool     `json:"has_v2ray_api"`
+	HasVisionFramingFix       bool     `json:"has_vision_framing_fix"`
+	VisionRequired            bool     `json:"vision_required"`
+	TransportRequired         bool     `json:"transport_required"`
+	HasTransportReadBufferFix bool     `json:"has_transport_read_buffer_fix"`
+	CheckedAt                 int64    `json:"checked_at"`
+	Error                     string   `json:"error,omitempty"`
+	RequiresReinstall         bool     `json:"requires_reinstall"`
+	RequiresCheck             bool     `json:"requires_check"`
+	Reasons                   []string `json:"reasons"`
 }
 
 func (a *API) relayMeteringPreflightNodes(links, perUser bool) ([]relayMeteringPreflightNode, error) {
@@ -96,18 +99,16 @@ func (a *API) relayMeteringPreflightNodes(links, perUser bool) ([]relayMeteringP
 			add(byTag[n.InboundTag], n.RouteUpstreamInboundID)
 		}
 	}
-	vision := map[int64]bool{}
-	visionError := ""
+	requirements := map[int64]store.RelayCoreRequirements{}
+	requirementsError := ""
 	if links && perUser {
-		ids, visionErr := a.st.PreviewRelayUserVisionServerIDs()
-		// A broken route is reported by the transactional topology preflight above.
-		// Preserve the machine list even when it cannot derive all Vision targets.
-		if visionErr == nil {
-			for _, id := range ids {
-				vision[id] = true
-			}
+		preview, previewErr := a.st.PreviewRelayUserCoreRequirements()
+		// Preserve the affected machine list when a broken route prevents safe
+		// requirement inference. Never guess that such a node needs no fix.
+		if previewErr == nil {
+			requirements = preview
 		} else {
-			visionError = visionErr.Error()
+			requirementsError = previewErr.Error()
 		}
 	}
 	names := map[int64]string{store.LocalNodeID: store.LocalNodeName}
@@ -124,13 +125,14 @@ func (a *API) relayMeteringPreflightNodes(links, perUser bool) ([]relayMeteringP
 	nodes := make([]relayMeteringPreflightNode, 0, len(ids))
 	now := time.Now().Unix()
 	for _, id := range ids {
-		node := relayMeteringPreflightNode{ServerID: id, Name: names[id], MeteringParticipant: participants[id], VisionRequired: vision[id], Reasons: []string{}}
+		node := relayMeteringPreflightNode{ServerID: id, Name: names[id], MeteringParticipant: participants[id], VisionRequired: requirements[id].VisionFraming, TransportRequired: requirements[id].TransportReadBuffer, Reasons: []string{}}
 		observation := observed[id]
 		if observation == nil || observation.CheckedAt == 0 {
 			node.RequiresCheck = true
 			node.Reasons = append(node.Reasons, "尚无内核检测记录，请到服务器页重新检测")
 		} else {
 			node.Version, node.HasV2RayAPI, node.HasVisionFramingFix, node.CheckedAt, node.Error = observation.Version, observation.HasV2RayAPI, observation.HasVisionFramingFix, observation.CheckedAt, observation.Error
+			node.HasTransportReadBufferFix = observation.HasTransportReadBufferFix
 			if observation.Version == "" {
 				node.RequiresCheck = true
 				node.Reasons = append(node.Reasons, "未能确认内核版本，请到服务器页重新检测")
@@ -148,19 +150,23 @@ func (a *API) relayMeteringPreflightNodes(links, perUser bool) ([]relayMeteringP
 					node.RequiresReinstall = true
 					node.Reasons = append(node.Reasons, "内核缺少 with_v2ray_api，无法逐用户统计；请重装带统计能力的内核")
 				}
-				if vision[id] && !observation.HasVisionFramingFix {
+				if node.VisionRequired && !observation.HasVisionFramingFix {
 					node.RequiresReinstall = true
 					node.Reasons = append(node.Reasons, fmt.Sprintf("该路径需要 Vision 分片修复，请安装 %s 并运行后重新检测", sbver.VisionFramingFixVersion))
 				}
+				if node.TransportRequired && !observation.HasTransportReadBufferFix {
+					node.RequiresReinstall = true
+					node.Reasons = append(node.Reasons, fmt.Sprintf("该路径需要 WebSocket/HTTPUpgrade 缓冲修复，请安装 %s 并运行后重新检测；旧 Vision 专用修复内核不包含这项修复", sbver.TransportReadBufferFixVersion))
+				}
 			}
-			if vision[id] && (observation.CheckedAt < now-15*60 || observation.CheckedAt > now+60) {
+			if (node.VisionRequired || node.TransportRequired) && (observation.CheckedAt < now-15*60 || observation.CheckedAt > now+60) {
 				node.RequiresCheck = true
-				node.Reasons = append(node.Reasons, "Vision 能力记录已过期，请到服务器页重新检测")
+				node.Reasons = append(node.Reasons, requirements[id].Label()+" 能力记录已过期，请到服务器页重新检测")
 			}
 		}
-		if visionError != "" {
+		if requirementsError != "" {
 			node.RequiresCheck = true
-			node.Reasons = append(node.Reasons, "当前拓扑无法确认所需的 Vision 能力："+visionError)
+			node.Reasons = append(node.Reasons, "当前拓扑无法确认所需的内核修复能力："+requirementsError)
 		}
 		nodes = append(nodes, node)
 	}

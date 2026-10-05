@@ -138,3 +138,14 @@ it('a later failed save clears the prior operation success banner',async()=>{
  vi.mocked(apiPut).mockRejectedValueOnce(new Error('新的保存失败'));await save(w)
  expect(w.text()).toContain('新的保存失败');expect(w.text()).not.toContain('本轮节点下发已成功');expect(w.text()).toContain('最近一次返回的下发记录')
 })
+
+it('separates an installed Vision marker from missing WebSocket/HTTPUpgrade repair',async()=>{
+ preflight={valid:false,errors:['WebSocket/HTTPUpgrade 缓冲修复能力未确认'],scope_note:'只读取已安装内核记录，实际下发另验运行进程',nodes:[{...node(1,'WS landing'),version:'1.14.2+qz-vmess.9b95ab8c9478',has_vision_framing_fix:true,vision_required:false,transport_required:true,has_transport_read_buffer_fix:false,requires_reinstall:true,reasons:['请安装 1.14.2+qz-vmess.9b95ab8c9478-transport.07512b10；旧 Vision 专用修复内核不包含这项修复']}]}
+ const w=await render();await inspect(w)
+ expect(w.text()).toContain('WebSocket/HTTPUpgrade 修复标记：未检测到支持');expect(w.text()).toContain('需要重装内核');expect(w.text()).not.toContain('Vision 修复标记：')
+ expect(w.text()).toContain('运行能力仍以下发时核验为准');expect(button(w,'确认保存并下发').attributes('disabled')).toBeDefined();expect(apiPut).not.toHaveBeenCalled();expect(apiPost).not.toHaveBeenCalled()
+})
+it('reports transport capability as unconfirmed after failed installed probing even with a saved marker',async()=>{
+ preflight={valid:false,errors:['WebSocket/HTTPUpgrade 检测失败'],scope_note:'只读',nodes:[{...node(),transport_required:true,has_transport_read_buffer_fix:true,error:'probe offline',requires_check:true,reasons:['probe offline']}]}
+ const w=await render();await inspect(w);expect(w.text()).toContain('WebSocket/HTTPUpgrade 修复标记：待确认');expect(w.text()).toContain('probe offline');expect(w.text()).not.toContain('运行已就绪')
+})

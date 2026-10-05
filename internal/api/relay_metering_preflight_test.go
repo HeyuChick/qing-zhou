@@ -115,3 +115,83 @@ func TestGetRelayMeteringProvidesControllerEpochAndReadOnlyNodeNames(t *testing.
 		t.Fatalf("status metadata absent: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestRelayMeteringPreflightRequiresTransportMarkerBeforeOptIn(t *testing.T) {
+	for _, transport := range []string{"ws", "httpupgrade"} {
+		t.Run(transport, func(t *testing.T) {
+			a, st := newUserEditAPI(t)
+			landingServer, err := st.CreateServer(store.Server{Name: "transport landing", Host: "192.0.2.9", Enabled: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := `{"transport":{"type":"` + transport + `","path":"/relay"}}`
+			landing, err := st.SaveSbInbound(&store.SbInbound{ServerID: landingServer, Type: "vless", Tag: "transport-landing", ListenPort: 21002, Enabled: true, Options: options})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = st.SaveSbInbound(&store.SbInbound{ServerID: 0, Type: "vless", Tag: "transport-source", ListenPort: 21001, Enabled: true, Options: options, UpstreamInboundID: landing}); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []int64{0, landingServer} {
+				if err = st.SetNodeSingbox(id, sbver.Parse("sing-box version "+sbver.VisionFramingFixVersion+"\nTags: with_v2ray_api")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			nodes, err := a.relayMeteringPreflightNodes(true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(nodes) != 2 {
+				t.Fatalf("missing endpoints: %+v", nodes)
+			}
+			for _, node := range nodes {
+				if !node.TransportRequired || node.VisionRequired || !node.HasVisionFramingFix || node.HasTransportReadBufferFix || !node.RequiresReinstall {
+					t.Fatalf("old Vision build passed transport preflight: %+v", node)
+				}
+				reasons := strings.Join(node.Reasons, ";")
+				if !strings.Contains(reasons, "WebSocket/HTTPUpgrade 缓冲修复") || !strings.Contains(reasons, sbver.TransportReadBufferFixVersion) {
+					t.Fatalf("missing exact required fix: %s", reasons)
+				}
+			}
+			if st.RelayUserMeteringEnabled() {
+				t.Fatal("preflight enabled P1")
+			}
+			for _, id := range []int64{0, landingServer} {
+				if err = st.SetNodeSingbox(id, sbver.Parse("sing-box version "+sbver.TransportReadBufferFixVersion+"\nTags: with_v2ray_api")); err != nil {
+					t.Fatal(err)
+				}
+				// Installed support may be shown even while the actual running core is
+				// known old. This read-only result must never claim runtime readiness.
+				if err = st.SetNodeVisionRuntime(id, sbver.Parse("sing-box version "+sbver.VisionFramingFixVersion+"\nTags: with_v2ray_api")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			nodes, err = a.relayMeteringPreflightNodes(true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, node := range nodes {
+				if !node.HasTransportReadBufferFix || node.RequiresReinstall || !node.TransportRequired {
+					t.Fatalf("new installed marker not surfaced: %+v", node)
+				}
+			}
+			encoded, err := json.Marshal(nodes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "runtime_ready") || strings.Contains(string(encoded), "attribution_ready") {
+				t.Fatal("disk observation promoted to runtime readiness")
+			}
+			if err = st.SetNodeSingboxError(landingServer, "cannot verify installed file"); err != nil {
+				t.Fatal(err)
+			}
+			nodes, err = a.relayMeteringPreflightNodes(true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !nodes[1].RequiresCheck || nodes[1].Error != "cannot verify installed file" {
+				t.Fatalf("failed probe disappeared: %+v", nodes[1])
+			}
+		})
+	}
+}
