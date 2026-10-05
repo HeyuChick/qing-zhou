@@ -330,6 +330,10 @@ func (s *Store) prepareRelayMeteringUsers(inbounds []*SbInbound, edges []relayMe
 	if err != nil {
 		return err
 	}
+	retiredUsers, err := retiredRelayUserIDs(tx)
+	if err != nil {
+		return err
+	}
 	allLinks, err := relayMeteringLinksWith(tx)
 	if err != nil {
 		return err
@@ -346,7 +350,7 @@ func (s *Store) prepareRelayMeteringUsers(inbounds []*SbInbound, edges []relayMe
 	incomingCredentials := map[string]singbox.User{}
 	for _, user := range allUsers {
 		link := linkByID[user.LinkID]
-		if !user.Enabled || link == nil {
+		if !user.Enabled || link == nil || retiredUsers[user.ID] {
 			continue
 		}
 		server, exists := serverByInbound[link.TargetInboundID]
@@ -428,7 +432,7 @@ func matchesLogicalRelay(name string, ids []int64) bool {
 // Keep actually accepted old generations during opt-out. Prepared credentials
 // are only installed while P1 is enabled, and disabled owners never self-revive.
 func (s *Store) relayUserLandingUsers() (map[int64][]singbox.User, error) {
-	rows, err := s.db.Query(`SELECT u.identity_name,u.credential,u.user_id,u.link_id,l.target_inbound_id,l.target_server_id FROM relay_metering_users u JOIN relay_metering_links l ON l.id=u.link_id JOIN sb_inbounds i ON i.id=l.target_inbound_id AND i.server_id=l.target_server_id WHERE u.enabled=1 AND (u.accepted_at>0 OR ?=1) ORDER BY u.id`, s.RelayUserMeteringEnabled())
+	rows, err := s.db.Query(`SELECT u.identity_name,u.credential,u.user_id,u.link_id,l.target_inbound_id,l.target_server_id FROM relay_metering_users u JOIN relay_metering_links l ON l.id=u.link_id JOIN sb_inbounds i ON i.id=l.target_inbound_id AND i.server_id=l.target_server_id WHERE u.enabled=1 AND NOT EXISTS(SELECT 1 FROM relay_user_retirements r WHERE r.relay_user_id=u.id AND r.state IN ('retiring','retired')) AND (u.accepted_at>0 OR ?=1 OR EXISTS(SELECT 1 FROM relay_user_retirements r WHERE r.relay_user_id=u.id AND r.state='restoring')) ORDER BY u.id`, s.RelayUserMeteringEnabled())
 	if err != nil {
 		return nil, err
 	}
@@ -525,6 +529,15 @@ func (s *Store) meteredUserRelays(from *SbInbound, routeID int64, landing *SbInb
 }
 
 func (s *Store) acknowledgeRelayMeteringUsers(tx *sql.Tx, serverID int64, raw []byte) error {
+	if err := s.acknowledgeRelayMeteringUsersState(tx, serverID, raw); err != nil {
+		return err
+	}
+	// Retirement proof must use readiness validated against this same apply,
+	// never a stale active flag retained while P1 was disabled.
+	return s.acknowledgeRelayUserRetirements(tx, serverID, raw)
+}
+
+func (s *Store) acknowledgeRelayMeteringUsersState(tx *sql.Tx, serverID int64, raw []byte) error {
 	var enabled string
 	err := tx.QueryRow(`SELECT value FROM settings WHERE key=?`, RelayUserMeteringSetting).Scan(&enabled)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -34,6 +34,7 @@ func (s *Store) migrations() []migration {
 		{6, "legacy_relay_statistics_namespace", func(tx *sql.Tx) error { _, err := tx.Exec(legacyRelayIdentitySchema); return err }},
 		{7, "vision_runtime_capability", func(tx *sql.Tx) error { _, err := tx.Exec(visionRuntimeCapabilitySchema); return err }},
 		{8, "relay_protocol_auth_verification", s.migrateRelayProtocolAuthVerification},
+		{9, "relay_user_retirement", func(tx *sql.Tx) error { _, err := tx.Exec(relayUserRetirementSchema); return err }},
 	}
 }
 
