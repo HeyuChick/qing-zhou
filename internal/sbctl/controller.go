@@ -150,11 +150,13 @@ type Controller struct {
 	// schedules a rebuild and returns immediately; this coalesces bursts (one
 	// in-flight pass + at most one queued follow-up) and records a per-target
 	// SyncStatus the UI can poll. See schedule.go.
-	schedMu       sync.Mutex
-	schedRunning  bool
-	pendingAll    bool
-	pendingServer map[int64]bool
-	syncStatus    map[int64]SyncStatus
+	schedMu            sync.Mutex
+	schedRunning       bool
+	pendingAll         bool
+	pendingAllRevision uint64
+	syncEpoch          string
+	pendingServer      map[int64]bool
+	syncStatus         map[int64]SyncStatus
 	// statusSeq is a monotonic revision stamped onto every SyncStatus write. A
 	// full rebuild reports each machine individually while it runs, so drain uses
 	// the revision to tell "this machine already has its own result" from "this

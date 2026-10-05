@@ -383,7 +383,7 @@ const groupMap = computed(() => new Map(groups.value.map(g => [g.id, g.name])))
 const inboundMap = computed(() => new Map(inbounds.value.map(i => [i.tag, i])))
 const groupOptions = computed(() => groups.value.map(g => ({ label: g.name, value: g.id })))
 const inboundOptions = computed(() => inbounds.value.map(i => ({ label: `${i.tag} (${i.type}:${i.listen_port})`, value: i.tag })))
-const routeLandingTypes = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic'])
+const routeLandingTypes = new Set(['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria', 'hysteria2', 'tuic', 'anytls'])
 const routeLandingOptions = computed(() => {
   const entry = inboundMap.value.get(nodeForm.inbound_tag)
   if (entry?.type === 'mixed') return [{ label: '沿用入站原有链路（Mixed 暂不支持分流）', value: 0 }]

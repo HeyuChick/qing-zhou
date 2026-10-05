@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // AllTarget is the SyncStatus key for a full (every-server) rebuild. Real server
@@ -18,13 +20,39 @@ type SyncStatus struct {
 	State string `json:"state"` // pending | running | ok | failed
 	Error string `json:"error,omitempty"`
 	At    int64  `json:"at"` // unix seconds of the last state change
-	// seq is the controller-wide revision of this write (see Controller.statusSeq).
-	// Internal bookkeeping, never serialized.
-	seq uint64
+	// Revision distinguishes outcomes written in the same second.
+	Revision uint64 `json:"revision"`
+	// RequestRevision is the newest queued full rebuild included by this pass.
+	RequestRevision uint64 `json:"request_revision,omitempty"`
+	// StartedRevision separates the current pass from old per-node outcomes.
+	StartedRevision uint64 `json:"started_revision,omitempty"`
 }
 
 // ScheduleRebuild queues a full rebuild (all servers) and returns immediately.
 func (c *Controller) ScheduleRebuild() { c.schedule(AllTarget) }
+
+// SyncTicket identifies a queued rebuild within one controller lifetime.
+// The epoch changes after a restart, so reused sequence numbers cannot confirm
+// an earlier request. A ticket is an observation handle, not an authorization.
+type SyncTicket struct {
+	Epoch    string `json:"epoch"`
+	Revision uint64 `json:"revision"`
+}
+
+func (c *Controller) ScheduleRebuildTracked() SyncTicket { return c.schedule(AllTarget) }
+
+func (c *Controller) SyncEpoch() string {
+	c.schedMu.Lock()
+	defer c.schedMu.Unlock()
+	return c.syncEpochLocked()
+}
+
+func (c *Controller) syncEpochLocked() string {
+	if c.syncEpoch == "" {
+		c.syncEpoch = uuid.NewString()
+	}
+	return c.syncEpoch
+}
 
 // ScheduleRebuildServer queues a rebuild of one server (0 = local panel) and
 // returns immediately.
@@ -33,21 +61,29 @@ func (c *Controller) ScheduleRebuildServer(serverID int64) { c.schedule(serverID
 // schedule marks a target dirty and ensures exactly one drain goroutine is
 // running. Repeated calls while a pass is in flight coalesce into a single
 // follow-up pass, so a burst of admin edits doesn't reload each node N times.
-func (c *Controller) schedule(target int64) {
+func (c *Controller) schedule(target int64) SyncTicket {
 	c.schedMu.Lock()
 	if target == AllTarget {
 		c.pendingAll = true
 	} else {
 		c.pendingServer[target] = true
 	}
-	c.putStatusLocked(target, SyncStatus{State: "pending", At: time.Now().Unix()})
+	revision := c.statusSeq + 1
+	st := SyncStatus{State: "pending", At: time.Now().Unix()}
+	if target == AllTarget {
+		c.pendingAllRevision = revision
+		st.RequestRevision = revision
+	}
+	c.putStatusLocked(target, st)
+	ticket := SyncTicket{Epoch: c.syncEpochLocked(), Revision: revision}
 	if c.schedRunning {
 		c.schedMu.Unlock()
-		return
+		return ticket
 	}
 	c.schedRunning = true
 	c.schedMu.Unlock()
 	go c.drain()
+	return ticket
 }
 
 // drain runs queued rebuilds until nothing is pending, then exits. A full
@@ -57,7 +93,9 @@ func (c *Controller) drain() {
 	for {
 		c.schedMu.Lock()
 		all := c.pendingAll
+		requestRevision := c.pendingAllRevision
 		c.pendingAll = false
+		c.pendingAllRevision = 0
 		var servers []int64
 		for id := range c.pendingServer {
 			servers = append(servers, id)
@@ -78,7 +116,7 @@ func (c *Controller) drain() {
 			// would replace "SSH 下发失败: ..." on the machine that actually failed
 			// with the same generic line on every machine.
 			before := c.statusSeqs(servers)
-			c.runOne(AllTarget, c.Rebuild)
+			c.runTrackedRebuild(requestRevision, c.Rebuild)
 			st := c.status(AllTarget)
 			for _, id := range servers {
 				c.setStatusFromIfUntouched(id, st, before[id])
@@ -90,6 +128,24 @@ func (c *Controller) drain() {
 			c.runOne(id, func() error { return c.RebuildServer(id) })
 		}
 	}
+}
+
+// A completed older pass must never claim a newer request that arrived while
+// it was in flight. Its request watermark stays fixed even if pending status
+// was overwritten by a concurrent save. drain will then run the queued pass.
+func (c *Controller) runTrackedRebuild(requestRevision uint64, fn func() error) {
+	c.schedMu.Lock()
+	started := c.statusSeq + 1
+	c.putStatusLocked(AllTarget, SyncStatus{State: "running", At: time.Now().Unix(), RequestRevision: requestRevision, StartedRevision: started})
+	c.schedMu.Unlock()
+	err := fn()
+	st := SyncStatus{State: "ok", At: time.Now().Unix(), RequestRevision: requestRevision, StartedRevision: started}
+	if err != nil {
+		st.State, st.Error = "failed", err.Error()
+	}
+	c.schedMu.Lock()
+	c.putStatusLocked(AllTarget, st)
+	c.schedMu.Unlock()
 }
 
 func (c *Controller) runOne(target int64, fn func() error) {
@@ -110,7 +166,7 @@ func (c *Controller) setStatus(id int64, state, errMsg string) {
 // putStatusLocked stores st under id with the next revision. Caller holds schedMu.
 func (c *Controller) putStatusLocked(id int64, st SyncStatus) {
 	c.statusSeq++
-	st.seq = c.statusSeq
+	st.Revision = c.statusSeq
 	c.syncStatus[id] = st
 }
 
@@ -120,7 +176,7 @@ func (c *Controller) statusSeqs(ids []int64) map[int64]uint64 {
 	defer c.schedMu.Unlock()
 	out := make(map[int64]uint64, len(ids))
 	for _, id := range ids {
-		out[id] = c.syncStatus[id].seq
+		out[id] = c.syncStatus[id].Revision
 	}
 	return out
 }
@@ -131,7 +187,7 @@ func (c *Controller) statusSeqs(ids []int64) map[int64]uint64 {
 func (c *Controller) setStatusFromIfUntouched(id int64, st SyncStatus, since uint64) {
 	c.schedMu.Lock()
 	defer c.schedMu.Unlock()
-	if c.syncStatus[id].seq != since {
+	if c.syncStatus[id].Revision != since {
 		return
 	}
 	c.putStatusLocked(id, st)
