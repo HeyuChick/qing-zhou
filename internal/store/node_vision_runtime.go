@@ -9,6 +9,8 @@ import (
 	"qingzhou/internal/sbver"
 )
 
+// The historical Vision table also stores transport-capability evidence; both
+// capabilities are derived independently from the actual running version marker.
 // Runtime evidence is distinct from an installed-binary/UI refresh. Otherwise
 // a disk-only positive probe could erase a known old running core and falsely
 // restore P1 attribution readiness. This table has no credential/user data.
@@ -47,6 +49,10 @@ func (r visionSettingReader) GetSetting(key string) (string, error) {
 }
 
 func nodeVisionRuntimeReadyWith(db txLike, serverID, now int64) (bool, error) {
+	return nodeRelayCoreRuntimeReadyWith(db, serverID, now, sbver.HasVisionFramingFix)
+}
+
+func nodeRelayCoreRuntimeReadyWith(db txLike, serverID, now int64, accepts func(string) bool) (bool, error) {
 	var version, probeErr string
 	var checkedAt int64
 	var stats bool
@@ -64,5 +70,5 @@ func nodeVisionRuntimeReadyWith(db txLike, serverID, now int64) (bool, error) {
 	if maxAge < relayVisionProbeMaxAge {
 		maxAge = relayVisionProbeMaxAge
 	}
-	return sbver.HasVisionFramingFix(version) && stats && probeErr == "" && checkedAt > 0 && checkedAt >= now-int64(maxAge/time.Second) && checkedAt <= now+60, nil
+	return accepts(version) && stats && probeErr == "" && checkedAt > 0 && checkedAt >= now-int64(maxAge/time.Second) && checkedAt <= now+60, nil
 }

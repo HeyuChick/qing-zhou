@@ -236,6 +236,11 @@ func serviceTrafficAttributionReady(db txLike, serverID int64) (bool, bool, []st
 	} else if !ready {
 		reasons = append(reasons, "vision_core_unverified")
 	}
+	if ready, err := relayTransportAttributionReadyWith(db, serverID, time.Now().Unix()); err != nil {
+		return false, false, reasons, err
+	} else if !ready {
+		reasons = append(reasons, "transport_core_unverified")
+	}
 	// Include both explicit inbound relays and enabled logical node routes.
 	// A disabled or broken logical node must not manufacture an active path.
 	const incomingRoutes = `WITH incoming AS (

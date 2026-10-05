@@ -74,6 +74,9 @@ func (a *API) handleAdminCreateNode(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := a.st.CreateNode(n)
 	if err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "创建节点失败")
 		return
 	}
@@ -103,6 +106,9 @@ func (a *API) handleAdminUpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.st.UpdateNode(*n); err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "更新节点失败")
 		return
 	}
@@ -143,7 +149,7 @@ func (a *API) validateNodeRoute(n *store.Node) string {
 	if !target.Enabled {
 		return "所选落地入站已停用"
 	}
-	allowed := map[string]bool{"vless": true, "vmess": true, "trojan": true, "shadowsocks": true, "hysteria2": true, "tuic": true}
+	allowed := map[string]bool{"vless": true, "vmess": true, "trojan": true, "shadowsocks": true, "hysteria": true, "hysteria2": true, "tuic": true, "anytls": true}
 	if !allowed[target.Type] {
 		return "该落地协议暂不支持由线路机拨号"
 	}
@@ -419,7 +425,7 @@ func (a *API) fetchSource(ctx context.Context, src *store.NodeSource, groupIDs [
 	}
 	nodes := make([]store.Node, 0, len(proxies))
 	for _, p := range proxies {
-		nodes = append(nodes, store.Node{Name: p.Name, Protocol: p.Protocol, ShareLink: p.Raw})
+		nodes = append(nodes, store.Node{Name: p.Name, Protocol: p.Protocol, ShareLink: p.Raw, ImportLegacyKeys: p.SourceLegacyKeys})
 	}
 	if err := a.st.ReplaceSourceNodes(src.ID, nodes, groupIDs, ""); err != nil {
 		return failed(err)

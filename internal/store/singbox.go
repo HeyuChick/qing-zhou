@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"qingzhou/internal/singbox"
+	"qingzhou/internal/subconv"
 )
 
 // SbTls is a TLS/Reality profile for native sing-box inbounds (B2). ServerJSON
@@ -119,22 +120,37 @@ func (s *Store) GetSbTls(id int64) (*SbTls, error) {
 
 // SaveSbTls inserts (id==0) or updates a TLS profile. ServerJSON is encrypted.
 func (s *Store) SaveSbTls(t *SbTls) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 	now := time.Now().Unix()
 	enc := s.encrypt(t.ServerJSON)
-	if t.ID == 0 {
-		// New rows land at the end of the list. Leaving sort_order at 0 would drop
-		// them into the middle of a manually ordered list (0 ties with whatever the
-		// admin put first), which reads as the list reshuffling itself.
-		res, err := s.db.Exec(`INSERT INTO sb_tls (server_id, name, mode, server_json, client_json, cert_id, sort_order, created_at, updated_at)
+	id := t.ID
+	if id == 0 {
+		// Append new profiles without disturbing administrator-defined ordering.
+		res, err := tx.Exec(`INSERT INTO sb_tls (server_id, name, mode, server_json, client_json, cert_id, sort_order, created_at, updated_at)
 			VALUES (?,?,?,?,?,?,(SELECT COALESCE(MAX(sort_order),0)+1 FROM sb_tls),?,?)`, t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, t.CertID, now, now)
 		if err != nil {
 			return 0, err
 		}
-		return res.LastInsertId()
+		id, err = res.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+	} else if _, err := tx.Exec(`UPDATE sb_tls SET server_id=?, name=?, mode=?, server_json=?, client_json=?, cert_id=?, updated_at=? WHERE id=?`,
+		t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, t.CertID, now, id); err != nil {
+		return id, err
 	}
-	_, err := s.db.Exec(`UPDATE sb_tls SET server_id=?, name=?, mode=?, server_json=?, client_json=?, cert_id=?, updated_at=? WHERE id=?`,
-		t.ServerID, t.Name, t.Mode, enc, t.ClientJSON, t.CertID, now, t.ID)
-	return t.ID, err
+	// A newly provisioned profile cannot invalidate an existing route and may
+	// be needed to repair one. Only edits to existing profiles affect the graph.
+	if t.ID != 0 {
+		if err := s.validateRelayTopologySave(tx); err != nil {
+			return id, err
+		}
+	}
+	return id, tx.Commit()
 }
 
 // ReorderSbTls sets sort_order to each id's position in the given slice, so
@@ -173,16 +189,24 @@ func (s *Store) reorderByID(table string, ids []int64) error {
 var ErrInUse = errors.New("仍被引用，无法删除")
 
 func (s *Store) DeleteSbTls(id int64) error {
-	// Refuse deletion while an inbound still references this TLS: nulling it out
-	// would silently strip encryption from a live inbound (e.g. a VLESS Reality
-	// node), which is worse than a clear error.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Refuse to strip encryption from any referenced inbound. The reference
+	// check and delete share the same write lock as inbound saves.
 	var n int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sb_inbounds WHERE tls_id=?`, id).Scan(&n)
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sb_inbounds WHERE tls_id=?`, id).Scan(&n); err != nil {
+		return err
+	}
 	if n > 0 {
 		return fmt.Errorf("%w：仍有 %d 个入站在使用此 TLS", ErrInUse, n)
 	}
-	_, err := s.db.Exec(`DELETE FROM sb_tls WHERE id=?`, id)
-	return err
+	if _, err := tx.Exec(`DELETE FROM sb_tls WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // resolveTlsBlock builds the sing-box "tls" block for an inbound's TLS profile.
@@ -295,6 +319,11 @@ func (s *Store) GetSbInboundByTag(tag string) (*SbInbound, error) {
 }
 
 func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return n.ID, err
+	}
+	defer tx.Rollback()
 	now := time.Now().Unix()
 	if n.Options == "" {
 		n.Options = "{}"
@@ -306,28 +335,30 @@ func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 		if n.SortOrder == 0 {
 			// Append rather than tie with the first manually ordered row — see the
 			// same note in SaveSbTls.
-			_ = s.db.QueryRow(`SELECT COALESCE(MAX(sort_order),0)+1 FROM sb_inbounds`).Scan(&n.SortOrder)
+			_ = tx.QueryRow(`SELECT COALESCE(MAX(sort_order),0)+1 FROM sb_inbounds`).Scan(&n.SortOrder)
 		}
-		res, err := s.db.Exec(`INSERT INTO sb_inbounds (server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, egress_id, created_at, updated_at)
+		res, err := tx.Exec(`INSERT INTO sb_inbounds (server_id, type, tag, listen, listen_port, tls_id, options, enabled, sort_order, upstream_inbound_id, relay_secret, egress_id, created_at, updated_at)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			n.ServerID, n.Type, n.Tag, n.Listen, n.ListenPort, n.TlsID, n.Options, b2i(n.Enabled), n.SortOrder, n.UpstreamInboundID, n.RelaySecret, n.EgressID, now, now)
 		if err != nil {
 			return 0, err
 		}
-		return res.LastInsertId()
+		id, err := res.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+		if err := s.validateRelayTopologySave(tx); err != nil {
+			return 0, err
+		}
+		return id, tx.Commit()
 	}
 	// Self-built nodes link to an inbound by its tag (inbound_tag is a copy
 	// of the value). If the tag changes, that linkage — and the group/subscription
 	// matching built on it — silently breaks. Cascade the rename atomically.
 	var oldTag string
-	_ = s.db.QueryRow(`SELECT tag FROM sb_inbounds WHERE id=?`, n.ID).Scan(&oldTag)
+	_ = tx.QueryRow(`SELECT tag FROM sb_inbounds WHERE id=?`, n.ID).Scan(&oldTag)
 	tagChanged := oldTag != "" && oldTag != n.Tag
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return n.ID, err
-	}
-	defer tx.Rollback()
 	// upstream_broken clears only when this save gives the inbound a real exit
 	// again — a new landing, or an egress. Not on every save: enable/disable and
 	// the batch toggle go through here too, and an unrelated toggle must not
@@ -353,6 +384,9 @@ func (s *Store) SaveSbInbound(n *SbInbound) (int64, error) {
 			return n.ID, err
 		}
 	}
+	if err := s.validateRelayTopologySave(tx); err != nil {
+		return n.ID, err
+	}
 	return n.ID, tx.Commit()
 }
 
@@ -369,13 +403,17 @@ func (s *Store) AckUpstreamBroken(id int64) error {
 
 // DeleteSbInbound removes an inbound plus everything that only exists because of
 // it, and returns the ids of the servers hosting relay inbounds that were
-// un-chained by the deletion (see below) so the caller can rebuild them.
+// un-chained by the deletion (see below) so the caller can rebuild them. While
+// metering is enabled, active references must be removed explicitly first.
 func (s *Store) DeleteSbInbound(id int64) ([]int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := s.guardRelayInboundDelete(tx, id); err != nil {
+		return nil, err
+	}
 	// A self-built node's physical entry is linked by tag. Without that listener
 	// the logical node is non-functional, so remove every node using it — otherwise
 	// they linger as zombies and silently revive if a same-tag inbound is recreated.
@@ -478,7 +516,14 @@ func inboundTransports(typ, options string) transportBits {
 	switch typ {
 	case "tuic", "hysteria2", "hysteria":
 		return transportUDP // QUIC-based: UDP only
-	case "vless", "vmess", "trojan", "anytls", "mixed":
+	case "vless", "vmess", "trojan":
+		var opts map[string]interface{}
+		_ = json.Unmarshal([]byte(options), &opts)
+		if transport, ok := opts["transport"].(map[string]interface{}); ok && transport["type"] == "quic" {
+			return transportUDP
+		}
+		return transportTCP
+	case "anytls", "mixed":
 		return transportTCP
 	case "shadowsocks":
 		// sing-box's shadowsocks inbound serves both unless network narrows it.
@@ -487,8 +532,19 @@ func inboundTransports(typ, options string) transportBits {
 			_ = json.Unmarshal([]byte(options), &opts)
 		}
 		var bits transportBits
-		if n, _ := opts["network"].(string); n != "" {
-			for _, part := range strings.Split(n, ",") {
+		var networks []string
+		switch n := opts["network"].(type) {
+		case string:
+			networks = strings.Split(n, ",")
+		case []interface{}:
+			for _, value := range n {
+				if network, ok := value.(string); ok {
+					networks = append(networks, network)
+				}
+			}
+		}
+		if len(networks) != 0 {
+			for _, part := range networks {
 				switch strings.TrimSpace(part) {
 				case "tcp":
 					bits |= transportTCP
@@ -712,9 +768,10 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 // The tag is carried alongside rather than read back out of the link's remark,
 // because the remark shows the node's admin-configured display name.
 type SelfBuiltLink struct {
-	NodeID int64  // logical node id — several nodes may share one inbound tag
-	Tag    string // physical inbound tag — topology/config join key
-	Link   string
+	NodeID     int64  // logical node id — several nodes may share one inbound tag
+	Tag        string // physical inbound tag — topology/config join key
+	Link       string
+	LegacyKeys []string `json:"-"` // trusted pre-upgrade blocklist aliases; no credential-bearing legacy URI is exposed
 }
 
 // BuildSelfBuiltLinks generates client share-links for every enabled native
@@ -862,7 +919,17 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 				pin = certPin(t, server)
 			}
 		}
-		_ = json.Unmarshal([]byte(ib.Options), &opts)
+		if ib.Options != "" {
+			if err := json.Unmarshal([]byte(ib.Options), &opts); err != nil {
+				continue
+			}
+		}
+		legacyServer := server
+		tlsEnabled, tlsDisabled, effectiveServer, validTLS := shareLinkTLSState(ib.TlsID, server, opts)
+		if !validTLS {
+			continue
+		}
+		server = effectiveServer
 
 		// Remark = node remark (preferred) or name from the 节点 page; the raw
 		// inbound tag is only a fallback for an inbound no node is bound to.
@@ -896,7 +963,8 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			Type: ib.Type, Tag: remark, Host: nodeHost, Port: ib.ListenPort,
 			UUID: cred.UUID, Password: cred.Password,
 			NoUDP:       exit != nil && noUDP(exit.EgressID),
-			TLS:         ib.TlsID != 0,
+			TLS:         tlsEnabled,
+			TLSDisabled: tlsDisabled,
 			SNI:         mapStr(server, "server_name"),
 			Fingerprint: nestedStr(client, "utls", "fingerprint"),
 			Insecure:    mapBool(client, "insecure"),
@@ -909,6 +977,9 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			DownMbps:    mapInt(opts, "down_mbps"),
 			TCPFastOpen: mapBool(opts, "tcp_fast_open"),
 			MPTCP:       mapBool(opts, "tcp_multi_path"),
+		}
+		if sni := mapStr(client, "server_name"); sni != "" {
+			p.SNI = sni
 		}
 		// Multiplex + Brutal (vless/vmess/trojan): both are opt-in on the client,
 		// so mirror the inbound's setting onto the link or Brutal does nothing.
@@ -942,10 +1013,23 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			p.ServiceName = mapStr(tr, "service_name")
 			p.WSMaxEarlyData = mapInt(tr, "max_early_data")
 			p.WSEarlyDataHeader = mapStr(tr, "early_data_header_name")
-			if h := mapStr(tr, "host"); h != "" {
-				p.WSHost = h
-			} else if hdr, ok := tr["headers"].(map[string]interface{}); ok {
-				p.WSHost = mapStr(hdr, "Host")
+			if p.Network == "ws" {
+				var err error
+				p.WSHeaders, err = singbox.NormalizeWSHeaders(tr["headers"])
+				// Do not publish a node with lost or ambiguous required headers.
+				if err != nil {
+					continue
+				}
+				if values := p.WSHeaders["Host"]; len(values) > 0 {
+					p.WSHost = values[0]
+				}
+			}
+			if p.WSHost == "" {
+				if h := mapStr(tr, "host"); h != "" {
+					p.WSHost = h
+				} else if hdr, ok := tr["headers"].(map[string]interface{}); ok {
+					p.WSHost = mapStr(hdr, "Host")
+				}
 			}
 			if p.WSHost == "" && (p.Network == "ws" || p.Network == "httpupgrade") {
 				p.WSHost = p.SNI // CDN host defaults to the TLS SNI
@@ -959,7 +1043,11 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 				p.Flow = true
 			}
 		}
-		if alpn, ok := server["alpn"].([]interface{}); ok {
+		alpnValue := server["alpn"]
+		if value, exists := client["alpn"]; exists {
+			alpnValue = value
+		}
+		if alpn, ok := alpnValue.([]interface{}); ok {
 			parts := make([]string, 0, len(alpn))
 			for _, a := range alpn {
 				if str, ok := a.(string); ok {
@@ -969,7 +1057,37 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			p.ALPN = strings.Join(parts, ",")
 		}
 		if link := singbox.BuildShareLink(p); link != "" {
-			out = append(out, SelfBuiltLink{NodeID: logicalID, Tag: ib.Tag, Link: link})
+			legacy := p
+			legacy.TLS = ib.TlsID != 0
+			legacy.TLSDisabled = false
+			legacy.SNI = mapStr(legacyServer, "server_name")
+			legacy.ALPN = ""
+			if values, ok := legacyServer["alpn"].([]interface{}); ok {
+				parts := []string{}
+				for _, value := range values {
+					if text, ok := value.(string); ok {
+						parts = append(parts, text)
+					}
+				}
+				legacy.ALPN = strings.Join(parts, ",")
+			}
+			legacy.WSHost = ""
+			legacy.WSHeaders = nil
+			if tr, ok := opts["transport"].(map[string]interface{}); ok {
+				if h := mapStr(tr, "host"); h != "" {
+					legacy.WSHost = h
+				} else if headers, ok := tr["headers"].(map[string]interface{}); ok {
+					legacy.WSHost = mapStr(headers, "Host")
+				}
+				if legacy.WSHost == "" && (legacy.Network == "ws" || legacy.Network == "httpupgrade") {
+					legacy.WSHost = legacy.SNI
+				}
+			}
+			legacyKeys := []string{}
+			if oldLink := singbox.LegacyShareLinkForNodeKey(legacy); oldLink != "" && oldLink != link {
+				legacyKeys = subconv.NodeKeys(oldLink)
+			}
+			out = append(out, SelfBuiltLink{NodeID: logicalID, Tag: ib.Tag, Link: link, LegacyKeys: legacyKeys})
 		}
 	}
 	return out

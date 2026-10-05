@@ -101,8 +101,11 @@ type Controller struct {
 	remoteSlots chan struct{} // shared SSH budget for applies, probes and stats
 
 	// Immutable during each serialized rebuild, including its apply goroutines.
-	visionRequired map[int64]*store.Server
-	visionBlocked  map[int64]error
+	coreRequirements  map[int64]store.RelayCoreRequirements
+	coreDependencies  map[int64][]int64
+	coreSnapshotKnown bool
+	visionRequired    map[int64]*store.Server
+	visionBlocked     map[int64]error
 
 	mu      sync.Mutex // serializes Rebuild
 	statsMu sync.Mutex // one authoritative collector per process
@@ -150,11 +153,13 @@ type Controller struct {
 	// schedules a rebuild and returns immediately; this coalesces bursts (one
 	// in-flight pass + at most one queued follow-up) and records a per-target
 	// SyncStatus the UI can poll. See schedule.go.
-	schedMu       sync.Mutex
-	schedRunning  bool
-	pendingAll    bool
-	pendingServer map[int64]bool
-	syncStatus    map[int64]SyncStatus
+	schedMu            sync.Mutex
+	schedRunning       bool
+	pendingAll         bool
+	pendingAllRevision uint64
+	syncEpoch          string
+	pendingServer      map[int64]bool
+	syncStatus         map[int64]SyncStatus
 	// statusSeq is a monotonic revision stamped onto every SyncStatus write. A
 	// full rebuild reports each machine individually while it runs, so drain uses
 	// the revision to tell "this machine already has its own result" from "this

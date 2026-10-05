@@ -1,8 +1,10 @@
 package store
 
 import (
+	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,7 +12,6 @@ import (
 	"strings"
 
 	"qingzhou/internal/singbox"
-	"qingzhou/internal/subconv"
 )
 
 // Relay chaining lets an inbound (线路机/relay) forward its traffic to another
@@ -373,22 +374,26 @@ func egressOutbound(e *SbEgress, trustPEM string) map[string]interface{} {
 	return ob
 }
 
-// relayOutbound builds the sing-box outbound that dials a landing inbound, using
-// the derived relay credential. It reconstructs a client LinkParams from the
-// landing inbound's server/TLS/options (mirroring BuildSelfBuiltLinks) and
-// renders it through the subscription outbound renderer.
+// relayOutbound builds a native sing-box outbound for a managed landing.
+// Share links are deliberately not an intermediate representation: they cannot
+// encode every native transport, TLS trust option, or protocol setting.
 func (s *Store) relayOutbound(landing *SbInbound, serverCache map[int64]*Server, tlsCache map[int64]*SbTls) (map[string]interface{}, error) {
 	return s.relayOutboundWithIdentity(landing, serverCache, tlsCache, nil, fmt.Sprintf("relay-to-%d", landing.ID))
 }
 
+// With an explicit identity and populated caches this is a pure renderer. In
+// particular it must not initialize the legacy relay secret: acknowledgements
+// render the expected outbound from a transaction snapshot without database IO.
 func (s *Store) relayOutboundWithIdentity(landing *SbInbound, serverCache map[int64]*Server, tlsCache map[int64]*SbTls, identity *singbox.User, outboundTag string) (map[string]interface{}, error) {
-	// Dial host: the landing server's own host; a local (server_id 0) landing is
-	// reached over loopback on the same machine.
 	host := "127.0.0.1"
 	if landing.ServerID != 0 {
 		sv, ok := serverCache[landing.ServerID]
 		if !ok {
-			sv, _ = s.GetServer(landing.ServerID)
+			var err error
+			sv, err = s.GetServer(landing.ServerID)
+			if err != nil {
+				return nil, err
+			}
 			serverCache[landing.ServerID] = sv
 		}
 		if sv != nil && sv.Host != "" {
@@ -396,142 +401,300 @@ func (s *Store) relayOutboundWithIdentity(landing *SbInbound, serverCache map[in
 		}
 	}
 
-	secret, err := s.ensureRelaySecret(landing)
-	if err != nil {
-		return nil, err
-	}
-	uuid, pw := relayCred(secret)
+	var uuid, password string
 	if identity != nil {
-		uuid, pw = identity.UUID, identity.Password
+		uuid, password = identity.UUID, identity.Password
+	} else {
+		secret, err := s.ensureRelaySecret(landing)
+		if err != nil {
+			return nil, err
+		}
+		uuid, password = relayCred(secret)
 	}
 
-	var server, client, opts map[string]interface{}
+	var opts, serverTLS, clientTLS map[string]interface{}
+	if landing.Options != "" {
+		if err := json.Unmarshal([]byte(landing.Options), &opts); err != nil {
+			return nil, fmt.Errorf("relay: invalid options for landing inbound %d: %w", landing.ID, err)
+		}
+	}
+	// The profile overrides inline TLS, exactly as the inbound builder does.
+	serverTLS, _ = opts["tls"].(map[string]interface{})
 	if landing.TlsID != 0 {
 		t, ok := tlsCache[landing.TlsID]
 		if !ok {
-			t, _ = s.GetSbTls(landing.TlsID)
+			// Resolve managed certificate bytes and SNI for ordinary builds too.
+			// The acknowledgement path supplies this already-resolved cache.
+			var err error
+			_, _, t, err = s.relayTargetSpec(landing)
+			if err != nil {
+				return nil, err
+			}
 			tlsCache[landing.TlsID] = t
 		}
-		if t != nil {
-			_ = json.Unmarshal([]byte(t.ServerJSON), &server)
-			_ = json.Unmarshal([]byte(t.ClientJSON), &client)
+		if t == nil || t.DecryptFailed {
+			return nil, fmt.Errorf("relay: TLS profile %d for landing inbound %d is unavailable", landing.TlsID, landing.ID)
 		}
-	}
-	_ = json.Unmarshal([]byte(landing.Options), &opts)
-
-	lp := singbox.LinkParams{
-		Type: landing.Type, Tag: "relay", Host: host, Port: landing.ListenPort,
-		UUID: uuid, Password: pw,
-		TLS:         landing.TlsID != 0,
-		SNI:         mapStr(server, "server_name"),
-		Fingerprint: nestedStr(client, "utls", "fingerprint"),
-		Insecure:    mapBool(client, "insecure"),
-		Congestion:  mapStr(opts, "congestion_control"),
-		ZeroRTT:     mapBool(opts, "zero_rtt_handshake"),
-		Method:      mapStr(opts, "method"),
-		ServerKey:   mapStr(opts, "password"),
-		TCPFastOpen: mapBool(opts, "tcp_fast_open"),
-		MPTCP:       mapBool(opts, "tcp_multi_path"),
-	}
-	// Multiplex on the relay→landing hop, mirroring the landing inbound's own
-	// setting exactly as BuildSelfBuiltLinks does for client links.
-	//
-	// This hop is the one place where the omission really hurts. A client makes a
-	// handful of connections; a relay carries every connection of every user
-	// behind it, and without multiplexing each one pays a full protocol handshake
-	// to the landing on top of the client's own. Loading one web page opens
-	// dozens of short connections across a dozen domains, so the round trips
-	// stack up into "images load half-way" while a long-lived app socket over the
-	// same relay feels perfectly fine.
-	//
-	// BuildShareLink drops mux by itself when vless xtls-rprx-vision is active
-	// (sing-box rejects the pair), so no gate is needed here.
-	//
-	// Brutal is deliberately NOT mirrored. Its up/down are per-endpoint physical
-	// bandwidths; the values configured for client links describe a subscriber's
-	// line, and a relay machine's is nothing like it. Brutal ignores congestion
-	// signals and paces to the number it is given, so a wrong one doesn't degrade
-	// gracefully — it floods the landing or throttles the relay to a crawl.
-	if mx, ok := opts["multiplex"].(map[string]interface{}); ok && mapBool(mx, "enabled") {
-		lp.Mux = true
-	}
-	if obfs, ok := opts["obfs"].(map[string]interface{}); ok {
-		lp.Obfs = mapStr(obfs, "type")
-		lp.ObfsPassword = mapStr(obfs, "password")
-		lp.ObfsMinPacket = mapInt(obfs, "min_packet_size")
-		lp.ObfsMaxPacket = mapInt(obfs, "max_packet_size")
-	}
-	if v := mapStr(opts, "bbr_profile"); v != "" {
-		lp.BBRProfile = v
-	}
-	lp.DisableChromeParrot = mapBool(opts, "disable_chrome_parrot")
-	lp.HopInterval = mapStr(opts, "hop_interval")
-	lp.HopIntervalMax = mapStr(opts, "hop_interval_max")
-	if tr, ok := opts["transport"].(map[string]interface{}); ok {
-		lp.Network = mapStr(tr, "type")
-		lp.Path = mapStr(tr, "path")
-		lp.ServiceName = mapStr(tr, "service_name")
-		if h := mapStr(tr, "host"); h != "" {
-			lp.WSHost = h
-		} else if hdr, ok := tr["headers"].(map[string]interface{}); ok {
-			lp.WSHost = mapStr(hdr, "Host")
-		}
-		if lp.WSHost == "" && (lp.Network == "ws" || lp.Network == "httpupgrade") {
-			lp.WSHost = lp.SNI
-		}
-		lp.WSMaxEarlyData = mapInt(tr, "max_early_data")
-		lp.WSEarlyDataHeader = mapStr(tr, "early_data_header_name")
-	}
-	if r, ok := server["reality"].(map[string]interface{}); ok {
-		lp.PublicKey = nestedStr(client, "reality", "public_key")
-		lp.ShortID = firstShortID(r["short_id"])
-		if landing.Type == "vless" && mapStr(opts, "flow") != "none" {
-			lp.Flow = true
-		}
-	}
-	if alpn, ok := server["alpn"].([]interface{}); ok {
-		parts := make([]string, 0, len(alpn))
-		for _, a := range alpn {
-			if str, ok := a.(string); ok {
-				parts = append(parts, str)
+		if t.ServerJSON != "" {
+			var profileTLS map[string]interface{}
+			if err := json.Unmarshal([]byte(t.ServerJSON), &profileTLS); err != nil {
+				return nil, fmt.Errorf("relay: invalid server TLS for landing inbound %d: %w", landing.ID, err)
+			}
+			if profileTLS != nil {
+				serverTLS = profileTLS
 			}
 		}
-		lp.ALPN = strings.Join(parts, ",")
+		if t.ClientJSON != "" {
+			if err := json.Unmarshal([]byte(t.ClientJSON), &clientTLS); err != nil {
+				return nil, fmt.Errorf("relay: invalid client TLS for landing inbound %d: %w", landing.ID, err)
+			}
+		}
+		if serverTLS == nil {
+			return nil, fmt.Errorf("relay: TLS profile %d for landing inbound %d has no effective server TLS", landing.TlsID, landing.ID)
+		}
+	}
+	requiresTLS := landing.Type == "tuic" || landing.Type == "hysteria" || landing.Type == "hysteria2" || landing.Type == "anytls"
+	if requiresTLS && !mapBool(serverTLS, "enabled") {
+		return nil, fmt.Errorf("relay: %s landing inbound %d requires enabled server TLS", landing.Type, landing.ID)
+	}
+	ob := map[string]interface{}{
+		"type": landing.Type, "tag": outboundTag, "server": host, "server_port": landing.ListenPort,
+	}
+	switch landing.Type {
+	case "vless":
+		ob["uuid"], ob["packet_encoding"] = uuid, "xudp"
+	case "vmess":
+		ob["uuid"], ob["security"], ob["alter_id"] = uuid, "auto", 0
+	case "trojan", "anytls":
+		ob["password"] = password
+	case "tuic":
+		ob["uuid"], ob["password"], ob["udp_relay_mode"] = uuid, password, "native"
+		relayCopyFields(ob, opts, "congestion_control", "zero_rtt_handshake", "heartbeat")
+	case "hysteria":
+		ob["auth_str"] = password
+		relayCopyFields(ob, opts, "obfs")
+		// Rates describe the local endpoint: the relay uploads what the landing
+		// receives, and downloads what the landing sends. Preserve the native
+		// string rates too; sing-box gives up/down precedence over *_mbps.
+		for from, to := range map[string]string{"up": "down", "up_mbps": "down_mbps", "down": "up", "down_mbps": "up_mbps"} {
+			if v, ok := opts[from]; ok {
+				ob[to] = v
+			}
+		}
+	case "hysteria2":
+		ob["password"] = password
+		relayCopyFields(ob, opts, "obfs", "bbr_profile", "disable_chrome_parrot", "hop_interval", "hop_interval_max")
+		// A bandwidth-enforcing landing rejects the default BBR client (Rx=0).
+		// Mirror known endpoint rates only when the server requires them. If
+		// its transmit rate is unlimited, use its known receive rate as the
+		// conservative relay download budget instead of inventing a faster one.
+		if mapBool(opts, "ignore_client_bandwidth") && mapInt(opts, "down_mbps") > 0 {
+			up, down := mapInt(opts, "down_mbps"), mapInt(opts, "up_mbps")
+			if down <= 0 {
+				down = up
+			}
+			ob["up_mbps"], ob["down_mbps"] = up, down
+		}
+	case "shadowsocks":
+		method := mapStr(opts, "method")
+		ob["method"] = method
+		ob["password"] = mapStr(opts, "password") + ":" + singbox.DeriveSSKey(password, method)
+		// Without multiplex, native payloads need the corresponding listener
+		// network. A TCP listener with mux can carry both TCP and UDP payloads.
+		mx, _ := opts["multiplex"].(map[string]interface{})
+		if !mapBool(mx, "enabled") || !relayNetworkIncludes(opts["network"], "tcp") {
+			relayCopyFields(ob, opts, "network")
+		}
+	default:
+		return nil, fmt.Errorf("relay: unsupported landing protocol %q", landing.Type)
 	}
 
-	link := singbox.BuildShareLink(lp)
-	if link == "" {
-		return nil, fmt.Errorf("relay: cannot build dial link for landing inbound %d (%s)", landing.ID, landing.Tag)
+	switch landing.Type {
+	case "vless", "vmess", "trojan":
+		if tr, ok := opts["transport"].(map[string]interface{}); ok && len(tr) > 0 {
+			// Native inbound and outbound transport schemas are identical. Keep
+			// HTTP host/header lists, WS early data, and gRPC tuning intact.
+			switch mapStr(tr, "type") {
+			case "http", "ws", "quic", "grpc", "httpupgrade":
+				ob["transport"] = tr
+			default:
+				return nil, fmt.Errorf("relay: unsupported transport %q for landing inbound %d", mapStr(tr, "type"), landing.ID)
+			}
+		}
 	}
-	ob, err := subconv.SingboxOutboundFromLink(link)
-	if err != nil {
-		return nil, err
+	switch landing.Type {
+	case "vless", "vmess", "trojan", "shadowsocks":
+		relayCopyFields(ob, opts, "tcp_fast_open", "tcp_multi_path")
+		if mx, ok := opts["multiplex"].(map[string]interface{}); ok && mapBool(mx, "enabled") && (landing.Type != "shadowsocks" || relayNetworkIncludes(opts["network"], "tcp")) {
+			outMux := map[string]interface{}{"enabled": true}
+			relayCopyFields(outMux, mx, "padding")
+			// Brutal rates configured for subscribers do not describe the relay
+			// machine. Mirroring those would flood or throttle the managed hop.
+			ob["multiplex"] = outMux
+		}
+	case "tuic", "hysteria", "hysteria2":
+		relayCopyFields(ob, opts, "idle_timeout", "keep_alive_period", "stream_receive_window", "connection_receive_window", "max_concurrent_streams", "initial_packet_size", "disable_path_mtu_discovery")
 	}
-	// Public VLESS/Trojan share links assume TLS, but managed relay listeners
-	// can explicitly have no TLS profile (for example a private-network hop).
-	// Preserve the actual listener here instead of sending a TLS ClientHello
-	// to a plaintext protocol parser. Never infer this from SNI, and never strip
-	// TLS from an inbound that references a TLS profile or carries an inline
-	// TLS block in its advanced options (even an unrecognized one).
-	_, inlineTLS := opts["tls"]
-	if landing.TlsID == 0 && !inlineTLS && (landing.Type == "vless" || landing.Type == "trojan") {
-		delete(ob, "tls")
+
+	if landing.Type != "shadowsocks" && (landing.TlsID != 0 || serverTLS != nil) {
+		transport, _ := opts["transport"].(map[string]interface{})
+		quic := landing.Type == "tuic" || landing.Type == "hysteria" || landing.Type == "hysteria2" || mapStr(transport, "type") == "quic"
+		tls, err := relayClientTLS(serverTLS, clientTLS, landing.Type, quic)
+		if err != nil {
+			return nil, fmt.Errorf("relay: landing inbound %d: %w", landing.ID, err)
+		}
+		if requiresTLS && !mapBool(tls, "enabled") {
+			return nil, fmt.Errorf("relay: %s landing inbound %d requires enabled client TLS", landing.Type, landing.ID)
+		}
+		ob["tls"] = tls
 	}
 	if landing.Type == "vless" {
-		// Share-link defaults only encode Vision for Reality. Managed listeners
-		// also support ordinary TLS+Vision: mirror the exact inbound user rule,
-		// including empty transports and explicit flow=none, after conversion.
 		flowSpec := map[string]interface{}{"flow": opts["flow"], "transport": opts["transport"]}
-		if landing.TlsID != 0 || inlineTLS {
+		if _, hasTLS := ob["tls"]; hasTLS {
 			flowSpec["tls"] = true
 		}
 		if flow := singbox.VLESSUserFlow(flowSpec); flow != "" {
 			ob["flow"] = flow
-			delete(ob, "multiplex") // Vision and outbound multiplex are incompatible
-		} else {
-			delete(ob, "flow")
+			delete(ob, "multiplex")
 		}
 	}
-	ob["tag"] = outboundTag
 	return ob, nil
+}
+
+func relayCopyFields(dst, src map[string]interface{}, keys ...string) {
+	for _, key := range keys {
+		if value, ok := src[key]; ok {
+			dst[key] = value
+		}
+	}
+}
+
+// relayClientTLS selects the dial-side fields without ever copying the
+// landing's private key, certificate-provider config or client-auth policy.
+// Explicit client settings take precedence, including certificate/pin trust,
+// SNI overrides and disabled uTLS. A profile is decoded afresh for each render,
+// so neither this map nor its nested values alias the supplied caches.
+func relayClientTLS(server, client map[string]interface{}, protocol string, quic bool) (map[string]interface{}, error) {
+	if quic {
+		// QUIC needs the native Go TLS config at dial time. REALITY and
+		// platform TLS engines cannot provide it; reject those combinations.
+		// The shared profile's TCP-only uTLS fingerprint is omitted below.
+		serverReality, _ := server["reality"].(map[string]interface{})
+		clientReality, _ := client["reality"].(map[string]interface{})
+		if mapBool(serverReality, "enabled") || mapBool(clientReality, "enabled") {
+			return nil, fmt.Errorf("QUIC relay does not support REALITY")
+		}
+		if engine := mapStr(client, "engine"); engine != "" && engine != "go" {
+			return nil, fmt.Errorf("QUIC relay requires the Go TLS engine, got %q", engine)
+		}
+	}
+	tls := map[string]interface{}{"enabled": true}
+	relayCopyFields(tls, server, "enabled", "server_name", "alpn", "min_version", "max_version", "cipher_suites", "curve_preferences", "handshake_timeout")
+	if !quic && (protocol == "vless" || protocol == "vmess" || protocol == "trojan" || protocol == "anytls") {
+		tls["utls"] = map[string]interface{}{"enabled": true, "fingerprint": "chrome"}
+	}
+	relayCopyFields(tls, client,
+		"enabled", "engine", "disable_sni", "server_name", "insecure", "alpn", "min_version", "max_version",
+		"cipher_suites", "curve_preferences", "certificate", "certificate_path", "certificate_public_key_sha256",
+		"client_certificate", "client_certificate_path", "client_key", "client_key_path", "fragment", "fragment_fallback_delay",
+		"record_fragment", "spoof", "spoof_method", "kernel_tx", "kernel_rx", "handshake_timeout", "ech", "utls", "reality")
+	if quic {
+		// TLS profiles are shared with TCP protocols and normally include a
+		// default browser fingerprint. uTLS is TCP-only, not a QUIC security
+		// setting: retain certificate verification, SNI, ALPN and other native
+		// TLS parameters while using Go TLS for this hop.
+		delete(tls, "utls")
+	}
+	// Managed self-signed certificates can be trusted exactly, without the
+	// client having to disable verification. Never replace explicit trust
+	// settings, or pin a public-CA certificate that can rotate independently.
+	_, hasCertificate := client["certificate"]
+	_, hasCertificatePath := client["certificate_path"]
+	_, hasPin := client["certificate_public_key_sha256"]
+	if !mapBool(tls, "insecure") && !hasCertificate && !hasCertificatePath && !hasPin {
+		pem := relayCertificatePEM(server["certificate"])
+		if singbox.IsSelfSignedCert(pem) {
+			tls["certificate"] = pem
+		}
+	}
+	if reality, ok := server["reality"].(map[string]interface{}); ok && mapBool(reality, "enabled") {
+		r, _ := tls["reality"].(map[string]interface{})
+		if r == nil {
+			r = map[string]interface{}{}
+		}
+		r["enabled"] = true
+		if mapStr(r, "public_key") == "" {
+			// Inline REALITY profiles need no second stored copy of the public
+			// key. Derive it locally; only the public half leaves this renderer.
+			key, err := base64.RawURLEncoding.DecodeString(mapStr(reality, "private_key"))
+			if err != nil {
+				return nil, fmt.Errorf("invalid REALITY private key: %w", err)
+			}
+			private, err := ecdh.X25519().NewPrivateKey(key)
+			if err != nil {
+				return nil, fmt.Errorf("invalid REALITY private key: %w", err)
+			}
+			r["public_key"] = base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes())
+		}
+		if _, ok := r["short_id"]; !ok {
+			if sid, ok := reality["short_id"].(string); ok {
+				r["short_id"] = sid
+			} else {
+				r["short_id"] = firstShortID(reality["short_id"])
+			}
+		}
+		tls["reality"] = r
+		if _, ok := tls["utls"]; !ok {
+			tls["utls"] = map[string]interface{}{"enabled": true, "fingerprint": "chrome"}
+		}
+	}
+	return tls, nil
+}
+
+// TLS certificate is a Listable[string] in the native schema.
+func relayCertificatePEM(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case []string:
+		return strings.Join(v, "\n")
+	case []interface{}:
+		var lines []string
+		for _, line := range v {
+			if text, ok := line.(string); ok {
+				lines = append(lines, text)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	return ""
+}
+
+// NetworkList accepts a string or a list; absent/empty means both networks.
+func relayNetworkIncludes(value interface{}, network string) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return v == "" || v == network
+	case []string:
+		if len(v) == 0 {
+			return true
+		}
+		for _, item := range v {
+			if item == network {
+				return true
+			}
+		}
+	case []interface{}:
+		if len(v) == 0 {
+			return true
+		}
+		for _, item := range v {
+			if item == network {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -172,10 +172,17 @@ func TestMeteringRelayRejectsUnsupportedAndCycles(t *testing.T) {
 	for _, protocol := range []string{"mixed", "shadowsocks"} {
 		t.Run(protocol, func(t *testing.T) {
 			st, _, _, _, bi, _ := meteringRelayFixture(t)
+			// Preserve planner defense against a legacy invalid stored graph.
+			if err := st.SetSetting(RelayMeteringSetting, "false"); err != nil {
+				t.Fatal(err)
+			}
 			ib, _ := st.GetSbInbound(bi)
 			ib.Type = protocol
 			ib.Options = `{"method":"2022-blake3-chacha20-poly1305"}`
 			if _, err := st.SaveSbInbound(ib); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.SetSetting(RelayMeteringSetting, "true"); err != nil {
 				t.Fatal(err)
 			}
 			if st.PrepareRelayMetering() == nil {
@@ -184,9 +191,15 @@ func TestMeteringRelayRejectsUnsupportedAndCycles(t *testing.T) {
 		})
 	}
 	st, _, _, ai, bi, _ := meteringRelayFixture(t)
+	if err := st.SetSetting(RelayMeteringSetting, "false"); err != nil {
+		t.Fatal(err)
+	}
 	ib, _ := st.GetSbInbound(bi)
 	ib.UpstreamInboundID = ai
 	if _, err := st.SaveSbInbound(ib); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting(RelayMeteringSetting, "true"); err != nil {
 		t.Fatal(err)
 	}
 	if st.PrepareRelayMetering() == nil {

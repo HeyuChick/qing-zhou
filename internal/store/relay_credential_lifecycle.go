@@ -11,6 +11,7 @@ import (
 )
 
 type RelayCredentialView struct {
+	UserID     int64  `json:"user_id,omitempty"`
 	Kind       string `json:"kind"`
 	LinkID     int64  `json:"link_id"`
 	ServerID   int64  `json:"server_id"`
@@ -90,6 +91,11 @@ func (s *Store) RelayCredentialViews() ([]RelayCredentialView, error) {
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
+	userViews, err := s.relayUserCredentialViews()
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, userViews...)
 	for i := range out {
 		v := &out[i]
 		if v.Kind == "legacy" {
@@ -113,6 +119,9 @@ func (s *Store) RelayCredentialViews() ([]RelayCredentialView, error) {
 // passes after the last old-identity traffic. The administrator must separately
 // confirm that any manually configured consumers have also migrated.
 func (s *Store) canRetireRelayCredential(db txLike, v RelayCredentialView) error {
+	if v.Kind == "user_generation" {
+		return s.canRetireRelayUser(db, v)
+	}
 	var boundary int64
 	var name string
 	if v.Kind == "generation" {
@@ -213,6 +222,9 @@ func (s *Store) ChangeRelayCredential(actorID int64, v RelayCredentialView, acti
 	if err = tx.QueryRow(`SELECT value FROM settings WHERE key=?`, RelayMeteringSetting).Scan(&enabled); err != nil || enabled != "true" {
 		return fmt.Errorf("需要保持链路计量启用，不能与关闭操作交错")
 	}
+	if v.Kind != "user_generation" && v.UserID != 0 {
+		return fmt.Errorf("无效用户凭据标识")
+	}
 	if v.Kind == "legacy" && (v.LinkID != 0 || v.Generation != 0) {
 		return fmt.Errorf("无效旧共享凭据标识")
 	}
@@ -226,7 +238,9 @@ func (s *Store) ChangeRelayCredential(actorID int64, v RelayCredentialView, acti
 		}
 	}
 	now := time.Now().Unix()
-	if v.Kind == "legacy" {
+	if v.Kind == "user_generation" {
+		err = s.changeRelayUserCredential(tx, v, action, now)
+	} else if v.Kind == "legacy" {
 		state := "retiring"
 		if action == "restore" {
 			state = "restoring"
@@ -251,7 +265,7 @@ func (s *Store) ChangeRelayCredential(actorID int64, v RelayCredentialView, acti
 	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`INSERT INTO relay_credential_audit(actor_id,server_id,inbound_id,link_id,generation,action,ts) VALUES(?,?,?,?,?,?,?)`, actorID, v.ServerID, v.InboundID, v.LinkID, v.Generation, action, now); err != nil {
+	if _, err = tx.Exec(`INSERT INTO relay_credential_audit(actor_id,server_id,inbound_id,link_id,generation,action,ts,user_id) VALUES(?,?,?,?,?,?,?,?)`, actorID, v.ServerID, v.InboundID, v.LinkID, v.Generation, action, now, v.UserID); err != nil {
 		return err
 	}
 	return tx.Commit()

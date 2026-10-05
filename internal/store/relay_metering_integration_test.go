@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,16 +23,143 @@ import (
 	"qingzhou/internal/singbox"
 )
 
+type meteringPortReservation struct {
+	owner *testing.T
+	tcp   net.Listener
+	udp   net.PacketConn
+}
+
+var meteringPorts = struct {
+	sync.Mutex
+	next     int
+	reserved map[int]meteringPortReservation
+	used     map[int]bool
+}{next: 20000, reserved: map[int]meteringPortReservation{}, used: map[int]bool{}}
+
+func meteringEphemeralPortRange(t *testing.T) (int, int) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		// Linux CI verifies the kernel's actual range below. On other systems
+		// keep test listeners in the low non-privileged band and hold both
+		// socket reservations until startup; do not assume their system source
+		// port range was observed or changed by this fixture.
+		return 32768, 65535
+	}
+	raw, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		t.Fatalf("read Linux ephemeral port range without changing network settings: %v", err)
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) != 2 {
+		t.Fatalf("invalid Linux ephemeral port range %q", raw)
+	}
+	low, lowErr := strconv.Atoi(fields[0])
+	high, highErr := strconv.Atoi(fields[1])
+	if lowErr != nil || highErr != nil || low < 1 || high > 65535 || low > high {
+		t.Fatalf("invalid Linux ephemeral port range %q", raw)
+	}
+	return low, high
+}
+
 func meteringTestPort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	low, high := meteringEphemeralPortRange(t)
+	meteringPorts.Lock()
+	defer meteringPorts.Unlock()
+	// No port is issued twice during this test process, including ports of
+	// already-stopped cores. Reserving both transports also protects native
+	// QUIC and SS2022 listeners, not just the TCP stats endpoint.
+	for attempt := 0; attempt < 65535-1024+1; attempt++ {
+		port := meteringPorts.next
+		meteringPorts.next++
+		if meteringPorts.next > 65535 {
+			meteringPorts.next = 1024
+		}
+		if (port >= low && port <= high) || meteringPorts.used[port] {
+			continue
+		}
+		address := fmt.Sprintf("127.0.0.1:%d", port)
+		tcp, err := net.Listen("tcp4", address)
+		if err != nil {
+			continue // another process owns this candidate; no traffic was tried
+		}
+		udp, err := net.ListenPacket("udp4", address)
+		if err != nil {
+			tcp.Close()
+			continue
+		}
+		meteringPorts.reserved[port] = meteringPortReservation{owner: t, tcp: tcp, udp: udp}
+		meteringPorts.used[port] = true
+		t.Cleanup(func() {
+			meteringPorts.Lock()
+			defer meteringPorts.Unlock()
+			if lease, ok := meteringPorts.reserved[port]; ok && lease.owner == t {
+				lease.tcp.Close()
+				lease.udp.Close()
+				delete(meteringPorts.reserved, port)
+			}
+		})
+		return port
+	}
+	t.Fatal("no unused TCP+UDP loopback test port outside the ephemeral range")
+	return 0
+}
+
+// Release only the imminent core's listening sockets after its config check,
+// immediately before cmd.Start. Other cores' planned ports remain reserved.
+// Keeping listener ports outside Linux's actual ephemeral range closes the
+// remaining release-to-bind window against our own readiness/gRPC dialers.
+func releaseMeteringConfigPorts(t *testing.T, raw []byte, api string) {
+	t.Helper()
+	var config struct {
+		Inbounds []struct {
+			ListenPort int `json:"listen_port"`
+		} `json:"inbounds"`
+		Experimental struct {
+			V2RayAPI struct {
+				Listen string `json:"listen"`
+			} `json:"v2ray_api"`
+		} `json:"experimental"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Experimental.V2RayAPI.Listen != api {
+		t.Fatalf("fixture API %q differs from its actual configured listener %q", api, config.Experimental.V2RayAPI.Listen)
+	}
+	_, apiPort, err := net.SplitHostPort(api)
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	return port
+	port, err := strconv.Atoi(apiPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ports := map[int]bool{port: true}
+	for _, inbound := range config.Inbounds {
+		ports[inbound.ListenPort] = true
+	}
+	meteringPorts.Lock()
+	defer meteringPorts.Unlock()
+	// Validate the complete set before releasing any of it.
+	for port := range ports {
+		lease, ok := meteringPorts.reserved[port]
+		if !ok || lease.owner != t {
+			t.Fatalf("fixture port %d has no reservation owned by this test", port)
+		}
+	}
+	for port := range ports {
+		lease := meteringPorts.reserved[port]
+		if err := lease.tcp.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := lease.udp.Close(); err != nil {
+			t.Fatal(err)
+		}
+		delete(meteringPorts.reserved, port)
+	}
 }
+
 func startMeteringBox(t *testing.T, bin string, raw []byte, api string) *exec.Cmd {
 	t.Helper()
 	dir := t.TempDir()
@@ -49,6 +178,7 @@ func startMeteringBox(t *testing.T, bin string, raw []byte, api string) *exec.Cm
 	cmd := exec.CommandContext(ctx, bin, "run", "-c", path)
 	cmd.Stdout = log
 	cmd.Stderr = log
+	releaseMeteringConfigPorts(t, raw, api)
 	if err = cmd.Start(); err != nil {
 		cancel()
 		log.Close()

@@ -26,8 +26,16 @@ const MinSupported = "1.12.0"
 // ordering cannot establish this capability, including for future releases.
 const VisionFramingFixVersion = "1.14.2+qz-vmess.9b95ab8c9478"
 
+// TransportReadBufferFixVersion additionally contains the reviewed upstream
+// transport buffering fix 07512b10. Older Vision-only builds do not prove it.
+const TransportReadBufferFixVersion = "1.14.2+qz-vmess.9b95ab8c9478-transport.07512b10"
+
 func HasVisionFramingFix(version string) bool {
-	return version == VisionFramingFixVersion
+	return version == VisionFramingFixVersion || version == TransportReadBufferFixVersion
+}
+
+func HasTransportReadBufferFix(version string) bool {
+	return version == TransportReadBufferFixVersion
 }
 
 // Info is what the panel knows about one node's sing-box.
@@ -40,6 +48,8 @@ type Info struct {
 	HasV2RayAPI bool `json:"has_v2ray_api"`
 	// HasVisionFramingFix is true only for the explicitly reviewed core marker.
 	HasVisionFramingFix bool `json:"has_vision_framing_fix"`
+	// WS/HTTPUpgrade capability is independent from the older Vision-only fix.
+	HasTransportReadBufferFix bool `json:"has_transport_read_buffer_fix"`
 	// Raw is the first line of output, kept so an unparseable answer can still
 	// be shown to a human instead of an empty box.
 	Raw string `json:"raw"`
@@ -64,6 +74,7 @@ func Parse(out string) Info {
 		}
 	}
 	info.HasVisionFramingFix = HasVisionFramingFix(info.Version)
+	info.HasTransportReadBufferFix = HasTransportReadBufferFix(info.Version)
 	return info
 }
 

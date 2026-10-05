@@ -21,12 +21,13 @@
       </template>
       <p class="nv-note">
         这里显示每台机器最近检测到的内核版本；普通重新检测读取已安装文件，更换磁盘文件不代表运行中的进程已更新。
-        P1 Vision 路径还会在下发前后核验实际运行的内核；预检不通过时不切换该路径，运行能力复核通过后才确认下发。
+        逐用户中转的 Vision、WebSocket/HTTPUpgrade 路径还会在下发前后核验实际运行的内核；预检不通过时不切换该路径，运行能力复核通过后才确认下发。
         面板生成的配置要求 <b>sing-box ≥ {{ minSupported }}</b>；低于这个版本，节点的
         <code>sing-box check</code> 会失败，面板会<b>停止向它下发任何配置</b>（旧配置继续跑，所以表面看不出来）。
         「重装」装的是<b>面板自己发布的构建</b>（随面板版本走，含流量统计所需的 <code>v2ray_api</code>），
         官方版不带这个插件，无法提供所需流量统计；官方 1.14.2 也不含本次 Vision 分片修复。
-        P1 Vision 需路径上的相关节点都运行已审定的修复内核<span v-if="visionFixedVersion">：<code>{{ visionFixedVersion }}</code></span>。
+        Vision 路径需相关节点运行带 Vision 修复的内核<span v-if="visionFixedVersion">：<code>{{ visionFixedVersion }}</code></span>。
+        WebSocket/HTTPUpgrade 路径另需缓冲修复<span v-if="transportFixedVersion">：<code>{{ transportFixedVersion }}</code></span>；旧 Vision 专用版本不包含这项修复，不能仅凭版本较新判断支持。
       </p>
       <div v-if="versions.length" class="nv-list">
         <div v-for="n in versions" :key="n.server_id" class="nv-row">
@@ -37,6 +38,7 @@
             <n-tag v-else-if="!n.version" type="default" size="tiny" :bordered="false">未知</n-tag>
             <n-tag v-if="n.version && !n.has_v2ray_api" type="error" size="tiny" :bordered="false">缺少 with_v2ray_api</n-tag>
             <n-tag v-if="n.version" :type="n.has_vision_framing_fix ? 'info' : 'default'" size="tiny" :bordered="false">{{ n.has_vision_framing_fix ? '版本含 Vision 修复标记' : '未确认 Vision 修复' }}</n-tag>
+            <n-tag v-if="n.version" :type="n.has_transport_read_buffer_fix ? 'info' : 'default'" size="tiny" :bordered="false">{{ n.has_transport_read_buffer_fix ? '版本含 WS/HTTPUpgrade 修复标记' : '未确认 WS/HTTPUpgrade 修复' }}</n-tag>
           </div>
           <div class="nv-side">
             <span v-if="n.checked_at" class="nv-time">{{ fmtDateTime(n.checked_at) }}</span>
@@ -379,6 +381,7 @@ function disposeTrafficChart(){ trafficChart.value?.dispose(); trafficChart.valu
 const versions = ref<any[]>([])
 const minSupported = ref('1.12.0')
 const visionFixedVersion = ref('')
+const transportFixedVersion = ref('')
 const verLoading = ref(false)
 
 async function loadVersions(){
@@ -387,6 +390,7 @@ async function loadVersions(){
     versions.value = d?.nodes || []
     if (d?.min_supported) minSupported.value = d.min_supported
     visionFixedVersion.value = d?.vision_fixed_version || ''
+    transportFixedVersion.value = d?.transport_fixed_version || ''
   }catch(e:any){ message.error(e?.message || '读取节点版本失败') }
 }
 

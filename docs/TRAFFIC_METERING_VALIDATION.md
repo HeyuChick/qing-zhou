@@ -4,14 +4,20 @@
 
 **状态约定：** `通过`必须对应具体commit、命令、环境和日志；阻塞、跳过及未执行都不等于通过。实现仍有变更时，早先通过不自动覆盖最新版本。[PR #84检查](https://github.com/mllt992/qing-zhou/pull/84/checks)中对应最新commit的原始CI日志是验收证据，发布说明给出最终结论；本文提供可复现清单，不预填未知的最终结果。
 
+## 全协议扩展的验收入口
+
+全协议扩展的范围和具体路径以[协议矩阵](TRAFFIC_PROTOCOL_MATRIX.md)及同commit原始日志为准。下文PR #84、v0.2.87的结果属于早先VLESS/mixed范围，不能作为本次VMess、Trojan、QUIC协议、AnyTLS、SS2022或跨协议路径通过的证据。
+
+新增`TestMeteringRelayRealSingboxProtocolMatrix`分别执行每条路径的`config-check`与`traffic`，两个阶段不能互相替代。普通测试中的`TestRelayProtocol...`只证明状态机、认证匹配或配置逻辑；未设置固定核心二进制而跳过真实测试时，须记为未执行。候选核心仍使用下文同一固定源码构建，不退回旧Vision核心。
+
 ## 发布验收清单
 
 按拟发布commit逐项查看原始日志，确认实际执行而非skip：
 
 - Go全量race、vet、build，前端单测及生产build，安装脚本语法
 - 按固定官方源码/模块构建候选统计核心，核对完整版本标记与provenance，再执行配置check及P0真实双核心TCP
-- P1两核心mixed → VLESS、两核心VLESS → VLESS，同路径双用户TCP/UDP
-- P1三核心VLESS，双中转用户与第三用户直连中间跳，TCP/UDP及精确入口扣费
+- P1原有mixed/VLESS回归，及49条全协议/传输路径，同路径双用户TCP/UDP；逐项核对config-check与traffic均实际执行
+- P1原有三核心VLESS及三组跨协议三跳，双中转用户与第三用户直连中间跳，TCP/UDP及精确入口扣费
 - P1两核心普通TLS＋Vision、WebSocket＋TLS，各自的`config-check`与`traffic`子测试；候选修复核心还需重复TLS/Vision压力，不能用一次偶然通过代替
 - 生命周期、实际进程/配置边界，以及可信边界建立后的no-op；P1 Vision相关节点运行核心的修复能力探测，包括旧普通1.14.2、探测失败和过期证据不能放行的用例
 - 100/1000用户SQL和配置规模诊断；若有实际核心RSS结果，确认它对应真实启动的核心，而非仅Go分配量
@@ -39,7 +45,7 @@
 仓库根目录执行常规检查：
 
 ```sh
-go test -race -timeout=20m ./...
+go test -race -timeout=30m ./...
 go vet ./...
 go build ./...
 bash -n internal/assets/install-singbox.sh
@@ -149,7 +155,7 @@ go test ./internal/store ./internal/singbox -count=1 -v
 - 重复无变化规划/编译，配置字节、内部凭据及状态收敛稳定；已验证应用后，相同配置不应再次重启。首次历史统计名分离允许为建立可信进程边界做一次受控重启，并验证之后不重复重启
 - 从末端到入口分阶段应用；目标未接受前上游不切换。新增用户、目标规格变化及凭据代次变化不能沿用旧确认
 - 确认实际加载的入站认证字段与正确的`auth_user`规则；缺规则、通配规则、错误用户/outbound、提前覆盖、反向或附加限制规则均不能错误标为就绪
-- 同机跳转、环路和P1不支持协议被拒绝；拒绝后不静默改直连
+- 同机跳转、环路和原生范围外协议被拒绝；拒绝后不静默改直连
 - 覆盖账号改名/转让、权益到期、用户删除、链路删除/移动以及晚到旧代样本，旧记录不换归属或转扣其他用户
 - 覆盖旧共享凭据停用/恢复状态、待入库阻塞、两次安静采集及手工消费者确认；没有自动撤销旧兼容
 - 旧`relay_N` mixed账号：只改变系统统计名，保留客户和旧中转线上凭据；desired JSON或磁盘hash单独不足以证明运行配置。实际受管配置/进程边界未验证时保持缺口，不猜扣
@@ -165,7 +171,7 @@ go test ./internal/store ./internal/singbox -count=1 -v
 - 面板重启、重复ID、内容冲突、同秒乱序、进程跨代、同代计数回退及旧代晚到均有断言；不能用PID或秒级时间替代真实顺序/代次
 - 报表按一致数据库读快照返回，`users`、`sources`和总量不能因并发写入互相矛盾；读报表不应抢占SQLite写锁
 - `observed_user_coverage_complete`与`attribution_ready`分别测试：共享兼容仍存在但本窗口没有未分配流量时，前者可真、后者为假；pending、缺口和无观测时不宣称完整
-- 迁移4之后追加5/6/7；失败回滚及重启不重复建代次/回填/扣费。用升级前一致数据库备份与原密钥做隔离恢复演练，禁止把新数据库交给旧二进制当作回退
+- 迁移4之后追加5/6/7/8（含逐用户认证HMAC与升级后重新确认）；失败回滚及重启不重复建代次/回填/扣费。用升级前一致数据库备份与原密钥做隔离恢复演练，禁止把新数据库交给旧二进制当作回退
 
 相关测试文件包括`traffic_identity_compat_test.go`、`legacy_relay_identity_test.go`、`relay_metering_users_test.go`、`relay_metering_test.go`、`relay_credential_lifecycle_test.go`、`traffic_ledger_report_test.go`及`internal/sbctl/traffic_snapshot_test.go`。应按最终测试清单核对覆盖，不能从文件名推断未写出的断言。
 
