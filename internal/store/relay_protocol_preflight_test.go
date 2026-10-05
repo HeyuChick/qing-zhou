@@ -7,7 +7,8 @@ func TestRelayProtocolPreflightRejectsInvalidTLSAtomically(t *testing.T) {
 		for _, side := range []int{0, 1} {
 			t.Run(protocol+[]string{"-source", "-target"}[side], func(t *testing.T) {
 				f := newUserMeteringFixture(t, 2)
-				if err := f.st.ConfigureTrafficMetering(true, false, false); err != nil {
+				// Build a legacy invalid graph with both modes off; enabled saves now reject it.
+				if err := f.st.ConfigureTrafficMetering(false, false, false); err != nil {
 					t.Fatal(err)
 				}
 				ib, err := f.st.GetSbInbound(f.inbounds[side])

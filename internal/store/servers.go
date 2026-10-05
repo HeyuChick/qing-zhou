@@ -161,9 +161,14 @@ func (s *Store) CreateServer(sv Server) (int64, error) {
 }
 
 func (s *Store) UpdateServer(sv Server) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	now := time.Now().Unix()
 	applyServerMonitorDefaults(&sv)
-	_, err := s.db.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, expiry_notify_enabled=?, expiry_notify_days=?, expiry_notify_mode=?, expiry_notify_count=?, traffic_limit_bytes=?, traffic_reset_day=?, traffic_reset_minute=?, traffic_alert_percent=?, traffic_accounting_mode=?, provider=?, location=?, spec=?, price=?, notes=?, public_visible=?, public_show_traffic=?, public_show_price=?, use_sudo=?, sudo_password=?, ssh_key_path=? WHERE id=?`,
+	_, err = tx.Exec(`UPDATE servers SET name=?, host=?, port=?, ssh_user=?, ssh_key=?, ssh_key_pass=?, ssh_password=?, config_path=?, systemd_unit=?, sing_box_bin=?, v2ray_listen=?, enabled=?, updated_at=?, probe_enabled=?, probe_token=?, probe_token_hash=?, expiry_date=?, expiry_notify_enabled=?, expiry_notify_days=?, expiry_notify_mode=?, expiry_notify_count=?, traffic_limit_bytes=?, traffic_reset_day=?, traffic_reset_minute=?, traffic_alert_percent=?, traffic_accounting_mode=?, provider=?, location=?, spec=?, price=?, notes=?, public_visible=?, public_show_traffic=?, public_show_price=?, use_sudo=?, sudo_password=?, ssh_key_path=? WHERE id=?`,
 		sv.Name, sv.Host, sv.Port, sv.SSHUser, s.encrypt(sv.SSHKey), s.encrypt(sv.SSHKeyPass), s.encrypt(sv.SSHPassword),
 		sv.ConfigPath, sv.SystemdUnit, sv.SingBoxBin, sv.V2rayListen,
 		b2i(sv.Enabled), now, b2i(sv.ProbeEnabled), s.encrypt(sv.ProbeToken), hashProbeToken(sv.ProbeToken), sv.ExpiryDate,
@@ -171,7 +176,13 @@ func (s *Store) UpdateServer(sv Server) error {
 		sv.TrafficLimitBytes, sv.TrafficResetDay, sv.TrafficResetMinute, sv.TrafficAlertPercent, sv.TrafficAccountingMode,
 		sv.Provider, sv.Location, sv.Spec, sv.Price, sv.Notes, b2i(sv.PublicVisible), b2i(sv.PublicShowTraffic), b2i(sv.PublicShowPrice),
 		b2i(sv.UseSudo), s.encrypt(sv.SudoPassword), sv.SSHKeyPath, sv.ID)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := s.validateRelayTopologySave(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReorderServers persists the complete administrator-facing server order.
@@ -228,21 +239,35 @@ func (s *Store) EnableServerProbe(id int64, token string) error {
 }
 
 func (s *Store) DeleteServer(id int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	// Refuse deletion while inbounds/TLS are still bound to this server, else
 	// they become undeployable orphans (server_id points at nothing).
 	var n int
-	_ = s.db.QueryRow(`SELECT
+	err = tx.QueryRow(`SELECT
 		(SELECT COUNT(*) FROM sb_inbounds WHERE server_id=?) +
 		(SELECT COUNT(*) FROM sb_tls WHERE server_id=?)`, id, id).Scan(&n)
+	if err != nil {
+		return err
+	}
 	if n > 0 {
 		return fmt.Errorf("%w：仍有 %d 个入站/TLS 绑定到此服务器，请先改绑或删除", ErrInUse, n)
 	}
-	if _, err := s.db.Exec(`DELETE FROM servers WHERE id=?`, id); err != nil {
+	if _, err := tx.Exec(`DELETE FROM servers WHERE id=?`, id); err != nil {
 		return err
 	}
 	// Drop the observed sing-box state with it; a row describing a server that
 	// no longer exists would keep showing up in the node version list.
-	return s.DeleteNodeSingbox(id)
+	if _, err := tx.Exec(`DELETE FROM node_singbox WHERE server_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM node_vision_runtime WHERE server_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateServerStatus(id int64, status string) error {

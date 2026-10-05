@@ -115,7 +115,12 @@ func NodeDisplayName(n *Node) string {
 }
 
 func (s *Store) CreateNode(n Node) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO nodes
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO nodes
 		(type, name, remark, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		n.Type, n.Name, n.Remark, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, n.SourceID,
@@ -125,24 +130,37 @@ func (s *Store) CreateNode(n Node) (int64, error) {
 	}
 	id, _ := res.LastInsertId()
 	if n.GroupIDs != nil {
-		if err := s.SetNodeGroups(id, n.GroupIDs); err != nil {
+		if err := setNodeGroupsWith(tx, id, n.GroupIDs); err != nil {
 			return id, err
 		}
 	}
-	return id, nil
+	if err := s.validateRelayTopologySave(tx); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
 func (s *Store) UpdateNode(n Node) error {
-	_, err := s.db.Exec(`UPDATE nodes SET
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE nodes SET
 		type=?, name=?, remark=?, protocol=?, inbound_tag=?, route_upstream_inbound_id=?, route_upstream_broken=?, share_link=?, enabled=?, sort_order=? WHERE id=?`,
 		n.Type, n.Name, n.Remark, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, boolToInt(n.Enabled), n.SortOrder, n.ID)
 	if err != nil {
 		return err
 	}
 	if n.GroupIDs != nil {
-		return s.SetNodeGroups(n.ID, n.GroupIDs)
+		if err := setNodeGroupsWith(tx, n.ID, n.GroupIDs); err != nil {
+			return err
+		}
 	}
-	return nil
+	if err := s.validateRelayTopologySave(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReorderNodes sets sort_order to each id's position in the given slice, so the
@@ -262,6 +280,13 @@ func (s *Store) SetNodeGroups(nodeID int64, groupIDs []int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := setNodeGroupsWith(tx, nodeID, groupIDs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func setNodeGroupsWith(tx *sql.Tx, nodeID int64, groupIDs []int64) error {
 	if _, err := tx.Exec(`DELETE FROM node_group_members WHERE node_id=?`, nodeID); err != nil {
 		return err
 	}
@@ -270,7 +295,7 @@ func (s *Store) SetNodeGroups(nodeID int64, groupIDs []int64) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) NodeGroupIDs(nodeID int64) ([]int64, error) {

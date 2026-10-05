@@ -554,6 +554,9 @@ func (s *Store) configureTrafficMetering(links, cumulative, apply bool, perUser 
 	if userMetering && !links {
 		return fmt.Errorf("逐用户机器观测需要保持中转链路计量启用")
 	}
+	if err = s.validateRelayTopologyForSettings(tx, links, userMetering); err != nil {
+		return err
+	}
 	if userMetering {
 		if err = s.validateRelayUserMeteringTopology(tx); err != nil {
 			return err

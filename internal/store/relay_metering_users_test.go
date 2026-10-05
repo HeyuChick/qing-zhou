@@ -524,7 +524,8 @@ func TestRelayMeteringUsersActivationPreflightIsAtomic(t *testing.T) {
 	for _, problem := range []string{"same-machine", "cycle", "disabled-target", "unsupported-target", "unsupported-source", "unsupported-ss-method"} {
 		t.Run(problem, func(t *testing.T) {
 			f := newUserMeteringFixture(t, 3)
-			if err := f.st.ConfigureTrafficMetering(true, false, false); err != nil {
+			// Simulate a legacy invalid graph; metering-enabled saves reject it now.
+			if err := f.st.ConfigureTrafficMetering(false, false, false); err != nil {
 				t.Fatal(err)
 			}
 			target, err := f.st.GetSbInbound(f.inbounds[2])
