@@ -632,7 +632,8 @@ func TestRelayMeteringProtocolAuthMigrationUpgradeAndRetry(t *testing.T) {
 			// contains genuine prepared/applied identities, rather than fabricated
 			// credentials that could not have passed the previous planner.
 			const version = "000008_relay_protocol_auth_verification"
-			if _, err := f.st.db.Exec(`DROP TABLE relay_user_retirements;
+			if _, err := f.st.db.Exec(`DROP TABLE node_source_key_aliases;
+ DROP TABLE relay_user_retirements;
  ALTER TABLE relay_credential_audit DROP COLUMN user_id;
  DROP INDEX idx_traffic_polls_server_state_time;
  DROP INDEX idx_traffic_observations_identity_positive;

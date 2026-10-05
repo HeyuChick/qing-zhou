@@ -111,7 +111,7 @@ func TestRelaySemanticSpecLegacyUpgradeWithoutRotation(t *testing.T) {
 				t.Fatal(err)
 			}
 			if migrate {
-				if _, err = f.st.db.Exec(`DROP TABLE relay_user_retirements; ALTER TABLE relay_credential_audit DROP COLUMN user_id; DROP INDEX idx_traffic_polls_server_state_time; DROP INDEX idx_traffic_observations_identity_positive; ALTER TABLE relay_metering_users DROP COLUMN source_auth_hashes; DELETE FROM schema_migrations WHERE version>='000008_relay_protocol_auth_verification'`); err != nil {
+				if _, err = f.st.db.Exec(`DROP TABLE node_source_key_aliases; DROP TABLE relay_user_retirements; ALTER TABLE relay_credential_audit DROP COLUMN user_id; DROP INDEX idx_traffic_polls_server_state_time; DROP INDEX idx_traffic_observations_identity_positive; ALTER TABLE relay_metering_users DROP COLUMN source_auth_hashes; DELETE FROM schema_migrations WHERE version>='000008_relay_protocol_auth_verification'`); err != nil {
 					t.Fatal(err)
 				}
 				if err = f.st.runMigrations(f.st.migrations()[:7]); err != nil {

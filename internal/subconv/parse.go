@@ -18,18 +18,19 @@ import (
 
 // Proxy is a normalized node parsed from a share link.
 type Proxy struct {
-	Raw      string
-	Protocol string // vless | vmess | ss | trojan | hysteria2 | tuic
-	Name     string
-	Server   string
-	Port     int
-	UUID     string
-	Password string
-	Method   string // ss cipher
-	AlterID  int    // vmess
-	Params   url.Values
-	VMess    map[string]any
-	AI       bool // belongs to at least one accessible admin-marked AI group
+	Raw              string
+	Protocol         string // vless | vmess | ss | trojan | hysteria2 | tuic
+	Name             string
+	Server           string
+	Port             int
+	UUID             string
+	Password         string
+	Method           string // ss cipher
+	AlterID          int    // vmess
+	Params           url.Values
+	VMess            map[string]any
+	SourceLegacyKeys []string `json:"-"` // generated only from raw Clash objects, never URI key claims
+	AI               bool     // belongs to at least one accessible admin-marked AI group
 }
 
 func b64decode(s string) ([]byte, error) {

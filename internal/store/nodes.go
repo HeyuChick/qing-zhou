@@ -10,20 +10,21 @@ import (
 )
 
 type Node struct {
-	ID                     int64   `json:"id"`
-	Type                   string  `json:"type"` // self_built | external
-	Name                   string  `json:"name"`
-	Remark                 string  `json:"remark"`
-	Protocol               string  `json:"protocol"`
-	InboundTag             string  `json:"inbound_tag"`
-	RouteUpstreamInboundID int64   `json:"route_upstream_inbound_id"`
-	RouteUpstreamBroken    bool    `json:"route_upstream_broken"`
-	ShareLink              string  `json:"share_link"`
-	SourceID               int64   `json:"source_id"`
-	Enabled                bool    `json:"enabled"`
-	SortOrder              int64   `json:"sort_order"`
-	CreatedAt              int64   `json:"created_at"`
-	GroupIDs               []int64 `json:"group_ids,omitempty"`
+	ImportLegacyKeys       []string `json:"-"` // transient candidates from trusted importer code; verified against source cache
+	ID                     int64    `json:"id"`
+	Type                   string   `json:"type"` // self_built | external
+	Name                   string   `json:"name"`
+	Remark                 string   `json:"remark"`
+	Protocol               string   `json:"protocol"`
+	InboundTag             string   `json:"inbound_tag"`
+	RouteUpstreamInboundID int64    `json:"route_upstream_inbound_id"`
+	RouteUpstreamBroken    bool     `json:"route_upstream_broken"`
+	ShareLink              string   `json:"share_link"`
+	SourceID               int64    `json:"source_id"`
+	Enabled                bool     `json:"enabled"`
+	SortOrder              int64    `json:"sort_order"`
+	CreatedAt              int64    `json:"created_at"`
+	GroupIDs               []int64  `json:"group_ids,omitempty"`
 }
 
 const nodeCols = `id, type, name, remark, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at`
@@ -590,6 +591,10 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int6
 	if groupIDs == nil {
 		groupIDs = unmarshalGroupIDs(storedGroups)
 	}
+	compatibility, err := s.prepareSourceNodeAliases(tx, sourceID, nodes)
+	if err != nil {
+		return err
+	}
 	preservedOrder := map[string]int64{}
 	rows, err := tx.Query(`SELECT share_link, sort_order FROM nodes WHERE source_id=?`, sourceID)
 	if err != nil {
@@ -643,6 +648,9 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int6
 				}
 			}
 		}
+	}
+	if err = s.replaceSourceNodeAliases(tx, sourceID, compatibility); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`UPDATE node_sources SET last_fetched=?, last_count=?, last_error=?, group_ids=? WHERE id=?`,
 		now, len(nodes), fetchErr, marshalGroupIDs(groupIDs), sourceID); err != nil {

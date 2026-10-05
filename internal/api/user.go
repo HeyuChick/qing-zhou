@@ -1184,6 +1184,19 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	}
 
 	nodes, _ := a.st.NodesInGroupsTagged(groupIDs)
+	sourceIDs := []int64{}
+	seenSource := map[int64]bool{}
+	for _, node := range nodes {
+		if node.SourceID > 0 && !seenSource[node.SourceID] {
+			sourceIDs = append(sourceIDs, node.SourceID)
+			seenSource[node.SourceID] = true
+		}
+	}
+	sourceAliases, err := a.st.SourceNodeKeyAliases(sourceIDs)
+	// Never bypass a disabled preference when compatibility metadata is unreadable.
+	if err != nil {
+		return nil
+	}
 	type nodeMeta struct {
 		groupID       int64
 		isAI          bool
@@ -1197,7 +1210,7 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	for _, n := range nodes {
 		switch n.Type {
 		case "external":
-			add(subconv.WithLinkRemark(n.ShareLink, n.Remark), n.GroupID, gname[n.GroupID], "", 0, false, n.IsAI, n.SortOrder, n.ID)
+			add(subconv.WithLinkRemark(n.ShareLink, n.Remark), n.GroupID, gname[n.GroupID], "", 0, false, n.IsAI, n.SortOrder, n.ID, sourceAliases[n.SourceID][subconv.NodeKey(n.ShareLink)])
 		case "self_built":
 			if n.InboundTag != "" {
 				if n.RouteUpstreamInboundID == 0 {

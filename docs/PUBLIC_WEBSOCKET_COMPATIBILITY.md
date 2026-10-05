@@ -48,3 +48,11 @@ VLESS/Trojan 历史直接调用 `BuildShareLink` 仍默认 TLS。新增 `TLSDisa
 读取不会修改用户偏好。若两个新节点曾共用一个旧 key，用户明确启用其中一个时，同一事务先为仍应禁用的兄弟节点保存各自当前 key，再删除共享旧 key；写入失败整体回滚，不能顺带启用另一节点。冻结旧 serializer 字节、真实 store 导出、API 可信 alias、共享 key 负例与事务失败测试覆盖该兼容路径。
 
 Surge 对空格后的 `#`、`;`、`//` 采用行内注释语义，因此不能安全编码的必需字段会明确省略；名称单独清理，重名后缀使用 `(2)`，避免 ` #2` 把整行后半段包括 TLS 设置注释掉。依据：[Surge profile 语法](https://manual.nssurge.com/profile/format.html)、[Mihomo WS runtime](https://github.com/MetaCubeX/mihomo/blob/Meta/transport/vmess/websocket.go)。
+
+### 外部 Clash 源刷新
+
+外部 YAML 订阅也是链接重生成入口。追加迁移 `000010_source_node_key_aliases`，按 source_id 与完整当前 NodeKey 保存已证明的旧 key；不改历史迁移，也不在运行时临时建表。原始 YAML 先经冻结旧 importer 计算候选，只有该 source 的旧缓存真实存在相同 key 才建立别名，不能按显示名猜配对。外部 URI 自带的 alias 字段没有权限生成兼容记录；host/凭据改变或另一 source 的同名节点不继承。
+
+节点替换、已证明别名记录和刷新状态在同一事务里提交。失败全部回滚。元数据重复刷新不重复增长；暂时缺项仍保留已证明的 hash 记录，防节点返回后旧禁用选择失效；删除 source 通过外键级联清理其兼容记录。刷新/读取不修改 user_disabled_nodes；只有用户明确启用才执行上文的共享 key 安全展开。
+
+端到端测试覆盖原始 YAML → 实际 fetchSource → 内部节点清单 → disabled UI → 订阅仍隐藏 → 用户明确启用；另覆盖跨源、实际 host/凭据变化、重复刷新、暂时缺项、源删除、共享旧 key、事务与迁移失败。升级后旧二进制会拒绝未知版本10；若必须降级，保留当前数据并使用配套升级前快照，不能删除版本标记强行启动。

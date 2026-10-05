@@ -425,7 +425,7 @@ func (a *API) fetchSource(ctx context.Context, src *store.NodeSource, groupIDs [
 	}
 	nodes := make([]store.Node, 0, len(proxies))
 	for _, p := range proxies {
-		nodes = append(nodes, store.Node{Name: p.Name, Protocol: p.Protocol, ShareLink: p.Raw})
+		nodes = append(nodes, store.Node{Name: p.Name, Protocol: p.Protocol, ShareLink: p.Raw, ImportLegacyKeys: p.SourceLegacyKeys})
 	}
 	if err := a.st.ReplaceSourceNodes(src.ID, nodes, groupIDs, ""); err != nil {
 		return failed(err)

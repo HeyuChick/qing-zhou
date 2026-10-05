@@ -41,6 +41,9 @@ func ParseClashYAML(blob string) []*Proxy {
 			continue
 		}
 		if p, err := ParseLink(link); err == nil {
+			if previous := legacyClashToLink(m); previous != "" && previous != link {
+				p.SourceLegacyKeys = NodeKeys(previous)
+			}
 			out = append(out, p)
 		}
 	}
