@@ -557,17 +557,57 @@ func runRelaySharedUserPath(t *testing.T, bin string, coreInfo sbver.Info, scena
 		return out
 	}
 	get := func(s snapshot, hop int, uid int64) UsageDelta {
+		if hop >= len(s) {
+			return UsageDelta{}
+		}
 		v := s[hop][counterNames[hop][uid]]
 		if v == nil {
 			return UsageDelta{}
 		}
 		return UsageDelta{Up: v.Up, Down: v.Down}
 	}
+	readSettled := func(phase string, before snapshot, completed map[int64]UsageDelta) snapshot {
+		t.Helper()
+		started := time.Now()
+		state := relayFixtureCounterSettler{
+			targets:  map[relayFixtureCounterID]relayFixtureCounterTarget{},
+			deadline: started.Add(2 * time.Second), stableFor: 50 * time.Millisecond,
+		}
+		for hop := range machines {
+			for _, c := range customers {
+				base := get(before, hop, c.uid)
+				delta, active := completed[c.uid]
+				active = active && hop >= c.entryHop
+				target := relayFixtureCounterTarget{Before: base, Minimum: base, Frozen: !active}
+				if active {
+					target.Minimum.Up += delta.Up
+					target.Minimum.Down += delta.Down
+				}
+				state.targets[relayFixtureCounterID{Hop: hop, Owner: c.uid}] = target
+			}
+		}
+		for {
+			actual := read()
+			sample := relayFixtureCounterSample{}
+			for key := range state.targets {
+				sample[key] = get(actual, key.Hop, key.Owner)
+			}
+			ready, err := state.observe(time.Now(), sample)
+			if err != nil {
+				t.Fatalf("counter visibility phase=%s samples=%d elapsed=%s first=%+v last=%+v targets=%+v: %v", phase, state.samples, time.Since(started), state.first, state.last, state.targets, err)
+			}
+			if ready {
+				t.Logf("counter visibility phase=%s samples=%d elapsed=%s first=%+v settled=%+v (read-only polling, no traffic retried)", phase, state.samples, time.Since(started), state.first, state.last)
+				return actual
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	tcpStarted := time.Now()
 	if err := request(customers[0]); err != nil {
 		t.Fatal(err)
 	}
-	first := read()
+	first := readSettled("TCP-first-user", nil, map[int64]UsageDelta{customers[0].uid: {Up: int64(customers[0].payload / 256), Down: int64(customers[0].payload)}})
 	for hop := range machines {
 		a, b := get(first, hop, customers[0].uid), get(first, hop, customers[1].uid)
 		if a.Down < int64(customers[0].payload) || a.Up == 0 || b != (UsageDelta{}) {
@@ -577,18 +617,20 @@ func runRelaySharedUserPath(t *testing.T, bin string, coreInfo sbver.Info, scena
 	if err := request(customers[1]); err != nil {
 		t.Fatal(err)
 	}
-	second := read()
+	second := readSettled("TCP-second-user", first, map[int64]UsageDelta{customers[1].uid: {Up: int64(customers[1].payload / 256), Down: int64(customers[1].payload)}})
 	for hop := range machines {
 		a, b := get(second, hop, customers[0].uid), get(second, hop, customers[1].uid)
 		if a != get(first, hop, customers[0].uid) || b.Down < int64(customers[1].payload) || b.Up == 0 || b.Down <= a.Down {
 			t.Fatalf("second user altered another owner's counter on hop %d: A=%+v B=%+v", hop, a, b)
 		}
 	}
+	sequentialTCP := second
 	if len(customers) == 3 {
 		if err := request(customers[2]); err != nil {
 			t.Fatal(err)
 		}
-		third := read()
+		third := readSettled("TCP-middle-entry-user", second, map[int64]UsageDelta{customers[2].uid: {Up: int64(customers[2].payload / 256), Down: int64(customers[2].payload)}})
+		sequentialTCP = third
 		if get(third, 0, customers[2].uid) != (UsageDelta{}) {
 			t.Fatal("direct-middle customer appeared on the upstream machine")
 		}
@@ -633,7 +675,11 @@ func runRelaySharedUserPath(t *testing.T, bin string, coreInfo sbver.Info, scena
 	t.Logf("completed stress batches=%d concurrent_requests_per_batch=%d without retry", batches, 4*len(customers))
 	tcpElapsed := time.Since(tcpStarted)
 	t.Logf("synthetic_loopback TCP completed_application_bytes=%d traffic_phase_elapsed=%s application_MiB_per_second=%.3f (includes sequential probes and concurrent requests; not WAN capacity)", tcpCompletedBytes, tcpElapsed, float64(tcpCompletedBytes)/(1<<20)/tcpElapsed.Seconds())
-	finalTCP := read()
+	tcpCompleted := map[int64]UsageDelta{}
+	for _, c := range customers {
+		tcpCompleted[c.uid] = UsageDelta{Up: int64(4 * batches * c.payload / 256), Down: int64(4 * batches * c.payload)}
+	}
+	finalTCP := readSettled("TCP-concurrent-users", sequentialTCP, tcpCompleted)
 	echo, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -661,7 +707,7 @@ func runRelaySharedUserPath(t *testing.T, bin string, coreInfo sbver.Info, scena
 		}); err != nil {
 			t.Fatalf("owner %d UDP: %v", c.uid, err)
 		}
-		afterUDP := read()
+		afterUDP := readSettled(fmt.Sprintf("UDP-owner-%d", c.uid), beforeUDP, map[int64]UsageDelta{c.uid: {Up: int64(3 * len(payload)), Down: int64(3 * len(payload))}})
 		for hop := range machines {
 			for _, other := range customers {
 				got, before := get(afterUDP, hop, other.uid), get(beforeUDP, hop, other.uid)
@@ -701,7 +747,11 @@ func runRelaySharedUserPath(t *testing.T, bin string, coreInfo sbver.Info, scena
 	for err := range udpErrors {
 		t.Fatal(err)
 	}
-	afterConcurrentUDP := read()
+	udpCompleted := map[int64]UsageDelta{}
+	for i, c := range customers {
+		udpCompleted[c.uid] = UsageDelta{Up: int64(3 * (313 + i*214)), Down: int64(3 * (313 + i*214))}
+	}
+	afterConcurrentUDP := readSettled("UDP-concurrent-users", beforeUDP, udpCompleted)
 	for i, c := range customers {
 		for hop := range machines {
 			got, before := get(afterConcurrentUDP, hop, c.uid), get(beforeUDP, hop, c.uid)

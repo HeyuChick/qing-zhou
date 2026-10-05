@@ -88,13 +88,20 @@ func (p relayProtocolFixture) transport() map[string]any {
 	}
 }
 
-// Custom V2Ray ALPN is exercised with TLS transports. QUIC protocols use
-// their native ALPN defaults; imposing HTTP/2 ALPN on QUIC would be invalid.
+// Transport-specific ALPN follows the actual wire protocol. HTTP and gRPC
+// use HTTP/2, while WS/HTTPUpgrade require HTTP/1.1 upgrades. This fixture
+// correction does not work around or fix HTTPUpgrade buffered-byte loss.
+// Native QUIC protocols keep their own defaults; V2Ray QUIC explicitly uses h3.
 func (p relayProtocolFixture) alpn() []string {
 	if !p.hasTLS() {
 		return nil
 	}
-	if p.tlsMode == "quic-tls" {
+	switch p.tlsMode {
+	case "ws-tls", "httpupgrade-tls":
+		return []string{"http/1.1"}
+	case "http-tls", "grpc-tls":
+		return []string{"h2"}
+	case "quic-tls":
 		return []string{"h3"}
 	}
 	switch p.protocol {
@@ -512,4 +519,22 @@ func TestRelayProtocolTrafficMatrixCoverage(t *testing.T) {
 		t.Fatalf("need the three independent mixed-protocol middle-entry paths, got %d", crossProtocolThreeHop)
 	}
 	t.Logf("defined %d distinct TCP+UDP paths; traffic is verified only by TestMeteringRelayRealSingboxProtocolMatrix", len(names))
+}
+
+func TestRelayProtocolTransportALPN(t *testing.T) {
+	for _, protocol := range []string{"vless", "vmess", "trojan"} {
+		for mode, want := range map[string]string{
+			"plain": "", "tls": "h2,http/1.1", "tls-vision": "h2,http/1.1",
+			"http-tls": "h2", "grpc-tls": "h2", "quic-tls": "h3",
+			"ws-tls": "http/1.1", "httpupgrade-tls": "http/1.1",
+		} {
+			if mode == "tls-vision" && protocol != "vless" {
+				continue
+			}
+			p := relayProtocolFixture{protocol: protocol, tlsMode: mode}
+			if got := strings.Join(p.alpn(), ","); got != want {
+				t.Errorf("%s/%s ALPN=%q, want %q", protocol, mode, got, want)
+			}
+		}
+	}
 }
