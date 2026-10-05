@@ -266,3 +266,48 @@ func TestRelaySemanticSpecLegacyManagedCertNeedsFreshAcceptance(t *testing.T) {
 		t.Fatal("same-ID certificate change did not create a fresh generation")
 	}
 }
+
+func TestRelaySemanticSpecKeepsTLSOverridePresence(t *testing.T) {
+	f := newUserMeteringFixture(t, 2)
+	if err := f.st.ConfigureTrafficMetering(false, false, false); err != nil {
+		t.Fatal(err)
+	}
+	target, _ := f.st.GetSbInbound(f.inbounds[1])
+	target.Type = "trojan"
+	target.Options = `{"tls":{"enabled":true,"server_name":"original.example"}}`
+	tlsID, err := f.st.SaveSbTls(&SbTls{Name: "inline-fallback-profile", ServerJSON: "", ClientJSON: `{}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.TlsID = tlsID
+	if _, err = f.st.SaveSbInbound(target); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _, err := f.st.relayTargetSpec(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tls, _ := f.st.GetSbTls(tlsID)
+	tls.ServerJSON = "null"
+	if _, err = f.st.SaveSbTls(tls); err != nil {
+		t.Fatal(err)
+	}
+	nullHash, _, _, err := f.st.relayTargetSpec(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nullHash != before {
+		t.Fatal("equivalent missing/null profile fallbacks differ")
+	}
+	tls.ServerJSON = "{}"
+	if _, err = f.st.SaveSbTls(tls); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _, err := f.st.relayTargetSpec(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("explicit TLS override object was conflated with inline fallback")
+	}
+}

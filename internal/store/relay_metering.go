@@ -483,7 +483,7 @@ func (s *Store) relayTargetSpecHashesWith(db txLike, ib *SbInbound) (relaySpecHa
 	if err != nil {
 		return relaySpecHashes{}, nil, nil, fmt.Errorf("落地选项无效: %w", err)
 	}
-	serverJSON, err := canonicalRelayJSONObject(tlsServer)
+	serverJSON, err := canonicalRelayTLSProfile(tlsServer)
 	if err != nil {
 		return relaySpecHashes{}, nil, nil, fmt.Errorf("落地TLS服务端配置无效: %w", err)
 	}

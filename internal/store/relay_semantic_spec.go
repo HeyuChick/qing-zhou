@@ -29,6 +29,16 @@ func canonicalRelayJSONObject(raw string) (string, error) {
 	return string(canonical), err
 }
 
+// A missing/null server profile leaves inline TLS in place, whereas an explicit
+// object (including {}) overrides it. Preserve this presence distinction; the
+// normal options decoder can safely treat missing and empty objects alike.
+func canonicalRelayTLSProfile(raw string) (string, error) {
+	if trimmed := strings.TrimSpace(raw); trimmed == "" || trimmed == "null" {
+		return "null", nil
+	}
+	return canonicalRelayJSONObject(raw)
+}
+
 // Only translate a legacy hash when it still proves the current desired raw
 // configuration. An arbitrary/stale hash is never blessed as equivalent. Old
 // cert_id-only hashes could not prove certificate contents, so those retain the
