@@ -21,6 +21,15 @@ import (
 // to it, because an invalid config is never swapped in.
 const MinSupported = "1.12.0"
 
+// VisionFramingFixVersion is the reviewed build with sing-vmess commit
+// 9b95ab8c9478. Stock 1.14.2 still embeds the affected dependency. Version
+// ordering cannot establish this capability, including for future releases.
+const VisionFramingFixVersion = "1.14.2+qz-vmess.9b95ab8c9478"
+
+func HasVisionFramingFix(version string) bool {
+	return version == VisionFramingFixVersion
+}
+
 // Info is what the panel knows about one node's sing-box.
 type Info struct {
 	// Version is the bare version, e.g. "1.13.18". Empty when the output could
@@ -29,6 +38,8 @@ type Info struct {
 	// HasV2RayAPI reports the with_v2ray_api build tag. Without it the node
 	// carries traffic but reports none, so quotas silently never apply.
 	HasV2RayAPI bool `json:"has_v2ray_api"`
+	// HasVisionFramingFix is true only for the explicitly reviewed core marker.
+	HasVisionFramingFix bool `json:"has_vision_framing_fix"`
 	// Raw is the first line of output, kept so an unparseable answer can still
 	// be shown to a human instead of an empty box.
 	Raw string `json:"raw"`
@@ -52,6 +63,7 @@ func Parse(out string) Info {
 			info.Version = v
 		}
 	}
+	info.HasVisionFramingFix = HasVisionFramingFix(info.Version)
 	return info
 }
 

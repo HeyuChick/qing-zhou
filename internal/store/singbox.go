@@ -641,6 +641,9 @@ func (s *Store) BuildSingboxConfig(base, v2rayListen string, usersByTag map[stri
 		}
 		ibs = append(ibs, singbox.Inbound{Type: ib.Type, Base: baseMap, Users: mergeRelayUser(usersByTag[ib.Tag], landingUsers, ib.Tag)})
 	}
+	if err := s.validateMeteringRoutes(base, v2rayListen, relays); err != nil {
+		return nil, err
+	}
 	return singbox.GenerateConfigWithOptions([]byte(base), ibs, singbox.Options{
 		V2RayListen:  v2rayListen,
 		Relays:       relays,
@@ -707,6 +710,9 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 	// API, and so no remote traffic was ever metered. The caller now decides:
 	// it probes each node's build tags (sshctl.SupportsStatsAPI) and passes that
 	// node's own listen address only when the plugin is actually present.
+	if err := s.validateMeteringRoutes(base, v2rayListen, relays); err != nil {
+		return nil, err
+	}
 	return singbox.GenerateConfigWithOptions([]byte(base), ibs, singbox.Options{
 		V2RayListen:  v2rayListen,
 		Relays:       relays,
@@ -1283,6 +1289,7 @@ func (s *Store) BuildUsersByTag(now int64) (map[string][]singbox.User, error) {
 	out := map[string][]singbox.User{}
 	emit := func(ib *SbInbound, b *Bucket, routeNodeID int64) {
 		addRaw := func(u singbox.User) {
+			u.OwnerID = b.UserID
 			key := inboundUser{ib.Tag, u.Name}
 			if seen[key] {
 				return

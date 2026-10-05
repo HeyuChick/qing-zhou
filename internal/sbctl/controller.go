@@ -100,7 +100,12 @@ type Controller struct {
 
 	remoteSlots chan struct{} // shared SSH budget for applies, probes and stats
 
-	mu sync.Mutex // serializes Rebuild
+	// Immutable during each serialized rebuild, including its apply goroutines.
+	visionRequired map[int64]*store.Server
+	visionBlocked  map[int64]error
+
+	mu      sync.Mutex // serializes Rebuild
+	statsMu sync.Mutex // one authoritative collector per process
 
 	// syncInterval is the period of the Run loop in nanoseconds, published for
 	// callers that let a change ride that pass instead of forcing a rebuild. Zero
@@ -123,6 +128,7 @@ type Controller struct {
 	// the remote file and systemd state.
 	desiredMu   sync.Mutex
 	desiredHash map[int64][sha256.Size]byte
+	visionRetry map[int64]bool // guarded by desiredMu; recheck health after gate failure
 
 	// restartFailed tracks servers whose last local systemctl restart errored, so
 	// applyLocal retries instead of short-circuiting on the already-swapped config
@@ -224,6 +230,7 @@ func (c *Controller) currentRestartPolicy() RestartCircuitPolicy {
 // notifyRestart reports one restart, if anyone is listening and this pass was
 // the periodic one.
 func (c *Controller) notifyRestart(periodic bool, serverID int64, name string) (opened bool, count int) {
+	c.recordMeteringRestart(serverID)
 	if !periodic {
 		return false, 0
 	}
@@ -273,12 +280,19 @@ func (c *Controller) desiredNeedsApply(serverID int64, cfg []byte, force bool) b
 	c.desiredMu.Lock()
 	defer c.desiredMu.Unlock()
 	old, ok := c.desiredHash[serverID]
-	return !ok || old != h
+	return c.visionRetry[serverID] || !ok || old != h
 }
 
 func (c *Controller) rememberDesired(serverID int64, cfg []byte) {
+	if metering, ok := c.st.(relayMeteringStore); ok {
+		if err := metering.RecordRelayConfigApplied(serverID, cfg); err != nil {
+			log.Printf("sbctl: could not persist relay readiness for server %d: %v", serverID, err)
+			return
+		}
+	}
 	c.desiredMu.Lock()
 	c.desiredHash[serverID] = sha256.Sum256(cfg)
+	delete(c.visionRetry, serverID)
 	c.desiredMu.Unlock()
 }
 
@@ -357,6 +371,17 @@ func resolveSingBoxBin(configured string) (string, error) {
 // implement just that), so the richer answer is taken when the real manager is
 // behind the interface.
 func (c *Controller) applyPanel(cfg []byte) (bool, error) {
+	return c.applyWithRelayNamespace(context.Background(), store.LocalNodeID, nil, cfg, func(force bool) (bool, error) {
+		return c.applyPanelRaw(cfg, force)
+	})
+}
+
+func (c *Controller) applyPanelRaw(cfg []byte, force bool) (bool, error) {
+	if r, ok := c.mgr.(interface {
+		ApplyChangedForce([]byte, bool) (bool, error)
+	}); ok {
+		return r.ApplyChangedForce(cfg, force)
+	}
 	if r, ok := c.mgr.(interface {
 		ApplyChanged([]byte) (bool, error)
 	}); ok {
@@ -417,6 +442,10 @@ func panelPathConflict(panelPath string, sv *store.Server, serverCfg, panelCfg [
 // It mirrors sbproc.Manager.Apply but uses the server entry's own config_path
 // and systemd_unit instead of the global defaults.
 func (c *Controller) applyLocal(sv *store.Server, cfg []byte) (bool, error) {
+	return c.applyWithRelayNamespace(context.Background(), sv.ID, sv, cfg, func(force bool) (bool, error) { return c.applyLocalRaw(sv, cfg, force) })
+}
+
+func (c *Controller) applyLocalRaw(sv *store.Server, cfg []byte, force bool) (bool, error) {
 	bin, err := resolveSingBoxBin(sv.SingBoxBin)
 	if err != nil {
 		return false, err
@@ -435,7 +464,7 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) (bool, error) {
 	c.restartMu.Lock()
 	pending := c.restartFailed[sv.ID]
 	c.restartMu.Unlock()
-	if !pending {
+	if !pending && !force {
 		if cur, err := os.ReadFile(configPath); err == nil && bytes.Equal(cur, cfg) {
 			return false, nil
 		}
@@ -594,21 +623,29 @@ func (c *Controller) invalidateRemoteCaches(serverID int64) {
 // applies it (validate + reload). Safe to call on every change; serialized.
 // When multi-server is configured, it iterates over all enabled remote servers
 // in addition to the local instance.
-func (c *Controller) Rebuild() error { return c.rebuild(false, true) }
+func (c *Controller) Rebuild() error { return c.rebuildUntilStable(false, true) }
 
 // rebuildPeriodic is the timer-driven pass. Restarts it causes are reported to
 // the restart observer; restarts from an admin's own edit are not, because a
 // node restarting right after someone changed it is the system working.
-func (c *Controller) rebuildPeriodic() error { return c.rebuild(true, false) }
+func (c *Controller) rebuildPeriodic() error { return c.rebuildUntilStable(true, false) }
 
 // reconcilePeriodic bypasses the desired-config cache. It still performs an
 // idempotent remote comparison, but verifies the node file and service instead
 // of assuming that an unchanged desired hash means the node stayed healthy.
-func (c *Controller) reconcilePeriodic() error { return c.rebuild(true, true) }
+func (c *Controller) reconcilePeriodic() error { return c.rebuildUntilStable(true, true) }
 
 func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.prepareVisionCapabilities(); err != nil {
+		return err
+	}
+	if metering, ok := c.st.(relayMeteringStore); ok {
+		if err := metering.PrepareRelayMetering(); err != nil {
+			return err
+		}
+	}
 
 	// Build the entitlement map once (shared across all servers).
 	byTag, err := c.st.BuildUsersByTag(time.Now().Unix())
@@ -618,6 +655,9 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 
 	// Apply to local server (server_id=0, the legacy path).
 	var lastErr error
+	for _, err := range c.visionBlocked {
+		lastErr = errors.Join(lastErr, err)
+	}
 	// record keeps a per-machine outcome alongside the aggregate lastErr. Without
 	// it a full rebuild reports one "下发失败" for the whole pass, and the admin
 	// UI can only say that *something* failed — not which machine, nor why.
@@ -632,7 +672,9 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	// and shares this file is a second writer, and the two only coexist while
 	// they generate the same bytes.
 	var panelCfg []byte
-	if cfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag); err != nil {
+	if err := c.visionBlocked[store.LocalNodeID]; err != nil {
+		record(store.LocalNodeID, err)
+	} else if cfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag); err != nil {
 		lastErr = fmt.Errorf("local build config: %w", err)
 		log.Printf("sbctl: local rebuild error: %v", err)
 		record(0, lastErr)
@@ -686,6 +728,10 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	}
 	for _, sv := range servers {
 		if !sv.Enabled {
+			continue
+		}
+		if err := c.visionBlocked[sv.ID]; err != nil {
+			record(sv.ID, err)
 			continue
 		}
 		cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.statsListenFor(sv), byTag)
@@ -745,18 +791,17 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 			record(sv.ID, fmt.Errorf("未配置远程管理器，无法通过 SSH 下发"))
 			continue
 		}
-		serverCfg := SSHConfigFor(sv)
 		// Acquire before spawning: waiting servers do not consume goroutines.
 		_ = c.acquireRemote(context.Background())
 		wg.Add(1)
-		go func(sv *store.Server, serverCfg *sshctl.ServerConfig, cfg []byte) {
+		go func(sv *store.Server, cfg []byte) {
 			defer wg.Done()
 			defer c.releaseRemote()
 			// Bound the apply so one unreachable / half-open node can't block on
 			// session.Wait() indefinitely and wedge Rebuild (which holds c.mu).
 			applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
-			restarted, err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg)
+			restarted, err := c.applyRemoteConfig(applyCtx, sv, cfg)
 			opened := false
 			if restarted {
 				// Every connection on this node was just cut. Say so, once per
@@ -784,7 +829,7 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 				return
 			}
 			record(sv.ID, nil)
-		}(sv, serverCfg, cfg)
+		}(sv, cfg)
 	}
 	wg.Wait()
 
@@ -796,6 +841,10 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 // server entry — which may be on the local machine (applied directly) or a
 // remote host (applied via SSH).
 func (c *Controller) RebuildServer(serverID int64) error {
+	if metering, ok := c.st.(relayMeteringStore); ok && metering.RelayMeteringEnabled() {
+		c.invalidateRemoteCaches(serverID)
+		return c.Rebuild()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -803,6 +852,12 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	// its sing-box reinstalled — so re-probe rather than trusting a cached answer
 	// about a binary that may have just changed.
 	c.invalidateRemoteCaches(serverID)
+	if err := c.prepareVisionCapabilities(); err != nil {
+		return err
+	}
+	if err := c.visionBlocked[serverID]; err != nil {
+		return err
+	}
 
 	byTag, err := c.st.BuildUsersByTag(time.Now().Unix())
 	if err != nil {
@@ -815,7 +870,7 @@ func (c *Controller) RebuildServer(serverID int64) error {
 		if err != nil {
 			return fmt.Errorf("local build config: %w", err)
 		}
-		if err := c.mgr.Apply(cfg); err != nil {
+		if _, err := c.applyPanel(cfg); err != nil {
 			return fmt.Errorf("local apply: %w", err)
 		}
 		c.rememberDesired(store.LocalNodeID, cfg)
@@ -860,12 +915,11 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	if c.remoteMgr == nil {
 		return fmt.Errorf("remote manager not configured")
 	}
-	serverCfg := SSHConfigFor(sv)
 	_ = c.acquireRemote(context.Background())
 	defer c.releaseRemote()
 	applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	restarted, err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg)
+	restarted, err := c.applyRemoteConfig(applyCtx, sv, cfg)
 	if restarted {
 		log.Printf("sbctl: server %d (%s) 配置有变化，已下发并重启 sing-box（该节点的连接会断一次）", sv.ID, sv.Name)
 	}
@@ -909,51 +963,57 @@ func SSHConfigFor(sv *store.Server) *sshctl.ServerConfig {
 // A per-identity sum is correct across servers: bucket client_names are globally
 // unique, and a user reachable on two nodes should be charged for both.
 func (c *Controller) CollectStats(ctx context.Context) (int, error) {
-	sources := map[int64]map[string]store.UsageDelta{}
-	convert := func(m map[string]*sbstats.Traffic) map[string]store.UsageDelta {
-		deltas := map[string]store.UsageDelta{}
-		for name, t := range m {
-			if t.Up == 0 && t.Down == 0 {
-				continue
-			}
-			d := deltas[name]
-			d.Up += t.Up
-			d.Down += t.Down
-			deltas[name] = d
-		}
-		return deltas
-	}
-
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
 	var errs []error
-	m, err := c.stats.QueryUserTraffic(ctx)
-	if err != nil {
+	applied := 0
+	if journal, ok := c.st.(interface{ RetryPendingTrafficPolls() (int, error) }); ok {
+		n, err := journal.RetryPendingTrafficPolls()
+		applied += n
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	sources := map[int64]map[string]store.UsageDelta{}
+	if _, ok := c.st.(trafficJournal); ok {
+		fetch, capable := c.stats.(snapshotFetcher)
+		if !capable {
+			fetch = legacySnapshotFetcher{c.stats}
+		}
+		n, err := c.collectTrafficSnapshot(ctx, store.LocalNodeID, nil, fetch)
+		applied += n
+		if err != nil {
+			errs = append(errs, fmt.Errorf("local stats: %w", err))
+			c.recordTrafficFailure(store.LocalNodeID, "unavailable")
+		}
+	} else if m, err := c.stats.QueryUserTraffic(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("local stats: %w", err))
+		c.recordTrafficFailure(store.LocalNodeID, "unavailable")
 	} else {
-		sources[store.LocalNodeID] = convert(m)
+		sources[store.LocalNodeID] = trafficDeltas(m)
 	}
 	for _, rm := range c.remoteStats(ctx) {
+		applied += rm.applied
 		if rm.err != nil {
 			errs = append(errs, rm.err)
+			c.recordTrafficFailure(rm.serverID, "unavailable")
 			continue
 		}
-		sources[rm.serverID] = convert(rm.traffic)
+		if !rm.recorded {
+			sources[rm.serverID] = trafficDeltas(rm.traffic)
+		}
 	}
-
-	// Commit whatever was collected even if some server failed. Each successful
-	// poll used reset=true, so its counters are already zeroed on that node —
-	// bailing out here would throw that traffic away permanently.
-	//
-	// Apply the whole poll in one transaction (one WAL write-lock acquisition
-	// instead of one per identity). AddUsageBatchesByServer isolates each identity in a
-	// savepoint, so one bad delta doesn't discard the rest.
 	n, err := c.st.AddUsageBatchesByServer(sources)
+	applied += n
 	if err != nil {
 		errs = append(errs, err)
 	}
-	return n, errors.Join(errs...)
+	return applied, errors.Join(errs...)
 }
 
 type remoteResult struct {
+	recorded bool
+	applied  int
 	serverID int64
 	traffic  map[string]*sbstats.Traffic
 	err      error
@@ -996,6 +1056,7 @@ func (c *Controller) remoteStats(ctx context.Context) []remoteResult {
 			break
 		}
 		if listen == "" {
+			c.recordTrafficFailure(sv.ID, "unsupported")
 			continue
 		}
 		if err := c.acquireRemote(ctx); err != nil {
@@ -1020,6 +1081,16 @@ func (c *Controller) remoteStats(ctx context.Context) []remoteResult {
 			// is closed. One poll per minute per server otherwise piles up
 			// sshd processes on the node until it runs out of memory.
 			defer client.Close()
+			if _, ok := c.st.(trafficJournal); ok {
+				n, err := c.collectTrafficSnapshot(sctx, sv.ID, sv, client)
+				if err != nil {
+					err = fmt.Errorf("server %d stats: %w", sv.ID, err)
+				}
+				mu.Lock()
+				out = append(out, remoteResult{serverID: sv.ID, recorded: true, applied: n, err: err})
+				mu.Unlock()
+				return
+			}
 			t, err := client.QueryUserTraffic(sctx)
 			if err != nil {
 				err = fmt.Errorf("server %d (%s) stats: %w", sv.ID, sv.Name, err)
@@ -1145,3 +1216,15 @@ func (c *Controller) acquireRemote(ctx context.Context) error {
 	}
 }
 func (c *Controller) releaseRemote() { <-c.remoteSlots }
+
+func (c *Controller) recordTrafficFailure(serverID int64, status string) {
+	if journal, ok := c.st.(interface{ RecordTrafficCollectionFailure(int64, string) error }); ok {
+		_ = journal.RecordTrafficCollectionFailure(serverID, status)
+	}
+}
+
+func (c *Controller) recordMeteringRestart(serverID int64) {
+	if journal, ok := c.st.(interface{ RecordTrafficBoundaryGap(int64, string) error }); ok {
+		_ = journal.RecordTrafficBoundaryGap(serverID, "planned_config_restart_tail")
+	}
+}

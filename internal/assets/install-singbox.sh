@@ -7,7 +7,7 @@
 #   1. 已装 sing-box → 直接检测并打印版本/路径（不重装，除非 --force）
 #   2. 未装 → 安装 sing-box 到 /usr/local/bin/sing-box，建
 #      /etc/sing-box/config.json 占位配置 + systemd。
-#      装的是面板发布页那份：与官方同版本同功能，额外编入 with_v2ray_api ——
+#      装的是面板发布页那份：基于官方稳定版本，含已审定的 Vision 分片修复及 with_v2ray_api ——
 #      官方 release 不含该插件，而面板的流量统计与配额全靠它。
 #   3. 应用网络内核调优（BBR + fq + 缓冲区 + somaxconn 等）
 #   4. 最后打印一段「服务器」信息，照着填进面板即可接管
@@ -80,14 +80,30 @@ SYSCTL
   ok "内核调优完成（拥塞控制：$cc）"
 }
 
-# 面板发布页托管的 sing-box —— 与官方同版本、同功能，额外编入 with_v2ray_api。
+# 面板发布页托管的 sing-box —— 官方稳定基线，固定 Vision 分片修复及 with_v2ray_api。
 # 官方 release 不含这个插件（上游文档：V2Ray API is not included by default），
 # 而面板正是靠它读取每个用户的流量：装官方版的节点，流量永远统计不到、配额
 # 也永远不会生效，且界面上看不出异常（流量恒为 0）。
 QZ_REPO=${QZ_REPO:-mllt992/qing-zhou}
-# Keep the emergency official fallback aligned with release.yml; never jump to
+# Keep the emergency official fallback aligned with scripts/build-singbox.sh; never jump to
 # an unreviewed stable/minor release merely because upstream latest moved.
 QZ_SB_FALLBACK_VERSION=v1.14.2
+# Capability marker is independent of the stock fallback/minimum version.
+QZ_SB_VISION_FIXED_VERSION=1.14.2+qz-vmess.9b95ab8c9478
+
+report_vision_capability() {
+  local core=$1 output version
+  output=$("$core" version 2>/dev/null || true)
+  version=$(printf '%s\n' "$output" | awk '$1=="sing-box" && $2=="version" { sub(/^[vV]/,"",$3); print $3; exit }')
+  if [ "$version" = "$QZ_SB_VISION_FIXED_VERSION" ]; then
+    ok "内核版本标记包含已审定的 Vision 分片修复（9b95ab8c9478）"
+    info "P1 Vision 启用前仍需确认各节点实际运行此修复内核，并在面板重新检测"
+  else
+    warn "该内核未确认包含 Vision 分片修复，不能用于 P1 Vision 逐用户机器观测。"
+    warn "官方 1.14.2 同样不含此修复；所需轻舟内核标记：$QZ_SB_VISION_FIXED_VERSION"
+    warn "本脚本不会为此自动替换已有内核；如需更换，请明确使用 --force 并重新检测。"
+  fi
+}
 
 install_singbox() {
   local arch url tmp
@@ -100,7 +116,7 @@ install_singbox() {
     rm -rf "$tmp"
     ok "sing-box 已安装 → $BIN ($("$BIN" version | head -1))"
   else
-    warn "从面板发布页下载失败，回退到 sing-box 官方版本"
+    warn "从面板发布页下载失败，回退到 sing-box 官方版本（不含 Vision 分片修复，不能用于 P1 Vision）"
     install_singbox_upstream "$arch" "$tmp"
   fi
   # 装完就验一次：这是"流量统计能不能用"的唯一判据，装错了要当场看见，
@@ -111,9 +127,10 @@ install_singbox() {
     warn "该 sing-box 不含 v2ray_api 插件 —— 本节点的流量将无法统计、配额不会生效。"
     warn "请改用面板发布页的版本：https://github.com/${QZ_REPO}/releases/latest"
   fi
+  report_vision_capability "$BIN"
 }
 
-# 回退路径：官方 release。能跑代理，但统计不了流量。
+# 回退路径：官方 release。能跑代理，但统计不了流量，也没有已审定的 Vision 修复。
 install_singbox_upstream() {
   local arch=$1 tmp=$2 tag ver url
   tag=$QZ_SB_FALLBACK_VERSION
@@ -201,6 +218,7 @@ main() {
       warn "请重跑本脚本并加 --force 换成面板发布页的版本："
       warn "  curl -fsSL <面板地址>/install-singbox.sh | bash -s -- --force"
     fi
+    report_vision_capability "$cur"
     apply_tuning
     write_placeholder_conf
     write_unit

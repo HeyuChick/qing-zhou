@@ -30,16 +30,17 @@ func runtimeIsLinux() bool { return runtime.GOOS == "linux" }
 
 // nodeVersionView is one row of the node sing-box list.
 type nodeVersionView struct {
-	ServerID    int64  `json:"server_id"` // 0 = the panel's own machine
-	Name        string `json:"name"`
-	Host        string `json:"host"`
-	Local       bool   `json:"local"`
-	Enabled     bool   `json:"enabled"`
-	Version     string `json:"version"`
-	Raw         string `json:"raw"`
-	HasV2RayAPI bool   `json:"has_v2ray_api"`
-	CheckedAt   int64  `json:"checked_at"`
-	Error       string `json:"error"`
+	ServerID            int64  `json:"server_id"` // 0 = the panel's own machine
+	Name                string `json:"name"`
+	Host                string `json:"host"`
+	Local               bool   `json:"local"`
+	Enabled             bool   `json:"enabled"`
+	Version             string `json:"version"`
+	Raw                 string `json:"raw"`
+	HasV2RayAPI         bool   `json:"has_v2ray_api"`
+	HasVisionFramingFix bool   `json:"has_vision_framing_fix"`
+	CheckedAt           int64  `json:"checked_at"`
+	Error               string `json:"error"`
 	// Reinstall job state, so the list the UI already polls is also what tells it
 	// how the reinstall went. See nodeUpgradeJob.
 	Upgrading     bool   `json:"upgrading"`
@@ -83,7 +84,8 @@ func (a *API) handleAdminNodeVersions(w http.ResponseWriter, r *http.Request) {
 	ok(w, J{
 		"nodes": rows,
 		// Stated rather than hardcoded in the UI so the two cannot drift.
-		"min_supported": sbver.MinSupported,
+		"min_supported":        sbver.MinSupported,
+		"vision_fixed_version": sbver.VisionFramingFixVersion,
 	})
 }
 
@@ -96,6 +98,7 @@ func viewFor(id int64, name, host string, local, enabled bool, observed map[int6
 	if n := observed[id]; n != nil {
 		v.Version, v.Raw, v.HasV2RayAPI = n.Version, n.Raw, n.HasV2RayAPI
 		v.CheckedAt, v.Error = n.CheckedAt, n.Error
+		v.HasVisionFramingFix = n.HasVisionFramingFix
 		v.TooOld = sbver.Info{Version: n.Version}.TooOld()
 	}
 	if j, ok := jobs[id]; ok {
