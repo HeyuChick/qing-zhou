@@ -87,6 +87,7 @@ jobs:
           QZ_TRANSPORT_STRESS_ROUNDS: "100"
         run: bash scripts/test-transport-buffer.sh --check-baseline
       - name: Build the exact release core candidate (amd64 and arm64)
+        id: core
         run: bash scripts/build-singbox.sh --output-dir "$RUNNER_TEMP/qz-core" --arch amd64,arm64
       - name: Record candidate core provenance
         uses: actions/upload-artifact@v4
@@ -101,7 +102,10 @@ jobs:
           QZ_METERING_SCALE: "1"
         run: go test ./internal/store -run '^TestMeteringRelayUserScale$' -count=1 -v
 
+      # A scale-fixture failure must not hide independent traffic failures.
+      # The job still fails, and an unbuilt/unverified core is never executed.
       - name: Shared and per-user relay observation over loopback
+        if: ${{ !cancelled() && steps.core.outcome == 'success' }}
         env:
           QZ_SINGBOX_TEST_BIN: ${{ runner.temp }}/qz-core/sing-box-linux-amd64
           QZ_SINGBOX_REQUIRE_STATS: "1"

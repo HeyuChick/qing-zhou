@@ -50,7 +50,11 @@ func upgradeRelaySpecHash(tx *sql.Tx, link *RelayMeteringLink, hashes relaySpecH
 	}
 	unprovenCertificate := hashes.managedCertificate && link.SpecHash != hashes.previous
 	if unprovenCertificate {
-		if _, err := tx.Exec(`UPDATE relay_metering_users SET state='prepared',accepted_at=0,activated_at=0 WHERE link_id=? AND generation=? AND enabled=1`, link.ID, link.Generation); err != nil {
+		// accepted_at also proves that this credential was installed before an
+		// opt-out. Keep that compatibility receipt; state/activated_at and the
+		// link receipt below independently revoke readiness for the new spec.
+		// A hash migration must never silently retire published credentials.
+		if _, err := tx.Exec(`UPDATE relay_metering_users SET state='prepared',activated_at=0 WHERE link_id=? AND generation=? AND enabled=1`, link.ID, link.Generation); err != nil {
 			return false, err
 		}
 		if _, err := tx.Exec(`UPDATE relay_metering_links SET spec_hash=?,state='prepared',accepted_at=0,activated_at=0 WHERE id=?`, hashes.current, link.ID); err != nil {
@@ -70,6 +74,20 @@ func (s *Store) migrateRelayProtocolAuthVerification(tx *sql.Tx) error {
 	if _, err := tx.Exec(relayProtocolAuthSchema); err != nil {
 		return err
 	}
+	// Startup runs migrations before Seed installs the jwt_secret fallback on
+	// the live Store. Resolve it in this snapshot, with explicit QZ_SECRET_KEY
+	// taking precedence, without changing shared key/cache state on failure.
+	reader := &Store{secretKey: s.secretKey}
+	if len(reader.secretKey) == 0 {
+		var key string
+		err := tx.QueryRow(`SELECT value FROM settings WHERE key='jwt_secret'`).Scan(&key)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if key != "" {
+			reader.SetSecretKey([]byte(key))
+		}
+	}
 	links, err := relayMeteringLinksWith(tx)
 	if err != nil {
 		return err
@@ -82,7 +100,7 @@ func (s *Store) migrateRelayProtocolAuthVerification(tx *sql.Tx) error {
 		if target == nil || target.ServerID != link.TargetServerID {
 			continue
 		}
-		hashes, _, _, err := s.relayTargetSpecHashesWith(tx, target)
+		hashes, _, _, err := reader.relayTargetSpecHashesWith(tx, target)
 		if err != nil {
 			// A previously broken target remains unproven. Do not reinterpret a
 			// missing certificate/server as a valid new hash or block upgrades.

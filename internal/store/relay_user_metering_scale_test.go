@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+	"qingzhou/internal/sbver"
 	"qingzhou/internal/singbox"
 )
 
@@ -66,12 +67,36 @@ func meterSQL(t *testing.T, st *Store) *atomic.Int64 {
 	return count
 }
 
+// SQL/config-only runs explicitly model an installed capability for planner
+// preflight. Runs with a binary instead probe that exact candidate executable;
+// neither branch records a running-process observation before startup succeeds.
+func meteringScaleCore(t *testing.T) (string, sbver.Info) {
+	t.Helper()
+	if os.Getenv("QZ_SINGBOX_TEST_BIN") != "" || os.Getenv("QZ_SINGBOX_REQUIRE_STATS") == "1" {
+		return relayFixtureCore(t)
+	}
+	info := sbver.Parse("sing-box version " + sbver.TransportReadBufferFixVersion + "\nTags: with_v2ray_api")
+	info.Raw = "synthetic planner-only scale capability; no executable or running process was observed"
+	t.Log("SQL/config-only scale fixture uses explicitly synthetic installed capability; no running-core or traffic evidence")
+	return "", info
+}
+
+func recordMeteringScaleCapabilities(t *testing.T, st *Store, info sbver.Info, serverIDs ...int64) {
+	t.Helper()
+	for _, id := range serverIDs {
+		if err := st.SetNodeSingbox(id, info); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // Opt-in scale diagnostics are reproducible local/CI evidence, not a promise
 // about a production VPS, WAN transport, or concurrent application workload.
 func TestMeteringRelayUserScale(t *testing.T) {
 	if os.Getenv("QZ_METERING_SCALE") != "1" {
 		t.Skip("set QZ_METERING_SCALE=1 for 100/1000-user diagnostics")
 	}
+	bin, coreInfo := meteringScaleCore(t)
 	for _, protocol := range []meteringProtocolCase{
 		{name: "vless", protocol: "vless"},
 		{name: "anytls", protocol: "anytls"},
@@ -93,6 +118,7 @@ func TestMeteringRelayUserScale(t *testing.T) {
 				for i := 0; i < size; i++ {
 					trafficCompatCustomer(t, st, pkg, "account", fmt.Sprintf("scale_user_%04d", i))
 				}
+				recordMeteringScaleCapabilities(t, st, coreInfo, a, b)
 				if err = st.ConfigureTrafficMetering(true, true, true); err != nil {
 					t.Fatal(err)
 				}
@@ -222,18 +248,93 @@ func TestMeteringRelayUserScale(t *testing.T) {
 						t.Fatalf("identity lookup scans: %v", details)
 					}
 				}
-				if bin := os.Getenv("QZ_SINGBOX_TEST_BIN"); bin != "" {
+				if bin != "" {
 					started = time.Now()
 					landingCore := startMeteringBox(t, bin, down, bAPI)
 					landingStart := time.Since(started)
+					if err = st.SetNodeVisionRuntime(b, coreInfo); err != nil {
+						t.Fatal(err)
+					}
 					started = time.Now()
 					entryCore := startMeteringBox(t, bin, up, aAPI)
 					entryStart := time.Since(started)
+					if err = st.SetNodeVisionRuntime(a, coreInfo); err != nil {
+						t.Fatal(err)
+					}
 					t.Logf("synthetic loopback idle cores protocol=%s users=%d landing_check_start=%s landing_RSS_KiB=%d entry_check_start=%s entry_RSS_KiB=%d (instant RSS, not peak, active-connection capacity or production budget)", protocol.name, size, landingStart, meteringBoxRSSKiB(t, landingCore), entryStart, meteringBoxRSSKiB(t, entryCore))
 				}
 				t.Logf("landing_ack=%s/%dSQL source_ack=%s/%dSQL", landingAckTime, landingAckSQL, sourceAckTime, sourceAckSQL)
 				t.Logf("protocol=%s users=%d prepare=%s/%dSQL compile=%s/%dSQL alloc=%dBytes entry_config=%dBytes landing_config=%dBytes outbounds=%d rules=%d noop=%s/%dSQL ingest=%s/%dSQL report=%s/%dSQL plan=%v", protocol.name, size, prepareTime, prepareSQL, buildTime, buildSQL, after.TotalAlloc-before.TotalAlloc, len(up), len(down), len(cfg.Outbounds), len(cfg.Route.Rules), noopTime, noopSQL, ingestTime, ingestSQL, reportTime, reportSQL, details)
 			})
 		}
+	}
+}
+
+func TestMeteringScaleFixtureCapabilityPreflightRemainsStrict(t *testing.T) {
+	t.Setenv("QZ_SINGBOX_TEST_BIN", "")
+	t.Setenv("QZ_SINGBOX_REQUIRE_STATS", "")
+	bin, info := meteringScaleCore(t)
+	if bin != "" || !info.HasTransportReadBufferFix || !strings.Contains(info.Raw, "synthetic planner-only") {
+		t.Fatalf("SQL-only scale capability was not explicitly labelled: bin=%q info=%+v", bin, info)
+	}
+	for _, test := range []string{"reviewed-fixture", "missing-node", "old-vision", "without-stats"} {
+		t.Run(test, func(t *testing.T) {
+			f := visionCapabilityFixture(t, 2, `{"transport":{"type":"ws","path":"/scale"}}`)
+			recordMeteringScaleCapabilities(t, f.st, info, f.servers...)
+			switch test {
+			case "missing-node":
+				if err := f.st.DeleteNodeSingbox(f.servers[1]); err != nil {
+					t.Fatal(err)
+				}
+			case "old-vision":
+				old := sbver.Parse("sing-box version " + sbver.VisionFramingFixVersion + "\nTags: with_v2ray_api")
+				recordMeteringScaleCapabilities(t, f.st, old, f.servers[1])
+			case "without-stats":
+				withoutAPI := info
+				withoutAPI.HasV2RayAPI = false
+				recordMeteringScaleCapabilities(t, f.st, withoutAPI, f.servers[1])
+			}
+			err := f.st.ConfigureTrafficMetering(true, true, true)
+			if test == "reviewed-fixture" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "WebSocket/HTTPUpgrade") || f.st.RelayUserMeteringEnabled() {
+				t.Fatalf("scale setup weakened the transport gate for %s: %v", test, err)
+			}
+			var runtimeObservations int
+			if err := f.st.db.QueryRow(`SELECT COUNT(*) FROM node_vision_runtime`).Scan(&runtimeObservations); err != nil || runtimeObservations != 0 {
+				t.Fatalf("planner preflight manufactured running-process evidence: count=%d err=%v", runtimeObservations, err)
+			}
+		})
+	}
+}
+
+func TestMeteringScaleFixtureUsesActualCandidateObservation(t *testing.T) {
+	if os.Getenv("QZ_SINGBOX_TEST_BIN") == "" {
+		t.Skip("set QZ_SINGBOX_TEST_BIN to verify actual scale candidate version observation")
+	}
+	bin, info := meteringScaleCore(t)
+	if bin != os.Getenv("QZ_SINGBOX_TEST_BIN") || strings.Contains(info.Raw, "synthetic") || !info.HasTransportReadBufferFix {
+		t.Fatalf("scale fixture did not use its actual candidate probe: bin=%q info=%+v", bin, info)
+	}
+	f := visionCapabilityFixture(t, 2, `{"transport":{"type":"ws","path":"/scale"}}`)
+	recordMeteringScaleCapabilities(t, f.st, info, f.servers...)
+	if err := f.st.ConfigureTrafficMetering(true, true, true); err != nil {
+		t.Fatal(err)
+	}
+	observations, err := f.st.NodeSingboxAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range f.servers {
+		got := observations[id]
+		if got == nil || got.Version != info.Version || got.Raw != info.Raw || !got.HasTransportReadBufferFix || !got.HasV2RayAPI {
+			t.Fatalf("server %d did not retain actual candidate observation: %+v", id, got)
+		}
+	}
+	var runtimeObservations int
+	if err := f.st.db.QueryRow(`SELECT COUNT(*) FROM node_vision_runtime`).Scan(&runtimeObservations); err != nil || runtimeObservations != 0 {
+		t.Fatalf("version probe was misrepresented as a running process: count=%d err=%v", runtimeObservations, err)
 	}
 }

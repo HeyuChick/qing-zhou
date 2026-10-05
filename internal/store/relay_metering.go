@@ -442,10 +442,12 @@ func (s *Store) relayTargetSpecHashesWith(db txLike, ib *SbInbound) (relaySpecHa
 	if ib.TlsID != 0 {
 		cert = &SbTls{ID: ib.TlsID}
 		err = db.QueryRow(`SELECT server_json,client_json,cert_id FROM sb_tls WHERE id=?`, ib.TlsID).Scan(&cert.ServerJSON, &cert.ClientJSON, &cert.CertID)
+		// Before startup key initialization, decryptOK may retain ciphertext.
+		// It must never become a valid semantic specification or certificate.
 		var ok bool
 		cert.ServerJSON, ok = s.decryptOK(cert.ServerJSON)
 		cert.DecryptFailed = !ok
-		if err != nil || cert == nil || cert.DecryptFailed {
+		if err != nil || cert == nil || cert.DecryptFailed || strings.HasPrefix(cert.ServerJSON, encPrefix) {
 			return relaySpecHashes{}, nil, nil, fmt.Errorf("落地TLS不可用")
 		}
 		legacyTLSServer = cert.ServerJSON
@@ -454,7 +456,7 @@ func (s *Store) relayTargetSpecHashesWith(db txLike, ib *SbInbound) (relaySpecHa
 		// an upstream configured for a different certificate/SNI under that ID.
 		if cert.CertID != 0 {
 			managed, err := s.scanCert(db.QueryRow(`SELECT `+certCols+` FROM certificates WHERE id=?`, cert.CertID))
-			if err != nil || managed == nil || managed.DecryptFailed {
+			if err != nil || managed == nil || managed.DecryptFailed || strings.HasPrefix(managed.CertPEM, encPrefix) || strings.HasPrefix(managed.KeyPEM, encPrefix) {
 				return relaySpecHashes{}, nil, nil, fmt.Errorf("落地TLS证书不可用")
 			}
 			block, err := s.resolveTlsBlock(ib.TlsID, ib.Tag,
