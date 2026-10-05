@@ -78,7 +78,7 @@ const visibleSources = computed(() => unallocatedSources.value.slice((page.value
 const visibleUsers = computed(() => users.value.slice((userPage.value-1)*pageSize,userPage.value*pageSize))
 watch(() => props.service, () => { page.value=1; userPage.value=1 })
 const qualityLabel = computed(() => (({unknown:'统计状态尚未确认', unavailable:'用户统计采集失败', unsupported:'统计能力未就绪', disabled:'统计未启用', stale:'用户统计已延迟', legacy:'进程代次无法验证，保留旧式采集'} as Record<string,string>)[props.service.quality.status] || '统计需要核查'))
-const deploymentReasons = computed(() => (props.service.coverage_reasons || []).map(reason => ({per_user_metering_disabled:'逐用户中转计量尚未启用',relay_users_not_active:'部分逐用户中转身份尚未完成入口切换',relay_route_not_ready:'部分中转路径尚未完成入口切换',shared_compatibility_active:'共享兼容身份尚未确认撤除，仍可能承载无法归属用户的流量',vision_core_unverified:'Vision 路径的实际运行内核修复能力未确认，请检查节点并重新检测'} as Record<string,string>)[reason]).filter(Boolean))
+const deploymentReasons = computed(() => (props.service.coverage_reasons || []).map(reason => ({per_user_metering_disabled:'逐用户中转计量尚未启用',relay_users_not_active:'部分逐用户中转身份尚未完成入口切换',relay_route_not_ready:'部分中转路径尚未完成入口切换',shared_compatibility_active:'共享兼容身份尚未确认撤除，仍可能承载无法归属用户的流量',vision_core_unverified:'Vision 路径的实际运行内核修复能力未确认，请检查节点并重新检测',transport_core_unverified:'WebSocket/HTTPUpgrade 路径的实际运行内核缓冲修复能力未确认，请安装并运行包含该修复的内核后重新检测；旧 Vision 专用版本不能替代'} as Record<string,string>)[reason]).filter(Boolean))
 function kindLabel(kind:string) { return ({direct_user:'直连用户',relay_user:'逐用户中转',historical_user:'历史部分记录',relay_link:'共享中转链路',legacy_shared_relay:'旧共享中转',ambiguous_identity:'身份冲突',unknown:'未知身份'} as Record<string,string>)[kind] || '未知身份' }
 function isRelay(kind:string) { return ['relay_user','relay_link','legacy_shared_relay','ambiguous_identity','unknown'].includes(kind) }
 </script>

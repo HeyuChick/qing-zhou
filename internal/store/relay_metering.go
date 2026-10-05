@@ -169,10 +169,11 @@ func (s *Store) PrepareRelayMetering() error {
 		// The target's protocol/port/TLS changes invalidate readiness; source
 		// compiler then holds its previous config until the new target is applied.
 
-		specHash, targetServer, _, er := s.relayTargetSpec(e.to)
+		specHashes, targetServer, _, er := s.relayTargetSpecHashesWith(s.db, e.to)
 		if er != nil {
 			return er
 		}
+		specHash := specHashes.current
 		sourceName, targetName := e.from.Tag, e.to.Tag
 		if targetServer != nil {
 			targetName = targetServer.Name + " / " + e.to.Tag
@@ -195,6 +196,12 @@ func (s *Store) PrepareRelayMetering() error {
 		}
 		existing, er := scanRelayMetering(tx.QueryRow(`SELECT `+relayMeteringCols+` FROM relay_metering_links WHERE source_server_id=? AND source_inbound_id=? AND route_node_id=? AND target_server_id=? AND target_inbound_id=?`, e.from.ServerID, e.from.ID, e.route, e.to.ServerID, e.to.ID))
 
+		if er == nil && existing.SpecHash != specHash {
+			// Existing unversioned hashes describe the exact stored JSON. When
+			// that previous hash still matches the desired endpoint, translate
+			// its representation instead of rotating credentials on upgrade.
+			_, er = upgradeRelaySpecHash(tx, existing, specHashes)
+		}
 		if er == nil && existing.SpecHash != specHash {
 			name, encrypted, credentialErr := s.newRelayMeteringCredential(tx)
 			er = credentialErr
@@ -413,6 +420,11 @@ func (s *Store) relayTargetSpec(ib *SbInbound) (string, *Server, *SbTls, error) 
 	return s.relayTargetSpecWith(s.db, ib)
 }
 func (s *Store) relayTargetSpecWith(db txLike, ib *SbInbound) (string, *Server, *SbTls, error) {
+	hashes, server, tls, err := s.relayTargetSpecHashesWith(db, ib)
+	return hashes.current, server, tls, err
+}
+
+func (s *Store) relayTargetSpecHashesWith(db txLike, ib *SbInbound) (relaySpecHashes, *Server, *SbTls, error) {
 	var sv *Server
 	var cert *SbTls
 	var err error
@@ -421,38 +433,92 @@ func (s *Store) relayTargetSpecWith(db txLike, ib *SbInbound) (string, *Server, 
 		sv = &Server{ID: ib.ServerID}
 		err = db.QueryRow(`SELECT name,host,enabled FROM servers WHERE id=?`, ib.ServerID).Scan(&sv.Name, &sv.Host, &sv.Enabled)
 		if err != nil || sv == nil || !sv.Enabled {
-			return "", nil, nil, fmt.Errorf("落地服务器不存在或已禁用")
+			return relaySpecHashes{}, nil, nil, fmt.Errorf("落地服务器不存在或已禁用")
 		}
 		host = sv.Host
 	}
-	tlsServer, tlsClient := "", ""
+	tlsServer, tlsClient, legacyTLSServer := "", "", ""
 	var certID int64
 	if ib.TlsID != 0 {
 		cert = &SbTls{ID: ib.TlsID}
 		err = db.QueryRow(`SELECT server_json,client_json,cert_id FROM sb_tls WHERE id=?`, ib.TlsID).Scan(&cert.ServerJSON, &cert.ClientJSON, &cert.CertID)
+		// Before startup key initialization, decryptOK may retain ciphertext.
+		// It must never become a valid semantic specification or certificate.
 		var ok bool
 		cert.ServerJSON, ok = s.decryptOK(cert.ServerJSON)
 		cert.DecryptFailed = !ok
-		if err != nil || cert == nil || cert.DecryptFailed {
-			return "", nil, nil, fmt.Errorf("落地TLS不可用")
+		if err != nil || cert == nil || cert.DecryptFailed || strings.HasPrefix(cert.ServerJSON, encPrefix) {
+			return relaySpecHashes{}, nil, nil, fmt.Errorf("落地TLS不可用")
+		}
+		legacyTLSServer = cert.ServerJSON
+		// A managed certificate can rotate without changing cert_id. Hash and
+		// render its resolved contents so old target acceptance cannot authorize
+		// an upstream configured for a different certificate/SNI under that ID.
+		if cert.CertID != 0 {
+			managed, err := s.scanCert(db.QueryRow(`SELECT `+certCols+` FROM certificates WHERE id=?`, cert.CertID))
+			if err != nil || managed == nil || managed.DecryptFailed || strings.HasPrefix(managed.CertPEM, encPrefix) || strings.HasPrefix(managed.KeyPEM, encPrefix) {
+				return relaySpecHashes{}, nil, nil, fmt.Errorf("落地TLS证书不可用")
+			}
+			block, err := s.resolveTlsBlock(ib.TlsID, ib.Tag,
+				map[int64]*SbTls{ib.TlsID: cert}, map[int64]*Cert{cert.CertID: managed})
+			if err != nil {
+				return relaySpecHashes{}, nil, nil, err
+			}
+			resolved, err := json.Marshal(block)
+			if err != nil {
+				return relaySpecHashes{}, nil, nil, err
+			}
+			cert.ServerJSON = string(resolved)
 		}
 		tlsServer, tlsClient, certID = cert.ServerJSON, cert.ClientJSON, cert.CertID
 	}
-	spec, _ := json.Marshal(struct {
-		Type, Tag, Listen, Options, Host, TLSServer, TLSClient string
-		Port                                                   int
-		CertID                                                 int64
-	}{ib.Type, ib.Tag, ib.Listen, ib.Options, host, tlsServer, tlsClient, ib.ListenPort, certID})
-	h := sha256.Sum256(spec)
-	return hex.EncodeToString(h[:]), sv, cert, nil
+	hash := func(options, server, client string) string {
+		spec, _ := json.Marshal(struct {
+			Type, Tag, Listen, Options, Host, TLSServer, TLSClient string
+			Port                                                   int
+			CertID                                                 int64
+		}{ib.Type, ib.Tag, ib.Listen, options, host, server, client, ib.ListenPort, certID})
+		h := sha256.Sum256(spec)
+		return hex.EncodeToString(h[:])
+	}
+	options, err := canonicalRelayJSONObject(ib.Options)
+	if err != nil {
+		return relaySpecHashes{}, nil, nil, fmt.Errorf("落地选项无效: %w", err)
+	}
+	serverJSON, err := canonicalRelayTLSProfile(tlsServer)
+	if err != nil {
+		return relaySpecHashes{}, nil, nil, fmt.Errorf("落地TLS服务端配置无效: %w", err)
+	}
+	clientJSON, err := canonicalRelayJSONObject(tlsClient)
+	if err != nil {
+		return relaySpecHashes{}, nil, nil, fmt.Errorf("落地TLS客户端配置无效: %w", err)
+	}
+	return relaySpecHashes{
+		current:            relaySemanticSpecPrefix + hash(options, serverJSON, clientJSON),
+		previous:           hash(ib.Options, tlsServer, tlsClient),
+		legacy:             hash(ib.Options, legacyTLSServer, tlsClient),
+		managedCertificate: certID != 0,
+	}, sv, cert, nil
 }
 func meteringUserMatches(ib *SbInbound, u singbox.User, actual map[string]interface{}) bool {
 	if actual["name"] != u.Name {
 		return false
 	}
 	switch ib.Type {
-	case "vless", "vmess":
-		return actual["uuid"] == u.UUID
+	case "vless":
+		var opts map[string]interface{}
+		_ = json.Unmarshal([]byte(ib.Options), &opts)
+		if opts == nil {
+			opts = map[string]interface{}{}
+		}
+		if ib.TlsID != 0 {
+			opts["tls"] = true
+		}
+		flow, _ := actual["flow"].(string)
+		return actual["uuid"] == u.UUID && flow == singbox.VLESSUserFlow(opts)
+	case "vmess":
+		alterID, _ := actual["alterId"].(float64)
+		return actual["uuid"] == u.UUID && alterID == 0
 	case "tuic":
 		return actual["uuid"] == u.UUID && actual["password"] == u.Password
 	case "hysteria":
@@ -488,7 +554,18 @@ func (s *Store) relayMeteringAcceptedGenerations() ([]*RelayMeteringLink, error)
 
 // ConfigureTrafficMetering keeps both feature switches atomic. Existing
 // cumulative nodes never re-enter a reset reader through a settings toggle.
+// PreflightTrafficMetering runs the same validation as the settings save,
+// without persisting switches, relay identities or any acknowledgement. The
+// validation transaction is rolled back; it does not perform remote probes.
+func (s *Store) PreflightTrafficMetering(links, cumulative, perUser bool) error {
+	return s.configureTrafficMetering(links, cumulative, false, perUser)
+}
+
 func (s *Store) ConfigureTrafficMetering(links, cumulative bool, perUser ...bool) error {
+	return s.configureTrafficMetering(links, cumulative, true, perUser...)
+}
+
+func (s *Store) configureTrafficMetering(links, cumulative, apply bool, perUser ...bool) error {
 	if len(perUser) > 1 {
 		return fmt.Errorf("无效逐用户计量设置")
 	}
@@ -512,6 +589,9 @@ func (s *Store) ConfigureTrafficMetering(links, cumulative bool, perUser ...bool
 	if userMetering && !links {
 		return fmt.Errorf("逐用户机器观测需要保持中转链路计量启用")
 	}
+	if err = s.validateRelayTopologyForSettings(tx, links, userMetering); err != nil {
+		return err
+	}
 	if userMetering {
 		if err = s.validateRelayUserMeteringTopology(tx); err != nil {
 			return err
@@ -533,6 +613,10 @@ func (s *Store) ConfigureTrafficMetering(links, cumulative bool, perUser ...bool
 		if incompatible > 0 {
 			return fmt.Errorf("请先恢复并确认落地的旧共享凭据，再关闭链路计量")
 		}
+	}
+
+	if !apply {
+		return nil
 	}
 
 	boolString := func(v bool) string {

@@ -43,11 +43,39 @@ func configNeedsRelayNamespaceProof(raw []byte) bool {
 // Namespace proof is created only around a controlled successful restart. A
 // matching disk file with an old active core is deliberately insufficient.
 func (c *Controller) applyWithRelayNamespace(ctx context.Context, serverID int64, sv *store.Server, raw []byte, apply func(bool) (bool, error)) (bool, error) {
+	if err := c.verifyCoreTopologySnapshot(serverID); err != nil {
+		return false, err
+	}
+	requirements, needsCore := c.coreRequirements[serverID]
+	if inspector, ok := c.st.(interface {
+		RelayCoreRequirementsForConfig(int64, []byte) (store.RelayCoreRequirements, error)
+	}); ok {
+		actual, err := inspector.RelayCoreRequirementsForConfig(serverID, raw)
+		if err != nil {
+			return false, fmt.Errorf("无法确认待下发配置的内核能力：%w", err)
+		}
+		requirements.VisionFraming = requirements.VisionFraming || actual.VisionFraming
+		requirements.TransportReadBuffer = requirements.TransportReadBuffer || actual.TransportReadBuffer
+		requirements.TrojanHandshake = requirements.TrojanHandshake || actual.TrojanHandshake
+		needsCore = requirements.VisionFraming || requirements.TransportReadBuffer || requirements.TrojanHandshake
+		if needsCore {
+			// Remote callers already hold their apply slot. Reacquiring here
+			// could deadlock when all slots are occupied by guarded applies.
+			if err := c.verifyCoreCapability(ctx, serverID, sv, true, requirements, true); err != nil {
+				return false, err
+			}
+		}
+	}
 	restarted, err := c.applyWithRelayNamespaceRaw(ctx, serverID, sv, raw, apply)
 	if err == nil {
-		if _, needsVision := c.visionRequired[serverID]; needsVision {
-			// No downstream readiness acknowledgement until the live core is verified
-			// again. A restart may use a different executable from the checked file.
+		if err = c.verifyCoreTopologySnapshot(serverID); err != nil {
+			return restarted, err
+		}
+		if needsCore {
+			// Recheck the SAME raw-derived capability after restart, regardless
+			// of a concurrently changed feature flag or desired topology.
+			err = c.verifyCoreCapability(ctx, serverID, sv, false, requirements, true)
+		} else if _, legacyVision := c.visionRequired[serverID]; legacyVision {
 			err = c.verifyVisionCapability(ctx, serverID, sv, false)
 		}
 	}

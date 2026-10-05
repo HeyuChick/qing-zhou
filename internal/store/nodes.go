@@ -10,20 +10,21 @@ import (
 )
 
 type Node struct {
-	ID                     int64   `json:"id"`
-	Type                   string  `json:"type"` // self_built | external
-	Name                   string  `json:"name"`
-	Remark                 string  `json:"remark"`
-	Protocol               string  `json:"protocol"`
-	InboundTag             string  `json:"inbound_tag"`
-	RouteUpstreamInboundID int64   `json:"route_upstream_inbound_id"`
-	RouteUpstreamBroken    bool    `json:"route_upstream_broken"`
-	ShareLink              string  `json:"share_link"`
-	SourceID               int64   `json:"source_id"`
-	Enabled                bool    `json:"enabled"`
-	SortOrder              int64   `json:"sort_order"`
-	CreatedAt              int64   `json:"created_at"`
-	GroupIDs               []int64 `json:"group_ids,omitempty"`
+	ImportLegacyKeys       []string `json:"-"` // transient candidates from trusted importer code; verified against source cache
+	ID                     int64    `json:"id"`
+	Type                   string   `json:"type"` // self_built | external
+	Name                   string   `json:"name"`
+	Remark                 string   `json:"remark"`
+	Protocol               string   `json:"protocol"`
+	InboundTag             string   `json:"inbound_tag"`
+	RouteUpstreamInboundID int64    `json:"route_upstream_inbound_id"`
+	RouteUpstreamBroken    bool     `json:"route_upstream_broken"`
+	ShareLink              string   `json:"share_link"`
+	SourceID               int64    `json:"source_id"`
+	Enabled                bool     `json:"enabled"`
+	SortOrder              int64    `json:"sort_order"`
+	CreatedAt              int64    `json:"created_at"`
+	GroupIDs               []int64  `json:"group_ids,omitempty"`
 }
 
 const nodeCols = `id, type, name, remark, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at`
@@ -115,7 +116,12 @@ func NodeDisplayName(n *Node) string {
 }
 
 func (s *Store) CreateNode(n Node) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO nodes
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO nodes
 		(type, name, remark, protocol, inbound_tag, route_upstream_inbound_id, route_upstream_broken, share_link, source_id, enabled, sort_order, created_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		n.Type, n.Name, n.Remark, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, n.SourceID,
@@ -125,24 +131,37 @@ func (s *Store) CreateNode(n Node) (int64, error) {
 	}
 	id, _ := res.LastInsertId()
 	if n.GroupIDs != nil {
-		if err := s.SetNodeGroups(id, n.GroupIDs); err != nil {
+		if err := setNodeGroupsWith(tx, id, n.GroupIDs); err != nil {
 			return id, err
 		}
 	}
-	return id, nil
+	if err := s.validateRelayTopologySave(tx); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
 func (s *Store) UpdateNode(n Node) error {
-	_, err := s.db.Exec(`UPDATE nodes SET
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE nodes SET
 		type=?, name=?, remark=?, protocol=?, inbound_tag=?, route_upstream_inbound_id=?, route_upstream_broken=?, share_link=?, enabled=?, sort_order=? WHERE id=?`,
 		n.Type, n.Name, n.Remark, n.Protocol, n.InboundTag, n.RouteUpstreamInboundID, boolToInt(n.RouteUpstreamBroken), n.ShareLink, boolToInt(n.Enabled), n.SortOrder, n.ID)
 	if err != nil {
 		return err
 	}
 	if n.GroupIDs != nil {
-		return s.SetNodeGroups(n.ID, n.GroupIDs)
+		if err := setNodeGroupsWith(tx, n.ID, n.GroupIDs); err != nil {
+			return err
+		}
 	}
-	return nil
+	if err := s.validateRelayTopologySave(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReorderNodes sets sort_order to each id's position in the given slice, so the
@@ -262,6 +281,13 @@ func (s *Store) SetNodeGroups(nodeID int64, groupIDs []int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := setNodeGroupsWith(tx, nodeID, groupIDs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func setNodeGroupsWith(tx *sql.Tx, nodeID int64, groupIDs []int64) error {
 	if _, err := tx.Exec(`DELETE FROM node_group_members WHERE node_id=?`, nodeID); err != nil {
 		return err
 	}
@@ -270,7 +296,7 @@ func (s *Store) SetNodeGroups(nodeID int64, groupIDs []int64) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) NodeGroupIDs(nodeID int64) ([]int64, error) {
@@ -565,6 +591,10 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int6
 	if groupIDs == nil {
 		groupIDs = unmarshalGroupIDs(storedGroups)
 	}
+	compatibility, err := s.prepareSourceNodeAliases(tx, sourceID, nodes)
+	if err != nil {
+		return err
+	}
 	preservedOrder := map[string]int64{}
 	rows, err := tx.Query(`SELECT share_link, sort_order FROM nodes WHERE source_id=?`, sourceID)
 	if err != nil {
@@ -618,6 +648,9 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, nodes []Node, groupIDs []int6
 				}
 			}
 		}
+	}
+	if err = s.replaceSourceNodeAliases(tx, sourceID, compatibility); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`UPDATE node_sources SET last_fetched=?, last_count=?, last_error=?, group_ids=? WHERE id=?`,
 		now, len(nodes), fetchErr, marshalGroupIDs(groupIDs), sourceID); err != nil {

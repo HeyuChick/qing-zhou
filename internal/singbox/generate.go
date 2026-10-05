@@ -81,6 +81,13 @@ func VLESSUserFlow(ib map[string]interface{}) string {
 	return flow
 }
 
+// UserConfig returns the exact protocol-specific authentication object used by
+// GenerateConfig. Apply verification uses the same renderer to avoid accepting
+// a matching statistics name with different wire credentials or flow.
+func UserConfig(t string, u User, ib map[string]interface{}) map[string]interface{} {
+	return renderUser(t, u, ib)
+}
+
 func renderUser(t string, u User, ib map[string]interface{}) map[string]interface{} {
 	switch t {
 	case "vless":

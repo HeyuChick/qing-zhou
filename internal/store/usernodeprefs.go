@@ -1,5 +1,7 @@
 package store
 
+import "fmt"
+
 // Per-user node blocklist. A node_key (subconv.NodeKey of a share link) present
 // for a user is hidden from that user's subscription output. Only affects the
 // owning user; other users and the node's existence are unchanged.
@@ -61,11 +63,67 @@ func (s *Store) EnableAllNodes(userID int64) error {
 // ApplyNodePrefs disables (insert) the given keys and enables (delete) the
 // others in a single transaction. Keys in neither list are left untouched.
 func (s *Store) ApplyNodePrefs(userID int64, disable, enable []string) error {
+	return s.ApplyNodePrefsWithAliases(userID, disable, enable, nil)
+}
+
+// ApplyNodePrefsWithAliases preserves siblings covered by a shared historical
+// key. Compatibility is read-only until the user explicitly enables a node;
+// sibling protection and removal of its old aliases commit in one transaction.
+// aliases must be rebuilt from trusted current node metadata by the caller.
+func (s *Store) ApplyNodePrefsWithAliases(userID int64, disable, enable []string, aliases map[string][]string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	requested := map[string]bool{}
+	remove := map[string]bool{}
+	for _, key := range enable {
+		requested[key] = true
+		remove[key] = true
+		for _, old := range aliases[key] {
+			remove[old] = true
+		}
+	}
+	if len(aliases) > 0 && len(enable) > 0 {
+		rows, err := tx.Query(`SELECT node_key FROM user_disabled_nodes WHERE user_id=?`, userID)
+		if err != nil {
+			return err
+		}
+		disabled := map[string]bool{}
+		for rows.Next() {
+			var key string
+			if err = rows.Scan(&key); err != nil {
+				rows.Close()
+				return err
+			}
+			disabled[key] = true
+		}
+		if err = rows.Close(); err != nil {
+			return err
+		}
+		if err = rows.Err(); err != nil {
+			return err
+		}
+		for current, keys := range aliases {
+			if requested[current] {
+				continue
+			}
+			for _, old := range keys {
+				if disabled[old] && remove[old] {
+					if remove[current] {
+						return fmt.Errorf("旧节点标识存在无法分离的共享冲突，请同时选择相关节点")
+					}
+					disable = append(disable, current)
+					break
+				}
+			}
+		}
+	}
+	enable = make([]string, 0, len(remove))
+	for key := range remove {
+		enable = append(enable, key)
+	}
 	ins, err := tx.Prepare(`INSERT OR IGNORE INTO user_disabled_nodes(user_id, node_key) VALUES(?,?)`)
 	if err != nil {
 		return err

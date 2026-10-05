@@ -60,3 +60,8 @@ it('paginates users independently and resets pages on a newer machine response',
  expect(w.findAll('.user-sources li')).toHaveLength(1)
  expect(w.text()).toContain('user 1');expect(w.text()).not.toContain('user 12');w.unmount()
 })
+it('names unverified WebSocket/HTTPUpgrade runtime capability without presenting it as Vision failure or observed traffic loss',()=>{
+ const w=mount(AdminServiceTraffic,{props:{service:{...service,observed_user_coverage_complete:true,attribution_ready:false,coverage_reasons:['transport_core_unverified']}}})
+ expect(w.text()).toContain('WebSocket/HTTPUpgrade 路径的实际运行内核缓冲修复能力未确认');expect(w.text()).toContain('旧 Vision 专用版本不能替代')
+ expect(w.text()).not.toContain('Vision 路径的实际运行内核修复能力未确认');expect(w.text()).toContain('不代表已丢失流量');w.unmount()
+})

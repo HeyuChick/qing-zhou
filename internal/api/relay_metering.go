@@ -25,9 +25,15 @@ func (a *API) handleGetRelayMetering(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "读取兼容凭据状态失败")
 		return
 	}
-	out := J{"credentials": credentials, "enabled": a.st.RelayMeteringEnabled(), "per_user_enabled": a.st.RelayUserMeteringEnabled(), "cumulative_enabled": cumulative == "true", "cumulative_started": started > 0, "links": links, "compatibility_retained": true}
+	nodes, err := a.relayMeteringPreflightNodes(a.st.RelayMeteringEnabled(), a.st.RelayUserMeteringEnabled())
+	if err != nil {
+		fail(w, 500, "读取节点预检信息失败")
+		return
+	}
+	out := J{"nodes": nodes, "credentials": credentials, "enabled": a.st.RelayMeteringEnabled(), "per_user_enabled": a.st.RelayUserMeteringEnabled(), "cumulative_enabled": cumulative == "true", "cumulative_started": started > 0, "links": links, "compatibility_retained": true}
 	if a.sbctl != nil {
 		out["sync"] = a.sbctl.SyncStatuses()
+		out["sync_epoch"] = a.sbctl.SyncEpoch()
 	}
 	ok(w, out)
 }
@@ -63,8 +69,8 @@ func (a *API) handlePutRelayMetering(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	a.sbctl.ScheduleRebuild()
-	ok(w, J{"started": true, "message": "已保存，按落地优先顺序下发；旧凭据继续兼容，节点配置变更可能中断现有连接"})
+	ticket := a.sbctl.ScheduleRebuildTracked()
+	ok(w, J{"started": true, "sync_ticket": ticket, "message": "已保存，按落地优先顺序下发；旧凭据继续兼容，节点配置变更可能中断现有连接"})
 }
 
 func (a *API) handleRelayCredentialChange(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +92,6 @@ func (a *API) handleRelayCredentialChange(w http.ResponseWriter, r *http.Request
 		fail(w, http.StatusConflict, err.Error())
 		return
 	}
-	a.sbctl.ScheduleRebuild()
-	ok(w, J{"started": true, "message": "已记录凭据变更请求，请刷新查看节点下发确认"})
+	ticket := a.sbctl.ScheduleRebuildTracked()
+	ok(w, J{"started": true, "sync_ticket": ticket, "message": "已记录凭据变更请求，请刷新查看节点下发确认"})
 }

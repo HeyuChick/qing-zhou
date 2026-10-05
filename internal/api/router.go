@@ -447,6 +447,7 @@ func (a *API) Router() http.Handler {
 		ar.Get("/api/admin/monitor/servers/{id}/traffic-status", a.handleServerTrafficStatus)
 		ar.Get("/api/admin/monitor/servers/{id}/traffic-analysis", a.handleServerTrafficAnalysis)
 		ar.Get("/api/admin/relay-metering", a.handleGetRelayMetering)
+		ar.Get("/api/admin/relay-metering/preflight", a.handleRelayMeteringPreflight)
 		ar.Put("/api/admin/relay-metering", a.handlePutRelayMetering)
 		ar.Post("/api/admin/relay-metering/credentials", a.handleRelayCredentialChange)
 		ar.Post("/api/admin/monitor/servers/{id}/probe/upgrade", a.handleAdminProbeUpgrade)

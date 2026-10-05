@@ -92,12 +92,16 @@
           <n-input v-model:value="inbSearch" placeholder="搜索 tag/协议" size="small" clearable style="width:160px;max-width:40%;" />
           <n-select v-model:value="presetType" :options="presetOpts" placeholder="一键模板" size="small" style="width:180px;" @update:value="applyPreset" />
           <span class="spacer" />
-          <n-button v-if="checkedIds.size" size="small" @click="batchToggle(true)">批量启用</n-button>
-          <n-button v-if="checkedIds.size" size="small" @click="batchToggle(false)">批量停用</n-button>
-          <n-button v-if="checkedIds.size" size="small" type="error" @click="batchDelete">批量删除</n-button>
+          <n-button v-if="checkedIds.size" size="small" :disabled="batchToggling" @click="batchToggle(true)">批量启用</n-button>
+          <n-button v-if="checkedIds.size" size="small" :disabled="batchToggling" @click="batchToggle(false)">批量停用</n-button>
+          <n-button v-if="checkedIds.size" size="small" type="error" :disabled="batchToggling" @click="batchDelete">批量删除</n-button>
           <n-button size="small" @click="toggleAllMachines">{{ allExpanded ? '全部折叠' : '全部展开' }}</n-button>
           <n-button size="small" type="primary" @click="openInbound()">添加入站</n-button>
         </div>
+        <n-alert v-if="batchToggleFailures.length" type="error" title="部分入站未保存" style="margin-bottom:12px;">
+          <p>成功项已保存并排队下发，失败项保持原设置并保留选中。请修正以下问题后重试；节点是否生效仍以下发结果为准</p>
+          <ul><li v-for="failure in batchToggleFailures" :key="failure.id">{{ failure.name }}（#{{ failure.id }}）：{{ failure.error }}</li></ul>
+        </n-alert>
         <n-spin :show="loading">
           <n-collapse v-if="inboundGroups.length" v-model:expanded-names="expandedMachines" arrow-placement="left" class="machine-list">
             <n-collapse-item v-for="g in inboundGroups" :key="g.machine.id" :name="g.machine.id">
@@ -709,6 +713,7 @@ import {
   NAlert, NPopselect, useMessage, useDialog
 } from 'naive-ui'
 import { apiList, apiGet, apiGetRaw, apiPost, apiPut, apiDelete } from '@/api'
+import { applyInboundToggle, type BatchToggleFailure } from '@/utils/inboundBatch'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -960,6 +965,8 @@ function onTabChange(name: string) {
 
 // 批量操作
 const checkedIds = ref(new Set<number>())
+const batchToggling = ref(false)
+const batchToggleFailures = ref<BatchToggleFailure[]>([])
 function toggleCheck(id: number) {
   const s = new Set(checkedIds.value)
   if (s.has(id)) s.delete(id); else s.add(id)
@@ -977,7 +984,7 @@ const serverOpts = computed(() => [{ label: '本机', value: 0 }, ...servers.val
 // Relay chaining: which inbounds can serve as a landing (must be renderable as a
 // sing-box outbound). anytls / hysteria v1 have no outbound renderer, so they
 // can't be a relay's upstream.
-const RELAY_LANDING_TYPES = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'tuic']
+const RELAY_LANDING_TYPES = ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria', 'hysteria2', 'tuic', 'anytls']
 const inboundById = computed(() => { const m: Record<number, any> = {}; for (const n of inbounds.value) m[n.id] = n; return m })
 function landingOf(r: any) { return r && r.upstream_inbound_id ? (inboundById.value[r.upstream_inbound_id] || null) : null }
 // 从某入站出发沿 upstream 链走到头，返回拓扑段列表（多级中转 + 末端出口），防环。
@@ -1666,19 +1673,25 @@ async function checkPort(n: any) {
 
 // 批量启停
 async function batchToggle(enable: boolean) {
+  if (batchToggling.value) return
   const targets = inbounds.value.filter(n => checkedIds.value.has(n.id))
-  let ok = 0
-  for (const n of targets) {
-    if (n.enabled === enable) { ok++; continue }
-    try {
+  if (!targets.length) return
+  batchToggling.value = true
+  batchToggleFailures.value = []
+  try {
+    const result = await applyInboundToggle(targets, enable, n => {
       const o = jp(n.options)
-      await apiPut('/api/admin/sb/inbounds/' + n.id, { type: n.type, tag: n.tag, listen: n.listen || '::', listen_port: n.listen_port, tls_id: n.tls_id, server_id: n.server_id, enabled: enable, upstream_inbound_id: n.upstream_inbound_id || 0, options: JSON.stringify(o) })
-      n.enabled = enable
-      ok++
-    } catch {}
+      return apiPut('/api/admin/sb/inbounds/' + n.id, { type: n.type, tag: n.tag, listen: n.listen || '::', listen_port: n.listen_port, tls_id: n.tls_id, server_id: n.server_id, enabled: enable, upstream_inbound_id: n.upstream_inbound_id || 0, options: JSON.stringify(o) })
+    })
+    batchToggleFailures.value = result.failures
+    checkedIds.value = new Set(result.failures.map(f => f.id))
+    const summary = `${result.updated} 个入站设置已保存，${result.unchanged} 个无需修改`
+    if (result.failures.length) message.error(`${summary}，${result.failures.length} 个保存失败，请查看完整原因`)
+    else message.success(summary + (result.updated ? '，正在下发' : ''))
+    if (result.updated) pollSyncStatus()
+  } finally {
+    batchToggling.value = false
   }
-  checkedIds.value = new Set()
-  message.success(`${ok} 个入站已${enable ? '启用' : '停用'}`)
 }
 
 async function batchDelete() {

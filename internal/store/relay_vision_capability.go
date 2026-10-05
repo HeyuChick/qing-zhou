@@ -38,6 +38,16 @@ func relayInboundUsesVision(ib *SbInbound) bool {
 // code. A Vision customer-facing entry also needs the fix even when its next
 // managed hop is plaintext. This is per machine, not per user or credential.
 func relayVisionTopologyWith(db txLike) (map[int64]bool, map[int64][]int64, error) {
+	return relayCapabilityTopologyWith(db, relayInboundUsesVision, "Vision")
+}
+
+func relayCapabilityTopologyWith(db txLike, uses func(*SbInbound) bool, capability string) (map[int64]bool, map[int64][]int64, error) {
+	return relayCapabilityTopologyModeWith(db, uses, capability, true)
+}
+
+// relayCapabilityTopologyModeWith: callerNeedsFix=false is for server-only
+// fixes (Trojan #87), where the relay caller only runs the protocol client.
+func relayCapabilityTopologyModeWith(db txLike, uses func(*SbInbound) bool, capability string, callerNeedsFix bool) (map[int64]bool, map[int64][]int64, error) {
 	rows, err := db.Query(`SELECT i.id,i.server_id,i.type,i.tag,i.tls_id,i.options,i.upstream_inbound_id FROM sb_inbounds i WHERE i.enabled=1 AND i.upstream_inbound_id<>0
  UNION ALL SELECT i.id,i.server_id,i.type,i.tag,i.tls_id,i.options,n.route_upstream_inbound_id FROM nodes n JOIN sb_inbounds i ON i.tag=n.inbound_tag WHERE n.enabled=1 AND n.type='self_built' AND n.route_upstream_broken=0 AND n.route_upstream_inbound_id<>0 AND i.enabled=1`)
 	if err != nil {
@@ -70,15 +80,18 @@ func relayVisionTopologyWith(db txLike) (map[int64]bool, map[int64][]int64, erro
 			return nil, nil, err
 		}
 		if target == nil || !target.Enabled {
-			return nil, nil, fmt.Errorf("逐用户机器观测无法确认 Vision 能力：入口 %s 的落地不存在或已禁用", edge.from.Tag)
+			return nil, nil, fmt.Errorf("逐用户机器观测无法确认 %s 能力：入口 %s 的落地不存在或已禁用", capability, edge.from.Tag)
 		}
 		connected[edge.from.ServerID] = append(connected[edge.from.ServerID], target.ServerID)
 		connected[target.ServerID] = append(connected[target.ServerID], edge.from.ServerID)
-		if relayInboundUsesVision(&edge.from) {
+		if uses(&edge.from) {
 			required[edge.from.ServerID] = true
 		}
-		if relayInboundUsesVision(target) {
-			required[edge.from.ServerID], required[target.ServerID] = true, true
+		if uses(target) {
+			required[target.ServerID] = true
+			if callerNeedsFix {
+				required[edge.from.ServerID] = true
+			}
 		}
 	}
 	return required, connected, nil
@@ -182,7 +195,7 @@ func validateRelayVisionCapabilitiesWith(db txLike, now int64) error {
 			return fmt.Errorf("逐用户机器观测无法启用：%s 的 Vision 分片修复能力未确认；请先安装并运行轻舟修复内核 %s（含 with_v2ray_api），再到服务器页重新检测。官方 1.14.2、未知/过期或检测失败的结果不能启用 P1 Vision", name, sbver.VisionFramingFixVersion)
 		}
 	}
-	return nil
+	return validateRelayTransportCapabilitiesWith(db, now)
 }
 
 // An old active receipt cannot keep a path's attribution readiness green after

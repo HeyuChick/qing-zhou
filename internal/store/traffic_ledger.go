@@ -85,10 +85,8 @@ func (s *Store) RecordTrafficPoll(p TrafficPoll) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		for name := range p.Traffic {
-			if err = s.bindTrafficIdentity(tx, p, name); err != nil {
-				return 0, err
-			}
+		if err = s.bindTrafficIdentities(tx, p); err != nil {
+			return 0, err
 		}
 		// A reset intent is cleared only by the same transaction that durably
 		// journals its response and frozen owners. Quota processing may still
@@ -214,6 +212,10 @@ func (s *Store) processTrafficPoll(id string) (int, error) {
 			}
 		}
 	}
+	batch, err := loadTrafficPollBatch(tx, p)
+	if err != nil {
+		return 0, err
+	}
 	names := make([]string, 0, len(p.Traffic))
 	for name := range p.Traffic {
 		names = append(names, name)
@@ -222,17 +224,13 @@ func (s *Store) processTrafficPoll(id string) (int, error) {
 	applied := 0
 	firstErr := bindingErr
 	for _, name := range names {
-		var seen int
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM traffic_observations WHERE poll_id=? AND counter_name=?`, id, name).Scan(&seen); err != nil {
-			return 0, err
-		}
-		if seen > 0 {
+		if batch.seen[name] {
 			continue
 		}
 		if _, err = tx.Exec(`SAVEPOINT traffic_identity`); err != nil {
 			return 0, err
 		}
-		n, e := s.processTrafficIdentity(tx, p, name)
+		n, e := s.processTrafficIdentity(tx, p, name, batch)
 		if e != nil {
 			_, _ = tx.Exec(`ROLLBACK TO traffic_identity`)
 			_, _ = tx.Exec(`RELEASE traffic_identity`)
@@ -280,7 +278,7 @@ func trafficGap(tx *sql.Tx, p TrafficPoll, reason string) error {
 	_, err := tx.Exec(`INSERT OR IGNORE INTO traffic_metering_gaps(server_id,ts,reason,poll_id) VALUES(?,?,?,?)`, p.ServerID, p.ObservedAt, reason, p.ID)
 	return err
 }
-func (s *Store) processTrafficIdentity(tx *sql.Tx, p TrafficPoll, name string) (int, error) {
+func (s *Store) processTrafficIdentity(tx *sql.Tx, p TrafficPoll, name string, batch *trafficPollBatch) (int, error) {
 	d := p.Traffic[name]
 	quality := "observed"
 	if p.Mode == "cumulative" {
@@ -289,23 +287,14 @@ func (s *Store) processTrafficIdentity(tx *sql.Tx, p TrafficPoll, name string) (
 		// that interval to a later name owner, then make its retry look stale.
 		// Only block the same counter/epoch; other identities in a partial poll
 		// and observations from a restarted process can continue independently.
-		var earlierPending bool
-		if err := tx.QueryRow(`SELECT EXISTS(
- SELECT 1 FROM traffic_polls earlier
- JOIN traffic_poll_bindings binding ON binding.poll_id=earlier.id AND binding.counter_name=?
- WHERE earlier.state='pending' AND earlier.mode='cumulative'
- AND earlier.server_id=? AND earlier.epoch=? AND earlier.sequence<?
- AND NOT EXISTS(SELECT 1 FROM traffic_observations observation
-                WHERE observation.poll_id=earlier.id AND observation.counter_name=binding.counter_name))`, name, p.ServerID, p.Epoch, p.Sequence).Scan(&earlierPending); err != nil {
-			return 0, err
-		}
-		if earlierPending {
+		if batch.pending[name] {
 			return 0, fmt.Errorf("earlier cumulative observation is pending; retain this counter for ordered retry")
 		}
-		var up, down, seq int64
-		e := tx.QueryRow(`SELECT up,down,sequence FROM traffic_counter_cursors WHERE server_id=? AND counter_name=? AND epoch=?`, p.ServerID, name, p.Epoch).Scan(&up, &down, &seq)
+		cursor, exists := batch.cursors[name]
+		up, down, seq := cursor.up, cursor.down, cursor.sequence
+		var e error
 		switch {
-		case errors.Is(e, sql.ErrNoRows):
+		case !exists:
 			if p.Baseline {
 				d = UsageDelta{}
 				quality = "baseline"
@@ -313,8 +302,6 @@ func (s *Store) processTrafficIdentity(tx *sql.Tx, p TrafficPoll, name string) (
 					return 0, e
 				}
 			}
-		case e != nil:
-			return 0, e
 		case p.Sequence <= seq:
 			d = UsageDelta{}
 			quality = "out_of_order"
@@ -345,12 +332,13 @@ func (s *Store) processTrafficIdentity(tx *sql.Tx, p TrafficPoll, name string) (
 		}
 
 	}
-	var kind, bucketKind string
-	var linkID, bucketID, userID, pkgID int64
-	err := tx.QueryRow(`SELECT source_kind,link_id,bucket_id,user_id,package_id,bucket_kind FROM traffic_poll_bindings WHERE poll_id=? AND counter_name=?`, p.ID, name).Scan(&kind, &linkID, &bucketID, &userID, &pkgID, &bucketKind)
-	if err != nil {
-		return 0, err
+	binding, exists := batch.bindings[name]
+	if !exists {
+		return 0, fmt.Errorf("frozen traffic binding unavailable; retain poll for retry")
 	}
+	kind, bucketKind := binding.kind, binding.bucketKind
+	linkID, bucketID, userID, pkgID := binding.linkID, binding.bucketID, binding.userID, binding.pkgID
+	var err error
 	billable := kind == "direct_user"
 	if billable && bucketID == 0 {
 		return 0, fmt.Errorf("account billing target unavailable; owner retained for retry")

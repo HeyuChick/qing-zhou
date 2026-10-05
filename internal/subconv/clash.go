@@ -66,7 +66,23 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 		p *Proxy
 	}
 	var cs []conv
+	unsupportedWS, normalizedWS := 0, 0
 	for _, p := range proxies {
+		if p.Protocol == "trojan" && p.param("security") == "none" {
+			unsupportedWS++
+			continue
+		}
+		if p.transportNetwork() == "ws" {
+			if w, err := p.websocket(); err != nil {
+				unsupportedWS++
+				continue
+			} else if _, ok := w.singleHeaders(); !ok {
+				unsupportedWS++
+				continue
+			} else if w.mihomoNormalizesPath() {
+				normalizedWS++
+			}
+		}
 		if m := clashProxy(p, opt); m != nil {
 			cs = append(cs, conv{m: m, p: p})
 		}
@@ -136,7 +152,14 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 	injectNodeDomains(doc, proxies)
 
 	b, err := yaml.Marshal(doc)
-	return string(b), err
+	notes := ""
+	if unsupportedWS > 0 {
+		notes += fmt.Sprintf("# Qingzhou: omitted %d nodes with plaintext Trojan or multi-value WS headers unsupported by this mihomo exporter; use sing-box format.\n", unsupportedWS)
+	}
+	if normalizedWS > 0 {
+		notes += fmt.Sprintf("# Qingzhou: %d WS paths are preserved in YAML, but mihomo itself interprets numeric ed query parameters and normalizes escaped path bytes; exact wire-path fidelity is not guaranteed.\n", normalizedWS)
+	}
+	return notes + string(b), err
 }
 
 var clashDomesticDNS = []any{
@@ -350,6 +373,16 @@ func clashFallback(name string, proxies []string) map[string]any {
 }
 
 func clashProxy(p *Proxy, opt ClashOptions) map[string]any {
+	if p.Protocol == "trojan" && p.param("security") == "none" {
+		return nil
+	}
+	if p.transportNetwork() == "ws" {
+		if w, err := p.websocket(); err != nil {
+			return nil
+		} else if _, ok := w.singleHeaders(); !ok {
+			return nil
+		}
+	}
 	m := map[string]any{"name": p.Name, "server": p.Server, "port": p.Port}
 	switch p.Protocol {
 	case "vless":
@@ -380,6 +413,9 @@ func clashProxy(p *Proxy, opt ClashOptions) map[string]any {
 		if v := p.param("sni"); v != "" {
 			m["servername"] = v
 		}
+		if v := p.tlsParam("alpn"); v != "" {
+			m["alpn"] = strings.Split(v, ",")
+		}
 		if v := p.param("flow"); v != "" {
 			m["flow"] = v
 		}
@@ -396,7 +432,7 @@ func clashProxy(p *Proxy, opt ClashOptions) map[string]any {
 			}
 			m["reality-opts"] = ro
 		}
-		clashWS(m, p, network, p.param("path"), p.param("host"))
+		clashWS(m, p, network)
 		if p.tlsInsecure() {
 			m["skip-cert-verify"] = true
 		}
@@ -430,7 +466,7 @@ func clashProxy(p *Proxy, opt ClashOptions) map[string]any {
 				m["skip-cert-verify"] = true
 			}
 		}
-		clashWS(m, p, network, str(p.VMess["path"]), str(p.VMess["host"]))
+		clashWS(m, p, network)
 	case "ss":
 		m["type"] = "ss"
 		m["cipher"] = p.Method
@@ -440,6 +476,16 @@ func clashProxy(p *Proxy, opt ClashOptions) map[string]any {
 		m["type"] = "trojan"
 		m["password"] = p.Password
 		m["udp"] = true
+		if v := p.tlsParam("alpn"); v != "" {
+			m["alpn"] = strings.Split(v, ",")
+		}
+		if v := p.tlsParam("fp"); v != "" {
+			m["client-fingerprint"] = v
+		}
+		if network := p.transportNetwork(); network == "ws" {
+			m["network"] = network
+			clashWS(m, p, network)
+		}
 		if v := p.param("sni", "peer"); v != "" {
 			m["sni"] = v
 		}
@@ -601,23 +647,29 @@ func clashApplyTuning(m map[string]any, t tuning, suppressMux bool) {
 	}
 }
 
-func clashWS(m map[string]any, p *Proxy, network, path, host string) {
+func clashWS(m map[string]any, p *Proxy, network string) {
 	if network != "ws" {
 		return
 	}
+	w, err := p.websocket()
+	if err != nil {
+		return
+	}
+	headers, ok := w.singleHeaders()
+	if !ok {
+		return
+	}
 	wo := map[string]any{}
-	if path != "" {
-		wo["path"] = path
+	if w.path != "" {
+		wo["path"] = w.path
 	}
-	if host != "" {
-		wo["headers"] = map[string]any{"Host": host}
+	if len(headers) > 0 {
+		wo["headers"] = headers
 	}
-	// ws 0-RTT early data (must mirror the inbound). early-data-header-name is
-	// required for mihomo to use header-based early data instead of the path mode.
-	if ed := atoi(p.param("max_early_data")); ed > 0 {
-		wo["max-early-data"] = ed
-		if h := p.param("early_data_header_name"); h != "" {
-			wo["early-data-header-name"] = h
+	if w.maxEarlyData > 0 {
+		wo["max-early-data"] = w.maxEarlyData
+		if w.earlyDataHeader != "" {
+			wo["early-data-header-name"] = w.earlyDataHeader
 		}
 	}
 	m["ws-opts"] = wo

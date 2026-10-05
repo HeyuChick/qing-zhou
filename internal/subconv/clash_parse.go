@@ -41,6 +41,9 @@ func ParseClashYAML(blob string) []*Proxy {
 			continue
 		}
 		if p, err := ParseLink(link); err == nil {
+			if previous := legacyClashToLink(m); previous != "" && previous != link {
+				p.SourceLegacyKeys = NodeKeys(previous)
+			}
 			out = append(out, p)
 		}
 	}
@@ -99,14 +102,11 @@ func clashToLink(m map[string]any) string {
 		if v := str(m["client-fingerprint"]); v != "" {
 			q.Set("fp", v)
 		}
-		if net == "ws" {
-			path, host := clashWSOpts(m)
-			if path != "" {
-				q.Set("path", path)
-			}
-			if host != "" {
-				q.Set("host", host)
-			}
+		if net == "ws" && !clashWSToQuery(m, q) {
+			return ""
+		}
+		if v := alpnStr(m["alpn"]); v != "" {
+			q.Set("alpn", v)
 		}
 		if cbool(m["skip-cert-verify"]) {
 			q.Set("allowInsecure", "1")
@@ -135,6 +135,7 @@ func clashToLink(m map[string]any) string {
 			// the exemption at parse time, so no amount of fixing the renderers
 			// could bring it back on re-export.
 			if cbool(m["skip-cert-verify"]) {
+				j["insecure"] = "1"
 				j["allowInsecure"] = "1"
 			}
 			if v := str(m["client-fingerprint"]); v != "" {
@@ -145,9 +146,21 @@ func clashToLink(m map[string]any) string {
 			}
 		}
 		if strOr(str(m["network"]), "tcp") == "ws" {
-			path, host := clashWSOpts(m)
-			j["path"] = path
-			j["host"] = host
+			q := url.Values{}
+			if !clashWSToQuery(m, q) {
+				return ""
+			}
+			for key, values := range q {
+				if key == "qz-ws-headers" {
+					var headers any
+					if json.Unmarshal([]byte(values[0]), &headers) != nil {
+						return ""
+					}
+					j[key] = headers
+				} else {
+					j[key] = values[0]
+				}
+			}
 		}
 		b, _ := json.Marshal(j)
 		return "vmess://" + base64.StdEncoding.EncodeToString(b)
@@ -158,13 +171,26 @@ func clashToLink(m map[string]any) string {
 
 	case "trojan":
 		q := url.Values{}
+		q.Set("security", "tls")
+		if network := str(m["network"]); network != "" {
+			q.Set("type", network)
+			if network == "ws" && !clashWSToQuery(m, q) {
+				return ""
+			}
+		}
+		if v := alpnStr(m["alpn"]); v != "" {
+			q.Set("alpn", v)
+		}
+		if v := str(m["client-fingerprint"]); v != "" {
+			q.Set("fp", v)
+		}
 		if v := str(m["sni"]); v != "" {
 			q.Set("sni", v)
 		}
 		if cbool(m["skip-cert-verify"]) {
 			q.Set("allowInsecure", "1")
 		}
-		return "trojan://" + str(m["password"]) + "@" + addr + qstr(q) + frag
+		return "trojan://" + url.User(str(m["password"])).String() + "@" + addr + qstr(q) + frag
 
 	// hysteria (v1) is deliberately NOT folded in here: it is a different wire
 	// protocol with different fields (auth-str, up/down), so rendering it as a
@@ -259,20 +285,10 @@ func clashToLink(m map[string]any) string {
 	return ""
 }
 
-func clashWSOpts(m map[string]any) (path, host string) {
-	wo, ok := m["ws-opts"].(map[string]any)
-	if !ok {
-		return "", ""
-	}
-	path = str(wo["path"])
-	if h, ok := wo["headers"].(map[string]any); ok {
-		host = strOr(str(h["Host"]), str(h["host"]))
-	}
-	return path, host
-}
-
 func alpnStr(v any) string {
 	switch x := v.(type) {
+	case []string:
+		return strings.Join(x, ",")
 	case []any:
 		parts := make([]string, 0, len(x))
 		for _, e := range x {

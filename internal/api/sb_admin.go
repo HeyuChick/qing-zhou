@@ -124,6 +124,9 @@ func (a *API) handleAdminQuickSelfSignedTls(w http.ResponseWriter, r *http.Reque
 	cj, _ := json.Marshal(client)
 	newID, err := a.st.SaveSbTls(&store.SbTls{ServerID: req.ServerID, Name: name, Mode: "tls", ServerJSON: string(sj), ClientJSON: string(cj)})
 	if err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "保存证书失败")
 		return
 	}
@@ -234,6 +237,9 @@ func (a *API) handleAdminAcmeCert(w http.ResponseWriter, r *http.Request) {
 	cj, _ := json.Marshal(client)
 	id, err := a.st.SaveSbTls(&store.SbTls{ServerID: req.ServerID, Name: req.Name, Mode: "tls", ServerJSON: string(sj), ClientJSON: string(cj)})
 	if err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "证书已申请，但保存配置失败")
 		return
 	}
@@ -450,6 +456,9 @@ func (a *API) handleAdminSaveSbTls(w http.ResponseWriter, r *http.Request) {
 	}
 	newID, err := a.st.SaveSbTls(&t)
 	if err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
@@ -573,6 +582,9 @@ func (a *API) handleAdminCreateRealityTls(w http.ResponseWriter, r *http.Request
 	cj, _ := json.Marshal(client)
 	id, err := a.st.SaveSbTls(&store.SbTls{ServerID: req.ServerID, Name: req.Name, Mode: "reality", ServerJSON: string(sj), ClientJSON: string(cj)})
 	if err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
@@ -672,6 +684,9 @@ func (a *API) handleAdminUpdateRealityTls(w http.ResponseWriter, r *http.Request
 	sj, _ := json.Marshal(server)
 	cj, _ := json.Marshal(client)
 	if _, err := a.st.SaveSbTls(&store.SbTls{ID: id, ServerID: req.ServerID, Name: req.Name, Mode: "reality", ServerJSON: string(sj), ClientJSON: string(cj)}); err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
@@ -748,6 +763,9 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 		cj, _ := json.Marshal(client)
 		newID, err := a.st.SaveSbTls(&store.SbTls{ID: id, ServerID: req.ServerID, Name: req.Name, Mode: "tls", CertID: req.CertID, ServerJSON: string(sj), ClientJSON: string(cj)})
 		if err != nil {
+			if failRelayTopology(w, err) {
+				return
+			}
 			fail(w, http.StatusInternalServerError, "保存失败")
 			return
 		}
@@ -802,6 +820,9 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 	cj, _ := json.Marshal(client)
 	newID, err := a.st.SaveSbTls(&store.SbTls{ID: id, ServerID: req.ServerID, Name: req.Name, Mode: "tls", ServerJSON: string(sj), ClientJSON: string(cj)})
 	if err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
@@ -1634,6 +1655,9 @@ func (a *API) handleAdminSaveSbInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	newID, err := a.st.SaveSbInbound(&n)
 	if err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "保存失败（tag 可能重复）")
 		return
 	}
@@ -1690,6 +1714,9 @@ func (a *API) handleAdminDeleteSbInbound(w http.ResponseWriter, r *http.Request)
 	// outbound that dialed the now-deleted inbound.
 	relayServers, err := a.st.DeleteSbInbound(inboundID)
 	if err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "删除失败")
 		return
 	}
@@ -1965,4 +1992,14 @@ func (a *API) handleAdminImportRemotePreview(w http.ResponseWriter, r *http.Requ
 		"config_path": configPath,
 		"inbounds":    inbounds,
 	})
+}
+
+// A static candidate-graph rejection means nothing was saved. Keep ordinary
+// database failures generic, but show the actionable routing error to admins.
+func failRelayTopology(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, store.ErrRelayTopology) {
+		return false
+	}
+	fail(w, http.StatusBadRequest, err.Error())
+	return true
 }

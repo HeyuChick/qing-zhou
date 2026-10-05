@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "base_commit": "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",
+  "upstream_commit": "07512b1093aa38626fca00dbba07bc5d77375861",
+  "upstream_url": "https://github.com/SagerNet/sing-box/commit/07512b1093aa38626fca00dbba07bc5d77375861",
+  "patch_sha256": "731a661d2121470feb6e04c64d0c6a2b6185819dac9c11fb50af06f2c87e9a44",
+  "files": [
+    {
+      "path": "transport/v2rayhttpupgrade/client.go",
+      "before_sha256": "4d7051024cedfd36d03297e64ff5754b426a75b455d8aab22cd35633cf6395e1",
+      "after_sha256": "38d243252827f9d89f50d3f86be4974d6d68b35a51965bdd53647ece81bfee05"
+    },
+    {
+      "path": "transport/v2rayhttpupgrade/server.go",
+      "before_sha256": "1bc5c4afb21175412cd55c85e4441d579d05c0f9f75d5a204a0721c4e690f5ee",
+      "after_sha256": "db30a71f1f6d5ba3553ba8d603d6be673c8ba355c9e660c0730dcd0aa6bded95"
+    },
+    {
+      "path": "transport/v2raywebsocket/client.go",
+      "before_sha256": "23f797a480f7a825424769924e38937d0c9411af43b444a3b536baf36297d241",
+      "after_sha256": "666f2baf8f91827fc8350bfbb0a938febbb353c968b446ddaa07aef08dfe6195"
+    }
+  ]
+}

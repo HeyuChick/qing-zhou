@@ -503,14 +503,14 @@ func TestRelayMeteringUsersOptInDoesNotNarrowP0(t *testing.T) {
 	if _, err = st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, "127.0.0.1:18080", users); err != nil {
 		t.Fatal(err)
 	}
-	if err = st.ConfigureTrafficMetering(true, false, true); err == nil {
-		t.Fatal("unverified P1 landing protocol activation succeeded")
+	if err = st.ConfigureTrafficMetering(true, false, true); err != nil {
+		t.Fatal("supported Trojan landing must enable P1:", err)
 	}
-	if st.RelayUserMeteringEnabled() {
-		t.Fatal("failed P1 preflight polluted the persisted switch")
+	if !st.RelayUserMeteringEnabled() {
+		t.Fatal("successful P1 activation did not persist the switch")
 	}
 	if err = st.PrepareRelayMetering(); err != nil {
-		t.Fatal("failed P1 activation blocked later P0 user/config changes:", err)
+		t.Fatal("supported Trojan landing failed P1 preparation:", err)
 	}
 	if err = st.ConfigureTrafficMetering(true, false, false); err != nil {
 		t.Fatal(err)
@@ -521,10 +521,11 @@ func TestRelayMeteringUsersOptInDoesNotNarrowP0(t *testing.T) {
 }
 
 func TestRelayMeteringUsersActivationPreflightIsAtomic(t *testing.T) {
-	for _, problem := range []string{"same-machine", "cycle", "disabled-target"} {
+	for _, problem := range []string{"same-machine", "cycle", "disabled-target", "unsupported-target", "unsupported-source", "unsupported-ss-method"} {
 		t.Run(problem, func(t *testing.T) {
 			f := newUserMeteringFixture(t, 3)
-			if err := f.st.ConfigureTrafficMetering(true, false, false); err != nil {
+			// Simulate a legacy invalid graph; metering-enabled saves reject it now.
+			if err := f.st.ConfigureTrafficMetering(false, false, false); err != nil {
 				t.Fatal(err)
 			}
 			target, err := f.st.GetSbInbound(f.inbounds[2])
@@ -538,6 +539,15 @@ func TestRelayMeteringUsersActivationPreflightIsAtomic(t *testing.T) {
 				target.UpstreamInboundID = f.inbounds[0]
 			case "disabled-target":
 				target.Enabled = false
+			case "unsupported-target":
+				target.Type = "unsupported-protocol"
+			case "unsupported-source":
+				if _, err = f.st.db.Exec(`UPDATE sb_inbounds SET type='unsupported-protocol' WHERE id=?`, f.inbounds[0]); err != nil {
+					t.Fatal(err)
+				}
+			case "unsupported-ss-method":
+				target.Type = "shadowsocks"
+				target.Options = `{"method":"2022-blake3-chacha20-poly1305"}`
 			}
 			if _, err = f.st.SaveSbInbound(target); err != nil {
 				t.Fatal(err)

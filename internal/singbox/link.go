@@ -24,9 +24,10 @@ type LinkParams struct {
 	// (sb_inbounds.tls_id != 0). It is NOT derivable from SNI: server_name is
 	// optional and routinely empty on self-signed or bare-IP inbounds, so
 	// inferring TLS from "SNI != ''" silently renders those nodes as plaintext.
-	// vless/trojan sidestep this by being unconditionally TLS; vmess is the one
-	// protocol whose link has to carry the flag explicitly.
+	// VMess uses TLS directly. VLESS/Trojan keep their historical TLS default
+	// unless the caller explicitly sets TLSDisabled after verifying plaintext.
 	TLS         bool
+	TLSDisabled bool // explicit plaintext; false preserves legacy VLESS/Trojan TLS defaults
 	SNI         string
 	PublicKey   string // reality pbk
 	ShortID     string // reality sid
@@ -53,9 +54,10 @@ type LinkParams struct {
 
 	// transport (vless/vmess/trojan): Network is ws|grpc|httpupgrade ("" or tcp = none)
 	Network     string
-	Path        string // ws/httpupgrade path
-	WSHost      string // ws/httpupgrade Host header
-	ServiceName string // grpc service name
+	Path        string              // ws/httpupgrade path
+	WSHost      string              // ws/httpupgrade Host header
+	WSHeaders   map[string][]string // lossless WS headers; URI transport uses a documented Qingzhou extension
+	ServiceName string              // grpc service name
 
 	// ws 0-RTT early data. Both must match the inbound; carried so the client
 	// gets the same 1-RTT-saving handshake the server advertises.
@@ -163,6 +165,10 @@ func (p LinkParams) transportQuery() []string {
 		if p.WSHost != "" {
 			q = append(q, "host="+url.QueryEscape(p.WSHost))
 		}
+		if extendedWSHeaders(p.WSHeaders) {
+			headers, _ := json.Marshal(p.WSHeaders)
+			q = append(q, "qz-ws-headers="+url.QueryEscape(string(headers)))
+		}
 		if p.WSMaxEarlyData > 0 {
 			q = append(q, "max_early_data="+strconv.Itoa(p.WSMaxEarlyData))
 			if p.WSEarlyDataHeader != "" {
@@ -220,6 +226,32 @@ func BuildShareLink(p LinkParams) string {
 	if p.Host == "" || p.Port == 0 {
 		return ""
 	}
+	if p.Network == "ws" {
+		if p.WSMaxEarlyData < 0 || strings.ContainsAny(p.Path, "\r\n\x00") {
+			return ""
+		}
+		if p.WSHost != "" {
+			if _, err := NormalizeWSHeaders(map[string]string{"Host": p.WSHost}); err != nil {
+				return ""
+			}
+		}
+		if p.WSEarlyDataHeader != "" {
+			if _, err := NormalizeWSHeaders(map[string]string{p.WSEarlyDataHeader: ""}); err != nil {
+				return ""
+			}
+		}
+		headers, err := NormalizeWSHeaders(p.WSHeaders)
+		if err != nil {
+			return ""
+		}
+		p.WSHeaders = headers
+		if values := headers["Host"]; len(values) > 0 {
+			if p.WSHost != "" && p.WSHost != values[0] {
+				return ""
+			}
+			p.WSHost = values[0]
+		}
+	}
 	fp := p.Fingerprint
 	if fp == "" {
 		fp = "chrome"
@@ -243,11 +275,16 @@ func BuildShareLink(p LinkParams) string {
 				q = append(q, "flow=xtls-rprx-vision")
 				visionActive = true
 			}
+		} else if p.TLSDisabled {
+			q = append(q, "security=none")
 		} else { // plain TLS
 			q = append(q, "security=tls", "fp="+esc(fp), "sni="+esc(p.SNI))
 			if p.Insecure {
 				q = append(q, "allowInsecure=1")
 			}
+		}
+		if p.ALPN != "" && !p.TLSDisabled {
+			q = append(q, "alpn="+esc(p.ALPN))
 		}
 		// VLESS is the only protocol here whose UDP needs an explicit packet
 		// encoding; without it each client picks its own default and UDP fails
@@ -258,18 +295,25 @@ func BuildShareLink(p LinkParams) string {
 		if p.NoUDP {
 			q = append(q, noUDPParam)
 		}
-		return "vless://" + esc(p.UUID) + "@" + hp + "?" + strings.Join(q, "&") + frag
+		return "vless://" + url.User(p.UUID).String() + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "trojan":
 		q := p.transportQuery()
-		q = append(q, "security=tls", "fp="+esc(fp), "sni="+esc(p.SNI))
-		if p.Insecure {
-			q = append(q, "allowInsecure=1")
+		if p.TLSDisabled {
+			q = append(q, "security=none")
+		} else {
+			q = append(q, "security=tls", "fp="+esc(fp), "sni="+esc(p.SNI))
+			if p.Insecure {
+				q = append(q, "allowInsecure=1")
+			}
+		}
+		if p.ALPN != "" && !p.TLSDisabled {
+			q = append(q, "alpn="+esc(p.ALPN))
 		}
 		q = append(q, p.tuningQuery(true)...)
 		if p.NoUDP {
 			q = append(q, noUDPParam)
 		}
-		return "trojan://" + esc(p.Password) + "@" + hp + "?" + strings.Join(q, "&") + frag
+		return "trojan://" + url.User(p.Password).String() + "@" + hp + "?" + strings.Join(q, "&") + frag
 	case "tuic":
 		q := []string{"security=tls"}
 		if p.Insecure {
@@ -348,6 +392,17 @@ func BuildShareLink(p LinkParams) string {
 		if m["net"] == "" || m["net"] == nil {
 			m["net"] = "tcp"
 		}
+		if p.Network == "ws" {
+			if extendedWSHeaders(p.WSHeaders) {
+				m["qz-ws-headers"] = p.WSHeaders
+			}
+			if p.WSMaxEarlyData > 0 {
+				m["max_early_data"] = p.WSMaxEarlyData
+				if p.WSEarlyDataHeader != "" {
+					m["early_data_header_name"] = p.WSEarlyDataHeader
+				}
+			}
+		}
 		if p.Network == "grpc" {
 			m["path"] = p.ServiceName
 		}
@@ -371,9 +426,9 @@ func BuildShareLink(p LinkParams) string {
 				m["alpn"] = p.ALPN
 			}
 			if p.Insecure {
-				// Not part of the v2rayN vmess schema (it has no such key), but
-				// 轻舟's own renderers read it back via Proxy.param, which falls
-				// through to the vmess JSON map. Clients that don't know it ignore it.
+				// Current VMess v2 documents insecure; keep allowInsecure for
+				// historical Qingzhou consumers as an equivalent alias.
+				m["insecure"] = "1"
 				m["allowInsecure"] = "1"
 			}
 		} else {

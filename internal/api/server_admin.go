@@ -166,6 +166,9 @@ func (a *API) handleAdminUpdateServer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := a.st.UpdateServer(*sv); err != nil {
+		if failRelayTopology(w, err) {
+			return
+		}
 		fail(w, http.StatusInternalServerError, "更新服务器失败")
 		return
 	}
