@@ -101,8 +101,11 @@ type Controller struct {
 	remoteSlots chan struct{} // shared SSH budget for applies, probes and stats
 
 	// Immutable during each serialized rebuild, including its apply goroutines.
-	visionRequired map[int64]*store.Server
-	visionBlocked  map[int64]error
+	coreRequirements  map[int64]store.RelayCoreRequirements
+	coreDependencies  map[int64][]int64
+	coreSnapshotKnown bool
+	visionRequired    map[int64]*store.Server
+	visionBlocked     map[int64]error
 
 	mu      sync.Mutex // serializes Rebuild
 	statsMu sync.Mutex // one authoritative collector per process

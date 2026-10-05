@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"qingzhou/internal/sbver"
 	"qingzhou/internal/singbox"
 )
 
@@ -119,6 +120,13 @@ func newProtocolMeteringFixture(t *testing.T, protocols ...meteringProtocolCase)
 		id := mkUser(t, f.st, fmt.Sprintf("protocol-owner-%d", owner))
 		buy(t, f.st, id, f.pkg)
 		f.owners = append(f.owners, id)
+	}
+	// This planner-only fixture models a reviewed installed capability for
+	// activation preflight. It is not a real handshake or live-process proof.
+	for _, id := range f.servers {
+		if err := f.st.SetNodeSingbox(id, sbver.Parse("sing-box version "+sbver.TransportReadBufferFixVersion+"\nTags: with_v2ray_api")); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := f.st.ConfigureTrafficMetering(true, false, true); err != nil {
 		t.Fatal(err)

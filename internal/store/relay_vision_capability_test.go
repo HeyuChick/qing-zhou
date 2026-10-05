@@ -93,6 +93,15 @@ func TestRelayVisionGateLeavesPlainWSP0AndOptOutUnchanged(t *testing.T) {
 	for _, options := range []string{`{"flow":"none"}`, `{"transport":{"type":"ws","path":"/fixture"}}`} {
 		t.Run(options, func(t *testing.T) {
 			f := visionCapabilityFixture(t, 2, options)
+			if strings.Contains(options, `"ws"`) {
+				// WS still does not require Vision, but independently requires the
+				// reviewed transport buffering fix for P1.
+				for _, id := range f.servers {
+					if err := f.st.SetNodeSingbox(id, sbver.Parse("sing-box version "+sbver.TransportReadBufferFixVersion+"\nTags: with_v2ray_api")); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			if err := f.st.ConfigureTrafficMetering(true, false, true); err != nil {
 				t.Fatal(err)
 			}

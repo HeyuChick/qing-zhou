@@ -22,9 +22,10 @@ type NodeSingbox struct {
 	Version     string `json:"version"`
 	HasV2RayAPI bool   `json:"has_v2ray_api"`
 	// Derived from the preserved version marker, never from version ordering.
-	HasVisionFramingFix bool   `json:"has_vision_framing_fix"`
-	Raw                 string `json:"raw"`
-	CheckedAt           int64  `json:"checked_at"`
+	HasVisionFramingFix       bool   `json:"has_vision_framing_fix"`
+	HasTransportReadBufferFix bool   `json:"has_transport_read_buffer_fix"`
+	Raw                       string `json:"raw"`
+	CheckedAt                 int64  `json:"checked_at"`
 	// Error is why the last probe failed. A failed probe never clears the
 	// previously observed version: "the node is unreachable right now" and "the
 	// node has no sing-box" are different answers, and overwriting the former
@@ -80,6 +81,7 @@ func (s *Store) NodeSingboxAll() (map[int64]*NodeSingbox, error) {
 		}
 		n.HasV2RayAPI = api != 0
 		n.HasVisionFramingFix = sbver.HasVisionFramingFix(n.Version)
+		n.HasTransportReadBufferFix = sbver.HasTransportReadBufferFix(n.Version)
 		out[n.ServerID] = &n
 	}
 	return out, rows.Err()
