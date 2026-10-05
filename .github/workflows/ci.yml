@@ -72,7 +72,7 @@ jobs:
 
   relay-integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -82,8 +82,12 @@ jobs:
           go-version: "1.25.14"
       - name: Verify official Vision framing fix
         run: bash scripts/test-vision-framing.sh
-      - name: Build the exact release core candidate
-        run: bash scripts/build-singbox.sh --output-dir "$RUNNER_TEMP/qz-core" --arch amd64
+      - name: Verify exact transport buffer backport and negative controls
+        env:
+          QZ_TRANSPORT_STRESS_ROUNDS: "100"
+        run: bash scripts/test-transport-buffer.sh --check-baseline
+      - name: Build the exact release core candidate (amd64 and arm64)
+        run: bash scripts/build-singbox.sh --output-dir "$RUNNER_TEMP/qz-core" --arch amd64,arm64
       - name: Record candidate core provenance
         uses: actions/upload-artifact@v4
         with:

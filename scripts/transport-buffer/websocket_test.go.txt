@@ -1,0 +1,160 @@
+package v2raywebsocket
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/json/badoption"
+	M "github.com/sagernet/sing/common/metadata"
+)
+
+type qzWSConn struct {
+	input   *bytes.Reader
+	written bytes.Buffer
+	payload []byte
+	limit   int
+}
+
+func (c *qzWSConn) Read(p []byte) (int, error) {
+	if c.input == nil {
+		req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(c.written.Bytes())))
+		if err != nil {
+			return 0, err
+		}
+		accept := sha1.Sum([]byte(req.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+		protocolHeader := ""
+		if protocol := req.Header.Get("Sec-WebSocket-Protocol"); protocol != "" {
+			protocolHeader = "Sec-WebSocket-Protocol: " + protocol + "\r\n"
+		}
+		response := []byte("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: " + base64.StdEncoding.EncodeToString(accept[:]) + "\r\n" + protocolHeader + "\r\n")
+		response = append(response, 0x82)
+		if len(c.payload) < 126 {
+			response = append(response, byte(len(c.payload)))
+		} else if len(c.payload) <= 65535 {
+			response = append(response, 126)
+			response = binary.BigEndian.AppendUint16(response, uint16(len(c.payload)))
+		} else {
+			response = append(response, 127)
+			response = binary.BigEndian.AppendUint64(response, uint64(len(c.payload)))
+		}
+		response = append(response, c.payload...)
+		c.input = bytes.NewReader(response)
+	}
+	if c.limit > 0 && len(p) > c.limit {
+		p = p[:c.limit]
+	}
+	return c.input.Read(p)
+}
+func (c *qzWSConn) Write(p []byte) (int, error)      { return c.written.Write(p) }
+func (c *qzWSConn) Close() error                     { return nil }
+func (c *qzWSConn) LocalAddr() net.Addr              { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234} }
+func (c *qzWSConn) RemoteAddr() net.Addr             { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4321} }
+func (c *qzWSConn) SetDeadline(time.Time) error      { return nil }
+func (c *qzWSConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *qzWSConn) SetWriteDeadline(time.Time) error { return nil }
+
+type qzWSDialer struct{ conn net.Conn }
+
+func (d qzWSDialer) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
+	return d.conn, nil
+}
+func (d qzWSDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
+	return nil, errors.New("unused")
+}
+
+func TestQZWebSocketClientPreservesCoalescedFirstFrame(t *testing.T) {
+	payload := []byte{0, 146, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	raw := &qzWSConn{payload: payload}
+	client, err := NewClient(context.Background(), qzWSDialer{raw}, M.ParseSocksaddr("127.0.0.1:1234"), option.V2RayWebsocketOptions{Path: "/fixture"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := client.DialContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	n, err := io.ReadFull(conn, got)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("first WebSocket frame lost after HTTP 101: got %x (%d) want %x err=%v", got[:n], n, payload, err)
+	}
+}
+
+type qzWSFactory struct{ payload []byte }
+
+func (d qzWSFactory) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
+	return &qzWSConn{payload: d.payload}, nil
+}
+func (d qzWSFactory) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
+	return nil, errors.New("unused")
+}
+
+func TestQZWebSocketConcurrentSharedHeaders(t *testing.T) {
+	payload := bytes.Repeat([]byte{0x47}, 8192)
+	client, err := NewClient(context.Background(), qzWSFactory{payload}, M.ParseSocksaddr("127.0.0.1:1234"), option.V2RayWebsocketOptions{Path: "/fixture", Headers: badoption.HTTPHeader{"Sec-WebSocket-Protocol": []string{"qz-test"}, "X-Fixture": []string{"preserve-me"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := client.DialContext(context.Background())
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			got := make([]byte, len(payload))
+			_, err = io.ReadFull(conn, got)
+			if err != nil || !bytes.Equal(got, payload) {
+				t.Errorf("concurrent WS buffer/header corrupted: %v", err)
+			}
+			conn.Close()
+		}()
+	}
+	wg.Wait()
+	if client.(*Client).headers.Get("Sec-WebSocket-Protocol") != "qz-test" {
+		t.Fatal("shared client headers were mutated by handshake")
+	}
+}
+
+func TestQZWebSocketFragmentedAndLongFlow(t *testing.T) {
+	for _, limit := range []int{1, 7, 0} {
+		for _, size := range []int{1, 65536, 1048576} {
+			t.Run(fmt.Sprintf("chunk-%d/bytes-%d", limit, size), func(t *testing.T) {
+				payload := bytes.Repeat([]byte{0x66}, size)
+				raw := &qzWSConn{payload: payload, limit: limit}
+				client, err := NewClient(context.Background(), qzWSDialer{raw}, M.ParseSocksaddr("127.0.0.1:1234"), option.V2RayWebsocketOptions{Path: "/fixture"}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				conn, err := client.DialContext(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := make([]byte, size)
+				_, err = io.ReadFull(conn, got)
+				if err != nil || !bytes.Equal(got, payload) {
+					t.Fatalf("fragmented/long WS stream truncated: size=%d err=%v", size, err)
+				}
+				if err = conn.Close(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}

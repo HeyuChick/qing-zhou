@@ -1,0 +1,75 @@
+diff --git a/transport/v2rayhttpupgrade/client.go b/transport/v2rayhttpupgrade/client.go
+--- a/transport/v2rayhttpupgrade/client.go
++++ b/transport/v2rayhttpupgrade/client.go
+@@ -105,8 +105,9 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
+ 	}
+ 	if bufReader.Buffered() > 0 {
+ 		buffer := buf.NewSize(bufReader.Buffered())
+-		_, err = buffer.ReadFullFrom(bufReader, buffer.Len())
++		_, err = buffer.ReadFullFrom(bufReader, buffer.FreeLen())
+ 		if err != nil {
++			buffer.Release()
+ 			conn.Close()
+ 			return nil, err
+ 		}
+diff --git a/transport/v2rayhttpupgrade/server.go b/transport/v2rayhttpupgrade/server.go
+--- a/transport/v2rayhttpupgrade/server.go
++++ b/transport/v2rayhttpupgrade/server.go
+@@ -14,6 +14,8 @@ import (
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing-box/transport/v2rayhttp"
+ 	"github.com/sagernet/sing/common"
++	"github.com/sagernet/sing/common/buf"
++	"github.com/sagernet/sing/common/bufio"
+ 	E "github.com/sagernet/sing/common/exceptions"
+ 	"github.com/sagernet/sing/common/logger"
+ 	M "github.com/sagernet/sing/common/metadata"
+@@ -107,11 +109,22 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+ 		s.invalidRequest(writer, request, http.StatusInternalServerError, E.New("invalid connection, maybe HTTP/2"))
+ 		return
+ 	}
+-	conn, _, err := hijacker.Hijack()
++	conn, reader, err := hijacker.Hijack()
+ 	if err != nil {
+ 		s.invalidRequest(writer, request, http.StatusInternalServerError, E.Cause(err, "hijack failed"))
+ 		return
+ 	}
++	if cacheLen := reader.Reader.Buffered(); cacheLen > 0 {
++		cache := buf.NewSize(cacheLen)
++		_, err = cache.ReadFullFrom(reader.Reader, cacheLen)
++		if err != nil {
++			cache.Release()
++			conn.Close()
++			s.invalidRequest(writer, request, 0, E.Cause(err, "read cache"))
++			return
++		}
++		conn = bufio.NewCachedConn(conn, cache)
++	}
+ 	s.handler.NewConnectionEx(v2rayhttp.DupContext(request.Context()), conn, sHttp.SourceAddress(request), M.Socksaddr{}, nil)
+ }
+ 
+diff --git a/transport/v2raywebsocket/client.go b/transport/v2raywebsocket/client.go
+--- a/transport/v2raywebsocket/client.go
++++ b/transport/v2raywebsocket/client.go
+@@ -97,8 +97,10 @@ func (c *Client) upgrade(conn net.Conn, requestURL *url.URL, headers http.Header
+ 	}
+ 	deadlineConn.SetDeadline(time.Now().Add(C.TCPTimeout))
+ 	var protocols []string
+-	if protocolHeader := headers.Get("Sec-WebSocket-Protocol"); protocolHeader != "" {
++	protocolHeader := headers.Get("Sec-WebSocket-Protocol")
++	if protocolHeader != "" {
+ 		protocols = []string{protocolHeader}
++		headers = headers.Clone()
+ 		headers.Del("Sec-WebSocket-Protocol")
+ 	}
+ 	reader, _, err := ws.Dialer{Header: ws.HandshakeHeaderHTTP(headers), Protocols: protocols}.Upgrade(deadlineConn, requestURL)
+@@ -109,7 +111,7 @@ func (c *Client) upgrade(conn net.Conn, requestURL *url.URL, headers http.Header
+ 	}
+ 	if reader != nil {
+ 		buffer := buf.NewSize(reader.Buffered())
+-		_, err = buffer.ReadFullFrom(reader, buffer.Len())
++		_, err = buffer.ReadFullFrom(reader, buffer.FreeLen())
+ 		if err != nil {
+ 			conn.Close()
+ 			return nil, err
+

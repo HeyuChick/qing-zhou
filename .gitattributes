@@ -1,3 +1,7 @@
 * text=auto eol=lf
 *.png binary
 *.ico binary
+
+# Unified patch context intentionally starts with a space before source tabs.
+# Exact patch/source hashes and git apply --check validate this reviewed input.
+scripts/transport-buffer/07512b10-selected.patch -whitespace

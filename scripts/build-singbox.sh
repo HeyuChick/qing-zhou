@@ -4,13 +4,8 @@
 # commit only; its worktree is never edited and uncommitted changes are ignored.
 set -euo pipefail
 
-SB_TAG=v1.14.2
-SB_COMMIT=af6e64c3b69e6132ebaee0e1a3d24e93903f6709
-VMESS_VERSION=v0.2.9-0.20260929152519-9b95ab8c9478
-VMESS_COMMIT=9b95ab8c9478f8e8ebe5758d325ec8cda8197c5c
-VMESS_SUM='h1:q2eQn4nq8oWGxRm9zXesXSlPr9GEgPrOGzf4iPtzG9A='
-VMESS_MOD_SUM='h1:P11scgTxMxVVQ8dlM27yNm3Cro40mD0+gHbnqrNGDuY='
-CORE_VERSION=1.14.2+qz-vmess.9b95ab8c9478
+script_root=$(cd "$(dirname "$0")" && pwd)
+source "$script_root/singbox-pins.sh"
 TAGS=with_gvisor,with_quic,with_grpc,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api,with_tailscale,with_ccm,with_ocm,with_cloudflared,with_naive_outbound,with_usbip,with_openvpn,with_openconnect,with_purego,badlinkname,tfogo_checklinkname0
 GO=${GO:-go}
 export GOWORK=off GOTOOLCHAIN=local
@@ -74,6 +69,7 @@ origin = info.get('Origin')
 if origin:
     assert origin.get('Hash') == sys.argv[3], 'sing-vmess origin commit mismatch'
 PY
+bash "$script_root/apply-transport-buffer-patch.sh" "$PWD"
 cp go.mod "$work/expected.go.mod"
 printf 'Verified sing-box %s (%s), sing-vmess %s (%s)\n' "$SB_TAG" "$SB_COMMIT" "$VMESS_VERSION" "$VMESS_SUM"
 IFS=, read -r -a arches <<< "$architectures"
@@ -102,12 +98,12 @@ PY
   fi
   (cd "$output_dir" && sha256sum "sing-box-linux-$arch")
 done
-python3 - "$output_dir" "$SB_TAG" "$SB_COMMIT" "$VMESS_VERSION" "$VMESS_COMMIT" "$VMESS_SUM" "$VMESS_MOD_SUM" "$CORE_VERSION" "$architectures" "$TAGS" "$work" <<'PY'
+python3 - "$output_dir" "$SB_TAG" "$SB_COMMIT" "$VMESS_VERSION" "$VMESS_COMMIT" "$VMESS_SUM" "$VMESS_MOD_SUM" "$CORE_VERSION" "$architectures" "$TAGS" "$work" "$script_root/transport-buffer/manifest.json" <<'PY'
 import hashlib, json, pathlib, sys
 directory = pathlib.Path(sys.argv[1])
 work = pathlib.Path(sys.argv[11])
 data = {
-    'schema_version': 1,
+    'schema_version': 2,
     'sing_box_tag': sys.argv[2],
     'sing_box_commit': sys.argv[3],
     'sing_vmess_version': sys.argv[4],
@@ -115,6 +111,7 @@ data = {
     'sing_vmess_module_sum': sys.argv[6],
     'sing_vmess_go_mod_sum': sys.argv[7],
     'core_version': sys.argv[8],
+    'transport_buffer_patch': json.load(open(sys.argv[12])),
     'go_version': 'go1.25.14',
     'build_tags': sys.argv[10].split(','),
     'binaries': [],
