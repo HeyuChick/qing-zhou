@@ -953,7 +953,7 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	aiNodes := map[string]bool{}
 	if serviceable {
 		for _, e := range a.collectEntries(u) {
-			if subconv.NodeDisabled(disabled, e.Link) {
+			if e.disabled(disabled) {
 				continue
 			}
 			links = append(links, e.Link)
@@ -1112,12 +1112,13 @@ func (a *API) invalidateLinks(userID int64) {
 
 // nodeEntry is a share link plus the accessible group it was served from.
 type nodeEntry struct {
-	Link      string
-	GroupID   int64
-	GroupName string
-	IsAI      bool
-	SortOrder int64
-	SortID    int64
+	Link       string
+	LegacyKeys []string // only supplied by trusted self-built metadata, never imported URI claims
+	GroupID    int64
+	GroupName  string
+	IsAI       bool
+	SortOrder  int64
+	SortID     int64
 	// Tag is the sing-box inbound tag for a self-built node, "" for an external
 	// (imported share-link) one. It is the join key to the inbound row, and so to
 	// the relay/egress chain behind the node.
@@ -1151,16 +1152,21 @@ func nodeOrderBefore(order, id, otherOrder, otherID int64) bool {
 func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 	var out []nodeEntry
 	seen := map[string]int{}
-	add := func(l string, gid int64, gname, tag string, routeUpstream int64, routeBroken, isAI bool, sortOrder, sortID int64) {
+	add := func(l string, gid int64, gname, tag string, routeUpstream int64, routeBroken, isAI bool, sortOrder, sortID int64, legacyKeys ...[]string) {
 		if l == "" {
 			return
 		}
+		var compat []string
+		if len(legacyKeys) > 0 {
+			compat = legacyKeys[0]
+		}
 		if idx, ok := seen[l]; ok {
+			out[idx].LegacyKeys = append(out[idx].LegacyKeys, compat...)
 			out[idx].IsAI = out[idx].IsAI || isAI
 			return
 		}
 		seen[l] = len(out)
-		out = append(out, nodeEntry{Link: l, GroupID: gid, GroupName: gname, IsAI: isAI, Tag: tag,
+		out = append(out, nodeEntry{Link: l, LegacyKeys: compat, GroupID: gid, GroupName: gname, IsAI: isAI, Tag: tag,
 			RouteUpstream: routeUpstream, RouteBroken: routeBroken, SortOrder: sortOrder, SortID: sortID})
 	}
 
@@ -1227,12 +1233,12 @@ func (a *API) computeNodeEntries(u *store.User) []nodeEntry {
 		for _, l := range a.selfBuiltLinks(u) {
 			if l.NodeID == 0 {
 				if meta, ok := tagGroup[l.Tag]; ok {
-					add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, 0, meta.routeBroken, meta.isAI, meta.sortOrder, meta.sortID)
+					add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, 0, meta.routeBroken, meta.isAI, meta.sortOrder, meta.sortID, l.LegacyKeys)
 				}
 				continue
 			}
 			if meta, ok := nodeGroup[l.NodeID]; ok {
-				add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, meta.routeUpstream, meta.routeBroken, meta.isAI, meta.sortOrder, meta.sortID)
+				add(l.Link, meta.groupID, gname[meta.groupID], l.Tag, meta.routeUpstream, meta.routeBroken, meta.isAI, meta.sortOrder, meta.sortID, l.LegacyKeys)
 			}
 		}
 	}

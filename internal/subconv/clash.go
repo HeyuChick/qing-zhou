@@ -66,7 +66,7 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 		p *Proxy
 	}
 	var cs []conv
-	unsupportedWS := 0
+	unsupportedWS, normalizedWS := 0, 0
 	for _, p := range proxies {
 		if p.Protocol == "trojan" && p.param("security") == "none" {
 			unsupportedWS++
@@ -79,6 +79,8 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 			} else if _, ok := w.singleHeaders(); !ok {
 				unsupportedWS++
 				continue
+			} else if w.mihomoNormalizesPath() {
+				normalizedWS++
 			}
 		}
 		if m := clashProxy(p, opt); m != nil {
@@ -150,10 +152,14 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 	injectNodeDomains(doc, proxies)
 
 	b, err := yaml.Marshal(doc)
+	notes := ""
 	if unsupportedWS > 0 {
-		return fmt.Sprintf("# Qingzhou: omitted %d nodes with plaintext Trojan or multi-value WS headers unsupported by this mihomo exporter; use sing-box format.\n", unsupportedWS) + string(b), err
+		notes += fmt.Sprintf("# Qingzhou: omitted %d nodes with plaintext Trojan or multi-value WS headers unsupported by this mihomo exporter; use sing-box format.\n", unsupportedWS)
 	}
-	return string(b), err
+	if normalizedWS > 0 {
+		notes += fmt.Sprintf("# Qingzhou: %d WS paths are preserved in YAML, but mihomo itself interprets numeric ed query parameters and normalizes escaped path bytes; exact wire-path fidelity is not guaranteed.\n", normalizedWS)
+	}
+	return notes + string(b), err
 }
 
 var clashDomesticDNS = []any{

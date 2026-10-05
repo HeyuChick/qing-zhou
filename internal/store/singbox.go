@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"qingzhou/internal/singbox"
+	"qingzhou/internal/subconv"
 )
 
 // SbTls is a TLS/Reality profile for native sing-box inbounds (B2). ServerJSON
@@ -767,9 +768,10 @@ func (s *Store) BuildSingboxConfigForServer(serverID int64, base, v2rayListen st
 // The tag is carried alongside rather than read back out of the link's remark,
 // because the remark shows the node's admin-configured display name.
 type SelfBuiltLink struct {
-	NodeID int64  // logical node id — several nodes may share one inbound tag
-	Tag    string // physical inbound tag — topology/config join key
-	Link   string
+	NodeID     int64  // logical node id — several nodes may share one inbound tag
+	Tag        string // physical inbound tag — topology/config join key
+	Link       string
+	LegacyKeys []string `json:"-"` // trusted pre-upgrade blocklist aliases; no credential-bearing legacy URI is exposed
 }
 
 // BuildSelfBuiltLinks generates client share-links for every enabled native
@@ -922,6 +924,7 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 				continue
 			}
 		}
+		legacyServer := server
 		tlsEnabled, tlsDisabled, effectiveServer, validTLS := shareLinkTLSState(ib.TlsID, server, opts)
 		if !validTLS {
 			continue
@@ -1054,7 +1057,37 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			p.ALPN = strings.Join(parts, ",")
 		}
 		if link := singbox.BuildShareLink(p); link != "" {
-			out = append(out, SelfBuiltLink{NodeID: logicalID, Tag: ib.Tag, Link: link})
+			legacy := p
+			legacy.TLS = ib.TlsID != 0
+			legacy.TLSDisabled = false
+			legacy.SNI = mapStr(legacyServer, "server_name")
+			legacy.ALPN = ""
+			if values, ok := legacyServer["alpn"].([]interface{}); ok {
+				parts := []string{}
+				for _, value := range values {
+					if text, ok := value.(string); ok {
+						parts = append(parts, text)
+					}
+				}
+				legacy.ALPN = strings.Join(parts, ",")
+			}
+			legacy.WSHost = ""
+			legacy.WSHeaders = nil
+			if tr, ok := opts["transport"].(map[string]interface{}); ok {
+				if h := mapStr(tr, "host"); h != "" {
+					legacy.WSHost = h
+				} else if headers, ok := tr["headers"].(map[string]interface{}); ok {
+					legacy.WSHost = mapStr(headers, "Host")
+				}
+				if legacy.WSHost == "" && (legacy.Network == "ws" || legacy.Network == "httpupgrade") {
+					legacy.WSHost = legacy.SNI
+				}
+			}
+			legacyKeys := []string{}
+			if oldLink := singbox.LegacyShareLinkForNodeKey(legacy); oldLink != "" && oldLink != link {
+				legacyKeys = subconv.NodeKeys(oldLink)
+			}
+			out = append(out, SelfBuiltLink{NodeID: logicalID, Tag: ib.Tag, Link: link, LegacyKeys: legacyKeys})
 		}
 	}
 	return out

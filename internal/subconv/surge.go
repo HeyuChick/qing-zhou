@@ -42,7 +42,7 @@ func surgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) s
 			kept = append(kept, p)
 		}
 	}
-	dedupeNames(kept)
+	dedupeSurgeNames(kept)
 
 	var b strings.Builder
 	if subURL != "" {
@@ -104,11 +104,12 @@ func surgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) s
 // remark carrying %0A would end the proxy line early and let the rest of the
 // name become its own directive, e.g. a FINAL rule rewriting the user's routing.
 // A leading # or ; would comment the whole line out instead, silently dropping a
-// node the proxy groups still reference. Interior # is left alone: dedupeNames
-// legitimately appends " #2" suffixes.
+// node the proxy groups still reference. Spaced #/;/ // are inline comments,
+// even inside a node name; Surge uses a separate safe dedupe suffix.
 func surgeName(s string) string {
 	s = strings.NewReplacer(",", " ", "=", " ", "\n", " ", "\r", " ").Replace(s)
-	s = strings.TrimLeft(strings.TrimSpace(s), "#;")
+	s = strings.NewReplacer(" #", " -", " ;", " -", " //", " -", "\t#", " -", "\t;", " -", "\t//", " -").Replace(s)
+	s = strings.TrimLeft(strings.TrimSpace(s), "#;/")
 	if s = strings.TrimSpace(s); s == "" {
 		s = "node"
 	}
@@ -211,19 +212,19 @@ func surgeWSCompatibility(p *Proxy) string {
 	if _, ok := w.singleHeaders(); !ok {
 		return "multi-value WS headers"
 	}
-	for _, value := range []string{w.path, p.UUID, p.Password, p.tlsParam("sni"), p.tlsParam("alpn")} {
-		if strings.ContainsAny(value, "\r\n\x00\"") {
+	for _, value := range []string{w.path, p.Server, p.UUID, p.Password, p.tlsParam("sni", "peer"), p.tlsParam("alpn")} {
+		if strings.ContainsAny(value, "\r\n\x00\"") || surgeInlineComment(value) {
 			return "unsafe Surge token"
 		}
 	}
-	if strings.ContainsAny(p.UUID+p.Password+p.tlsParam("sni"), ",|") {
+	if strings.ContainsAny(p.Server+p.UUID+p.Password+p.tlsParam("sni", "peer"), ",|") {
 		return "unrepresentable credential or TLS token"
 	}
 	if strings.ContainsAny(w.path, ",|") {
 		return "unrepresentable WS path"
 	}
 	for key, values := range w.headers {
-		if strings.ContainsAny(key+values[0], ",|\"\r\n\t") {
+		if strings.ContainsAny(key+values[0], ",|\"\r\n\t") || surgeInlineComment(values[0]) {
 			return "unrepresentable WS header"
 		}
 	}
@@ -254,4 +255,25 @@ func surgeWSParams(p *Proxy) []string {
 		parts = append(parts, "ws-headers="+strings.Join(values, "|"))
 	}
 	return parts
+}
+
+func surgeInlineComment(value string) bool {
+	for _, marker := range []string{" #", " ;", " //", "\t#", "\t;", "\t//"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+func dedupeSurgeNames(proxies []*Proxy) {
+	seen := reservedTags()
+	for _, p := range proxies {
+		base := surgeName(p.Name)
+		name := base
+		for n := 2; seen[name]; n++ {
+			name = fmt.Sprintf("%s (%d)", base, n)
+		}
+		p.Name = name
+		seen[name] = true
+	}
 }

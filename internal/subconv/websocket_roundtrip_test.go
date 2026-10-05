@@ -280,3 +280,101 @@ func TestPublicWebSocketHostOnlyCompatibilityAndUnsafeFields(t *testing.T) {
 		t.Fatal("unsafe standard Host accepted")
 	}
 }
+
+func TestPublicWebSocketSurgeCommentsCannotDisableTLS(t *testing.T) {
+	for _, marker := range []string{" # comment", " ; comment", " // comment"} {
+		for _, field := range []string{"header", "path", "password", "uuid", "sni", "alpn", "server", "peer"} {
+			t.Run(field+marker, func(t *testing.T) {
+				params := wsLinkFixture("vmess")
+				params.Password = "safe"
+				switch field {
+				case "header":
+					params.WSHeaders["X-Token"] = []string{"safe" + marker}
+				case "path":
+					params.Path = "/safe" + marker
+				case "uuid":
+					params.UUID = "safe" + marker
+				case "sni":
+					params.SNI = "safe" + marker
+				case "alpn":
+					params.ALPN = "http/1.1" + marker
+				case "server":
+					params.Host = "safe" + marker
+				case "password", "peer":
+					params.Type = "trojan"
+					params.Password = "safe"
+					if field == "password" {
+						params.Password += marker
+					}
+				}
+				link := singbox.BuildShareLink(params)
+				p, err := ParseLink(link)
+				if err != nil {
+					return
+				} // Parse-time rejection is also safe
+				if field == "peer" {
+					p.Params.Del("sni")
+					p.Params.Set("peer", "safe"+marker)
+				}
+				out := Surge([]*Proxy{p}, "")
+				if !strings.Contains(out, "omitted 1") || strings.Contains(out, " = vmess,") || strings.Contains(out, " = trojan,") {
+					t.Fatalf("unsafe WS emitted: %s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestSurgeNamesAndDuplicateSuffixCannotStartComments(t *testing.T) {
+	proxies := []*Proxy{}
+	for _, name := range []string{"shared", "shared", "name # comment", "name ; comment", "name // comment", "//hidden"} {
+		p := wsLinkFixture("vmess")
+		p.Tag = name
+		p.Password = "safe"
+		proxy, err := ParseLink(singbox.BuildShareLink(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		proxies = append(proxies, proxy)
+	}
+	out := Surge(proxies, "")
+	section := out[strings.Index(out, "[Proxy]\n")+len("[Proxy]\n") : strings.Index(out, "[Proxy Group]")]
+	count := 0
+	for _, line := range strings.Split(section, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		count++
+		if surgeInlineComment(line) {
+			t.Fatalf("declaration contains inline comment: %s", line)
+		}
+		if !strings.Contains(line, "tls=true") {
+			t.Fatal("TLS lost", line)
+		}
+	}
+	if count != len(proxies) || !strings.Contains(out, "shared (2) = vmess,") || !strings.Contains(out, "shared, shared (2)") {
+		t.Fatal("Surge dedupe/groups inconsistent", out)
+	}
+}
+
+func TestMihomoPathNormalizationIsDisclosedWithoutChangingInput(t *testing.T) {
+	for _, path := range []string{"/ws?ed=2560&token=a%2Fb", "/ws%2Fpath?token=a%2Fb"} {
+		p := wsLinkFixture("vmess")
+		p.Path = path
+		proxy, err := ParseLink(singbox.BuildShareLink(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := Clash([]*Proxy{proxy}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "exact wire-path fidelity is not guaranteed") {
+			t.Fatal("native normalization hidden", out)
+		}
+		ws := clashProxy(proxy, ClashOptions{})["ws-opts"].(map[string]any)
+		if ws["path"] != path {
+			t.Fatal("export rewrote path")
+		}
+	}
+}

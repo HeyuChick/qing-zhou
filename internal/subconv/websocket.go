@@ -154,3 +154,17 @@ func clashWSToQuery(m map[string]any, q url.Values) bool {
 	}
 	return true
 }
+
+func (w websocketOptions) mihomoNormalizesPath() bool {
+	u, err := url.Parse(w.path)
+	if err != nil {
+		return true
+	}
+	if value := u.Query().Get("ed"); value != "" {
+		if _, err := strconv.Atoi(value); err == nil {
+			return true
+		}
+	}
+	normalized := url.URL{Path: u.Path}
+	return u.EscapedPath() != normalized.EscapedPath()
+}

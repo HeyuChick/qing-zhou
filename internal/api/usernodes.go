@@ -36,8 +36,8 @@ func (a *API) expandEnableKeys(u *store.User, keys []string) []string {
 	}
 	alias := map[string][]string{}
 	for _, e := range a.computeNodeEntries(u) {
-		all := subconv.NodeKeys(e.Link)
-		alias[all[0]] = all
+		all := e.nodeKeys()
+		alias[all[0]] = append(alias[all[0]], all...)
 	}
 	out := make([]string, 0, len(keys))
 	seen := map[string]bool{}
@@ -81,7 +81,7 @@ func (a *API) handleUserNodes(w http.ResponseWriter, r *http.Request) {
 		// The key handed to the client is always the current one, so a toggle
 		// round-trip rewrites a legacy row under the new key.
 		row := J{"name": p.Name, "protocol": p.Protocol, "server": p.Server, "port": p.Port,
-			"key": subconv.NodeKey(e.Link), "disabled": subconv.NodeDisabled(disabled, e.Link), "group": e.GroupName,
+			"key": subconv.NodeKey(e.Link), "disabled": e.disabled(disabled), "group": e.GroupName,
 			"plans": plansOf(e)}
 		if t := ix.topoFor(e.Tag, e.RouteUpstream, e.RouteBroken); t != nil {
 			row["topo"] = t
@@ -111,7 +111,7 @@ func (a *API) handleUserToggleNode(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusInternalServerError, "保存失败")
 			return
 		}
-	} else if err := a.st.ApplyNodePrefs(u.ID, nil, a.expandEnableKeys(u, []string{req.Key})); err != nil {
+	} else if err := a.applyNodePrefsCompat(u, nil, []string{req.Key}); err != nil {
 		fail(w, http.StatusInternalServerError, "保存失败")
 		return
 	}
@@ -154,7 +154,7 @@ func (a *API) handleUserBulkNodes(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "参数错误")
 		return
 	}
-	if err := a.st.ApplyNodePrefs(u.ID, req.Disable, a.expandEnableKeys(u, req.Enable)); err != nil {
+	if err := a.applyNodePrefsCompat(u, req.Disable, req.Enable); err != nil {
 		fail(w, http.StatusInternalServerError, "操作失败")
 		return
 	}
@@ -212,7 +212,7 @@ func (a *API) handleUserNodesPing(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		out[i] = pingResult{Name: p.Name, Protocol: p.Protocol, Server: p.Server, Port: p.Port,
-			Key: subconv.NodeKey(entries[i].Link), Disabled: subconv.NodeDisabled(disabled, entries[i].Link),
+			Key: subconv.NodeKey(entries[i].Link), Disabled: entries[i].disabled(disabled),
 			Group: entries[i].GroupName}
 		if udpProto[p.Protocol] {
 			out[i].UDP = true

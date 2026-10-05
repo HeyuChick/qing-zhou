@@ -1,9 +1,12 @@
 package store
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	"qingzhou/internal/subconv"
@@ -62,6 +65,7 @@ func TestSelfBuiltWSShareLinksPreserveTransportAndTLS(t *testing.T) {
 				if len(links) != 1 {
 					t.Fatalf("links=%d", len(links))
 				}
+				assertPreWSUpgradeNodeKeys(t, links[0], protocol, mode)
 				out, err := subconv.SingboxOutboundFromLink(links[0].Link)
 				if err != nil {
 					t.Fatal(err)
@@ -119,5 +123,54 @@ func TestShareLinkTLSStateNeverInfersPlaintextFromUnknown(t *testing.T) {
 				t.Fatalf("got %v/%v/%v", e, d, v)
 			}
 		})
+	}
+}
+
+func assertPreWSUpgradeNodeKeys(t *testing.T, link SelfBuiltLink, protocol, mode string) {
+	t.Helper()
+	p, err := subconv.ParseLink(link.Link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := mode == "profile" || mode == "client-override"
+	oldSNI := ""
+	if profile {
+		oldSNI = "tls.example.test"
+	}
+	oldPath := "/ws?token=a%2Bb&ed=literal"
+	oldLink := ""
+	if protocol == "vmess" {
+		fields := map[string]any{"v": "2", "ps": p.Name, "add": "public.example.test", "port": "8443", "id": p.UUID, "aid": "0", "scy": "auto", "type": "none", "net": "ws", "host": oldSNI, "path": oldPath, "tls": ""}
+		if profile {
+			fields["tls"] = "tls"
+			fields["sni"] = oldSNI
+			fields["fp"] = "chrome"
+			fields["alpn"] = "http/1.1"
+		}
+		raw, _ := json.Marshal(fields)
+		oldLink = "vmess://" + base64.StdEncoding.EncodeToString(raw)
+	} else {
+		credential := p.UUID
+		if protocol == "trojan" {
+			credential = p.Password
+		}
+		q := []string{"type=ws", "path=" + url.QueryEscape(oldPath)}
+		if oldSNI != "" {
+			q = append(q, "host="+url.QueryEscape(oldSNI))
+		}
+		q = append(q, "max_early_data=2048", "early_data_header_name=Sec-WebSocket-Protocol", "security=tls", "fp=chrome", "sni="+url.QueryEscape(oldSNI))
+		if protocol == "vless" {
+			q = append(q, "packetEncoding=xudp")
+		}
+		oldLink = protocol + "://" + url.QueryEscape(credential) + "@public.example.test:8443?" + strings.Join(q, "&") + "#" + url.QueryEscape(p.Name)
+	}
+	actual := map[string]bool{}
+	for _, key := range link.LegacyKeys {
+		actual[key] = true
+	}
+	for _, key := range subconv.NodeKeys(oldLink) {
+		if !actual[key] {
+			t.Fatalf("old serializer key missing for %s/%s: %s in %v", protocol, mode, key, link.LegacyKeys)
+		}
 	}
 }
