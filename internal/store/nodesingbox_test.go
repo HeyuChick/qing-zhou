@@ -3,6 +3,7 @@ package store
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"qingzhou/internal/sbver"
 )
@@ -132,4 +133,74 @@ func TestLocalNodeCoexistsWithServers(t *testing.T) {
 	if all[LocalNodeID].Version != "1.12.25" || all[1].Version != "1.13.18" {
 		t.Errorf("local=%+v remote=%+v", all[LocalNodeID], all[1])
 	}
+}
+
+func TestNodeSingboxDerivesVisionMarkerWithoutTrustingFlag(t *testing.T) {
+	st := newRefundStore(t)
+	for id, info := range map[int64]sbver.Info{
+		LocalNodeID: sbver.Parse("sing-box version " + sbver.VisionFramingFixVersion + "\nTags: with_v2ray_api"),
+		1:           {Version: "1.14.2", HasVisionFramingFix: true},
+		2:           {Version: "1.14.3", HasVisionFramingFix: true},
+	} {
+		if err := st.SetNodeSingbox(id, info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := st.NodeSingboxAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !all[LocalNodeID].HasVisionFramingFix || all[1].HasVisionFramingFix || all[2].HasVisionFramingFix {
+		t.Fatalf("exact persisted capability: %+v", all)
+	}
+	if err = st.SetNodeSingboxError(LocalNodeID, "unreachable"); err != nil {
+		t.Fatal(err)
+	}
+	all, _ = st.NodeSingboxAll()
+	if !all[LocalNodeID].HasVisionFramingFix || all[LocalNodeID].Error == "" {
+		t.Fatal("failed probe must retain the historical marker alongside the explicit error")
+	}
+}
+
+func TestNodeVisionRuntimeRequiresFreshExactActualProof(t *testing.T) {
+	st := newRefundStore(t)
+	fixed := sbver.Parse("sing-box version " + sbver.VisionFramingFixVersion + "\nTags: with_v2ray_api")
+	if err := st.SetNodeSingbox(LocalNodeID, fixed); err != nil {
+		t.Fatal(err)
+	}
+	ready := func(want bool) {
+		t.Helper()
+		got, err := nodeVisionRuntimeReadyWith(st.db, LocalNodeID, time.Now().Unix())
+		if err != nil || got != want {
+			t.Fatalf("runtime ready=%v want=%v %v", got, want, err)
+		}
+	}
+	ready(false) // installed-only evidence cannot endorse the running process.
+	for _, info := range []sbver.Info{
+		{Version: "1.14.2", HasV2RayAPI: true, HasVisionFramingFix: true},
+		{Version: "1.14.3", HasV2RayAPI: true, HasVisionFramingFix: true},
+		{Version: sbver.VisionFramingFixVersion},
+		{},
+	} {
+		if err := st.SetNodeVisionRuntime(LocalNodeID, info); err != nil {
+			t.Fatal(err)
+		}
+		ready(false)
+	}
+	if err := st.SetNodeVisionRuntime(LocalNodeID, fixed); err != nil {
+		t.Fatal(err)
+	}
+	ready(true)
+	if _, err := st.db.Exec(`UPDATE node_vision_runtime SET checked_at=? WHERE server_id=0`, time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	ready(false)
+	if err := st.SetNodeVisionRuntime(LocalNodeID, fixed); err != nil {
+		t.Fatal(err)
+	}
+	ready(true)
+	if err := st.DeleteNodeSingbox(LocalNodeID); err != nil {
+		t.Fatal(err)
+	}
+	ready(false)
 }
