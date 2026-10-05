@@ -40,9 +40,10 @@ TLS客户端高级字段的存在不代表每种组合都合法。例如显式�
 3. 真实矩阵共49条路径（98个配置/通信子项），其中真实双机：9种同协议路径、mixed分别进入9种落地，分别执行A-only/B-only TCP/UDP、并发连接并校验各机器原始user计数等于各自报表；套餐等于各自入口一次，重复批次不重扣
 4. 真实三机：VMess→Trojan→Hysteria2、SS128→TUIC→SS256、Hysteria→AnyTLS→VLESS；A/B走全程，C原凭据直连中段，C仅中段扣费，A/B不混入C计数
 5. 传输路径：TLS、Vision、WS early-data、gRPC、HTTPUpgrade、HTTP、QUIC、适用mux等有独立子测试；测试源中的路径列表是精确清单
-6. 生命周期与规模：保留已发布的旧代晚到、重试、跨进程、失败/noop、迁移回滚测试；扩展协议/证书变更代次和源认证摘要验证，以及VLESS/AnyTLS/TUIC/Hysteria2的100/1000用户配置诊断
+6. 额外WS稳定性：三协议经临时TLS反代，双用户长流与并发；主动断连后原非重放POST必须失败且目标只执行一次，新请求ID独立恢复，最后仍按原始计数入账
+7. 生命周期与规模：保留已发布的旧代晚到、重试、跨进程、失败/noop、迁移回滚测试；扩展协议/证书变更代次和源认证摘要验证，以及VLESS/AnyTLS/TUIC/Hysteria2的100/1000用户配置诊断
 
-真实核心固定为`1.14.2+qz-vmess.9b95ab8c9478`，与`scripts/build-singbox.sh`和发布产物同源。测试只用回环HTTP/UDP目标、临时证书及临时数据库。真实流量和1000个配置用户不等于1000个活跃连接或公网性能；QUIC/AnyTLS每用户会话成本、旧代次累积、长期SQLite并发需要单独评估。
+真实候选核心固定为`1.14.2+qz-vmess.9b95ab8c9478-transport.07512b10`，与`scripts/build-singbox.sh`和发布产物同源。测试只用回环HTTP/UDP目标、临时证书及临时数据库。真实流量和1000个配置用户不等于1000个活跃连接或公网性能；QUIC/AnyTLS每用户会话成本、旧代次累积、长期SQLite并发需要单独评估。
 
 ## 可复现命令和结果状态
 
