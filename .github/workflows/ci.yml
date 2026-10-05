@@ -36,7 +36,9 @@ jobs:
         run: go vet ./...
 
       - name: Test (race)
-        run: go test -race ./...
+        # The complete SQLite-backed store suite exceeds Go's default 10m
+        # package budget with the race detector; retain every test and race check.
+        run: go test -race -timeout=20m ./...
 
   shell:
     runs-on: ubuntu-latest
@@ -70,23 +72,34 @@ jobs:
 
   relay-integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
-      - name: Fetch pinned metering-enabled sing-box fixture
-        run: |
-          curl --fail --location --retry 3 --output "$RUNNER_TEMP/qz-sing-box" \
-            https://github.com/mllt992/qing-zhou/releases/download/v0.2.86/sing-box-linux-amd64
-          echo "68472358c9e43a50417beadb6d3ae9207417fdebb296286605dabd71da25a7da  $RUNNER_TEMP/qz-sing-box" | sha256sum --check --strict
-          chmod 700 "$RUNNER_TEMP/qz-sing-box"
-          "$RUNNER_TEMP/qz-sing-box" version | grep -q with_v2ray_api
-      - name: Relay observation and single quota debit over loopback
+          go-version: "1.25.14"
+      - name: Verify official Vision framing fix
+        run: bash scripts/test-vision-framing.sh
+      - name: Build the exact release core candidate
+        run: bash scripts/build-singbox.sh --output-dir "$RUNNER_TEMP/qz-core" --arch amd64
+      - name: Record candidate core provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-candidate-provenance
+          path: ${{ runner.temp }}/qz-core/sing-box-provenance.json
+          if-no-files-found: error
+      - name: Per-user metering scale diagnostics (isolated 100 and 1000 users)
         env:
-          QZ_SINGBOX_TEST_BIN: ${{ runner.temp }}/qz-sing-box
+          QZ_SINGBOX_TEST_BIN: ${{ runner.temp }}/qz-core/sing-box-linux-amd64
           QZ_SINGBOX_REQUIRE_STATS: "1"
-        run: go test -race ./internal/store -run '^TestMeteringRelayRealSingboxTraffic$' -count=1 -v
+          QZ_METERING_SCALE: "1"
+        run: go test ./internal/store -run '^TestMeteringRelayUserScale$' -count=1 -v
+
+      - name: Shared and per-user relay observation over loopback
+        env:
+          QZ_SINGBOX_TEST_BIN: ${{ runner.temp }}/qz-core/sing-box-linux-amd64
+          QZ_SINGBOX_REQUIRE_STATS: "1"
+          QZ_VISION_STRESS_BATCHES: "100"
+        run: go test -race ./internal/store -run '^(TestMeteringRelayRealSingbox|TestRelayVLESSFlowMatchesListener)' -count=1 -v

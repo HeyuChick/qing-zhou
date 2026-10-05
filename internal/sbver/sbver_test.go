@@ -119,3 +119,25 @@ func TestCompare(t *testing.T) {
 		}
 	}
 }
+
+func TestVisionFramingFixRequiresExactReviewedMarker(t *testing.T) {
+	for _, version := range []string{
+		"", "1.13.18", "1.14.2", "1.14.3", "2.0.0",
+		"1.14.2+qz-vmess.9b95ab8", "1.14.2+qz-vmess.9b95ab8c9478-extra",
+		"1.14.3+qz-vmess.9b95ab8c9478", "1.14.2+other",
+	} {
+		got := Parse("sing-box version " + version + "\nTags: with_v2ray_api\nRevision: " + VisionFramingFixVersion)
+		if got.HasVisionFramingFix || HasVisionFramingFix(version) {
+			t.Errorf("unreviewed %q claimed fixed Vision framing", version)
+		}
+	}
+	for _, prefix := range []string{"", "v", "V"} {
+		got := Parse("sing-box version " + prefix + VisionFramingFixVersion + "\nTags: with_v2ray_api\n")
+		if got.Version != VisionFramingFixVersion || !got.HasVisionFramingFix || !got.HasV2RayAPI {
+			t.Errorf("fixed marker not preserved: %+v", got)
+		}
+	}
+	if Compare(VisionFramingFixVersion, "1.14.2") != 0 {
+		t.Fatal("capability marker must not change the general minimum-version comparison")
+	}
+}

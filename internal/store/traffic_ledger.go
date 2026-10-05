@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -89,6 +90,12 @@ func (s *Store) RecordTrafficPoll(p TrafficPoll) (int, error) {
 				return 0, err
 			}
 		}
+		// A reset intent is cleared only by the same transaction that durably
+		// journals its response and frozen owners. Quota processing may still
+		// fail afterwards without losing the destructive response.
+		if _, err = tx.Exec(`DELETE FROM traffic_metering_gaps WHERE server_id=? AND poll_id=? AND reason='reset_outcome_unknown'`, p.ServerID, p.ID); err != nil {
+			return 0, err
+		}
 		// The destructive boundary is complete once its immutable response is safe,
 		// independently of per-identity processing. A retry must never reset again.
 		if p.Transition {
@@ -111,6 +118,18 @@ func (s *Store) NextTrafficSequence() (int64, error) {
 	var seq int64
 	err := s.db.QueryRow(`UPDATE traffic_collection_sequence SET value=value+1 WHERE id=1 RETURNING value`).Scan(&seq)
 	return seq, err
+}
+
+// BeginTrafficReset records the possibility of a destructive read BEFORE it
+// reaches the remote core. A crash, timeout, or failed journal commit leaves a
+// durable coverage warning; successful persistence clears it atomically above.
+// This makes uncertainty visible, but cannot reconstruct a lost reset response.
+func (s *Store) BeginTrafficReset(p TrafficPoll) error {
+	if p.ID == "" || p.ServerID < 0 || p.Mode != "reset" || p.ObservedAt <= 0 {
+		return fmt.Errorf("invalid reset intent")
+	}
+	_, err := s.db.Exec(`INSERT INTO traffic_metering_gaps(server_id,ts,reason,poll_id) VALUES(?,?,'reset_outcome_unknown',?)`, p.ServerID, p.ObservedAt, p.ID)
+	return err
 }
 
 // RetryPendingTrafficPolls replays persisted results, never resetting a node.
@@ -265,6 +284,24 @@ func (s *Store) processTrafficIdentity(tx *sql.Tx, p TrafficPoll, name string) (
 	d := p.Traffic[name]
 	quality := "observed"
 	if p.Mode == "cumulative" {
+		// A failed earlier observation still owns its interval and its frozen
+		// billing identity. Advancing this shared counter past it could charge
+		// that interval to a later name owner, then make its retry look stale.
+		// Only block the same counter/epoch; other identities in a partial poll
+		// and observations from a restarted process can continue independently.
+		var earlierPending bool
+		if err := tx.QueryRow(`SELECT EXISTS(
+ SELECT 1 FROM traffic_polls earlier
+ JOIN traffic_poll_bindings binding ON binding.poll_id=earlier.id AND binding.counter_name=?
+ WHERE earlier.state='pending' AND earlier.mode='cumulative'
+ AND earlier.server_id=? AND earlier.epoch=? AND earlier.sequence<?
+ AND NOT EXISTS(SELECT 1 FROM traffic_observations observation
+                WHERE observation.poll_id=earlier.id AND observation.counter_name=binding.counter_name))`, name, p.ServerID, p.Epoch, p.Sequence).Scan(&earlierPending); err != nil {
+			return 0, err
+		}
+		if earlierPending {
+			return 0, fmt.Errorf("earlier cumulative observation is pending; retain this counter for ordered retry")
+		}
 		var up, down, seq int64
 		e := tx.QueryRow(`SELECT up,down,sequence FROM traffic_counter_cursors WHERE server_id=? AND counter_name=? AND epoch=?`, p.ServerID, name, p.Epoch).Scan(&up, &down, &seq)
 		switch {
@@ -363,48 +400,104 @@ func safeApplyBucketUsage(tx *sql.Tx, bucketID, userID, pkgID int64, kind string
 	}
 	return applyBucketUsage(tx, bucketID, userID, pkgID, kind, d.Up, d.Down, at)
 }
-func relayObservationIdentity(tx txLike, serverID int64, name string) (string, int64, error) {
+
+// A name's spelling is not proof that its traffic belongs to a relay. Match
+// durable generations first, including retired generations and other machines.
+// Only the old shared namespace lacks a durable history after inbound deletion;
+// its exact generated names therefore remain nonbillable when provenance is lost.
+func relayObservationIdentity(tx txLike, serverID int64, name string) (kind string, linkID int64, gap string, err error) {
 	if strings.HasPrefix(name, "outbound:") {
 		var id int64
-		err := tx.QueryRow(`SELECT l.id FROM relay_metering_links l JOIN relay_metering_generations g ON g.link_id=l.id WHERE l.source_server_id=? AND 'relay-link-'||l.id||'-g'||g.generation=?`, serverID, strings.TrimPrefix(name, "outbound:")).Scan(&id)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return "", 0, err
+		parts := strings.Split(strings.TrimPrefix(name, "outbound:"), "-")
+		if len(parts) >= 4 && parts[0] == "relay" && parts[1] == "link" {
+			link, linkErr := strconv.ParseInt(parts[2], 10, 64)
+			if linkErr == nil && link > 0 && strconv.FormatInt(link, 10) == parts[2] {
+				if len(parts) == 4 && strings.HasPrefix(parts[3], "g") {
+					generation, e := strconv.Atoi(strings.TrimPrefix(parts[3], "g"))
+					if e == nil && parts[3] == fmt.Sprintf("g%d", generation) {
+						err = tx.QueryRow(`SELECT l.id FROM relay_metering_links l JOIN relay_metering_generations g ON g.link_id=l.id WHERE l.id=? AND l.source_server_id=? AND g.generation=?`, link, serverID, generation).Scan(&id)
+					}
+				} else if len(parts) == 5 && strings.HasPrefix(parts[3], "u") && strings.HasPrefix(parts[4], "g") {
+					owner, e1 := strconv.ParseInt(strings.TrimPrefix(parts[3], "u"), 10, 64)
+					generation, e2 := strconv.Atoi(strings.TrimPrefix(parts[4], "g"))
+					if e1 == nil && e2 == nil && parts[3] == fmt.Sprintf("u%d", owner) && parts[4] == fmt.Sprintf("g%d", generation) {
+						err = tx.QueryRow(`SELECT l.id FROM relay_metering_links l JOIN relay_metering_users u ON u.link_id=l.id WHERE l.id=? AND l.source_server_id=? AND u.user_id=? AND u.generation=?`, link, serverID, owner, generation).Scan(&id)
+					}
+				}
+			}
 		}
-		return "diagnostic_outbound", id, nil
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", 0, "", err
+		}
+		return "diagnostic_outbound", id, "", nil
 	}
-	var id int64
-	err := tx.QueryRow(`SELECT l.id FROM relay_metering_links l JOIN relay_metering_generations g ON g.link_id=l.id WHERE l.target_server_id=? AND g.identity_name=?`, serverID, name).Scan(&id)
+	var legacyServerID int64
+	err = tx.QueryRow(`SELECT server_id FROM legacy_relay_identities WHERE identity_name=?`, name).Scan(&legacyServerID)
 	if err == nil {
-		return "relay_link", id, nil
+		if legacyServerID != serverID {
+			return "unknown", 0, "relay_source_mismatch", nil
+		}
+		return "legacy_shared_relay", 0, "", nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return "", 0, err
+		return "", 0, "", err
 	}
-	if strings.HasPrefix(name, "relay_") {
-		var count int
-		err = tx.QueryRow(`SELECT COUNT(*) FROM sb_inbounds WHERE server_id=? AND relay_secret<>'' AND 'relay_'||id=?`, serverID, name).Scan(&count)
-		if err != nil {
-			return "", 0, err
+	var id int64
+	var targetServerID sql.NullInt64
+	err = tx.QueryRow(`SELECT g.link_id,l.target_server_id FROM relay_metering_generations g LEFT JOIN relay_metering_links l ON l.id=g.link_id WHERE g.identity_name=?`, name).Scan(&id, &targetServerID)
+	if err == nil {
+		if !targetServerID.Valid || targetServerID.Int64 != serverID {
+			return "unknown", id, "relay_source_mismatch", nil
 		}
-		if count > 0 {
-			return "legacy_shared_relay", 0, nil
+		return "relay_link", id, "", nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", 0, "", err
+	}
+	if inboundID, ok := legacyRelayInboundID(name); ok {
+		var target int64
+		var secret string
+		err = tx.QueryRow(`SELECT server_id,relay_secret FROM sb_inbounds WHERE id=?`, inboundID).Scan(&target, &secret)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", 0, "", err
+		}
+		if err == nil && target == serverID && secret != "" {
+			return "legacy_shared_relay", 0, "", nil
 		}
 		// Deleted/moved inbounds must not turn a late shared-relay sample into
-		// a customer's similarly named legacy proxy account. Reserved namespaces
-		// without a surviving mapping stay observable, never billable.
-		return "unknown", 0, nil
+		// a customer's similarly named legacy proxy account. Make the unresolved
+		// attribution visible even though the observation itself can be stored.
+		return "unknown", 0, "legacy_relay_provenance_unknown", nil
 	}
-	return "", 0, nil
+	// Existing qzr_* and non-system relay_* customer names predate the new
+	// validation rule. Generation creation checks those owners for collisions,
+	// so an unmapped name must still reach the ordinary customer resolver.
+	return "", 0, "", nil
+}
+
+func legacyRelayInboundID(name string) (int64, bool) {
+	if !strings.HasPrefix(name, "relay_") {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(name, "relay_")
+	id, err := strconv.ParseInt(suffix, 10, 64)
+	// Match only what fmt.Sprintf("relay_%d", inbound.ID) can generate. In
+	// particular, valid customer route/alias suffixes are not shared relays.
+	return id, err == nil && id > 0 && strconv.FormatInt(id, 10) == suffix
 }
 
 // Category-only messages avoid exposing raw SSH/config/credential diagnostics.
 func (s *Store) RecordTrafficCollectionFailure(serverID int64, status string) error {
 	switch status {
-	case "unavailable", "unsupported", "disabled", "legacy":
+	case "unavailable", "unsupported", "disabled", "legacy", "legacy_identity_unverified":
 	default:
 		status = "unavailable"
 	}
-	_, err := s.db.Exec(`INSERT INTO traffic_metering_state(server_id,last_attempt,failures,status,error) VALUES(?,?,1,?,?) ON CONFLICT(server_id) DO UPDATE SET last_attempt=excluded.last_attempt,failures=failures+1,status=excluded.status,error=excluded.error`, serverID, time.Now().Unix(), status, "用户统计未成功采集；缺失不是零流量")
+	message := "用户统计未成功采集；缺失不是零流量"
+	if status == "legacy_identity_unverified" {
+		message = "旧 relay_数字 自定义账号尚无运行配置切换证明；该类流量暂未归属，其他账号继续采集"
+	}
+	_, err := s.db.Exec(`INSERT INTO traffic_metering_state(server_id,last_attempt,failures,status,error) VALUES(?,?,1,?,?) ON CONFLICT(server_id) DO UPDATE SET last_attempt=excluded.last_attempt,failures=failures+1,status=excluded.status,error=excluded.error`, serverID, time.Now().Unix(), status, message)
 	return err
 }
 

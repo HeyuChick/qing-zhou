@@ -9,6 +9,53 @@ import (
 	"qingzhou/internal/singbox"
 )
 
+// Statistics labels may be separated from legacy customer names, while the
+// already-deployed upstream UUID/password must remain byte-for-byte usable.
+func assertLegacyRelayConfigUser(t *testing.T, st *Store, raw []byte, serverID, inboundID int64, present bool) string {
+	t.Helper()
+	var name string
+	if err := st.db.QueryRow(`SELECT identity_name FROM legacy_relay_identities WHERE server_id=? AND inbound_id=?`, serverID, inboundID).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	ib, err := st.GetSbInbound(inboundID)
+	if err != nil || ib == nil || ib.RelaySecret == "" {
+		t.Fatalf("legacy wire credential unavailable: %v", err)
+	}
+	wantUUID, wantPassword := relayCred(ib.RelaySecret)
+	var cfg struct {
+		Inbounds []struct {
+			Tag   string `json:"tag"`
+			Users []struct {
+				Name     string `json:"name"`
+				UUID     string `json:"uuid"`
+				Password string `json:"password"`
+			} `json:"users"`
+		} `json:"inbounds"`
+	}
+	if err = json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, inbound := range cfg.Inbounds {
+		if inbound.Tag != ib.Tag {
+			continue
+		}
+		for _, user := range inbound.Users {
+			if user.Name != name {
+				continue
+			}
+			found = true
+			if ib.Type == "vless" && user.UUID != wantUUID || ib.Type == "trojan" && user.Password != wantPassword {
+				t.Fatal("separating the legacy statistics name changed its wire credential")
+			}
+		}
+	}
+	if found != present {
+		t.Fatalf("legacy statistics identity present=%t, want %t", found, present)
+	}
+	return name
+}
+
 // TestRelayChaining exercises the full relay wiring: a relay inbound on server 1
 // pointing at a landing inbound on server 2 must (a) get an upstream outbound +
 // route rule in server 1's config, and (b) inject a matching relay user into the
@@ -78,9 +125,7 @@ func TestRelayChaining(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(landingCfg), "relay_"+itoa(landingID)) {
-		t.Errorf("landing config missing injected relay user relay_%d:\n%s", landingID, landingCfg)
-	}
+	assertLegacyRelayConfigUser(t, st, landingCfg, landingSrv, landingID, true)
 
 	// The relay credential must be identical on both ends.
 	ib, _ := st.GetSbInbound(landingID)
@@ -168,9 +213,7 @@ func TestRelayMultiHopChain(t *testing.T) {
 	// Server 2: B carries A's relay user AND routes into relay-to-C.
 	c2 := cfgFor(srv2)
 	b2, _ := json.Marshal(c2)
-	if !strings.Contains(string(b2), "relay_"+itoa(bID)) {
-		t.Errorf("server2 missing injected relay user relay_%d", bID)
-	}
+	assertLegacyRelayConfigUser(t, st, b2, srv2, bID, true)
 	if !hasOutbound(c2, "relay-to-"+itoa(cID)) || !hasRouteToOutbound(c2, "relay-to-"+itoa(cID), "B-trojan") {
 		t.Errorf("server2 missing B→C wiring: %v", c2["route"])
 	}
@@ -178,9 +221,7 @@ func TestRelayMultiHopChain(t *testing.T) {
 	// Server 3: C carries B's relay user AND routes into the egress outbound.
 	c3 := cfgFor(srv3)
 	b3, _ := json.Marshal(c3)
-	if !strings.Contains(string(b3), "relay_"+itoa(cID)) {
-		t.Errorf("server3 missing injected relay user relay_%d", cID)
-	}
+	assertLegacyRelayConfigUser(t, st, b3, srv3, cID, true)
 	if !hasOutbound(c3, "egress-"+itoa(egID)) || !hasRouteToOutbound(c3, "egress-"+itoa(egID), "C-vless") {
 		t.Errorf("server3 missing C→egress wiring: %v", c3["route"])
 	}

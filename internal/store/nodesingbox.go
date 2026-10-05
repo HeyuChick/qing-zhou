@@ -21,8 +21,10 @@ type NodeSingbox struct {
 	ServerID    int64  `json:"server_id"`
 	Version     string `json:"version"`
 	HasV2RayAPI bool   `json:"has_v2ray_api"`
-	Raw         string `json:"raw"`
-	CheckedAt   int64  `json:"checked_at"`
+	// Derived from the preserved version marker, never from version ordering.
+	HasVisionFramingFix bool   `json:"has_vision_framing_fix"`
+	Raw                 string `json:"raw"`
+	CheckedAt           int64  `json:"checked_at"`
 	// Error is why the last probe failed. A failed probe never clears the
 	// previously observed version: "the node is unreachable right now" and "the
 	// node has no sing-box" are different answers, and overwriting the former
@@ -77,6 +79,7 @@ func (s *Store) NodeSingboxAll() (map[int64]*NodeSingbox, error) {
 			return nil, err
 		}
 		n.HasV2RayAPI = api != 0
+		n.HasVisionFramingFix = sbver.HasVisionFramingFix(n.Version)
 		out[n.ServerID] = &n
 	}
 	return out, rows.Err()
@@ -85,6 +88,16 @@ func (s *Store) NodeSingboxAll() (map[int64]*NodeSingbox, error) {
 // DeleteNodeSingbox drops a node's observation, called when its server is
 // removed so the row does not outlive the thing it describes.
 func (s *Store) DeleteNodeSingbox(serverID int64) error {
-	_, err := s.db.Exec(`DELETE FROM node_singbox WHERE server_id=?`, serverID)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DELETE FROM node_singbox WHERE server_id=?`, serverID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM node_vision_runtime WHERE server_id=?`, serverID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

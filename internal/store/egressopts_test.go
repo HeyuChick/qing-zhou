@@ -560,7 +560,7 @@ func TestRelayHopCarriesMultiplex(t *testing.T) {
 	}
 	landingID, err := st.SaveSbInbound(&SbInbound{
 		Type: "vless", Tag: "landing", ListenPort: 443, TlsID: tlsID, ServerID: 0,
-		Options: `{"multiplex":{"enabled":true,"brutal":{"enabled":true,"up_mbps":100,"down_mbps":200}}}`,
+		Options: `{"flow":"none","multiplex":{"enabled":true,"brutal":{"enabled":true,"up_mbps":100,"down_mbps":200}}}`,
 		Enabled: true,
 	})
 	if err != nil {
@@ -592,6 +592,9 @@ func TestRelayHopCarriesMultiplex(t *testing.T) {
 	}
 	if ob == nil {
 		t.Fatalf("no relay outbound in config:\n%s", cfgBytes)
+	}
+	if flow, _ := ob["flow"].(string); flow != "" {
+		t.Fatalf("explicit no-Vision landing generated outbound flow %q", flow)
 	}
 	mx, _ := ob["multiplex"].(map[string]any)
 	if mx == nil || mx["enabled"] != true {

@@ -39,6 +39,8 @@ type User struct {
 	Name     string // identity used in users[] AND as the v2ray stats key
 	UUID     string // vless / vmess / tuic
 	Password string // hysteria2 / tuic / trojan
+	OwnerID  int64  `json:"-"` // panel ownership; internal metadata, never rendered on the wire
+	Relay    bool   `json:"-"` // received from a managed proxy; never a quota-debit authority
 }
 
 // Inbound is one sing-box inbound: its protocol Type, the pre-rendered body
@@ -58,23 +60,33 @@ type Inbound struct {
 // new name) is normalized back to "xtls-rprx-vision" for maximum compatibility
 // with both the server (which accepts the legacy name) and client software
 // (which widely only recognizes the legacy name in subscription links).
-func renderUser(t string, u User, ib map[string]interface{}) map[string]interface{} {
+// VLESSUserFlow is the listener's normalized per-user flow. Managed relay
+// outbounds use the same rule so ordinary TLS and Reality cannot drift apart.
+func VLESSUserFlow(ib map[string]interface{}) string {
 	_, hasTLS := ib["tls"]
 	hasTransport := false
 	if tr, ok := ib["transport"].(map[string]interface{}); ok && len(tr) > 0 {
 		hasTransport = true
 	}
+	if !hasTLS || hasTransport {
+		return ""
+	}
+	flow, _ := ib["flow"].(string)
+	if flow == "none" {
+		return ""
+	}
+	if flow == "" || flow == "vision" {
+		return "xtls-rprx-vision"
+	}
+	return flow
+}
+
+func renderUser(t string, u User, ib map[string]interface{}) map[string]interface{} {
 	switch t {
 	case "vless":
 		m := map[string]interface{}{"name": u.Name, "uuid": u.UUID}
-		if hasTLS && !hasTransport {
-			flow, _ := ib["flow"].(string)
-			if flow == "" || flow == "vision" {
-				flow = "xtls-rprx-vision" // 统一用旧名，兼容客户端和服务端
-			}
-			if flow != "none" {
-				m["flow"] = flow
-			}
+		if flow := VLESSUserFlow(ib); flow != "" {
+			m["flow"] = flow
 		}
 		return m
 	case "vmess":

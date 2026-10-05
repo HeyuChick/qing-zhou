@@ -47,9 +47,10 @@ func TestMeteringRelayWaitsForDownstreamAndRetainsCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(landing), link.IdentityName) || !strings.Contains(string(landing), "relay_"+itoa(bi)) {
-		t.Fatal("new/old identities not both accepted")
+	if !strings.Contains(string(landing), link.IdentityName) {
+		t.Fatal("new identity not accepted")
 	}
+	assertLegacyRelayConfigUser(t, st, landing, b, bi, true)
 	if err = st.RecordRelayConfigApplied(b, landing); err != nil {
 		t.Fatal(err)
 	}

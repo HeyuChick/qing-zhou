@@ -100,6 +100,10 @@ type Controller struct {
 
 	remoteSlots chan struct{} // shared SSH budget for applies, probes and stats
 
+	// Immutable during each serialized rebuild, including its apply goroutines.
+	visionRequired map[int64]*store.Server
+	visionBlocked  map[int64]error
+
 	mu      sync.Mutex // serializes Rebuild
 	statsMu sync.Mutex // one authoritative collector per process
 
@@ -124,6 +128,7 @@ type Controller struct {
 	// the remote file and systemd state.
 	desiredMu   sync.Mutex
 	desiredHash map[int64][sha256.Size]byte
+	visionRetry map[int64]bool // guarded by desiredMu; recheck health after gate failure
 
 	// restartFailed tracks servers whose last local systemctl restart errored, so
 	// applyLocal retries instead of short-circuiting on the already-swapped config
@@ -275,7 +280,7 @@ func (c *Controller) desiredNeedsApply(serverID int64, cfg []byte, force bool) b
 	c.desiredMu.Lock()
 	defer c.desiredMu.Unlock()
 	old, ok := c.desiredHash[serverID]
-	return !ok || old != h
+	return c.visionRetry[serverID] || !ok || old != h
 }
 
 func (c *Controller) rememberDesired(serverID int64, cfg []byte) {
@@ -287,6 +292,7 @@ func (c *Controller) rememberDesired(serverID int64, cfg []byte) {
 	}
 	c.desiredMu.Lock()
 	c.desiredHash[serverID] = sha256.Sum256(cfg)
+	delete(c.visionRetry, serverID)
 	c.desiredMu.Unlock()
 }
 
@@ -365,6 +371,17 @@ func resolveSingBoxBin(configured string) (string, error) {
 // implement just that), so the richer answer is taken when the real manager is
 // behind the interface.
 func (c *Controller) applyPanel(cfg []byte) (bool, error) {
+	return c.applyWithRelayNamespace(context.Background(), store.LocalNodeID, nil, cfg, func(force bool) (bool, error) {
+		return c.applyPanelRaw(cfg, force)
+	})
+}
+
+func (c *Controller) applyPanelRaw(cfg []byte, force bool) (bool, error) {
+	if r, ok := c.mgr.(interface {
+		ApplyChangedForce([]byte, bool) (bool, error)
+	}); ok {
+		return r.ApplyChangedForce(cfg, force)
+	}
 	if r, ok := c.mgr.(interface {
 		ApplyChanged([]byte) (bool, error)
 	}); ok {
@@ -425,6 +442,10 @@ func panelPathConflict(panelPath string, sv *store.Server, serverCfg, panelCfg [
 // It mirrors sbproc.Manager.Apply but uses the server entry's own config_path
 // and systemd_unit instead of the global defaults.
 func (c *Controller) applyLocal(sv *store.Server, cfg []byte) (bool, error) {
+	return c.applyWithRelayNamespace(context.Background(), sv.ID, sv, cfg, func(force bool) (bool, error) { return c.applyLocalRaw(sv, cfg, force) })
+}
+
+func (c *Controller) applyLocalRaw(sv *store.Server, cfg []byte, force bool) (bool, error) {
 	bin, err := resolveSingBoxBin(sv.SingBoxBin)
 	if err != nil {
 		return false, err
@@ -443,7 +464,7 @@ func (c *Controller) applyLocal(sv *store.Server, cfg []byte) (bool, error) {
 	c.restartMu.Lock()
 	pending := c.restartFailed[sv.ID]
 	c.restartMu.Unlock()
-	if !pending {
+	if !pending && !force {
 		if cur, err := os.ReadFile(configPath); err == nil && bytes.Equal(cur, cfg) {
 			return false, nil
 		}
@@ -617,6 +638,9 @@ func (c *Controller) reconcilePeriodic() error { return c.rebuildUntilStable(tru
 func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.prepareVisionCapabilities(); err != nil {
+		return err
+	}
 	if metering, ok := c.st.(relayMeteringStore); ok {
 		if err := metering.PrepareRelayMetering(); err != nil {
 			return err
@@ -631,6 +655,9 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 
 	// Apply to local server (server_id=0, the legacy path).
 	var lastErr error
+	for _, err := range c.visionBlocked {
+		lastErr = errors.Join(lastErr, err)
+	}
 	// record keeps a per-machine outcome alongside the aggregate lastErr. Without
 	// it a full rebuild reports one "下发失败" for the whole pass, and the admin
 	// UI can only say that *something* failed — not which machine, nor why.
@@ -645,7 +672,9 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	// and shares this file is a second writer, and the two only coexist while
 	// they generate the same bytes.
 	var panelCfg []byte
-	if cfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag); err != nil {
+	if err := c.visionBlocked[store.LocalNodeID]; err != nil {
+		record(store.LocalNodeID, err)
+	} else if cfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag); err != nil {
 		lastErr = fmt.Errorf("local build config: %w", err)
 		log.Printf("sbctl: local rebuild error: %v", err)
 		record(0, lastErr)
@@ -699,6 +728,10 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	}
 	for _, sv := range servers {
 		if !sv.Enabled {
+			continue
+		}
+		if err := c.visionBlocked[sv.ID]; err != nil {
+			record(sv.ID, err)
 			continue
 		}
 		cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.statsListenFor(sv), byTag)
@@ -758,18 +791,17 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 			record(sv.ID, fmt.Errorf("未配置远程管理器，无法通过 SSH 下发"))
 			continue
 		}
-		serverCfg := SSHConfigFor(sv)
 		// Acquire before spawning: waiting servers do not consume goroutines.
 		_ = c.acquireRemote(context.Background())
 		wg.Add(1)
-		go func(sv *store.Server, serverCfg *sshctl.ServerConfig, cfg []byte) {
+		go func(sv *store.Server, cfg []byte) {
 			defer wg.Done()
 			defer c.releaseRemote()
 			// Bound the apply so one unreachable / half-open node can't block on
 			// session.Wait() indefinitely and wedge Rebuild (which holds c.mu).
 			applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
-			restarted, err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg)
+			restarted, err := c.applyRemoteConfig(applyCtx, sv, cfg)
 			opened := false
 			if restarted {
 				// Every connection on this node was just cut. Say so, once per
@@ -797,7 +829,7 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 				return
 			}
 			record(sv.ID, nil)
-		}(sv, serverCfg, cfg)
+		}(sv, cfg)
 	}
 	wg.Wait()
 
@@ -820,6 +852,12 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	// its sing-box reinstalled — so re-probe rather than trusting a cached answer
 	// about a binary that may have just changed.
 	c.invalidateRemoteCaches(serverID)
+	if err := c.prepareVisionCapabilities(); err != nil {
+		return err
+	}
+	if err := c.visionBlocked[serverID]; err != nil {
+		return err
+	}
 
 	byTag, err := c.st.BuildUsersByTag(time.Now().Unix())
 	if err != nil {
@@ -832,7 +870,7 @@ func (c *Controller) RebuildServer(serverID int64) error {
 		if err != nil {
 			return fmt.Errorf("local build config: %w", err)
 		}
-		if err := c.mgr.Apply(cfg); err != nil {
+		if _, err := c.applyPanel(cfg); err != nil {
 			return fmt.Errorf("local apply: %w", err)
 		}
 		c.rememberDesired(store.LocalNodeID, cfg)
@@ -877,12 +915,11 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	if c.remoteMgr == nil {
 		return fmt.Errorf("remote manager not configured")
 	}
-	serverCfg := SSHConfigFor(sv)
 	_ = c.acquireRemote(context.Background())
 	defer c.releaseRemote()
 	applyCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	restarted, err := c.remoteMgr.ApplyConfig(applyCtx, serverCfg, cfg)
+	restarted, err := c.applyRemoteConfig(applyCtx, sv, cfg)
 	if restarted {
 		log.Printf("sbctl: server %d (%s) 配置有变化，已下发并重启 sing-box（该节点的连接会断一次）", sv.ID, sv.Name)
 	}

@@ -19,6 +19,7 @@ const cumulativeMeteringSetting = "traffic_cumulative_metering"
 type trafficJournal interface {
 	NextTrafficSequence() (int64, error)
 	RecordTrafficPoll(store.TrafficPoll) (int, error)
+	BeginTrafficReset(store.TrafficPoll) error
 	TrafficCollectionState(int64) (store.TrafficMeteringQuality, string, error)
 	GetSetting(string) (string, error)
 	AcquireTrafficLease(int64, string) (bool, error)
@@ -62,7 +63,7 @@ func quoteEpochUnit(s string) string { return "'" + strings.ReplaceAll(s, "'", "
 
 // systemd InvocationID changes on every service invocation, unlike PID or a
 // config hash. The boot ID guards reuse across host replacement/restarts.
-func (c *Controller) trafficEpoch(ctx context.Context, sv *store.Server) (string, error) {
+func (c *Controller) trafficUnit(sv *store.Server) string {
 	unit := "sing-box"
 	if sv != nil && sv.SystemdUnit != "" {
 		unit = sv.SystemdUnit
@@ -76,10 +77,18 @@ func (c *Controller) trafficEpoch(ctx context.Context, sv *store.Server) (string
 			}
 		}
 	}
+	return unit
+}
+
+func (c *Controller) trafficEpoch(ctx context.Context, sv *store.Server) (string, error) {
+	unit := c.trafficUnit(sv)
 	script := "set -eu; boot=$(cat /proc/sys/kernel/random/boot_id); invocation=$(systemctl show --property=InvocationID --value -- " + quoteEpochUnit(unit) + "); printf '%s:%s' \"$boot\" \"$invocation\""
 	var out string
 	var err error
-	if sv != nil {
+	if sv != nil && (sv.Host == "" || !isLocalHostContext(ctx, sv.Host)) {
+		if c.remoteMgr == nil {
+			return "", fmt.Errorf("remote manager unavailable")
+		}
 		out, err = c.remoteMgr.RunCommand(ctx, SSHConfigFor(sv), script)
 	} else {
 		var b []byte
@@ -119,17 +128,15 @@ func (c *Controller) collectTrafficSnapshot(ctx context.Context, serverID int64,
 	// Every legacy reader shares this lease and rechecks the persisted mode.
 	// This closes the late-reset race across panel processes during handover.
 	if state.Mode != "cumulative" && !c.useTrafficSnapshots() {
-		seq, e := journal.NextTrafficSequence()
-		if e != nil {
-			return 0, e
+		// The epoch is optional in legacy reset mode. Unverifiable numeric names
+		// are quarantined individually by the journal, never the whole node.
+		epoch := ""
+		if proofs, ok := c.st.(interface{ HasRelayNamespaceProof(int64) (bool, error) }); ok {
+			if known, err := proofs.HasRelayNamespaceProof(serverID); err == nil && known {
+				epoch, _ = c.trafficEpoch(ctx, sv)
+			}
 		}
-		traffic, e := fetch.QueryTraffic(ctx, true)
-		if e != nil {
-			return 0, e
-		}
-		p := store.NewTrafficPoll(serverID, trafficDeltas(traffic))
-		p.Sequence = seq
-		return journal.RecordTrafficPoll(p)
+		return c.collectResetTraffic(ctx, journal, serverID, sv, fetch, epoch, false)
 	}
 	before, err := c.trafficEpoch(ctx, sv)
 	if err != nil {
@@ -138,44 +145,15 @@ func (c *Controller) collectTrafficSnapshot(ctx context.Context, serverID int64,
 		}
 		// Nodes without a verifiable systemd epoch keep their existing collector;
 		// opting in must not silently stop quota metering on unsupported nodes.
-		seq, e := journal.NextTrafficSequence()
-		if e != nil {
-			return 0, e
-		}
-		traffic, e := fetch.QueryTraffic(ctx, true)
-		if e != nil {
-			return 0, e
-		}
-		poll := store.NewTrafficPoll(serverID, trafficDeltas(traffic))
-		poll.Sequence = seq
-		n, e := journal.RecordTrafficPoll(poll)
+		n, e := c.collectResetTraffic(ctx, journal, serverID, sv, fetch, "", false)
 		c.recordTrafficFailure(serverID, "legacy")
 		return n, e
 	}
 	applied := 0
 	if state.Mode != "cumulative" {
-		seq, err := journal.NextTrafficSequence()
-		if err != nil {
-			return 0, err
-		}
-		traffic, err := fetch.QueryTraffic(ctx, true)
-		if err != nil {
-			_ = journal.RecordTrafficBoundaryGap(serverID, "transition_reset_uncertain")
-			return 0, fmt.Errorf("final reset poll outcome uncertain: %w", err)
-		}
-		poll := store.NewTrafficPoll(serverID, trafficDeltas(traffic))
-		poll.Epoch = before
-		poll.Sequence = seq
-		poll.Transition = true
-		n, err := journal.RecordTrafficPoll(poll)
+		n, err := c.collectResetTraffic(ctx, journal, serverID, sv, fetch, before, true)
 		applied += n
 		if err != nil {
-			// The immutable response may have failed before reaching durable storage.
-			// If so, expose the lost boundary instead of implying exact recovery.
-			q, _, checkErr := journal.TrafficCollectionState(serverID)
-			if checkErr != nil || q.Mode != "cumulative" {
-				_ = journal.RecordTrafficBoundaryGap(serverID, "cumulative_transition_incomplete")
-			}
 			return applied, err
 		}
 	}
@@ -201,6 +179,33 @@ func (c *Controller) collectTrafficSnapshot(ctx context.Context, serverID int64,
 	poll.Epoch = after
 	n, err := journal.RecordTrafficPoll(poll)
 	return applied + n, err
+}
+
+func (c *Controller) collectResetTraffic(ctx context.Context, journal trafficJournal, serverID int64, sv *store.Server, fetch snapshotFetcher, epoch string, transition bool) (int, error) {
+	seq, err := journal.NextTrafficSequence()
+	if err != nil {
+		return 0, err
+	}
+	poll := store.NewTrafficPoll(serverID, nil)
+	poll.Sequence, poll.Epoch, poll.Transition = seq, epoch, transition
+	if err = journal.BeginTrafficReset(poll); err != nil {
+		return 0, fmt.Errorf("cannot persist reset intent; counters were not reset: %w", err)
+	}
+	traffic, err := fetch.QueryTraffic(ctx, true)
+	if err != nil {
+		return 0, fmt.Errorf("reset response uncertain; coverage warning retained: %w", err)
+	}
+	if epoch != "" {
+		after, epochErr := c.trafficEpoch(ctx, sv)
+		if epochErr != nil || after != epoch {
+			return 0, fmt.Errorf("process changed during reset read; coverage warning retained")
+		}
+	}
+	poll.Traffic = trafficDeltas(traffic)
+	// Keep the sampling timestamp at the completed response boundary. The
+	// durable uncertainty marker retains the earlier dispatch time separately.
+	poll.ObservedAt = time.Now().Unix()
+	return journal.RecordTrafficPoll(poll)
 }
 
 // Legacy opt-out is intentionally rejected once cumulative cursors exist. A

@@ -20,12 +20,13 @@
         </n-space>
       </template>
       <p class="nv-note">
-        一键脚本装完之后，版本号只印在当时的终端里。这里长期显示每台机器实际在跑的版本 ——
-        数据来自面板每轮下发配置时本来就会做的探测，不额外连一次机器。
+        这里显示每台机器最近检测到的内核版本；普通重新检测读取已安装文件，更换磁盘文件不代表运行中的进程已更新。
+        P1 Vision 路径还会在下发前后核验实际运行的内核；预检不通过时不切换该路径，运行能力复核通过后才确认下发。
         面板生成的配置要求 <b>sing-box ≥ {{ minSupported }}</b>；低于这个版本，节点的
         <code>sing-box check</code> 会失败，面板会<b>停止向它下发任何配置</b>（旧配置继续跑，所以表面看不出来）。
         「重装」装的是<b>面板自己发布的构建</b>（随面板版本走，含流量统计所需的 <code>v2ray_api</code>），
-        不是 sing-box 官方发布版 —— 官方版不带这个插件，装上去流量就统计不到了。
+        官方版不带这个插件，无法提供所需流量统计；官方 1.14.2 也不含本次 Vision 分片修复。
+        P1 Vision 需路径上的相关节点都运行已审定的修复内核<span v-if="visionFixedVersion">：<code>{{ visionFixedVersion }}</code></span>。
       </p>
       <div v-if="versions.length" class="nv-list">
         <div v-for="n in versions" :key="n.server_id" class="nv-row">
@@ -35,6 +36,7 @@
             <n-tag v-if="n.too_old" type="error" size="tiny" :bordered="false">版本过低</n-tag>
             <n-tag v-else-if="!n.version" type="default" size="tiny" :bordered="false">未知</n-tag>
             <n-tag v-if="n.version && !n.has_v2ray_api" type="error" size="tiny" :bordered="false">缺少 with_v2ray_api</n-tag>
+            <n-tag v-if="n.version" :type="n.has_vision_framing_fix ? 'info' : 'default'" size="tiny" :bordered="false">{{ n.has_vision_framing_fix ? '版本含 Vision 修复标记' : '未确认 Vision 修复' }}</n-tag>
           </div>
           <div class="nv-side">
             <span v-if="n.checked_at" class="nv-time">{{ fmtDateTime(n.checked_at) }}</span>
@@ -376,6 +378,7 @@ function disposeTrafficChart(){ trafficChart.value?.dispose(); trafficChart.valu
 // ---- 节点 sing-box 版本 ----
 const versions = ref<any[]>([])
 const minSupported = ref('1.12.0')
+const visionFixedVersion = ref('')
 const verLoading = ref(false)
 
 async function loadVersions(){
@@ -383,6 +386,7 @@ async function loadVersions(){
     const d = await apiGet<any>('/api/admin/nodes/singbox')
     versions.value = d?.nodes || []
     if (d?.min_supported) minSupported.value = d.min_supported
+    visionFixedVersion.value = d?.vision_fixed_version || ''
   }catch(e:any){ message.error(e?.message || '读取节点版本失败') }
 }
 
@@ -447,7 +451,7 @@ onUnmounted(() => trafficChart.value?.dispose())
 .nv-main { display:flex; align-items:center; gap:8px; flex:1; min-width:0; flex-wrap:wrap; }
 .nv-name { font-weight:600; font-size:13px; }
 .nv-host { color:var(--text-3); font-weight:400; font-size:12px; margin-left:6px; }
-.nv-ver { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+.nv-ver { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; max-width:100%; overflow-wrap:anywhere; }
 .nv-side { display:flex; align-items:center; gap:10px; }
 .nv-time { font-size:11px; color:var(--text-3); }
 .nv-err { flex-basis:100%; font-size:11px; line-height:1.7; color:var(--warning,#d97706); }

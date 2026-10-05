@@ -113,7 +113,11 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound, users
 			return nil, nil, err
 		}
 		uuid, pw := relayCred(sec)
-		landingUsers[ib.Tag] = []singbox.User{{Name: fmt.Sprintf("relay_%d", ib.ID), UUID: uuid, Password: pw}}
+		statsName, err := s.legacyRelayStatsName(ib.ServerID, ib.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		landingUsers[ib.Tag] = []singbox.User{{Name: statsName, UUID: uuid, Password: pw, Relay: true}}
 	}
 
 	metered := s.RelayMeteringEnabled()
@@ -134,6 +138,16 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound, users
 			}
 		}
 	}
+	userLandings, err := s.relayUserLandingUsers()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, ib := range serverInbounds {
+		if ib.Enabled {
+			landingUsers[ib.Tag] = append(landingUsers[ib.Tag], userLandings[ib.ID]...)
+		}
+	}
+	perUser := s.RelayUserMeteringEnabled()
 
 	// Upstream outbounds for this server's relay inbounds, grouped by landing so
 	// several relay inbounds pointing at the same landing share one outbound.
@@ -156,15 +170,25 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound, users
 			continue
 		}
 		auth := make([]string, 0)
+		routeUsers := make([]singbox.User, 0)
 		for _, u := range usersByTag[entry.Tag] {
 			if isRouteIdentityFor(u.Name, n.ID) {
 				auth = append(auth, u.Name)
+				routeUsers = append(routeUsers, u)
 			}
 		}
 		if len(auth) == 0 {
 			continue
 		}
 		sort.Strings(auth)
+		if perUser {
+			userRelays, err := s.meteredUserRelays(entry, n.ID, landing, routeUsers, serverCache, tlsCache)
+			if err != nil {
+				return nil, nil, err
+			}
+			relays = append(relays, userRelays...)
+			continue
+		}
 		cacheID := landing.ID
 		if metered {
 			cacheID = n.ID
@@ -197,6 +221,26 @@ func (s *Store) buildRelayWiring(serverInbounds, allInbounds []*SbInbound, users
 		landing := byID[r.UpstreamInboundID]
 		if landing == nil || !landing.Enabled {
 			continue // dangling/disabled upstream — traffic falls through to final
+		}
+		if perUser {
+			var logicalIDs []int64
+			for _, n := range nodes {
+				if n.Enabled && n.Type == "self_built" && n.InboundTag == r.Tag && n.RouteUpstreamInboundID != 0 && !n.RouteUpstreamBroken {
+					logicalIDs = append(logicalIDs, n.ID)
+				}
+			}
+			var sourceUsers []singbox.User
+			for _, user := range mergeRelayUser(usersByTag[r.Tag], landingUsers, r.Tag) {
+				if !user.Relay && matchesLogicalRelay(user.Name, logicalIDs) {
+					continue
+				}
+				sourceUsers = append(sourceUsers, user)
+			}
+			userRelays, err := s.meteredUserRelays(r, 0, landing, sourceUsers, serverCache, tlsCache)
+			if err != nil {
+				return nil, nil, err
+			}
+			relays = append(relays, userRelays...)
 		}
 		cacheID := landing.ID
 		if metered {
@@ -472,6 +516,21 @@ func (s *Store) relayOutboundWithIdentity(landing *SbInbound, serverCache map[in
 	_, inlineTLS := opts["tls"]
 	if landing.TlsID == 0 && !inlineTLS && (landing.Type == "vless" || landing.Type == "trojan") {
 		delete(ob, "tls")
+	}
+	if landing.Type == "vless" {
+		// Share-link defaults only encode Vision for Reality. Managed listeners
+		// also support ordinary TLS+Vision: mirror the exact inbound user rule,
+		// including empty transports and explicit flow=none, after conversion.
+		flowSpec := map[string]interface{}{"flow": opts["flow"], "transport": opts["transport"]}
+		if landing.TlsID != 0 || inlineTLS {
+			flowSpec["tls"] = true
+		}
+		if flow := singbox.VLESSUserFlow(flowSpec); flow != "" {
+			ob["flow"] = flow
+			delete(ob, "multiplex") // Vision and outbound multiplex are incompatible
+		} else {
+			delete(ob, "flow")
+		}
 	}
 	ob["tag"] = outboundTag
 	return ob, nil
