@@ -147,7 +147,11 @@ jobs:
       # NOT a newly published upstream stable sing-box release.
       - name: Verify official Vision framing fix
         run: bash scripts/test-vision-framing.sh
-      - name: Build sing-box with fixed Vision and v2ray_api
+      - name: Verify selected transport buffer patch and negative controls
+        env:
+          QZ_TRANSPORT_STRESS_ROUNDS: "100"
+        run: bash scripts/test-transport-buffer.sh --check-baseline
+      - name: Build sing-box with reviewed Vision, transport repair and v2ray_api
         run: bash scripts/build-singbox.sh --output-dir "$GITHUB_WORKSPACE/out" --arch amd64,arm64
 
       # Check exactly the metering-enabled binary that will be published, against
