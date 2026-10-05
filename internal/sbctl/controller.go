@@ -100,6 +100,10 @@ type Controller struct {
 
 	remoteSlots chan struct{} // shared SSH budget for applies, probes and stats
 
+	// Immutable during each serialized rebuild, including its apply goroutines.
+	visionRequired map[int64]*store.Server
+	visionBlocked  map[int64]error
+
 	mu      sync.Mutex // serializes Rebuild
 	statsMu sync.Mutex // one authoritative collector per process
 
@@ -124,6 +128,7 @@ type Controller struct {
 	// the remote file and systemd state.
 	desiredMu   sync.Mutex
 	desiredHash map[int64][sha256.Size]byte
+	visionRetry map[int64]bool // guarded by desiredMu; recheck health after gate failure
 
 	// restartFailed tracks servers whose last local systemctl restart errored, so
 	// applyLocal retries instead of short-circuiting on the already-swapped config
@@ -275,7 +280,7 @@ func (c *Controller) desiredNeedsApply(serverID int64, cfg []byte, force bool) b
 	c.desiredMu.Lock()
 	defer c.desiredMu.Unlock()
 	old, ok := c.desiredHash[serverID]
-	return !ok || old != h
+	return c.visionRetry[serverID] || !ok || old != h
 }
 
 func (c *Controller) rememberDesired(serverID int64, cfg []byte) {
@@ -287,6 +292,7 @@ func (c *Controller) rememberDesired(serverID int64, cfg []byte) {
 	}
 	c.desiredMu.Lock()
 	c.desiredHash[serverID] = sha256.Sum256(cfg)
+	delete(c.visionRetry, serverID)
 	c.desiredMu.Unlock()
 }
 
@@ -632,6 +638,9 @@ func (c *Controller) reconcilePeriodic() error { return c.rebuildUntilStable(tru
 func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.prepareVisionCapabilities(); err != nil {
+		return err
+	}
 	if metering, ok := c.st.(relayMeteringStore); ok {
 		if err := metering.PrepareRelayMetering(); err != nil {
 			return err
@@ -646,6 +655,9 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 
 	// Apply to local server (server_id=0, the legacy path).
 	var lastErr error
+	for _, err := range c.visionBlocked {
+		lastErr = errors.Join(lastErr, err)
+	}
 	// record keeps a per-machine outcome alongside the aggregate lastErr. Without
 	// it a full rebuild reports one "下发失败" for the whole pass, and the admin
 	// UI can only say that *something* failed — not which machine, nor why.
@@ -660,7 +672,9 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	// and shares this file is a second writer, and the two only coexist while
 	// they generate the same bytes.
 	var panelCfg []byte
-	if cfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag); err != nil {
+	if err := c.visionBlocked[store.LocalNodeID]; err != nil {
+		record(store.LocalNodeID, err)
+	} else if cfg, err := c.st.BuildSingboxConfig(c.baseConfig, c.v2rayListen, byTag); err != nil {
 		lastErr = fmt.Errorf("local build config: %w", err)
 		log.Printf("sbctl: local rebuild error: %v", err)
 		record(0, lastErr)
@@ -714,6 +728,10 @@ func (c *Controller) rebuild(periodic, forceHealth bool) error {
 	}
 	for _, sv := range servers {
 		if !sv.Enabled {
+			continue
+		}
+		if err := c.visionBlocked[sv.ID]; err != nil {
+			record(sv.ID, err)
 			continue
 		}
 		cfg, err := c.st.BuildSingboxConfigForServer(sv.ID, c.baseConfig, c.statsListenFor(sv), byTag)
@@ -834,6 +852,12 @@ func (c *Controller) RebuildServer(serverID int64) error {
 	// its sing-box reinstalled — so re-probe rather than trusting a cached answer
 	// about a binary that may have just changed.
 	c.invalidateRemoteCaches(serverID)
+	if err := c.prepareVisionCapabilities(); err != nil {
+		return err
+	}
+	if err := c.visionBlocked[serverID]; err != nil {
+		return err
+	}
 
 	byTag, err := c.st.BuildUsersByTag(time.Now().Unix())
 	if err != nil {

@@ -120,7 +120,7 @@ func (s *Store) validateRelayUserMeteringTopology(tx *sql.Tx) error {
 			return fmt.Errorf("逐用户机器观测无法启用：现有中转路径存在环路")
 		}
 	}
-	return nil
+	return validateRelayVisionCapabilitiesWith(tx, time.Now().Unix())
 }
 
 func scanRelayMeteringUser(row scanner) (*RelayMeteringUser, error) {

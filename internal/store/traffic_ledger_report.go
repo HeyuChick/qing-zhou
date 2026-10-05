@@ -231,6 +231,11 @@ func (s *Store) ServerServiceTraffic(serverID, since int64) (ServiceTraffic, err
 // insufficient evidence to enable a per-user capacity estimate.
 func serviceTrafficAttributionReady(db txLike, serverID int64) (bool, bool, []string, error) {
 	reasons := []string{}
+	if ready, err := relayVisionAttributionReadyWith(db, serverID, time.Now().Unix()); err != nil {
+		return false, false, reasons, err
+	} else if !ready {
+		reasons = append(reasons, "vision_core_unverified")
+	}
 	// Include both explicit inbound relays and enabled logical node routes.
 	// A disabled or broken logical node must not manufacture an active path.
 	const incomingRoutes = `WITH incoming AS (

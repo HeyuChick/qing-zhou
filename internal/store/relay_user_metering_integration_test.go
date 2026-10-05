@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"qingzhou/internal/sbstats"
+	"qingzhou/internal/sbver"
 	"qingzhou/internal/singbox"
 )
 
@@ -255,6 +256,11 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 	if bin == "" {
 		t.Skip("set QZ_SINGBOX_TEST_BIN for loopback integration")
 	}
+	versionOutput, err := exec.Command(bin, "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read actual fixture core version: %v %s", err, versionOutput)
+	}
+	coreInfo := sbver.Parse(string(versionOutput))
 	for _, scenario := range []struct {
 		entryType string
 		machines  int
@@ -273,7 +279,7 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 			st := newRefundStore(t)
 			baseConfig := singbox.DefaultBaseConfig
 			logLevel := "warn"
-			if scenario.tlsMode == "tls-vision" {
+			if scenario.tlsMode == "tls-vision" && os.Getenv("QZ_RELAY_TEST_TRACE") == "1" {
 				// Diagnostic logging changes no route, load, body-size assertion or
 				// retry behavior in the failing Vision path.
 				logLevel = "trace"
@@ -395,6 +401,12 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 					t.Fatalf("original customer %d absent from shared entry", c.uid)
 				}
 			}
+			// Probe the actual candidate executable, never invent a fixed marker.
+			for _, machine := range machines {
+				if err = st.SetNodeSingbox(machine.id, coreInfo); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err = st.ConfigureTrafficMetering(true, true, true); err != nil {
 				t.Fatal(err)
 			}
@@ -414,6 +426,9 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 					checkRelayFixtureConfig(t, bin, raw)
 				} else {
 					m.process = startMeteringBox(t, bin, raw, m.api)
+					if err = st.SetNodeVisionRuntime(m.id, coreInfo); err != nil {
+						t.Fatal(err)
+					}
 					t.Logf("fixture machine hop=%d server_id=%d pid=%d stats=%s transport=%s", i, m.id, m.process.Process.Pid, m.api, scenario.tlsMode)
 				}
 				if err = st.RecordRelayConfigApplied(m.id, raw); err != nil {
@@ -637,21 +652,32 @@ func TestMeteringRelayRealSingboxSharedUserPath(t *testing.T) {
 			}
 			// Repeated simultaneous independent connections exercise auth routing,
 			// rather than merely showing that one warm connection can pass bytes.
-			var wg sync.WaitGroup
-			errors := make(chan error, 4*len(customers))
-			for round := 0; round < 4; round++ {
-				for _, c := range customers {
-					wg.Add(1)
-					go func(c customer) { defer wg.Done(); errors <- request(c) }(c)
+			batches := 1
+			if scenario.tlsMode == "tls-vision" && os.Getenv("QZ_VISION_STRESS_BATCHES") != "" {
+				var parseErr error
+				batches, parseErr = strconv.Atoi(os.Getenv("QZ_VISION_STRESS_BATCHES"))
+				if parseErr != nil || batches < 1 || batches > 1000 {
+					t.Fatal("QZ_VISION_STRESS_BATCHES must be 1..1000")
 				}
 			}
-			wg.Wait()
-			close(errors)
-			for err := range errors {
-				if err != nil {
-					t.Fatal(err)
+			for batch := 0; batch < batches; batch++ {
+				var wg sync.WaitGroup
+				errors := make(chan error, 4*len(customers))
+				for round := 0; round < 4; round++ {
+					for _, c := range customers {
+						wg.Add(1)
+						go func(c customer) { defer wg.Done(); errors <- request(c) }(c)
+					}
+				}
+				wg.Wait()
+				close(errors)
+				for err := range errors {
+					if err != nil {
+						t.Fatalf("batch %d/%d: %v", batch+1, batches, err)
+					}
 				}
 			}
+			t.Logf("completed stress batches=%d concurrent_requests_per_batch=%d without retry", batches, 4*len(customers))
 			tcpElapsed := time.Since(tcpStarted)
 			t.Logf("synthetic_loopback TCP completed_application_bytes=%d traffic_phase_elapsed=%s application_MiB_per_second=%.3f (includes sequential probes and concurrent requests; not WAN capacity)", tcpCompletedBytes, tcpElapsed, float64(tcpCompletedBytes)/(1<<20)/tcpElapsed.Seconds())
 			finalTCP := read()

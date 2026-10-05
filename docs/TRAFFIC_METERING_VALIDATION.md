@@ -9,11 +9,11 @@
 按拟发布commit逐项查看原始日志，确认实际执行而非skip：
 
 - Go全量race、vet、build，前端单测及生产build，安装脚本语法
-- 固定统计内核的配置check，与P0真实双核心TCP
+- 按固定官方源码/模块构建候选统计核心，核对完整版本标记与provenance，再执行配置check及P0真实双核心TCP
 - P1两核心mixed → VLESS、两核心VLESS → VLESS，同路径双用户TCP/UDP
 - P1三核心VLESS，双中转用户与第三用户直连中间跳，TCP/UDP及精确入口扣费
-- P1两核心普通TLS＋Vision、WebSocket＋TLS，各自的`config-check`与`traffic`子测试
-- 生命周期、实际进程/配置边界，以及可信边界建立后的no-op
+- P1两核心普通TLS＋Vision、WebSocket＋TLS，各自的`config-check`与`traffic`子测试；候选修复核心还需重复TLS/Vision压力，不能用一次偶然通过代替
+- 生命周期、实际进程/配置边界，以及可信边界建立后的no-op；P1 Vision相关节点运行核心的修复能力探测，包括旧普通1.14.2、探测失败和过期证据不能放行的用例
 - 100/1000用户SQL和配置规模诊断；若有实际核心RSS结果，确认它对应真实启动的核心，而非仅Go分配量
 
 ### 已取得的首checkpoint证据（不是最终发布结果）
@@ -25,6 +25,14 @@
 后续源码仍有修改，以上checkpoint不能替代最终commit复测。TLS、Vision及WebSocket当时仅有本地配置check，不包括在这次真实流量通过结论内；应等对应后续checkpoint日志再更新。
 
 首轮云沙箱中的真实内核启动受到netlink套接字`EPERM`限制，正常权限路径及获准的常规升级权限执行均未建立可运行的真实核心环境。这是受阻项，不能把它改写为真实流量通过，也不能为了测试降低生产安全设置。最终真实流量证据以具备正常内核能力的Linux CI或其他获准的隔离测试环境为准。
+
+### Vision失败、协议修复与候选状态
+
+后续checkpoint `83ba025`的真实TLS/Vision CI曾出现RST失败；`a27e1102`未替换核心，只增加trace诊断后曾通过。这类时序变化不能证明问题已经修复，两个checkpoint都不能作为候选修复核心的完整通过证据。
+
+协议级对照已确定：旧sing-vmess `v0.2.8`对1～4字节头部分片的4个用例均失败，官方提交`9b95ab8c9478f8e8ebe5758d325ec8cda8197c5c`对4个用例均通过；额外库级实验的四组组合各有800/800通过记录。这些只支持相应库级测试结论，不代表完成TLS握手、真实核心转发、流量计数或套餐入账。
+
+截至本节记录，尚未取得采用该候选修复核心的完整中转集成通过证据。必须在最新候选commit上构建相同核心，完成重复TLS/Vision压力及全部真实TCP/UDP用例，再由发布说明给出结论。一次不报错、配置check或库级4/4通过均不能提前替代这一门槛。
 
 ## 可复现命令
 
@@ -42,26 +50,68 @@ bash -n install.sh
 
 依赖、Go/Node版本按仓库CI配置准备；Go构建依赖生成的前端资源。常规测试里真实内核和规模测试默认可以跳过，因此全量单测通过不等于下面的可选测试已运行。
 
-真实内核必须是带`with_v2ray_api`的统计构建。当前`.github/workflows/ci.yml`的`relay-integration`固定下载v0.2.86发布夹具`sing-box-linux-amd64`，校验SHA256：
+### 固定源码、候选构建与来源校验
 
-```text
-68472358c9e43a50417beadb6d3ae9207417fdebb296286605dabd71da25a7da
-```
+真实内核必须带`with_v2ray_api`。当前CI和Release共用`scripts/build-singbox.sh`，不再把旧v0.2.86发布中的普通1.14.2夹具作为Vision修复候选。固定来源为：
 
-使用相同、已校验的夹具路径执行：
+- sing-box tag：`v1.14.2`
+- sing-box commit：`af6e64c3b69e6132ebaee0e1a3d24e93903f6709`
+- 官方sing-vmess commit：`9b95ab8c9478f8e8ebe5758d325ec8cda8197c5c`
+- sing-vmess伪版本：`v0.2.9-0.20260929152519-9b95ab8c9478`
+- 模块checksum：`h1:q2eQn4nq8oWGxRm9zXesXSlPr9GEgPrOGzf4iPtzG9A=`
+- go.mod checksum：`h1:P11scgTxMxVVQ8dlM27yNm3Cro40mD0+gHbnqrNGDuY=`
+- 完整核心版本：`1.14.2+qz-vmess.9b95ab8c9478`
+- 固定Go工具链：`go1.25.14`
+
+此来源组合不是新发布的上游稳定tag。构建脚本只修改基础go.mod中sing-vmess的require版本，以readonly方式构建并核对build info，避免无关依赖升级。普通版本排序忽略后缀，不可用“1.14.2或更新”推断Vision修复能力；当前能力标记必须精确匹配，且由实际运行的相关节点核心探测确认。
+
+在隔离Linux amd64环境构建并记录来源：
 
 ```sh
-QZ_SINGBOX_TEST_BIN=/absolute/path/to/qz-sing-box \
-QZ_SINGBOX_REQUIRE_STATS=1 \
-go test -race ./internal/store -run '^TestMeteringRelayRealSingbox' -count=1 -v
+bash scripts/build-singbox.sh --output-dir "$PWD/.tmp-metering-core" --arch amd64
+cat .tmp-metering-core/sing-box-provenance.json
+python3 -c 'import json; d=json.load(open(".tmp-metering-core/sing-box-provenance.json")); [print(b["sha256"]+"  "+b["filename"]) for b in d["binaries"]]' | (cd .tmp-metering-core && sha256sum -c -)
+.tmp-metering-core/sing-box-linux-amd64 version
 ```
 
-`TestMeteringRelayRealSingboxTraffic`覆盖P0双核心回环；`TestMeteringRelayRealSingboxSharedUserPath`覆盖P1两/三核心场景。测试使用本机HTTP目标、SOCKS UDP echo和临时数据库；不使用生产地址、TUN或生产系统路由。VLESS场景的本地mixed客户端只是驱动进程，不算被计费机器。
+脚本也支持`--arch amd64,arm64`；交叉构建成功不等于非本机架构已经执行过真实流量。Release的`sing-box-provenance.json`包含固定源码/模块、工具链、build tags及每个架构产物SHA256；应把产物hash与对应架构条目及发布校验文件逐一核对。版本标记是能力判定条件之一，不能单独替代来源校验和实际运行进程证明。
+
+### 协议级确定性回归
+
+```sh
+bash scripts/test-vision-framing.sh --check-baseline
+```
+
+该脚本执行Vision padding header在1～4字节处分片、跨`Read`返回的确定性解析回归。`--check-baseline`还要求旧`v0.2.8`的四个指定子测试实际运行并失败；编译或网络错误不能冒充负向对照成功。该脚本没有启动完整核心、没有完成TLS握手，也不测试中转计数或扣费；此前额外的800次库级实验也不是该脚本的固定4子测试，更不能代替下面的完整集成。
+
+### 候选完整核心TCP/UDP集成
+
+使用上面构建并校验的同一候选核心：
+
+```sh
+QZ_SINGBOX_TEST_BIN="$PWD/.tmp-metering-core/sing-box-linux-amd64" \
+QZ_SINGBOX_REQUIRE_STATS=1 \
+QZ_VISION_STRESS_BATCHES=100 \
+go test -race ./internal/store -run '^(TestMeteringRelayRealSingbox|TestRelayVLESSFlowMatchesListener)' -count=1 -v
+```
+
+重复TLS/Vision路径的隔离压力复测示例：
+
+```sh
+QZ_SINGBOX_TEST_BIN="$PWD/.tmp-metering-core/sing-box-linux-amd64" \
+QZ_SINGBOX_REQUIRE_STATS=1 \
+QZ_VISION_STRESS_BATCHES=100 \
+go test -race ./internal/store -run '^TestMeteringRelayRealSingboxSharedUserPath$/^vless$/^2-machines$/^tls-vision$/^traffic$' -count=20 -v
+```
+
+发布验收须确认上述过滤器在最终源码中确实匹配、执行了目标子测试，没有`no tests to run`或skip；重复次数、实际连接次数与失败记录应从日志核对。20轮示例只提供可复现的回归负载，不是无故障保证或性能门槛。最终CI采用的压力参数与结论以对应commit原始日志为准。
+
+`TestMeteringRelayRealSingboxTraffic`覆盖P0双核心回环；`TestMeteringRelayRealSingboxSharedUserPath`覆盖P1两/三核心场景。测试使用本机HTTP目标、SOCKS UDP echo和临时数据库；不使用生产地址、TUN或生产系统路由。VLESS场景的本地mixed客户端只是驱动进程，不算被计费机器。真实Vision客户端与服务器都使用同一候选核心。账号/订阅不变不等于所有既有第三方或旧版本客户端已验证；若客户端本身仍包含同一上游分片缺陷，服务端修复不能替它修复。
 
 配置检查和纯逻辑测试也可在安装了同一夹具后运行：
 
 ```sh
-QZ_SINGBOX_TEST_BIN=/absolute/path/to/qz-sing-box \
+QZ_SINGBOX_TEST_BIN="$PWD/.tmp-metering-core/sing-box-linux-amd64" \
 QZ_SINGBOX_REQUIRE_STATS=1 \
 go test ./internal/store ./internal/singbox -count=1 -v
 ```
@@ -115,7 +165,7 @@ go test ./internal/store ./internal/singbox -count=1 -v
 - 面板重启、重复ID、内容冲突、同秒乱序、进程跨代、同代计数回退及旧代晚到均有断言；不能用PID或秒级时间替代真实顺序/代次
 - 报表按一致数据库读快照返回，`users`、`sources`和总量不能因并发写入互相矛盾；读报表不应抢占SQLite写锁
 - `observed_user_coverage_complete`与`attribution_ready`分别测试：共享兼容仍存在但本窗口没有未分配流量时，前者可真、后者为假；pending、缺口和无观测时不宣称完整
-- 迁移4之后追加5/6；失败回滚及重启不重复建代次/回填/扣费。用升级前一致数据库备份与原密钥做隔离恢复演练，禁止把新数据库交给旧二进制当作回退
+- 迁移4之后追加5/6/7；失败回滚及重启不重复建代次/回填/扣费。用升级前一致数据库备份与原密钥做隔离恢复演练，禁止把新数据库交给旧二进制当作回退
 
 相关测试文件包括`traffic_identity_compat_test.go`、`legacy_relay_identity_test.go`、`relay_metering_users_test.go`、`relay_metering_test.go`、`relay_credential_lifecycle_test.go`、`traffic_ledger_report_test.go`及`internal/sbctl/traffic_snapshot_test.go`。应按最终测试清单核对覆盖，不能从文件名推断未写出的断言。
 
@@ -145,6 +195,6 @@ go test ./internal/store -run '^TestMeteringRelayUserScale$' -count=1 -v
 
 1. 固定最终commit，重新跑受最后改动影响的检查；记录同一commit的CI链接及真实流量日志
 2. 将结果明确分为通过、失败、阻塞、跳过/未执行，逐项列出TLS/传输等未验收组合
-3. 核对迁移与回退说明、默认关闭但账本逻辑有变化的说明、重启断连及历史不可修复边界
-4. 发布制品与验收commit对应；测试中的临时数据库、测试密钥和计数器不得进入发布制品
+3. 核对迁移与回退说明、默认关闭但账本逻辑有变化的说明、重启断连及历史不可修复边界；明确管理员须自行重装相关核心并重新验证运行能力，Docker镜像仅含面板/probe
+4. 发布制品与验收commit对应，核心使用相同固定构建脚本并附带`sing-box-provenance.json`；核对架构hash及来源，测试中的临时数据库、测试密钥和计数器不得进入发布制品
 5. 发布与部署分开。发布不意味着已经接触、升级或验证用户生产服务器；管理员选择何时在自己的环境测试和部署

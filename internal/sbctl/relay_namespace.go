@@ -43,6 +43,18 @@ func configNeedsRelayNamespaceProof(raw []byte) bool {
 // Namespace proof is created only around a controlled successful restart. A
 // matching disk file with an old active core is deliberately insufficient.
 func (c *Controller) applyWithRelayNamespace(ctx context.Context, serverID int64, sv *store.Server, raw []byte, apply func(bool) (bool, error)) (bool, error) {
+	restarted, err := c.applyWithRelayNamespaceRaw(ctx, serverID, sv, raw, apply)
+	if err == nil {
+		if _, needsVision := c.visionRequired[serverID]; needsVision {
+			// No downstream readiness acknowledgement until the live core is verified
+			// again. A restart may use a different executable from the checked file.
+			err = c.verifyVisionCapability(ctx, serverID, sv, false)
+		}
+	}
+	return restarted, err
+}
+
+func (c *Controller) applyWithRelayNamespaceRaw(ctx context.Context, serverID int64, sv *store.Server, raw []byte, apply func(bool) (bool, error)) (bool, error) {
 	if !configNeedsRelayNamespaceProof(raw) {
 		return apply(false)
 	}

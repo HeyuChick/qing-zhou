@@ -202,6 +202,9 @@ func (c *Controller) collectResetTraffic(ctx context.Context, journal trafficJou
 		}
 	}
 	poll.Traffic = trafficDeltas(traffic)
+	// Keep the sampling timestamp at the completed response boundary. The
+	// durable uncertainty marker retains the earlier dispatch time separately.
+	poll.ObservedAt = time.Now().Unix()
 	return journal.RecordTrafficPoll(poll)
 }
 

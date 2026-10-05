@@ -32,6 +32,7 @@ func (s *Store) migrations() []migration {
 		{4, "traffic_observation_ledger", func(tx *sql.Tx) error { _, err := tx.Exec(trafficLedgerSchema); return err }},
 		{5, "relay_user_observation", func(tx *sql.Tx) error { _, err := tx.Exec(relayUserMeteringSchema); return err }},
 		{6, "legacy_relay_statistics_namespace", func(tx *sql.Tx) error { _, err := tx.Exec(legacyRelayIdentitySchema); return err }},
+		{7, "vision_runtime_capability", func(tx *sql.Tx) error { _, err := tx.Exec(visionRuntimeCapabilitySchema); return err }},
 	}
 }
 
