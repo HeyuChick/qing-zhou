@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -22,21 +23,22 @@ type relayMeteringEdge struct {
 // RelayMeteringUser is an immutable user-to-physical-link generation. Credentials
 // are only for managed proxy hops and never replace a customer's credentials.
 type RelayMeteringUser struct {
-	ID           int64  `json:"id"`
-	LinkID       int64  `json:"link_id"`
-	UserID       int64  `json:"user_id"`
-	Generation   int    `json:"generation"`
-	IdentityName string `json:"-"`
-	Credential   string `json:"-"`
-	Enabled      bool   `json:"enabled"`
-	State        string `json:"state"`
-	CreatedAt    int64  `json:"created_at"`
-	AcceptedAt   int64  `json:"accepted_at"`
-	ActivatedAt  int64  `json:"activated_at"`
-	SourceNames  string `json:"-"` // current desired auth_user names; never credentials
+	ID               int64  `json:"id"`
+	LinkID           int64  `json:"link_id"`
+	UserID           int64  `json:"user_id"`
+	Generation       int    `json:"generation"`
+	IdentityName     string `json:"-"`
+	Credential       string `json:"-"`
+	Enabled          bool   `json:"enabled"`
+	State            string `json:"state"`
+	CreatedAt        int64  `json:"created_at"`
+	AcceptedAt       int64  `json:"accepted_at"`
+	ActivatedAt      int64  `json:"activated_at"`
+	SourceNames      string `json:"-"` // current desired auth_user names; never credentials
+	SourceAuthHashes string `json:"-"` // keyed digests of the exact source authentication objects
 }
 
-const relayMeteringUserCols = `id,link_id,user_id,generation,identity_name,credential,enabled,state,created_at,accepted_at,activated_at,source_names`
+const relayMeteringUserCols = `id,link_id,user_id,generation,identity_name,credential,enabled,state,created_at,accepted_at,activated_at,source_names,source_auth_hashes`
 
 func (s *Store) RelayUserMeteringEnabled() bool {
 	value, err := s.GetSetting(RelayUserMeteringSetting)
@@ -44,8 +46,19 @@ func (s *Store) RelayUserMeteringEnabled() bool {
 }
 
 func supportedUserMeteringEdge(from, to *SbInbound) error {
-	if (from.Type != "mixed" && from.Type != "vless") || to.Type != "vless" {
-		return fmt.Errorf("逐用户机器观测当前支持 VLESS/mixed 入口到 VLESS 落地；线路 %s → %s 的协议尚未验收，保持原配置", from.Tag, to.Tag)
+	// Every supported listener must expose its authenticated user to the core's
+	// router and v2ray statistics. The managed Shadowsocks implementation is
+	// currently restricted to the two AES SS2022 methods it renders and tests.
+	if from == nil || to == nil {
+		return fmt.Errorf("逐用户机器观测的入口或落地不存在，保持原配置")
+	}
+	if from.Type != "mixed" {
+		if err := supportedMeteringLanding(from); err != nil {
+			return fmt.Errorf("逐用户机器观测入口不可用：%w", err)
+		}
+	}
+	if err := supportedMeteringLanding(to); err != nil {
+		return fmt.Errorf("逐用户机器观测落地不可用：%w", err)
 	}
 	return nil
 }
@@ -89,11 +102,31 @@ func (s *Store) validateRelayUserMeteringTopology(tx *sql.Tx) error {
 		if edge.from.ServerID == target.ServerID {
 			return fmt.Errorf("逐用户机器观测无法启用：入口 %s 存在尚不支持的同机多跳", edge.from.Tag)
 		}
-		if err = supportedUserMeteringEdge(&edge.from, target); err != nil {
+		// The initial topology scan contains only graph fields. Read the full
+		// source in this same transaction before checking protocol options.
+		source, err := meteringInboundWith(tx, edge.from.ID)
+		if err != nil {
 			return err
 		}
-		if _, _, _, err = s.relayTargetSpecWith(tx, target); err != nil {
-			return fmt.Errorf("逐用户机器观测无法启用：入口 %s 的落地不可用：%w", edge.from.Tag, err)
+		if err = supportedUserMeteringEdge(source, target); err != nil {
+			return err
+		}
+		// Pure protocol rendering catches known incompatible TLS/transport
+		// combinations before the opt-in switch commits. This is a static
+		// preflight, not a claim of end-to-end connectivity or a core check.
+		for _, endpoint := range []*SbInbound{source, target} {
+			if endpoint.Type == "mixed" {
+				continue
+			}
+			_, server, tls, err := s.relayTargetSpecWith(tx, endpoint)
+			if err != nil {
+				return fmt.Errorf("逐用户机器观测无法启用：入站 %s 不可用：%w", endpoint.Tag, err)
+			}
+			probe := singbox.User{UUID: "00000000-0000-4000-8000-000000000001", Password: "protocol-preflight-only"}
+			if _, err = s.relayOutboundWithIdentity(endpoint,
+				map[int64]*Server{endpoint.ServerID: server}, map[int64]*SbTls{endpoint.TlsID: tls}, &probe, "protocol-preflight-only"); err != nil {
+				return fmt.Errorf("逐用户机器观测无法启用：入站 %s 的协议配置不可用：%w", endpoint.Tag, err)
+			}
 		}
 		graph[edge.from.ServerID] = append(graph[edge.from.ServerID], target.ServerID)
 	}
@@ -125,7 +158,7 @@ func (s *Store) validateRelayUserMeteringTopology(tx *sql.Tx) error {
 
 func scanRelayMeteringUser(row scanner) (*RelayMeteringUser, error) {
 	u := new(RelayMeteringUser)
-	err := row.Scan(&u.ID, &u.LinkID, &u.UserID, &u.Generation, &u.IdentityName, &u.Credential, &u.Enabled, &u.State, &u.CreatedAt, &u.AcceptedAt, &u.ActivatedAt, &u.SourceNames)
+	err := row.Scan(&u.ID, &u.LinkID, &u.UserID, &u.Generation, &u.IdentityName, &u.Credential, &u.Enabled, &u.State, &u.CreatedAt, &u.AcceptedAt, &u.ActivatedAt, &u.SourceNames, &u.SourceAuthHashes)
 	return u, err
 }
 
@@ -310,6 +343,7 @@ func (s *Store) prepareRelayMeteringUsers(inbounds []*SbInbound, edges []relayMe
 		linkByID[link.ID] = link
 	}
 	incomingNames := map[int64]map[int64][]string{}
+	incomingCredentials := map[string]singbox.User{}
 	for _, user := range allUsers {
 		link := linkByID[user.LinkID]
 		if !user.Enabled || link == nil {
@@ -323,9 +357,27 @@ func (s *Store) prepareRelayMeteringUsers(inbounds []*SbInbound, edges []relayMe
 			incomingNames[link.TargetInboundID] = map[int64][]string{}
 		}
 		incomingNames[link.TargetInboundID][user.UserID] = append(incomingNames[link.TargetInboundID][user.UserID], user.IdentityName)
+		credential, err := s.relayMeteringUserCredential(user)
+		if err != nil {
+			return err
+		}
+		incomingCredentials[user.IdentityName] = credential
 	}
 	for i, edge := range edges {
 		link := edgeLinks[i]
+		base, err := s.relayMeteringInboundBaseWith(tx, edge.from)
+		if err != nil {
+			return err
+		}
+		authHashes := map[string]string{}
+		for _, user := range usersByTag[edge.from.Tag] {
+			authHashes[user.Name] = s.relayAuthenticationHash(singbox.UserConfig(edge.from.Type, user, base))
+		}
+		for _, names := range incomingNames[edge.from.ID] {
+			for _, name := range names {
+				authHashes[name] = s.relayAuthenticationHash(singbox.UserConfig(edge.from.Type, incomingCredentials[name], base))
+			}
+		}
 		for owner := range owners[i] {
 			names := map[string]bool{}
 			for _, name := range clientNames[i][owner] {
@@ -345,7 +397,18 @@ func (s *Store) prepareRelayMeteringUsers(inbounds []*SbInbound, edges []relayMe
 			if err != nil {
 				return err
 			}
-			if _, err = tx.Exec(`UPDATE relay_metering_users SET source_names=?,state=CASE WHEN state='active' THEN 'accepted' ELSE state END,activated_at=0 WHERE link_id=? AND user_id=? AND generation=? AND source_names<>?`, string(encoded), link.ID, owner, link.Generation, string(encoded)); err != nil {
+			ownedHashes := map[string]string{}
+			for _, name := range ordered {
+				if authHashes[name] == "" {
+					return fmt.Errorf("入口 %s 的用户认证映射未就绪", edge.from.Tag)
+				}
+				ownedHashes[name] = authHashes[name]
+			}
+			hashes, err := json.Marshal(ownedHashes)
+			if err != nil {
+				return err
+			}
+			if _, err = tx.Exec(`UPDATE relay_metering_users SET source_names=?,source_auth_hashes=?,state=CASE WHEN state='active' THEN 'accepted' ELSE state END,activated_at=0 WHERE link_id=? AND user_id=? AND generation=? AND (source_names<>? OR source_auth_hashes<>?)`, string(encoded), string(hashes), link.ID, owner, link.Generation, string(encoded), string(hashes)); err != nil {
 				return err
 			}
 		}
@@ -495,32 +558,58 @@ func (s *Store) acknowledgeRelayMeteringUsers(tx *sql.Tx, serverID int64, raw []
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return err
 	}
+	var fullConfig struct {
+		Inbounds []map[string]interface{} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(raw, &fullConfig); err != nil {
+		return err
+	}
+	actualBases := map[string]map[string]interface{}{}
+	for _, inbound := range fullConfig.Inbounds {
+		tag, _ := inbound["tag"].(string)
+		delete(inbound, "users")
+		actualBases[tag] = inbound
+	}
 	observed := map[string]bool{}
 	for _, name := range cfg.Experimental.V2Ray.Stats.Users {
 		observed[name] = true
 	}
 	inboundIndex := map[string]int{}
 	inboundUsers := map[string]map[string]map[string]interface{}{}
+	invalidInbounds := map[string]bool{}
 	for i, inbound := range cfg.Inbounds {
+		if _, exists := inboundIndex[inbound.Tag]; exists {
+			invalidInbounds[inbound.Tag] = true
+		}
 		inboundIndex[inbound.Tag] = i
+		wireKeys := map[string]bool{}
 		inboundUsers[inbound.Tag] = map[string]map[string]interface{}{}
 		for _, user := range inbound.Users {
 			name, ok := user["name"].(string)
 			if !ok {
 				name, ok = user["username"].(string)
 			}
+			key := relayAuthenticationKey(inbound.Type, user)
+			if !ok || name == "" || key == "" || inboundUsers[inbound.Tag][name] != nil || wireKeys[key] {
+				invalidInbounds[inbound.Tag] = true
+			}
+			wireKeys[key] = true
 			if ok {
 				inboundUsers[inbound.Tag][name] = user
 			}
 		}
 	}
 	outboundIndex := map[string]map[string]interface{}{}
+	duplicateOutbounds := map[string]bool{}
 	for _, outbound := range cfg.Outbounds {
 		if tag, ok := outbound["tag"].(string); ok {
+			if outboundIndex[tag] != nil {
+				duplicateOutbounds[tag] = true
+			}
 			outboundIndex[tag] = outbound
 		}
 	}
-	rows, err := tx.Query(`SELECT u.id,u.link_id,u.user_id,u.generation,u.identity_name,u.credential,u.enabled,u.state,u.created_at,u.accepted_at,u.activated_at,u.source_names FROM relay_metering_users u JOIN relay_metering_links l ON l.id=u.link_id WHERE u.enabled=1 AND u.generation=l.generation AND (l.source_server_id=? OR l.target_server_id=?) ORDER BY u.id`, serverID, serverID)
+	rows, err := tx.Query(`SELECT u.id,u.link_id,u.user_id,u.generation,u.identity_name,u.credential,u.enabled,u.state,u.created_at,u.accepted_at,u.activated_at,u.source_names,u.source_auth_hashes FROM relay_metering_users u JOIN relay_metering_links l ON l.id=u.link_id WHERE u.enabled=1 AND u.generation=l.generation AND (l.source_server_id=? OR l.target_server_id=?) ORDER BY u.id`, serverID, serverID)
 	if err != nil {
 		return err
 	}
@@ -546,7 +635,8 @@ func (s *Store) acknowledgeRelayMeteringUsers(tx *sql.Tx, serverID int64, raw []
 	byLink := map[int64]*RelayMeteringLink{}
 	type targetState struct {
 		inbound *SbInbound
-		host    string
+		server  *Server
+		tls     *SbTls
 	}
 	targets := map[int64]targetState{}
 	sources := map[int64]*SbInbound{}
@@ -562,15 +652,11 @@ func (s *Store) acknowledgeRelayMeteringUsers(tx *sql.Tx, serverID int64, raw []
 		if target == nil || target.ServerID != link.TargetServerID {
 			continue
 		}
-		spec, server, _, err := s.relayTargetSpecWith(tx, target)
+		spec, server, tls, err := s.relayTargetSpecWith(tx, target)
 		if err != nil || spec != link.SpecHash {
 			continue
 		}
-		host := "127.0.0.1"
-		if server != nil {
-			host = server.Host
-		}
-		targets[link.ID] = targetState{target, host}
+		targets[link.ID] = targetState{target, server, tls}
 		if link.SourceServerID == serverID {
 			source, err := meteringInboundWith(tx, link.SourceInboundID)
 			if err != nil {
@@ -583,6 +669,38 @@ func (s *Store) acknowledgeRelayMeteringUsers(tx *sql.Tx, serverID int64, raw []
 	}
 	wantedRoutes := map[string]map[string]string{}
 	subjectNames := map[int64][]string{}
+	subjectHashes := map[int64]map[string]string{}
+	expectedBases := map[int64]map[string]interface{}{}
+	authenticationBases := map[int64]map[string]interface{}{}
+	for _, ib := range sources {
+		if expectedBases[ib.ID] != nil {
+			continue
+		}
+		base, err := s.relayMeteringInboundBaseWith(tx, ib)
+		if err != nil {
+			return err
+		}
+		authenticationBases[ib.ID] = base
+		expectedBases[ib.ID], err = relayMeteringRenderedInboundBase(ib, base)
+		if err != nil {
+			return err
+		}
+	}
+	for _, state := range targets {
+		ib := state.inbound
+		if expectedBases[ib.ID] != nil {
+			continue
+		}
+		base, err := s.relayMeteringInboundBaseWith(tx, ib)
+		if err != nil {
+			return err
+		}
+		authenticationBases[ib.ID] = base
+		expectedBases[ib.ID], err = relayMeteringRenderedInboundBase(ib, base)
+		if err != nil {
+			return err
+		}
+	}
 	for _, user := range users {
 		if source := sources[user.LinkID]; source != nil {
 			var names []string
@@ -590,6 +708,11 @@ func (s *Store) acknowledgeRelayMeteringUsers(tx *sql.Tx, serverID int64, raw []
 				return fmt.Errorf("线路 %d 的用户来源映射无效", user.LinkID)
 			}
 			subjectNames[user.ID] = names
+			var hashes map[string]string
+			if err = json.Unmarshal([]byte(user.SourceAuthHashes), &hashes); err != nil {
+				return fmt.Errorf("线路 %d 的用户认证映射无效", user.LinkID)
+			}
+			subjectHashes[user.ID] = hashes
 			if wantedRoutes[source.Tag] == nil {
 				wantedRoutes[source.Tag] = map[string]string{}
 			}
@@ -619,7 +742,7 @@ func (s *Store) acknowledgeRelayMeteringUsers(tx *sql.Tx, serverID int64, raw []
 		}
 		if link.TargetServerID == serverID {
 			index, exists := inboundIndex[target.Tag]
-			matched := exists && cfg.Inbounds[index].Type == target.Type && cfg.Inbounds[index].Port == target.ListenPort && observed[user.IdentityName] && meteringUserMatches(target, credential, inboundUsers[target.Tag][user.IdentityName])
+			matched := exists && !invalidInbounds[target.Tag] && cfg.Inbounds[index].Type == target.Type && cfg.Inbounds[index].Port == target.ListenPort && observed[user.IdentityName] && relayAppliedObjectMatches(expectedBases[target.ID], actualBases[target.Tag]) && relayAppliedObjectMatches(singbox.UserConfig(target.Type, credential, authenticationBases[target.ID]), inboundUsers[target.Tag][user.IdentityName])
 			if matched {
 				_, err = tx.Exec(`UPDATE relay_metering_users SET state='accepted',accepted_at=? WHERE id=? AND enabled=1 AND state='prepared'`, now, user.ID)
 			} else {
@@ -632,17 +755,27 @@ func (s *Store) acknowledgeRelayMeteringUsers(tx *sql.Tx, serverID int64, raw []
 		if link.SourceServerID == serverID {
 			outbound := outboundIndex[user.outboundTag()]
 			source := sources[link.ID]
-			routed := source != nil && len(subjectNames[user.ID]) > 0 && !invalidOutbounds[user.outboundTag()]
+			routed := source != nil && !invalidInbounds[source.Tag] && len(subjectNames[user.ID]) > 0 && !invalidOutbounds[user.outboundTag()] && !duplicateOutbounds[user.outboundTag()]
 			if routed {
 				index, exists := inboundIndex[source.Tag]
-				routed = exists && cfg.Inbounds[index].Type == source.Type && cfg.Inbounds[index].Port == source.ListenPort
+				routed = exists && cfg.Inbounds[index].Type == source.Type && cfg.Inbounds[index].Port == source.ListenPort && relayAppliedObjectMatches(expectedBases[source.ID], actualBases[source.Tag])
 				for _, name := range subjectNames[user.ID] {
-					if !observed[name] || inboundUsers[source.Tag][name] == nil || appliedRoutes[source.Tag][name] != user.outboundTag() {
+					if !observed[name] || inboundUsers[source.Tag][name] == nil || subjectHashes[user.ID][name] == "" || subjectHashes[user.ID][name] != s.relayAuthenticationHash(inboundUsers[source.Tag][name]) || appliedRoutes[source.Tag][name] != user.outboundTag() {
 						routed = false
 					}
 				}
 			}
-			if routed && outbound["type"] == "vless" && outbound["uuid"] == credential.UUID && outbound["server"] == targetState.host && outbound["server_port"] == float64(target.ListenPort) {
+			// Compare the whole managed outbound, not just a UUID. Password
+			// protocols, TUIC's two credentials, SS2022's server/user key pair,
+			// TLS/flow, transport and obfuscation must all match this generation.
+			// Complete caches keep this renderer read-only inside the transaction.
+			expected, renderErr := s.relayOutboundWithIdentity(target,
+				map[int64]*Server{target.ServerID: targetState.server},
+				map[int64]*SbTls{target.TlsID: targetState.tls}, &credential, user.outboundTag())
+			if renderErr != nil {
+				return renderErr
+			}
+			if routed && relayAppliedObjectMatches(expected, outbound) {
 				_, err = tx.Exec(`UPDATE relay_metering_users SET state='active',activated_at=? WHERE id=? AND enabled=1 AND state='accepted'`, now, user.ID)
 			} else {
 				_, err = tx.Exec(`UPDATE relay_metering_users SET state='accepted',activated_at=0 WHERE id=? AND enabled=1 AND state='active'`, user.ID)
@@ -773,4 +906,20 @@ func relayRuleStrings(value interface{}) []string {
 		return out
 	}
 	return nil
+}
+
+// Both maps may come from different stages (Go values versus JSON decoding),
+// so canonical JSON also normalizes int/float representations without weakening
+// the exact-field check. Additional detours, network filters or TLS overrides
+// cannot accidentally endorse an otherwise plausible credential.
+func relayAppliedObjectMatches(expected, actual map[string]interface{}) bool {
+	if expected == nil || actual == nil {
+		return false
+	}
+	want, err := json.Marshal(expected)
+	if err != nil {
+		return false
+	}
+	got, err := json.Marshal(actual)
+	return err == nil && bytes.Equal(want, got)
 }

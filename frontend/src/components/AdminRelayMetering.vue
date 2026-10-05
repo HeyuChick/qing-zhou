@@ -9,7 +9,7 @@
         <label><input v-model="cumulative" type="checkbox" :disabled="busy || loading || !loaded || state.cumulative_started">启用累计快照采集，避免每次读取清零</label>
         <small>累计模式要求能够验证sing-box进程代次；不支持的节点保留旧式采集。已经切换的节点不能直接退回清零模式，避免重复扣费</small>
         <label><input v-model="perUser" type="checkbox" :disabled="busy || loading || !loaded || !enabled">启用逐用户中转实测（需先启用独立中转身份）</label>
-        <small>用户现有账号、密码和订阅不变。当前支持 VLESS/mixed 入口到 VLESS 落地。内部逐用户身份会增加配置规模；共享兼容与历史记录仍单列，未归属流量不会均摊给用户</small>
+        <small>用户现有账号、密码和订阅不变。支持 VLESS、VMess、Trojan、TUIC、Hysteria/Hysteria2、AnyTLS 和 SS2022 AES-128/256；mixed 仅作入口。各协议和传输的实测范围以该版本验收记录为准。内部逐用户身份会增加配置规模；共享兼容与历史记录仍单列，未归属流量不会均摊给用户</small>
         <div class="actions"><button type="submit" :disabled="busy || loading || !loaded">保存并重新下发</button><button type="button" :disabled="busy || loading" @click="load">刷新状态</button></div>
       </form>
       <div v-if="confirming" class="confirmation" role="alert">

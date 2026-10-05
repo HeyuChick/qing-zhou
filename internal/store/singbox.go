@@ -478,7 +478,14 @@ func inboundTransports(typ, options string) transportBits {
 	switch typ {
 	case "tuic", "hysteria2", "hysteria":
 		return transportUDP // QUIC-based: UDP only
-	case "vless", "vmess", "trojan", "anytls", "mixed":
+	case "vless", "vmess", "trojan":
+		var opts map[string]interface{}
+		_ = json.Unmarshal([]byte(options), &opts)
+		if transport, ok := opts["transport"].(map[string]interface{}); ok && transport["type"] == "quic" {
+			return transportUDP
+		}
+		return transportTCP
+	case "anytls", "mixed":
 		return transportTCP
 	case "shadowsocks":
 		// sing-box's shadowsocks inbound serves both unless network narrows it.
@@ -487,8 +494,19 @@ func inboundTransports(typ, options string) transportBits {
 			_ = json.Unmarshal([]byte(options), &opts)
 		}
 		var bits transportBits
-		if n, _ := opts["network"].(string); n != "" {
-			for _, part := range strings.Split(n, ",") {
+		var networks []string
+		switch n := opts["network"].(type) {
+		case string:
+			networks = strings.Split(n, ",")
+		case []interface{}:
+			for _, value := range n {
+				if network, ok := value.(string); ok {
+					networks = append(networks, network)
+				}
+			}
+		}
+		if len(networks) != 0 {
+			for _, part := range networks {
 				switch strings.TrimSpace(part) {
 				case "tcp":
 					bits |= transportTCP

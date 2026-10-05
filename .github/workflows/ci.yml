@@ -36,9 +36,9 @@ jobs:
         run: go vet ./...
 
       - name: Test (race)
-        # The complete SQLite-backed store suite exceeds Go's default 10m
-        # package budget with the race detector; retain every test and race check.
-        run: go test -race -timeout=20m ./...
+        # Retain the full SQLite-backed lifecycle suite and the 81-pair protocol
+        # matrix under race instrumentation; neither is replaced by core checks.
+        run: go test -race -timeout=30m ./...
 
   shell:
     runs-on: ubuntu-latest

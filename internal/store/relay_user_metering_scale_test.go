@@ -72,159 +72,168 @@ func TestMeteringRelayUserScale(t *testing.T) {
 	if os.Getenv("QZ_METERING_SCALE") != "1" {
 		t.Skip("set QZ_METERING_SCALE=1 for 100/1000-user diagnostics")
 	}
-	for _, size := range []int{100, 1000} {
-		t.Run(fmt.Sprint(size), func(t *testing.T) {
-			st := newRefundStore(t)
-			st.SetSecretKey([]byte("isolated-scale-fixture"))
-			a, _ := st.CreateServer(Server{Name: "entry", Host: "192.0.2.1", Enabled: true})
-			b, _ := st.CreateServer(Server{Name: "landing", Host: "192.0.2.2", Enabled: true})
-			aAPI, bAPI := fmt.Sprintf("127.0.0.1:%d", meteringTestPort(t)), fmt.Sprintf("127.0.0.1:%d", meteringTestPort(t))
-			landing, err := st.SaveSbInbound(&SbInbound{ServerID: b, Type: "vless", Tag: "scale-landing", Listen: "127.0.0.1", ListenPort: meteringTestPort(t), Options: `{}`, Enabled: true})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = st.SaveSbInbound(&SbInbound{ServerID: a, Type: "vless", Tag: "scale-entry", Listen: "127.0.0.1", ListenPort: meteringTestPort(t), Options: `{}`, Enabled: true, UpstreamInboundID: landing})
-			if err != nil {
-				t.Fatal(err)
-			}
-			pkg := mkPlan(t, st, "scale", 1, 100, 30)
-			bindPlanToInbound(t, st, pkg.ID, "scale-entry")
-			for i := 0; i < size; i++ {
-				trafficCompatCustomer(t, st, pkg, "account", fmt.Sprintf("scale_user_%04d", i))
-			}
-			if err = st.ConfigureTrafficMetering(true, true, true); err != nil {
-				t.Fatal(err)
-			}
-			count := meterSQL(t, st)
-			count.Store(0)
-			started := time.Now()
-			if err = st.PrepareRelayMetering(); err != nil {
-				t.Fatal(err)
-			}
-			prepareTime, prepareSQL := time.Since(started), count.Load()
-			users, err := st.BuildUsersByTag(time.Now().Unix())
-			if err != nil {
-				t.Fatal(err)
-			}
-			down, err := st.BuildSingboxConfigForServer(b, singbox.DefaultBaseConfig, bAPI, users)
-			if err != nil {
-				t.Fatal(err)
-			}
-			count.Store(0)
-			started = time.Now()
-			if err = st.RecordRelayConfigApplied(b, down); err != nil {
-				t.Fatal(err)
-			}
-			landingAckTime, landingAckSQL := time.Since(started), count.Load()
-			runtime.GC()
-			var before, after runtime.MemStats
-			runtime.ReadMemStats(&before)
-			count.Store(0)
-			started = time.Now()
-			up, err := st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, aAPI, users)
-			if err != nil {
-				t.Fatal(err)
-			}
-			buildTime, buildSQL := time.Since(started), count.Load()
-			runtime.ReadMemStats(&after)
-			var cfg struct {
-				Outbounds []json.RawMessage `json:"outbounds"`
-				Route     struct {
-					Rules []json.RawMessage `json:"rules"`
-				} `json:"route"`
-			}
-			if err = json.Unmarshal(up, &cfg); err != nil {
-				t.Fatal(err)
-			}
-			// An unchanged prepare/build must converge to byte-identical configuration.
-			count.Store(0)
-			started = time.Now()
-			if err = st.RecordRelayConfigApplied(a, up); err != nil {
-				t.Fatal(err)
-			}
-			sourceAckTime, sourceAckSQL := time.Since(started), count.Load()
-			count.Store(0)
-			started = time.Now()
-			if err = st.PrepareRelayMetering(); err != nil {
-				t.Fatal(err)
-			}
-			unchanged, err := st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, aAPI, users)
-			if err != nil {
-				t.Fatal(err)
-			}
-			noopTime, noopSQL := time.Since(started), count.Load()
-			if string(up) != string(unchanged) {
-				t.Fatal("no-op compile changed config")
-			}
-			rows, err := st.db.Query(`SELECT identity_name FROM relay_metering_users ORDER BY id`)
-			if err != nil {
-				t.Fatal(err)
-			}
-			traffic := map[string]UsageDelta{}
-			first := ""
-			for rows.Next() {
-				var name string
-				if err = rows.Scan(&name); err != nil {
+	for _, protocol := range []meteringProtocolCase{
+		{name: "vless", protocol: "vless"},
+		{name: "anytls", protocol: "anytls"},
+		{name: "tuic", protocol: "tuic"},
+		{name: "hysteria2", protocol: "hysteria2"},
+	} {
+		for _, size := range []int{100, 1000} {
+			t.Run(fmt.Sprintf("%s/%d", protocol.name, size), func(t *testing.T) {
+				st := newRefundStore(t)
+				st.SetSecretKey([]byte("isolated-scale-fixture"))
+				a, _ := st.CreateServer(Server{Name: "entry", Host: "192.0.2.1", Enabled: true})
+				b, _ := st.CreateServer(Server{Name: "landing", Host: "192.0.2.2", Enabled: true})
+				aAPI, bAPI := fmt.Sprintf("127.0.0.1:%d", meteringTestPort(t)), fmt.Sprintf("127.0.0.1:%d", meteringTestPort(t))
+				landing := saveMeteringProtocolInbound(t, st, &SbInbound{ServerID: b, Tag: "scale-landing", Listen: "127.0.0.1", ListenPort: meteringTestPort(t), Enabled: true}, protocol)
+				saveMeteringProtocolInbound(t, st, &SbInbound{ServerID: a, Tag: "scale-entry", Listen: "127.0.0.1", ListenPort: meteringTestPort(t), Enabled: true, UpstreamInboundID: landing}, protocol)
+				var err error
+				pkg := mkPlan(t, st, "scale", 1, 100, 30)
+				bindPlanToInbound(t, st, pkg.ID, "scale-entry")
+				for i := 0; i < size; i++ {
+					trafficCompatCustomer(t, st, pkg, "account", fmt.Sprintf("scale_user_%04d", i))
+				}
+				if err = st.ConfigureTrafficMetering(true, true, true); err != nil {
 					t.Fatal(err)
 				}
-				traffic[name] = UsageDelta{Up: 100, Down: 1000}
-				first = name
-			}
-			if err = rows.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if len(traffic) != size {
-				t.Fatalf("per-user identities %d want %d", len(traffic), size)
-			}
-			poll := NewTrafficPoll(b, traffic)
-			poll.Mode = "cumulative"
-			poll.Epoch = "scale-epoch"
-			count.Store(0)
-			started = time.Now()
-			if _, err = st.RecordTrafficPoll(poll); err != nil {
-				t.Fatal(err)
-			}
-			ingestTime, ingestSQL := time.Since(started), count.Load()
-			count.Store(0)
-			started = time.Now()
-			report, err := st.ServerServiceTraffic(b, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			reportTime, reportSQL := time.Since(started), count.Load()
-			if len(report.Users) != size || report.Total != int64(size*1100) || report.BillableTotal != 0 {
-				t.Fatalf("scale accounting: users=%d total=%d charged=%d", len(report.Users), report.Total, report.BillableTotal)
-			}
-			plan, err := st.db.Query(`EXPLAIN QUERY PLAN SELECT r.link_id,r.user_id,l.target_server_id FROM relay_metering_users r LEFT JOIN relay_metering_links l ON l.id=r.link_id WHERE r.identity_name=?`, first)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var details []string
-			for plan.Next() {
-				var id, parent, unused int
-				var detail string
-				if err = plan.Scan(&id, &parent, &unused, &detail); err != nil {
+				count := meterSQL(t, st)
+				count.Store(0)
+				started := time.Now()
+				if err = st.PrepareRelayMetering(); err != nil {
 					t.Fatal(err)
 				}
-				details = append(details, detail)
-			}
-			plan.Close()
-			for _, detail := range details {
-				if strings.Contains(detail, "SCAN ") {
-					t.Fatalf("identity lookup scans: %v", details)
+				prepareTime, prepareSQL := time.Since(started), count.Load()
+				users, err := st.BuildUsersByTag(time.Now().Unix())
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			if bin := os.Getenv("QZ_SINGBOX_TEST_BIN"); bin != "" {
+				down, err := st.BuildSingboxConfigForServer(b, singbox.DefaultBaseConfig, bAPI, users)
+				if err != nil {
+					t.Fatal(err)
+				}
+				count.Store(0)
 				started = time.Now()
-				landingCore := startMeteringBox(t, bin, down, bAPI)
-				landingStart := time.Since(started)
+				if err = st.RecordRelayConfigApplied(b, down); err != nil {
+					t.Fatal(err)
+				}
+				landingAckTime, landingAckSQL := time.Since(started), count.Load()
+				runtime.GC()
+				var before, after runtime.MemStats
+				runtime.ReadMemStats(&before)
+				count.Store(0)
 				started = time.Now()
-				entryCore := startMeteringBox(t, bin, up, aAPI)
-				entryStart := time.Since(started)
-				t.Logf("synthetic loopback idle cores users=%d landing_check_start=%s landing_RSS_KiB=%d entry_check_start=%s entry_RSS_KiB=%d (instant RSS, not peak or production budget)", size, landingStart, meteringBoxRSSKiB(t, landingCore), entryStart, meteringBoxRSSKiB(t, entryCore))
-			}
-			t.Logf("landing_ack=%s/%dSQL source_ack=%s/%dSQL", landingAckTime, landingAckSQL, sourceAckTime, sourceAckSQL)
-			t.Logf("users=%d prepare=%s/%dSQL compile=%s/%dSQL alloc=%dBytes entry_config=%dBytes landing_config=%dBytes outbounds=%d rules=%d noop=%s/%dSQL ingest=%s/%dSQL report=%s/%dSQL plan=%v", size, prepareTime, prepareSQL, buildTime, buildSQL, after.TotalAlloc-before.TotalAlloc, len(up), len(down), len(cfg.Outbounds), len(cfg.Route.Rules), noopTime, noopSQL, ingestTime, ingestSQL, reportTime, reportSQL, details)
-		})
+				up, err := st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, aAPI, users)
+				if err != nil {
+					t.Fatal(err)
+				}
+				buildTime, buildSQL := time.Since(started), count.Load()
+				runtime.ReadMemStats(&after)
+				var cfg struct {
+					Outbounds []json.RawMessage `json:"outbounds"`
+					Route     struct {
+						Rules []json.RawMessage `json:"rules"`
+					} `json:"route"`
+				}
+				if err = json.Unmarshal(up, &cfg); err != nil {
+					t.Fatal(err)
+				}
+				if len(cfg.Outbounds) != size+2 || len(cfg.Route.Rules) != size+2 {
+					t.Fatalf("per-user config missing branches: outbounds=%d rules=%d, want %d each", len(cfg.Outbounds), len(cfg.Route.Rules), size+2)
+				}
+				// An unchanged prepare/build must converge to byte-identical configuration.
+				count.Store(0)
+				started = time.Now()
+				if err = st.RecordRelayConfigApplied(a, up); err != nil {
+					t.Fatal(err)
+				}
+				sourceAckTime, sourceAckSQL := time.Since(started), count.Load()
+				var active int
+				if err = st.db.QueryRow(`SELECT COUNT(*) FROM relay_metering_users WHERE enabled=1 AND state='active'`).Scan(&active); err != nil || active != size {
+					t.Fatalf("source apply acknowledged %d/%d identities: %v", active, size, err)
+				}
+				count.Store(0)
+				started = time.Now()
+				if err = st.PrepareRelayMetering(); err != nil {
+					t.Fatal(err)
+				}
+				unchanged, err := st.BuildSingboxConfigForServer(a, singbox.DefaultBaseConfig, aAPI, users)
+				if err != nil {
+					t.Fatal(err)
+				}
+				noopTime, noopSQL := time.Since(started), count.Load()
+				if string(up) != string(unchanged) {
+					t.Fatal("no-op compile changed config")
+				}
+				rows, err := st.db.Query(`SELECT identity_name FROM relay_metering_users ORDER BY id`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				traffic := map[string]UsageDelta{}
+				first := ""
+				for rows.Next() {
+					var name string
+					if err = rows.Scan(&name); err != nil {
+						t.Fatal(err)
+					}
+					traffic[name] = UsageDelta{Up: 100, Down: 1000}
+					first = name
+				}
+				if err = rows.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if len(traffic) != size {
+					t.Fatalf("per-user identities %d want %d", len(traffic), size)
+				}
+				poll := NewTrafficPoll(b, traffic)
+				poll.Mode = "cumulative"
+				poll.Epoch = "scale-epoch"
+				count.Store(0)
+				started = time.Now()
+				if _, err = st.RecordTrafficPoll(poll); err != nil {
+					t.Fatal(err)
+				}
+				ingestTime, ingestSQL := time.Since(started), count.Load()
+				count.Store(0)
+				started = time.Now()
+				report, err := st.ServerServiceTraffic(b, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reportTime, reportSQL := time.Since(started), count.Load()
+				if len(report.Users) != size || report.Total != int64(size*1100) || report.BillableTotal != 0 {
+					t.Fatalf("scale accounting: users=%d total=%d charged=%d", len(report.Users), report.Total, report.BillableTotal)
+				}
+				plan, err := st.db.Query(`EXPLAIN QUERY PLAN SELECT r.link_id,r.user_id,l.target_server_id FROM relay_metering_users r LEFT JOIN relay_metering_links l ON l.id=r.link_id WHERE r.identity_name=?`, first)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var details []string
+				for plan.Next() {
+					var id, parent, unused int
+					var detail string
+					if err = plan.Scan(&id, &parent, &unused, &detail); err != nil {
+						t.Fatal(err)
+					}
+					details = append(details, detail)
+				}
+				plan.Close()
+				for _, detail := range details {
+					if strings.Contains(detail, "SCAN ") {
+						t.Fatalf("identity lookup scans: %v", details)
+					}
+				}
+				if bin := os.Getenv("QZ_SINGBOX_TEST_BIN"); bin != "" {
+					started = time.Now()
+					landingCore := startMeteringBox(t, bin, down, bAPI)
+					landingStart := time.Since(started)
+					started = time.Now()
+					entryCore := startMeteringBox(t, bin, up, aAPI)
+					entryStart := time.Since(started)
+					t.Logf("synthetic loopback idle cores protocol=%s users=%d landing_check_start=%s landing_RSS_KiB=%d entry_check_start=%s entry_RSS_KiB=%d (instant RSS, not peak, active-connection capacity or production budget)", protocol.name, size, landingStart, meteringBoxRSSKiB(t, landingCore), entryStart, meteringBoxRSSKiB(t, entryCore))
+				}
+				t.Logf("landing_ack=%s/%dSQL source_ack=%s/%dSQL", landingAckTime, landingAckSQL, sourceAckTime, sourceAckSQL)
+				t.Logf("protocol=%s users=%d prepare=%s/%dSQL compile=%s/%dSQL alloc=%dBytes entry_config=%dBytes landing_config=%dBytes outbounds=%d rules=%d noop=%s/%dSQL ingest=%s/%dSQL report=%s/%dSQL plan=%v", protocol.name, size, prepareTime, prepareSQL, buildTime, buildSQL, after.TotalAlloc-before.TotalAlloc, len(up), len(down), len(cfg.Outbounds), len(cfg.Route.Rules), noopTime, noopSQL, ingestTime, ingestSQL, reportTime, reportSQL, details)
+			})
+		}
 	}
 }

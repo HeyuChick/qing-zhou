@@ -436,6 +436,25 @@ func (s *Store) relayTargetSpecWith(db txLike, ib *SbInbound) (string, *Server, 
 		if err != nil || cert == nil || cert.DecryptFailed {
 			return "", nil, nil, fmt.Errorf("落地TLS不可用")
 		}
+		// A managed certificate can rotate without changing cert_id. Hash and
+		// render its resolved contents so old target acceptance cannot authorize
+		// an upstream configured for a different certificate/SNI under that ID.
+		if cert.CertID != 0 {
+			managed, err := s.scanCert(db.QueryRow(`SELECT `+certCols+` FROM certificates WHERE id=?`, cert.CertID))
+			if err != nil || managed == nil || managed.DecryptFailed {
+				return "", nil, nil, fmt.Errorf("落地TLS证书不可用")
+			}
+			block, err := s.resolveTlsBlock(ib.TlsID, ib.Tag,
+				map[int64]*SbTls{ib.TlsID: cert}, map[int64]*Cert{cert.CertID: managed})
+			if err != nil {
+				return "", nil, nil, err
+			}
+			resolved, err := json.Marshal(block)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			cert.ServerJSON = string(resolved)
+		}
 		tlsServer, tlsClient, certID = cert.ServerJSON, cert.ClientJSON, cert.CertID
 	}
 	spec, _ := json.Marshal(struct {
@@ -451,8 +470,20 @@ func meteringUserMatches(ib *SbInbound, u singbox.User, actual map[string]interf
 		return false
 	}
 	switch ib.Type {
-	case "vless", "vmess":
-		return actual["uuid"] == u.UUID
+	case "vless":
+		var opts map[string]interface{}
+		_ = json.Unmarshal([]byte(ib.Options), &opts)
+		if opts == nil {
+			opts = map[string]interface{}{}
+		}
+		if ib.TlsID != 0 {
+			opts["tls"] = true
+		}
+		flow, _ := actual["flow"].(string)
+		return actual["uuid"] == u.UUID && flow == singbox.VLESSUserFlow(opts)
+	case "vmess":
+		alterID, _ := actual["alterId"].(float64)
+		return actual["uuid"] == u.UUID && alterID == 0
 	case "tuic":
 		return actual["uuid"] == u.UUID && actual["password"] == u.Password
 	case "hysteria":
