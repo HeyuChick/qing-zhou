@@ -434,6 +434,13 @@ func runRelaySharedUserPath(t *testing.T, bin string, coreInfo sbver.Info, scena
 			t.Fatalf("hop %d did not retain distinct owners: %v %v", i, counterNames[i], err)
 		}
 	}
+	var wsProxy *relayWSReverseProxy
+	if scenario.wsStability {
+		if len(machines) != 2 || len(customers) != 2 || machines[0].protocol.tlsMode != "ws-tls" {
+			t.Fatal("WS stability must extend the two-user/two-machine WS TLS path")
+		}
+		wsProxy = newRelayWSReverseProxy(t, machines[0].port, tlsServer)
+	}
 	for i := range customers {
 		c := &customers[i]
 		proxyPort := machines[c.entryHop].port
@@ -442,7 +449,11 @@ func runRelaySharedUserPath(t *testing.T, bin string, coreInfo sbver.Info, scena
 		if machines[c.entryHop].protocol.protocol != "mixed" {
 			proxyPort = meteringTestPort(t)
 			api := fmt.Sprintf("127.0.0.1:%d", meteringTestPort(t))
-			outbound := machines[c.entryHop].protocol.clientOutbound(c.original, machines[c.entryHop].port, clientTLS)
+			entryPort := machines[c.entryHop].port
+			if wsProxy != nil {
+				entryPort = wsProxy.port
+			}
+			outbound := machines[c.entryHop].protocol.clientOutbound(c.original, entryPort, clientTLS)
 			clientConfig := map[string]any{
 				"log":          map[string]any{"level": logLevel, "timestamp": true},
 				"inbounds":     []any{map[string]any{"type": "mixed", "tag": "fixture-driver", "listen": "127.0.0.1", "listen_port": proxyPort}},
@@ -768,6 +779,15 @@ func runRelaySharedUserPath(t *testing.T, bin string, coreInfo sbver.Info, scena
 	udpElapsed := time.Since(udpStarted)
 	t.Logf("synthetic_loopback UDP completed_application_bytes=%d traffic_phase_elapsed=%s application_MiB_per_second=%.3f (includes associations and counter reads; not WAN capacity)", udpCompletedBytes, udpElapsed, float64(udpCompletedBytes)/(1<<20)/udpElapsed.Seconds())
 	final := beforeUDP
+	if scenario.wsStability {
+		drivers := make([]relayWSStabilityClient, len(customers))
+		for i, c := range customers {
+			drivers[i] = relayWSStabilityClient{owner: c.uid, client: c.client}
+		}
+		runRelayWSStabilityTraffic(t, drivers, wsProxy, func(phase string, completed map[int64]UsageDelta) {
+			final = readSettled("WS-stability-"+phase, final, completed)
+		})
+	}
 	for _, data := range []snapshot{first, second, finalTCP, final} {
 		for i, m := range machines {
 			deltas := map[string]UsageDelta{}

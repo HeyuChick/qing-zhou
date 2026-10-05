@@ -28,8 +28,9 @@ type relayProtocolFixture struct {
 }
 
 type relayTrafficScenario struct {
-	hops      []relayProtocolFixture
-	checkOnly bool
+	hops        []relayProtocolFixture
+	checkOnly   bool
+	wsStability bool // additional TLS reverse-proxy/long-flow recovery exercise
 }
 
 func (p relayProtocolFixture) hasTLS() bool { return p.tlsMode != "" && p.tlsMode != "plain" }
@@ -233,8 +234,8 @@ func relayFixtureCore(t *testing.T) (string, sbver.Info) {
 		t.Fatalf("read actual fixture core version: %v %s", err, output)
 	}
 	info := sbver.Parse(string(output))
-	if info.Version != sbver.VisionFramingFixVersion || !info.HasV2RayAPI {
-		t.Fatalf("fixture requires the fixed %s core with with_v2ray_api; got %+v", sbver.VisionFramingFixVersion, info)
+	if info.Version != sbver.TransportReadBufferFixVersion || !info.HasV2RayAPI || !info.HasTransportReadBufferFix {
+		t.Fatalf("fixture requires the fixed %s core with with_v2ray_api and transport buffered-read capability; got %+v", sbver.TransportReadBufferFixVersion, info)
 	}
 	t.Logf("actual integration core: %s", strings.TrimSpace(string(output)))
 	return bin, info
