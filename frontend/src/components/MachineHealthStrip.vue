@@ -44,14 +44,30 @@
               ref="canvasEl"
               class="heat-canvas"
               @mousemove="onMove"
-              @mouseleave="tip = null"
+              @mouseleave="hideTip"
               @click="onClick"
             />
-            <div v-if="tip" class="tip" :style="{ left: tip.x + 'px', top: tip.y + 'px' }">
-              <b>{{ tip.name }}</b>
-              <span>{{ tip.when }}</span>
-              <span>{{ tip.detail }}</span>
-            </div>
+            <!-- Use a body-level floating layer so nearby cards cannot cover it.
+                 Placement is measured from the pointer and flips at viewport edges. -->
+            <n-popover
+              trigger="manual"
+              :show="!!tip"
+              :x="tip?.x ?? 0"
+              :y="tip?.y ?? 0"
+              placement="top"
+              to="body"
+              :show-arrow="false"
+              :keep-alive-on-hover="false"
+              :animated="false"
+              :width="220"
+              :style="{ pointerEvents: 'none', maxWidth: 'calc(100vw - 16px)' }"
+            >
+              <div v-if="tip" class="tip" role="tooltip">
+                <b>{{ tip.name }}</b>
+                <span>{{ tip.when }}</span>
+                <span>{{ tip.detail }}</span>
+              </div>
+            </n-popover>
           </div>
         </div>
         <ul v-if="empties.length" class="empty-list">
@@ -68,7 +84,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { NCard, NEmpty, NRadioButton, NRadioGroup, NSpin, useMessage } from 'naive-ui'
+import { NCard, NEmpty, NPopover, NRadioButton, NRadioGroup, NSpin, useMessage } from 'naive-ui'
 import { apiGet } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { fmtBytes, fmtDateTime } from '@/utils/format'
@@ -246,14 +262,17 @@ function onMove(ev: MouseEvent) {
     tip.value = null
     return
   }
-  const rectW = canvasEl.value?.clientWidth || 0
   tip.value = {
-    x: Math.min(h.x + 12, Math.max(8, rectW - 180)),
-    y: Math.max(8, h.y - 48),
+    x: ev.clientX,
+    y: ev.clientY,
     name: h.machine.name,
     when: fmtDateTime(h.cell.ts),
     detail: detailFor(h.machine, h.cell),
   }
+}
+
+function hideTip() {
+  tip.value = null
 }
 
 function open(m: Strip) {
@@ -272,6 +291,7 @@ function onClick(ev: MouseEvent) {
 }
 
 async function load() {
+  tip.value = null
   const span = presets.find(r => r.v === preset.value)?.sec || 24 * 3600
   const now = Math.floor(Date.now() / 1000)
   loading.value = true
@@ -299,8 +319,16 @@ watch(canvasEl, (el) => {
   }
 })
 
-onMounted(() => { load() })
-onUnmounted(() => resizeObs?.disconnect())
+onMounted(() => {
+  load()
+  window.addEventListener('scroll', hideTip, true)
+  window.addEventListener('resize', hideTip)
+})
+onUnmounted(() => {
+  resizeObs?.disconnect()
+  window.removeEventListener('scroll', hideTip, true)
+  window.removeEventListener('resize', hideTip)
+})
 </script>
 
 <style scoped>
@@ -330,13 +358,9 @@ onUnmounted(() => resizeObs?.disconnect())
 .plot { position: relative; flex: 1; min-width: 0; }
 .heat-canvas { width: 100%; display: block; cursor: pointer; }
 .tip {
-  position: absolute; z-index: 2; pointer-events: none;
-  background: var(--card, #fff); border: 1px solid var(--border); border-radius: 8px;
-  padding: 6px 8px; font-size: 12px; color: var(--text-2);
-  display: flex; flex-direction: column; gap: 2px; max-width: 220px;
-  box-shadow: 0 4px 14px rgba(0,0,0,.06);
+  display: flex; flex-direction: column; gap: 2px;
+  font-size: 12px; overflow-wrap: anywhere;
 }
-.tip b { color: var(--text-1); }
 .empty-list { list-style: none; margin: 8px 0 0; padding: 0; }
 .empty-list li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-3); }
 .linkish { width: auto; height: auto; }
