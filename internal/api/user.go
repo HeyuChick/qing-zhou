@@ -1034,6 +1034,11 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	// fall back to the URL's last path segment, which is the subscription token —
 	// pinning a secret into the client's visible profile list.
 	w.Header().Set("Content-Disposition", contentDisposition(siteName, format))
+	// Stash/Shadowrocket 家族用这个头命名导入的订阅；prefix: 前缀表示后续是明文
+	// 展示名（否则按惯例当 base64 解码）。与 Content-Disposition 同源，双保险。
+	if name := strings.TrimSpace(siteName); name != "" {
+		w.Header().Set("Profile-Title", "prefix:"+name)
+	}
 	w.Header().Set("Content-Type", ctype)
 	if n, err := w.Write([]byte(body)); err == nil && n == len(body) {
 		a.recordSubscriptionFetch(u, format, subscriptionClientForUA(r.Header.Get("User-Agent")))
