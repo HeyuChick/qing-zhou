@@ -105,20 +105,27 @@ func TestSelfBuiltWSShareLinksPreserveTransportAndTLS(t *testing.T) {
 func TestShareLinkTLSStateNeverInfersPlaintextFromUnknown(t *testing.T) {
 	cases := []struct {
 		id                       int64
-		profile, options         map[string]any
+		profile, client, options map[string]any
 		enabled, disabled, valid bool
 	}{
-		{0, nil, map[string]any{}, false, true, true},
-		{0, nil, map[string]any{"tls": map[string]any{"enabled": true}}, true, false, true},
-		{0, nil, map[string]any{"tls": map[string]any{"enabled": false}}, false, true, true},
-		{0, nil, map[string]any{"tls": map[string]any{}}, false, false, false},
-		{0, nil, map[string]any{"tls": true}, false, false, false},
-		{1, nil, map[string]any{}, true, false, true},
-		{1, map[string]any{"enabled": true}, map[string]any{"tls": map[string]any{"enabled": false}}, true, false, true},
+		{0, nil, nil, map[string]any{}, false, true, true},
+		{0, nil, nil, map[string]any{"tls": map[string]any{"enabled": true}}, true, false, true},
+		{0, nil, nil, map[string]any{"tls": map[string]any{"enabled": false}}, false, true, true},
+		{0, nil, nil, map[string]any{"tls": map[string]any{}}, false, false, false},
+		{0, nil, nil, map[string]any{"tls": true}, false, false, false},
+		{1, nil, nil, map[string]any{}, true, false, true},
+		{1, map[string]any{"enabled": true}, nil, map[string]any{"tls": map[string]any{"enabled": false}}, true, false, true},
+		// 品牌定制：服务端 enabled:false（CF 前置·入站明文）+ client 声明 TLS
+		// ⇒ 链接按 TLS 渲染，不降级 security=none。
+		{1, map[string]any{"enabled": false}, map[string]any{"enabled": true}, map[string]any{}, true, false, true},
+		{1, map[string]any{"enabled": false}, map[string]any{"server_name": "cdn.example.com"}, map[string]any{}, true, false, true},
+		// 服务端明文且 client 无 TLS 线索 ⇒ 维持明文语义。
+		{1, map[string]any{"enabled": false}, map[string]any{}, map[string]any{}, false, true, true},
+		{1, map[string]any{"enabled": false}, nil, map[string]any{}, false, true, true},
 	}
 	for i, tc := range cases {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			e, d, _, v := shareLinkTLSState(tc.id, tc.profile, tc.options)
+			e, d, _, v := shareLinkTLSState(tc.id, tc.profile, tc.client, tc.options)
 			if e != tc.enabled || d != tc.disabled || v != tc.valid {
 				t.Fatalf("got %v/%v/%v", e, d, v)
 			}

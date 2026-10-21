@@ -208,3 +208,47 @@ func mustSelfSignedCert(t *testing.T) string {
 	}
 	return pem
 }
+
+
+// 品牌定制守护：CF 前置中转入站（服务端 tls enabled:false + client 带 server_name）
+// 的分享链接必须按 security=tls 渲染——上游 v0.2.8x 的 shareLinkTLSState 会把这种
+// 入站降级成 security=none，明文 ws 打 CF 的 443 直接 400（2026-10-21 线上事故）。
+func TestCFrontedInboundAdvertisesTLS(t *testing.T) {
+	st := newRefundStore(t)
+	uid := mkUser(t, st, "cfuser")
+	pkg := mkPlan(t, st, "CF套餐", 10, 100, 30)
+	buy(t, st, uid, pkg)
+
+	tlsID, err := st.SaveSbTls(&SbTls{
+		Name: "CF前置", Mode: "tls",
+		ServerJSON: `{"enabled":false,"server_name":"cdn.example.com"}`,
+		ClientJSON: `{"server_name":"cdn.example.com","utls":{"fingerprint":"chrome"}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveSbInbound(&SbInbound{
+		Type: "vless", Tag: "cf-ws", Listen: "127.0.0.1", ListenPort: 10002, TlsID: tlsID, Enabled: true,
+		Options: `{"advertise_host":"cdn.example.com","advertise_port":443,"transport":{"type":"ws","path":"/p"}}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gid, _ := st.CreateGroup(NodeGroup{Name: "CF组"})
+	_ = st.SetPlanGroups(pkg.ID, []int64{gid})
+	if _, err := st.CreateNode(Node{Type: "self_built", Name: "CF中转", InboundTag: "cf-ws", Enabled: true, GroupIDs: []int64{gid}}); err != nil {
+		t.Fatal(err)
+	}
+
+	u, _ := st.UserByID(uid)
+	links := st.BuildSelfBuiltLinks(u, "203.0.113.9")
+	if len(links) != 1 {
+		t.Fatalf("links = %d, want 1", len(links))
+	}
+	l := links[0].Link
+	if !strings.Contains(l, "security=tls") {
+		t.Errorf("CF-fronted inbound link must advertise security=tls: %s", l)
+	}
+	if strings.Contains(l, "security=none") {
+		t.Errorf("CF-fronted inbound link must not downgrade to security=none: %s", l)
+	}
+}

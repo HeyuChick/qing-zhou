@@ -937,7 +937,7 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			}
 		}
 		legacyServer := server
-		tlsEnabled, tlsDisabled, effectiveServer, validTLS := shareLinkTLSState(ib.TlsID, server, opts)
+		tlsEnabled, tlsDisabled, effectiveServer, validTLS := shareLinkTLSState(ib.TlsID, server, client, opts)
 		if !validTLS {
 			continue
 		}
