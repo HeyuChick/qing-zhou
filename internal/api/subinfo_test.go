@@ -72,40 +72,30 @@ func TestExplicitFormatSuppressesInfoPage(t *testing.T) {
 }
 
 func TestContentDispositionCarriesBothForms(t *testing.T) {
-	// 中文站名：filename= 回退 ASCII（subscription），中文名只在 filename*。
-	got := contentDisposition("轻舟", "", "clash")
-	if !strings.Contains(got, `filename="subscription`) {
-		t.Errorf("non-ASCII site name must not go into plain filename (mojibake risk): %s", got)
-	}
-	if !strings.Contains(got, `filename*=UTF-8''`) || !gotHasPct(got) {
-		t.Errorf("missing percent-encoded RFC 5987 form: %s", got)
-	}
-	// ASCII 自定义名：filename= 直接用自定义名。
-	got = contentDisposition("轻舟", "heiyu", "clash")
-	if !strings.Contains(got, `filename="heiyu`) {
-		t.Errorf("ASCII custom name must be the plain filename: %s", got)
+	got := contentDisposition("轻舟", "clash")
+	// 品牌定制：filename= 直接携带 UTF-8 站名（subconverter 生态事实标准）；
+	// 此前回退 ASCII "subscription.yaml" 会让只读 filename= 的客户端把订阅
+	// 导入成通用名 "subscription"（2026-10-21 用户报告）。RFC 5987 的
+	// filename* 保留给严格解析器，必须百分号编码。
+	if !strings.Contains(got, `filename="轻舟`) {
+		t.Errorf("plain filename must carry the site name: %s", got)
 	}
 	if !strings.Contains(got, `filename*=UTF-8''`) {
 		t.Errorf("missing RFC 5987 form: %s", got)
 	}
-	// 中文自定义名：展示名生效于 filename*，filename= 仍回退 ASCII。
-	got = contentDisposition("轻舟", "黑羽", "clash")
-	if !strings.Contains(got, `filename="subscription`) {
-		t.Errorf("non-ASCII custom name must not go into plain filename: %s", got)
+	if i := strings.Index(got, `filename*=UTF-8''`); i >= 0 && strings.Contains(got[i:], "轻舟") {
+		t.Errorf("filename* must be percent-encoded: %s", got)
 	}
-	// 引号与反斜杠必须转义。
-	if strings.Contains(contentDisposition("", `a"b\c`, "clash"), `"a"b`) {
+	if strings.Contains(contentDisposition(`a"b\c`, "clash"), `"a"b`) {
 		t.Errorf("unescaped quote inside filename quoted-string")
 	}
-	if got := contentDisposition("", "", "singbox"); got != `attachment; filename="subscription.json"` {
-		t.Errorf("blank names = %q", got)
+	if got := contentDisposition("", "singbox"); got != `attachment; filename="subscription.json"` {
+		t.Errorf("blank site name = %q", got)
 	}
-	if got := contentDisposition("", "", "surge"); !strings.Contains(got, ".conf") {
+	if got := contentDisposition("", "surge"); !strings.Contains(got, ".conf") {
 		t.Errorf("surge extension = %q", got)
 	}
 }
-
-func gotHasPct(s string) bool { return strings.Contains(s, "%") }
 
 func TestRFC5987Escape(t *testing.T) {
 	for in, want := range map[string]string{
