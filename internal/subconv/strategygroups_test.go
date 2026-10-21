@@ -50,3 +50,21 @@ func TestNoAIMarkerProducesNoAIRouteOrGroup(t *testing.T) {
 		t.Fatal("Surge emitted an unused AI rule")
 	}
 }
+
+
+// 品牌定制守护：Surge 广告拦截双库叠加——Loyalsoldier DOMAIN-SET 之后必须紧跟
+// anti-AD RULE-SET（10万+中文区广告域名），且先于 GEOIP,CN 与 FINAL。
+func TestSurgeDualAdBlock(t *testing.T) {
+	out := Surge(ParseLinks(nodeLinks()), "")
+	loyal := strings.Index(out, "DOMAIN-SET,https://raw.githubusercontent.com/Loyalsoldier/surge-rules/release/reject.txt,REJECT")
+	anti := strings.Index(out, "RULE-SET,https://anti-ad.net/surge.txt,REJECT")
+	if loyal < 0 || anti < 0 {
+		t.Fatalf("dual ad-block rules missing (loyal=%d anti=%d)", loyal, anti)
+	}
+	if anti < loyal {
+		t.Fatal("anti-AD should follow the Loyalsoldier domain-set")
+	}
+	if cn := strings.Index(out, "GEOIP,CN,DIRECT"); cn >= 0 && (cn < loyal || cn < anti) {
+		t.Fatal("ad-block rules must precede the domestic bypass")
+	}
+}

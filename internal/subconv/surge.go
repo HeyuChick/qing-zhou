@@ -86,6 +86,10 @@ func surgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) s
 		b.WriteString("RULE-SET," + surgeAIRuleURL + "," + grpAIClash + ",update-interval=86400\n")
 	}
 	b.WriteString("DOMAIN-SET,https://raw.githubusercontent.com/Loyalsoldier/surge-rules/release/reject.txt,REJECT\n")
+	// 品牌定制：叠加 anti-AD（10万+中文区广告域名聚合，EasyList China/CJX 等十余上游，
+	// 每日更新）。与 Loyalsoldier reject 互补——实测中文 App/视频广告覆盖远超单一列表；
+	// RULE-SET 格式与 Egern 兼容（与 DOMAIN-SET 同为 Surge 远程资源）。
+	b.WriteString("RULE-SET,https://anti-ad.net/surge.txt,REJECT\n")
 	// Legacy keeps Surge's historical CN bypass exactly as it was. The explicit
 	// cn-direct profile chooses the same behavior; proxy-all omits the rule so
 	// FINAL sends every public destination to the selected proxy policy.
