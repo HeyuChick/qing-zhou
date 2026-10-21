@@ -1033,11 +1033,19 @@ func (a *API) handleSub(w http.ResponseWriter, r *http.Request) {
 	// Clash-family clients name the imported profile after this; without it they
 	// fall back to the URL's last path segment, which is the subscription token —
 	// pinning a secret into the client's visible profile list.
-	w.Header().Set("Content-Disposition", contentDisposition(siteName, format))
+	// 订阅配置文件名：管理员可在系统设置自定义（sub_profile_name）。filename=
+	// 只放 ASCII 安全名（Latin-1/GBK 客户端直写 UTF-8 会乱码），中文名走
+	// filename* / Profile-Title。
+	subProfileName, _ := a.st.GetSetting("sub_profile_name")
+	w.Header().Set("Content-Disposition", contentDisposition(siteName, subProfileName, format))
 	// Stash/Shadowrocket 家族用这个头命名导入的订阅；prefix: 前缀表示后续是明文
 	// 展示名（否则按惯例当 base64 解码）。与 Content-Disposition 同源，双保险。
-	if name := strings.TrimSpace(siteName); name != "" {
-		w.Header().Set("Profile-Title", "prefix:"+name)
+	titleName := strings.TrimSpace(subProfileName)
+	if titleName == "" {
+		titleName = strings.TrimSpace(siteName)
+	}
+	if titleName != "" {
+		w.Header().Set("Profile-Title", "prefix:"+titleName)
 	}
 	w.Header().Set("Content-Type", ctype)
 	if n, err := w.Write([]byte(body)); err == nil && n == len(body) {

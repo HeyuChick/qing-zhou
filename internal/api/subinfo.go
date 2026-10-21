@@ -309,27 +309,52 @@ func subExt(format string) string {
 // subscription token, so the user ends up with their own secret shown as the
 // profile name in a list they may well screenshot for support.
 //
-// Both forms are emitted: the plain `filename` carrying the real site name as
-// a UTF-8 quoted-string (the de-facto convention every mainstream client —
-// browsers, Go net/http mime, libbox — parses transparently), plus the RFC
-// 5987 `filename*` for strict parsers. Writing the ASCII fallback
-// "subscription.<ext>" instead made every filename=-only client import the
-// profile under the generic name "subscription" (2026-10-21 user report).
-func contentDisposition(siteName, format string) string {
+// Both forms are emitted, but with different material:
+//   - filename*: the display name — the custom sub_profile_name if set, else
+//     the site name. Non-ASCII is fine here (percent-encoded).
+//   - filename=: ASCII-only. Clients that read filename= and decode it as
+//     Latin-1/GBK turn raw UTF-8 into mojibake (2026-10-21 user report), so a
+//     non-ASCII name falls back to the ASCII-safe custom name, else the
+//     site name if it happens to be ASCII, else "subscription".
+func contentDisposition(siteName, customName, format string) string {
 	ext := subExt(format)
-	name := strings.TrimSpace(siteName)
-	if name == "" {
-		if ext == "" {
-			return `attachment; filename="subscription"`
-		}
-		return `attachment; filename="subscription.` + ext + `"`
+	display := strings.TrimSpace(customName)
+	if display == "" {
+		display = strings.TrimSpace(siteName)
 	}
+	plain := asciiOrDefault(customName, "")
+	if plain == "" {
+		plain = asciiOrDefault(siteName, "")
+	}
+	if plain == "" {
+		plain = "subscription"
+	}
+	suffix := ""
 	if ext != "" {
-		name += "." + ext
+		suffix = "." + ext
 	}
-	// Escape header-hostile bytes for the quoted-string form.
-	qname := strings.NewReplacer(`"`, `%22`, `\`, `%5C`, "\r", "", "\n", "").Replace(name)
-	return `attachment; filename="` + qname + `"; filename*=UTF-8''` + rfc5987Escape(name)
+	if display == "" {
+		return `attachment; filename="` + plain + suffix + `"`
+	}
+	name := display + suffix
+	// filename= 只放 ASCII 安全名（非 ASCII 名在 Latin-1/GBK 客户端会乱码）；
+	// 展示名走 filename*。引号/反斜杠在 quoted-string 里转义。
+	qp := strings.NewReplacer(`"`, `%22`, `\`, `%5C`, "\r", "", "\n", "").Replace(plain + suffix)
+	return `attachment; filename="` + qp + `"; filename*=UTF-8''` + rfc5987Escape(name)
+}
+
+// asciiOrDefault returns the trimmed s when every byte is ASCII, else def.
+func asciiOrDefault(s, def string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return def
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			return def
+		}
+	}
+	return s
 }
 
 // rfc5987Escape percent-encodes for an ext-value, per RFC 5987/8187.

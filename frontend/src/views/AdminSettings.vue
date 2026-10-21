@@ -52,6 +52,14 @@
               <n-button @click="openBrandIconPicker">修改图标</n-button>
             </div>
           </n-form-item>
+          <n-form-item label="订阅配置文件名">
+            <div>
+              <n-input v-model:value="form.sub_profile_name" placeholder="留空跟随站点名称" style="max-width:320px" />
+              <div style="font-size:12px;color:var(--text-3);line-height:1.7;margin-top:4px;max-width:520px;">
+                客户端导入订阅后显示的配置名。建议填 ASCII 名（如 heiyu）：部分客户端按非 UTF-8 解码文件名，中文会乱码；留空时使用站点名称（同样仅对支持 UTF-8 的客户端显示中文，其余回退 subscription）。
+              </div>
+            </div>
+          </n-form-item>
           <n-form-item label="站点图标">
             <div class="brand-icon-control">
               <img :src="brandIconPreview" class="brand-icon-preview" alt="站点图标预览">
@@ -1521,6 +1529,7 @@ async function loadSettings() {
       // 从未设置过的键不会出现在响应里，而 n-input 需要一个受控的空串而不是
       // undefined —— 否则第一次输入前它不是一个受控输入。
       form.node_host_override ??= ''
+      form.sub_profile_name ??= ''
       form.brand_icon_data_uri ??= ''
       form.help_docs_mode = data.help_docs_mode === 'external' ? 'external' : 'builtin'
       form.help_docs_url ??= ''
