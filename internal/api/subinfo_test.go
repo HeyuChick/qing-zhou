@@ -73,27 +73,43 @@ func TestExplicitFormatSuppressesInfoPage(t *testing.T) {
 
 func TestContentDispositionCarriesBothForms(t *testing.T) {
 	got := contentDisposition("轻舟", "clash")
-	// 品牌定制：filename= 直接携带 UTF-8 站名（subconverter 生态事实标准）；
-	// 此前回退 ASCII "subscription.yaml" 会让只读 filename= 的客户端把订阅
-	// 导入成通用名 "subscription"（2026-10-21 用户报告）。RFC 5987 的
-	// filename* 保留给严格解析器，必须百分号编码。
-	if !strings.Contains(got, `filename="轻舟`) {
-		t.Errorf("plain filename must carry the site name: %s", got)
+	if !strings.Contains(got, `filename="subscription"`) {
+		t.Errorf("missing ASCII fallback: %s", got)
+	}
+	if strings.Contains(got, ".yaml") {
+		t.Errorf("Clash profile name must not carry a YAML suffix: %s", got)
+	}
+	if !strings.Contains(got, `filename*=UTF-8''%E8%BD%BB%E8%88%9F`) {
+		t.Errorf("Clash profile name was not encoded without a suffix: %s", got)
 	}
 	if !strings.Contains(got, `filename*=UTF-8''`) {
 		t.Errorf("missing RFC 5987 form: %s", got)
 	}
-	if i := strings.Index(got, `filename*=UTF-8''`); i >= 0 && strings.Contains(got[i:], "轻舟") {
-		t.Errorf("filename* must be percent-encoded: %s", got)
+	// The UTF-8 form must be percent-encoded, never raw bytes in a header.
+	if strings.Contains(got, "轻舟") {
+		t.Errorf("site name was not percent-encoded: %s", got)
 	}
-	if strings.Contains(contentDisposition(`a"b\c`, "clash"), `"a"b`) {
-		t.Errorf("unescaped quote inside filename quoted-string")
+	for _, c := range got {
+		if c > 127 {
+			t.Fatalf("header contains a non-ASCII byte: %s", got)
+		}
 	}
 	if got := contentDisposition("", "singbox"); got != `attachment; filename="subscription.json"` {
 		t.Errorf("blank site name = %q", got)
 	}
 	if got := contentDisposition("", "surge"); !strings.Contains(got, ".conf") {
 		t.Errorf("surge extension = %q", got)
+	}
+	if got := contentDisposition("", "base64"); !strings.Contains(got, ".txt") {
+		t.Errorf("base64 extension = %q", got)
+	}
+	// Characters that are legal in a URL path but would truncate or corrupt a
+	// header parameter must still be escaped.
+	got = contentDisposition(`a,b;c="d" e:f`, "clash")
+	for _, bad := range []string{",", ";c", `"`, " ", ":"} {
+		if strings.Contains(got[strings.Index(got, "UTF-8''"):], bad) {
+			t.Errorf("unescaped %q in ext-value: %s", bad, got)
+		}
 	}
 }
 

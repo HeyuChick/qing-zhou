@@ -309,27 +309,23 @@ func subExt(format string) string {
 // subscription token, so the user ends up with their own secret shown as the
 // profile name in a list they may well screenshot for support.
 //
-// Both forms are emitted: the plain `filename` carrying the real site name as
-// a UTF-8 quoted-string (the de-facto convention every mainstream client —
-// browsers, Go net/http mime, libbox — parses transparently), plus the RFC
-// 5987 `filename*` for strict parsers. Writing the ASCII fallback
-// "subscription.<ext>" instead made every filename=-only client import the
-// profile under the generic name "subscription" (2026-10-21 user report).
+// Both forms are emitted: a plain ASCII `filename` every client can parse, and
+// the RFC 5987 `filename*` carrying the real (often Chinese) site name for those
+// that understand it. Sending only the UTF-8 form would give the rest mojibake.
 func contentDisposition(siteName, format string) string {
 	ext := subExt(format)
+	ascii := "subscription"
+	if ext != "" {
+		ascii += "." + ext
+	}
 	name := strings.TrimSpace(siteName)
 	if name == "" {
-		if ext == "" {
-			return `attachment; filename="subscription"`
-		}
-		return `attachment; filename="subscription.` + ext + `"`
+		return `attachment; filename="` + ascii + `"`
 	}
 	if ext != "" {
 		name += "." + ext
 	}
-	// Escape header-hostile bytes for the quoted-string form.
-	qname := strings.NewReplacer(`"`, `%22`, `\`, `%5C`, "\r", "", "\n", "").Replace(name)
-	return `attachment; filename="` + qname + `"; filename*=UTF-8''` + rfc5987Escape(name)
+	return `attachment; filename="` + ascii + `"; filename*=UTF-8''` + rfc5987Escape(name)
 }
 
 // rfc5987Escape percent-encodes for an ext-value, per RFC 5987/8187.
