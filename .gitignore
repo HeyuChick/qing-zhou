@@ -21,3 +21,6 @@ SHA256SUMS.txt
 !/frontend/dist/.gitkeep
 # TypeScript incremental build cache — a build artifact, must not be tracked.
 /frontend/tsconfig.tsbuildinfo
+
+# Local API dumps / analysis scratch files
+pr54-files.json
