@@ -136,15 +136,20 @@ func TestSingboxCNDirectUsesLocalResolverAfterDomainRouting(t *testing.T) {
 		}
 	}
 	sets := mapSlice(route["rule_set"])
+	// 品牌定制：CN 规则集从面板镜像下发且 detour=direct（新配置首启无可用代理时
+	// 也能拉到规则；GitHub 直源 + 代理 detour 曾致启动失败，2026-11-02）。
 	for tag, wantURL := range map[string]string{"geosite-cn": singboxCNGeositeURL, "geoip-cn": singboxCNGeoIPURL} {
 		found := false
 		for _, set := range sets {
-			if set["tag"] == tag && set["url"] == wantURL && set["download_detour"] == tagProxy {
+			if set["tag"] == tag && set["url"] == wantURL && set["download_detour"] == "direct" {
 				found = true
 			}
 		}
 		if !found {
 			t.Errorf("rule-set %s missing or unsafe: %v", tag, sets)
+		}
+		if !strings.Contains(wantURL, "connect.heyuchick.com/ruleset/") {
+			t.Errorf("rule-set %s must be served from the panel mirror, got %s", tag, wantURL)
 		}
 	}
 	// CN requests remain fake-IP initially; resolving them to a real address

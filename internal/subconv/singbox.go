@@ -188,8 +188,12 @@ func singboxWithProfile(proxies []*Proxy, template string, profile RoutingProfil
 }
 
 const (
-	singboxCNGeositeURL = "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
-	singboxCNGeoIPURL   = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+	// 品牌定制：CN 规则集改从面板自建镜像下发（connect.heyuchick.com 走 CF，
+	// 国内直连可达）且 download_detour=direct——上游指向 raw.githubusercontent.com
+	// 且经代理下载，新配置首启时代理默认节点不可用/首包代理未就绪时规则拉不下来，
+	// 配置直接启动失败（2026-11-02 用户报障）。镜像文件由面板 cron 每日刷新。
+	singboxCNGeositeURL = "https://connect.heyuchick.com/ruleset/geosite-cn.srs"
+	singboxCNGeoIPURL   = "https://connect.heyuchick.com/ruleset/geoip-cn.srs"
 )
 
 // applySingboxRoutingProfile owns only the two qingzhou CN route-set tags. The
@@ -279,11 +283,11 @@ func ensureSingboxCNRuleSets(route map[string]any) {
 	kept = append(kept,
 		map[string]any{
 			"type": "remote", "tag": "geosite-cn", "format": "binary",
-			"download_detour": tagProxy, "url": singboxCNGeositeURL,
+			"download_detour": "direct", "url": singboxCNGeositeURL,
 		},
 		map[string]any{
 			"type": "remote", "tag": "geoip-cn", "format": "binary",
-			"download_detour": tagProxy, "url": singboxCNGeoIPURL,
+			"download_detour": "direct", "url": singboxCNGeoIPURL,
 		},
 	)
 	route["rule_set"] = kept
