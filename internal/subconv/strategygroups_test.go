@@ -68,3 +68,28 @@ func TestSurgeDualAdBlock(t *testing.T) {
 		t.Fatal("ad-block rules must precede the domestic bypass")
 	}
 }
+
+
+// 品牌定制守护：带 mport（端口跳跃）的 hy2 节点在 Surge 导出里必须用跳跃段
+// 首端口作固定端口——基础端口可能被运营商 UDP QoS，无跳跃能力的 Surge/Egern
+// 客户端打基础端口必死（2026-10-30 CN→BWH 443 被掐事故）。
+func TestSurgeHy2HopPortsUseFirstPortOfRange(t *testing.T) {
+	out := Surge(ParseLinks([]string{
+		"hysteria2://pass@203.0.113.9:443?security=tls&insecure=1&sni=h.example.com&fp=chrome&mport=20000-50000#BWH-hy2",
+	}), "")
+	i := strings.Index(out, "BWH-hy2 = hysteria2")
+	if i < 0 {
+		t.Fatalf("hy2 proxy line missing: %s", out)
+	}
+	rest := out[i:]
+	if j := strings.IndexByte(rest, 10); j > 0 {
+		rest = rest[:j]
+	}
+	if !strings.Contains(rest, "203.0.113.9, 20000,") {
+		t.Errorf("hop-ports hy2 must advertise the first port of the range, got: %s", rest)
+	}
+	if strings.Contains(rest, ", 443,") {
+		t.Errorf("must not fall back to the QoS-prone base port: %s", rest)
+	}
+}
+

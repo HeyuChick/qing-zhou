@@ -174,7 +174,20 @@ func surgeProxy(p *Proxy) string {
 		}
 		return strings.Join(parts, ", ")
 	case "hysteria2":
-		parts := []string{"hysteria2", p.Server, itoaPort(p.Port), "password=" + p.Password}
+		port := p.Port
+		// 品牌定制：端口跳跃（hop_ports→链接 mport）在 Surge/Egern 无等价参数，基础
+		// 端口可能正被运营商对 UDP QoS（2026-10-30 CN→BWH 443 被掐，SFA/Clash 靠
+		// server_ports/ports 跳跃逃逸，Surge 端一直打 443 全部失败）。跳跃段在服务端
+		// 经 iptables REDIRECT 全段转发——取 mport 首个端口作固定端口，无跳跃能力的
+		// 客户端同样绕开被掐的基础端口。
+		if v := p.param("mport"); v != "" {
+			if first := strings.TrimSpace(strings.SplitN(v, "-", 2)[0]); first != "" {
+				if n, err := strconv.Atoi(first); err == nil && n > 0 && n < 65536 {
+					port = n
+				}
+			}
+		}
+		parts := []string{"hysteria2", p.Server, itoaPort(port), "password=" + p.Password}
 		if v := p.param("sni"); v != "" {
 			parts = append(parts, "sni="+v)
 		}
