@@ -24,10 +24,9 @@
         逐用户中转的 Vision、WebSocket/HTTPUpgrade 路径还会在下发前后核验实际运行的内核；预检不通过时不切换该路径，运行能力复核通过后才确认下发。
         面板生成的配置要求 <b>sing-box ≥ {{ minSupported }}</b>；低于这个版本，节点的
         <code>sing-box check</code> 会失败，面板会<b>停止向它下发任何配置</b>（旧配置继续跑，所以表面看不出来）。
-        「重装」装的是<b>面板自己发布的构建</b>（随面板版本走，含流量统计所需的 <code>v2ray_api</code>），
-        官方版不带这个插件，无法提供所需流量统计；官方 1.14.2 也不含本次 Vision 分片修复。
-        Vision 路径需相关节点运行带 Vision 修复的内核<span v-if="visionFixedVersion">：<code>{{ visionFixedVersion }}</code></span>。
-        WebSocket/HTTPUpgrade 路径另需缓冲修复<span v-if="transportFixedVersion">：<code>{{ transportFixedVersion }}</code></span>；旧 Vision 专用版本不包含这项修复，不能仅凭版本较新判断支持。
+        「重装」装的是<b>面板自己发布的构建</b>（随面板版本走，当前标识<span v-if="currentReleaseVersion"> <code>{{ currentReleaseVersion }}</code></span>，含流量统计所需的 <code>v2ray_api</code> 与 Trojan 分段握手维护补丁）。
+        官方版不带这个插件，无法提供所需流量统计，也不含 Trojan 维护补丁。
+        已安装的历史审定标记（Vision <code v-if="visionFixedVersion">{{ visionFixedVersion }}</code>、WS/HTTPUpgrade <code v-if="transportFixedVersion">{{ transportFixedVersion }}</code>，以及旧 1.14.2 Trojan 标记）仍然算具备相应能力；不能仅凭官方版本号较新判断支持。
       </p>
       <div v-if="versions.length" class="nv-list">
         <div v-for="n in versions" :key="n.server_id" class="nv-row">
@@ -99,7 +98,7 @@
         <n-form-item label="名称"><n-input v-model:value="form.name" /></n-form-item>
         <n-form-item label="主机"><n-input v-model:value="form.host" placeholder="IP 或域名" /></n-form-item>
         <n-form-item label="IPv6 订阅地址（可选）"><n-input v-model:value="form.host_v6" placeholder="IPv6 地址或 AAAA 域名，留空则不生成" /></n-form-item>
-        <div style="margin:-12px 0 12px;font-size:12px;color:var(--text-3)">填写后订阅会为本机每个节点额外生成一条「原名-v6」节点，原节点不变；SSH 仍使用上面的主机。</div>
+        <div style="margin:-12px 0 12px;font-size:12px;color:var(--text-3)">填写后订阅会为本机每个节点额外生成一条「原名-v6」节点，原节点不变；SSH 仍使用上面的主机。本机直出流量会按客户端连入的地址族自动优先走 IPv4 或 IPv6（中转落地不受影响）。主机和 IPv6 订阅地址建议填字面量，不要填双栈域名。</div>
         <n-form-item label="SSH 端口"><n-input-number v-model:value="form.port" :min="1" :max="65535" style="width:100%;" /></n-form-item>
         <n-form-item label="SSH 用户"><n-input v-model:value="form.ssh_user" placeholder="root" @update:value="onSshUserInput" /></n-form-item>
         <n-form-item label="sudo 提权">
@@ -406,6 +405,7 @@ const versions = ref<any[]>([])
 const minSupported = ref('1.12.0')
 const visionFixedVersion = ref('')
 const transportFixedVersion = ref('')
+const currentReleaseVersion = ref('')
 const verLoading = ref(false)
 
 async function loadVersions(){
@@ -415,6 +415,7 @@ async function loadVersions(){
     if (d?.min_supported) minSupported.value = d.min_supported
     visionFixedVersion.value = d?.vision_fixed_version || ''
     transportFixedVersion.value = d?.transport_fixed_version || ''
+    currentReleaseVersion.value = d?.current_release_version || d?.trojan_fixed_version || ''
   }catch(e:any){ message.error(e?.message || '读取节点版本失败') }
 }
 
