@@ -707,15 +707,14 @@ func sbApplyTuning(o map[string]any, t tuning, suppressMux bool) {
 	}
 }
 
-// quicTransport reports whether this proxy rides QUIC (hysteria/hysteria2/tuic).
-// sing-box 1.14 rejects uTLS on QUIC outbounds ("unsupported usage for uTLS"),
-// so fingerprint hints must not become a utls block for them.
-func quicTransport(p *Proxy) bool {
-	switch p.Protocol {
-	case "hysteria", "hysteria2", "tuic":
-		return true
+// sbUTLSSupported reports whether a sing-box outbound of this protocol can
+// carry tls.utls. QUIC-based protocols cannot.
+func sbUTLSSupported(protocol string) bool {
+	switch protocol {
+	case "tuic", "hysteria", "hysteria2":
+		return false
 	}
-	return false
+	return true
 }
 
 func sbTLS(p *Proxy, sec string) map[string]any {
@@ -731,10 +730,12 @@ func sbTLS(p *Proxy, sec string) map[string]any {
 	if alpn := p.tlsParam("alpn"); alpn != "" {
 		tls["alpn"] = strings.Split(alpn, ",")
 	}
-	// sing-box >= 1.14 ：QUIC 传输（hysteria/hysteria2/tuic）的 TLS 不支持 uTLS
-	// ——携带 utls 块的 hy2 出站直接报 “unsupported usage for uTLS” 拒绝启动。
-	// 面板发的 hy2 链接默认带 fp=chrome，所以这里按协议到而不是无差别地下发。
-	if fp := p.tlsParam("fp"); fp != "" && !quicTransport(p) {
+	// uTLS is a TCP-only ClientHello parrot. QUIC protocols get their TLS from
+	// quic-go, and sing-box refuses the dial with "unsupported usage for uTLS"
+	// when a tuic/hysteria/hysteria2 outbound carries it (#108). The share link
+	// keeps its fp= (Clash/v2ray outputs are unaffected); only this sing-box
+	// rendering drops it for QUIC.
+	if fp := p.tlsParam("fp"); fp != "" && sbUTLSSupported(p.Protocol) {
 		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
 	}
 	if sec == "reality" {
