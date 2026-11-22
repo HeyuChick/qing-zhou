@@ -269,8 +269,8 @@ func (s *Store) resolveTlsBlock(tlsID int64, tag string, tlsCache map[int64]*SbT
 		delete(tj, "key_path")
 		tj["certificate"] = cert.CertPEM
 		tj["key"] = cert.KeyPEM
-		if cert.Domain != "" {
-			tj["server_name"] = cert.Domain
+		if sni := managedServerName(mapStr(tj, "server_name"), cert); sni != "" {
+			tj["server_name"] = sni
 		}
 	}
 	return tj, nil
@@ -837,6 +837,8 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 	// ACME renewal, and a subscription cached by the client across a renewal
 	// would then pin a certificate the server no longer presents.
 	pinCache := map[int64]string{}
+	linkCertCache := map[int64]*Cert{}
+	pinPEM := map[int64]string{} // self-signed leaf PEM per profile, for the trust anchor
 	certPin := func(t *SbTls, server map[string]interface{}) string {
 		if t == nil || t.DecryptFailed {
 			return ""
@@ -855,9 +857,25 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		pin := ""
 		if pem != "" && singbox.IsSelfSignedCert(pem) {
 			pin = singbox.CertFingerprintSHA256(pem)
+			pinPEM[t.ID] = pem
 		}
 		pinCache[t.ID] = pin
 		return pin
+	}
+	// trustAnchor is the self-signed certificate a link may embed (qz-cert) for
+	// sing-box clients: only when it verifies for the name the client will check
+	// — the SNI, else the dialed host — so it never breaks a working node.
+	now16 := time.Now()
+	trustAnchor := func(tlsID int64, sni, host string) string {
+		pem := pinPEM[tlsID]
+		if pem == "" {
+			return ""
+		}
+		name := sni
+		if name == "" {
+			name = host
+		}
+		return singbox.SelfSignedTrustAnchor(pem, name, now16)
 	}
 	// Each self-built node is owned by one of the user's buckets; the link uses
 	// that bucket's credentials and shows its own remaining quota/expiry. A node
@@ -939,8 +957,10 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 		}
 		var server, client, opts map[string]interface{}
 		pin := ""
+		var profile *SbTls
 		if ib.TlsID != 0 {
 			if t := getTls(ib.TlsID); t != nil {
+				profile = t
 				_ = json.Unmarshal([]byte(t.ServerJSON), &server)
 				_ = json.Unmarshal([]byte(t.ClientJSON), &client)
 				pin = certPin(t, server)
@@ -1026,8 +1046,18 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 			TCPFastOpen: mapBool(opts, "tcp_fast_open"),
 			MPTCP:       mapBool(opts, "tcp_multi_path"),
 		}
+		if profile != nil && ib.TlsID != 0 && !tlsDisabled {
+			// Same resolution as the node's inbound (resolveTlsBlock), not the
+			// stored copy, so the link's SNI matches the certificate served.
+			p.SNI = s.linkServerName(profile, server, linkCertCache)
+		}
 		if sni := mapStr(client, "server_name"); sni != "" {
 			p.SNI = sni
+		}
+		if pin != "" && tlsEnabled {
+			p.PinCert = trustAnchor(ib.TlsID, p.SNI, p.Host)
+		} else {
+			p.PinSHA256 = ""
 		}
 		// Multiplex + Brutal (vless/vmess/trojan): both are opt-in on the client,
 		// so mirror the inbound's setting onto the link or Brutal does nothing.
@@ -1143,6 +1173,10 @@ func (s *Store) BuildSelfBuiltLinks(u *User, host string) []SelfBuiltLink {
 				if v6 := serverHostV6(serverCache, ib.ServerID); v6 != "" {
 					p6 := p
 					p6.Host, p6.Tag = v6, remark+"-v6"
+					if p6.PinSHA256 != "" && p6.SNI == "" {
+						// No SNI: the client verifies against the address it dials.
+						p6.PinCert = trustAnchor(ib.TlsID, "", v6)
+					}
 					if link6 := singbox.BuildShareLink(p6); link6 != "" {
 						out = append(out, SelfBuiltLink{NodeID: logicalID, Tag: ib.Tag, Link: link6})
 					}
@@ -1231,16 +1265,27 @@ func nodeOutputForTag(nodes []*Node, tag string) (v4, v6 bool) {
 // the Clash/sing-box subscription (BuildShareLink returns "" for them), so this
 // is how a user retrieves them instead.
 type UserProxy struct {
-	Tag       string `json:"tag"`
-	BucketID  int64  `json:"bucket_id"` // owning bucket — target of a credential edit
-	Host      string `json:"host"`
-	Port      int    `json:"port"`
-	Username  string `json:"username"`
-	Password  string `json:"password"`
-	TLS       bool   `json:"tls"`        // true → HTTPS proxy; false → plain HTTP/SOCKS5
-	ExpiresAt int64  `json:"expires_at"` // 0 = permanent
-	Expired   bool   `json:"expired"`    // credential past its expiry (won't authenticate)
-	Custom    bool   `json:"custom"`     // true → a dedicated proxy account, not the node identity
+	Tag      string `json:"tag"`
+	BucketID int64  `json:"bucket_id"` // owning bucket — target of a credential edit
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	TLS      bool   `json:"tls"` // true → HTTPS proxy; false → plain HTTP/SOCKS5
+	// TLS trust details for an HTTPS proxy (all empty for plain HTTP/SOCKS5).
+	// A proxy URL cannot carry an SNI or a pin — every HTTP client verifies the
+	// certificate against the host it dials — so the page has to say what the
+	// certificate is actually issued for and how to trust it (#115).
+	SNI          string   `json:"sni,omitempty"`
+	CertDomain   string   `json:"cert_domain,omitempty"`
+	CertNames    []string `json:"cert_names,omitempty"`
+	SelfSigned   bool     `json:"self_signed,omitempty"`
+	CertSHA256   string   `json:"sha256,omitempty"`
+	Insecure     bool     `json:"insecure,omitempty"`
+	HostMismatch bool     `json:"host_mismatch,omitempty"` // certificate does not cover Host
+	ExpiresAt    int64    `json:"expires_at"`              // 0 = permanent
+	Expired      bool     `json:"expired"`                 // credential past its expiry (won't authenticate)
+	Custom       bool     `json:"custom"`                  // true → a dedicated proxy account, not the node identity
 	// Account is true when this node authenticates with the user's account-level
 	// credential — the same login on every such node, edited in one place. False
 	// means the node still carries a bucket credential of its own (the free
@@ -1288,6 +1333,8 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 		return nil
 	}
 	serverCache := make(map[int64]*Server)
+	tlsCache := map[int64]*SbTls{}
+	certCache := map[int64]*Cert{}
 	now := time.Now().Unix()
 	owners, _ := s.UserOwnedInbounds(u.ID, now)
 	// The account-level credential, if usable, is what every non-free node shows.
@@ -1326,6 +1373,30 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 				serverCache[ib.ServerID] = nil // negative cache
 			}
 		}
+		// Same TLS decision as the subscription links (shareLinkTLSState): a
+		// disabled profile is plaintext, inline options.tls counts, and an
+		// unreadable inline block is never advertised at all — guessing could
+		// hand out a plaintext proxy URL for a TLS port or vice versa.
+		var tlsServer, tlsOpts map[string]interface{}
+		if ib.TlsID != 0 {
+			t, ok := tlsCache[ib.TlsID]
+			if !ok {
+				t, _ = s.GetSbTls(ib.TlsID)
+				tlsCache[ib.TlsID] = t
+			}
+			if t != nil {
+				_ = json.Unmarshal([]byte(t.ServerJSON), &tlsServer)
+			}
+		}
+		if ib.Options != "" {
+			if err := json.Unmarshal([]byte(ib.Options), &tlsOpts); err != nil {
+				continue
+			}
+		}
+		tlsEnabled, _, _, validTLS := shareLinkTLSState(ib.TlsID, tlsServer, tlsOpts)
+		if !validTLS {
+			continue
+		}
 		plan := &ProxyPlanCred{
 			BucketID:  owner.ID,
 			Name:      owner.Name,
@@ -1342,7 +1413,7 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 			Port:      ib.ListenPort,
 			Username:  plan.Username,
 			Password:  plan.Password,
-			TLS:       ib.TlsID != 0,
+			TLS:       tlsEnabled,
 			ExpiresAt: plan.ExpiresAt,
 			Expired:   plan.Expired,
 			Custom:    plan.Custom,
@@ -1360,18 +1431,65 @@ func (s *Store) BuildUserProxies(u *User, host string) []UserProxy {
 			p.Custom, p.Account = true, true
 			p.MeterPlan = meterPlan
 		}
+		var tlsInfo *InboundTLSInfo
+		if p.TLS {
+			if tlsInfo = s.inboundTLSInfo(ib, tlsCache, certCache); tlsInfo != nil {
+				p.SNI, p.CertDomain, p.Insecure = tlsInfo.SNI, tlsInfo.CertDomain, tlsInfo.Insecure
+				p.CertNames = tlsInfo.CertNames
+				p.SelfSigned, p.CertSHA256 = tlsInfo.SelfSigned, tlsInfo.SHA256
+			}
+		}
+		mismatch := func(host string) bool {
+			covered, known := tlsInfo.CoversHost(host)
+			return known && !covered
+		}
 		if outV4 {
+			p.HostMismatch = mismatch(p.Host)
 			out = append(out, p)
 		}
 		if outV6 {
 			if v6 := serverHostV6(serverCache, ib.ServerID); v6 != "" {
 				p6 := p
 				p6.Host, p6.Tag = v6, ib.Tag+"-v6"
+				p6.HostMismatch = mismatch(v6)
 				out = append(out, p6)
 			}
 		}
 	}
 	return out
+}
+
+// managedServerName is the one rule for the SNI a managed certificate implies:
+// the sing-box inbound (resolveTlsBlock), the relay target spec built from it,
+// and every subscription link all go through here so they cannot drift (#121).
+// Empty when the certificate carries no domain (the stored value stands).
+func managedServerName(stored string, cert *Cert) string {
+	if cert == nil || cert.Domain == "" {
+		return ""
+	}
+	return singbox.EffectiveServerName(stored, cert.Domain, cert.CertPEM)
+}
+
+// linkServerName is the server_name a share link advertises for a TLS profile:
+// the stored value, resolved against the managed certificate exactly as the
+// node's own config is (see managedServerName).
+func (s *Store) linkServerName(t *SbTls, server map[string]interface{}, certCache map[int64]*Cert) string {
+	stored := mapStr(server, "server_name")
+	if t == nil || t.CertID == 0 || t.DecryptFailed {
+		return stored
+	}
+	c, ok := certCache[t.CertID]
+	if !ok {
+		c, _ = s.GetCert(t.CertID)
+		certCache[t.CertID] = c
+	}
+	if c == nil || c.DecryptFailed {
+		return stored
+	}
+	if sni := managedServerName(stored, c); sni != "" {
+		return sni
+	}
+	return stored
 }
 
 func mapStr(m map[string]interface{}, k string) string {

@@ -139,9 +139,24 @@
                     </n-tooltip>
                     <span class="kv">TLS <b :title="tlsName(r.tls_id)">{{ tlsName(r.tls_id) }}</b></span>
                     <span v-if="r.egress_id" class="kv">出口 <b :title="egressName(r.egress_id)">{{ egressName(r.egress_id) }}</b></span>
+                    <n-tooltip v-if="r.tls_warning" placement="top" style="max-width:360px;">
+                      <template #trigger>
+                        <n-tag size="tiny" type="warning" :bordered="false" class="inbound-tls-warning">证书不覆盖节点地址</n-tag>
+                      </template>
+                      {{ r.tls_warning }}
+                    </n-tooltip>
+                  </div>
+                  <!-- TLS 检测（#118）：一次真实握手，单独给出「TLS」状态，不影响入站的可达/健康判定。 -->
+                  <div v-if="tlsCheck[r.id]" class="lc-tls-check" :class="tlsCheck[r.id].status">
+                    <b>TLS {{ tlsStatusText(tlsCheck[r.id].status) }}</b>
+                    <template v-for="(res, i) in tlsCheck[r.id].results || []" :key="i">
+                      <div v-for="(m, j) in [...(res.problems || []), ...(res.warnings || []), ...(res.notes || [])]" :key="j" class="lc-tls-line">{{ res.addr }}：{{ m }}</div>
+                      <div v-if="res.handshake && !(res.problems || []).length && !(res.warnings || []).length" class="lc-tls-line">{{ res.addr }}：握手正常 · {{ res.tls_version }} · 证书剩余 {{ res.days_left }} 天</div>
+                    </template>
                   </div>
                   <div class="lc-foot">
                     <n-button size="tiny" @click="openInbound(r)">编辑</n-button>
+                    <n-button v-if="(r.tls_id || hasInlineTls(r)) && !TLS_PROBE_QUIC.includes(r.type)" size="tiny" :loading="tlsChecking[r.id]" @click="runTlsCheck(r)">TLS 检测</n-button>
                     <n-button size="tiny" @click="cloneInbound(r)">克隆</n-button>
                     <n-button size="tiny" :loading="portChecking === r.id" @click="checkPort(r)">测端口</n-button>
                     <n-button size="tiny" type="error" @click="deleteInbound(r.id)">删除</n-button>
@@ -396,13 +411,13 @@
               <n-select :value="te.cert_id" :options="certOpts" v-bind="longSelFor(certOpts.length)" @update:value="onCertPick" />
             </n-form-item>
             <n-form-item v-if="te.cert_id" label=" ">
-              <n-tag type="success" size="small" style="white-space:normal;height:auto;">已引用「证书管理」中的证书：SNI 自动取证书域名，真实证书自动关闭「允许不安全」；续期与管理请到证书管理页。</n-tag>
+              <n-tag type="success" size="small" style="white-space:normal;height:auto;">已引用「证书管理」中的证书：SNI 自动取证书域名（通配证书保留其覆盖的具体子域名，与订阅链接一致），真实证书自动关闭「允许不安全」；续期与管理请到证书管理页。</n-tag>
             </n-form-item>
             <template v-if="!te.cert_id">
             <n-form-item label=" ">
               <div style="display:flex;flex-direction:column;gap:4px;width:100%;">
                 <n-button :loading="genCertLoading" @click="genSelfSigned">一键生成自签证书（按 SNI）</n-button>
-                <span style="font-size:11px;color:var(--text-3);">自签证书适用于 TUIC / Hysteria2 等允许 insecure 或证书指纹的客户端。需可信证书建议到「证书管理」页申请后在上方引用。</span>
+                <span style="font-size:11px;color:var(--text-3);">自签证书：订阅里的 Clash / sing-box 节点会按证书指纹固定，分享链接带「允许不安全」。需可信证书建议到「证书管理」页申请后在上方引用。</span>
               </div>
             </n-form-item>
             <n-form-item v-if="te.server_id === 0" label=" ">
@@ -426,7 +441,7 @@
                 </n-collapse-item>
               </n-collapse>
             </n-form-item>
-            <n-form-item label="证书 PEM"><n-input v-model:value="te.certificate" type="textarea" :rows="3" placeholder="-----BEGIN CERTIFICATE-----" /></n-form-item>
+            <n-form-item label="证书 PEM" feedback="证书需含 SAN 并覆盖上方 SNI（开启跳过校验时仅要求含 SAN）"><n-input v-model:value="te.certificate" type="textarea" :rows="3" placeholder="-----BEGIN CERTIFICATE-----" /></n-form-item>
             <n-form-item label="私钥 PEM"><n-input v-model:value="te.key" type="textarea" :rows="3" placeholder="-----BEGIN PRIVATE KEY-----" /></n-form-item>
             </template>
             <n-form-item label="ALPN">
@@ -616,11 +631,16 @@
           <n-form-item v-if="ie.type === 'mixed' && !ie.tls_id" label=" ">
             <div style="width:100%;">
               <n-button size="small" :loading="quickCertLoading" @click="quickBindCert">🔒 一键生成自签证书并绑定（→ HTTPS 代理）</n-button>
-              <div class="form-tip">用该服务器地址自动签一张证书并绑定，公网使用更安全。客户端需勾选「跳过证书验证」；要浏览器/系统信任则改用 ACME 证书。</div>
+              <div class="form-tip">按该服务器的地址（IPv4 与 IPv6 订阅地址）自动签一张证书并绑定，公网使用更安全。客户端需勾选「跳过证书验证」或固定证书指纹；要浏览器/系统信任则改用 ACME 证书。</div>
             </div>
           </n-form-item>
           <n-form-item v-if="ie.type === 'mixed' && ie.tls_id" label=" ">
             <n-tag type="success" size="small">已绑定 TLS，保存后即为 HTTPS 代理（1Panel 代理类型选 HTTPS）</n-tag>
+          </n-form-item>
+          <!-- 证书不覆盖节点地址（#115）：HTTPS 代理客户端只能按地址校验证书。警告来自
+               已保存的入站（列表接口 tls_warning），换了证书需保存后刷新才会更新。 -->
+          <n-form-item v-if="ie.type === 'mixed' && ie.tls_id && editingInboundWarning" label=" ">
+            <n-alert type="warning" :show-icon="false" style="width:100%;">{{ editingInboundWarning }}</n-alert>
           </n-form-item>
           <n-form-item v-if="['vless','vmess','trojan'].includes(ie.type) && !ie.tls_id && ie.type !== 'shadowsocks'" label=" ">
             <n-tag type="warning" size="small">未配置 TLS，建议为 VLESS/VMess/Trojan 绑定 TLS 或 Reality</n-tag>
@@ -720,6 +740,7 @@ import {
 } from 'naive-ui'
 import { apiList, apiGet, apiGetRaw, apiPost, apiPut, apiDelete } from '@/api'
 import { applyInboundToggle, type BatchToggleFailure } from '@/utils/inboundBatch'
+import { sniForCert } from '@/utils/certSni'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -1162,7 +1183,10 @@ const certOpts = computed(() => [
 function onCertPick(id: number) {
   te.cert_id = id
   const c = certList.value.find(x => x.id === id)
-  if (c && c.domain) te.server_name = c.domain // SNI 必须与证书域名一致
+  if (c && c.domain) te.server_name = sniForCert(te.server_name, c.domain) // SNI 必须被证书覆盖（通配证书保留具体子域名）
+  // 自签证书没有 CA 背书，URI 类客户端只能跳过校验；Clash/sing-box 订阅会另外按证书
+  // 指纹固定（#116）。CA 证书则必须校验（后端也会强制关闭）。
+  if (c) te.insecure = !!c.self_signed
 }
 
 // --- SNI 延迟测试 ---
@@ -1230,6 +1254,7 @@ async function genSelfSigned() {
     const r = await apiPost<any>('/api/admin/sb/tls/self-signed', { server_name: host })
     te.certificate = r?.certificate || ''
     te.key = r?.key || ''
+    te.insecure = true // 自签证书：URI 客户端需跳过校验；订阅另按指纹固定（#116）
     message.success('自签证书已生成，请检查后保存')
   } catch (e: any) { message.error(e.message || '生成失败') } finally { genCertLoading.value = false }
 }
@@ -1504,6 +1529,36 @@ const ie = reactive({
   anytls_idle_check: 0, anytls_idle_timeout: 0, anytls_min_idle: 0,
   mux: false, brutal: false, brutal_up: 0, brutal_down: 0, upstream_inbound_id: 0, egress_id: 0,
 })
+
+// 正在编辑的已保存 mixed 入站的证书地址警告（#115）。只在 TLS 选择未变时显示，
+// 换了证书的话旧警告不再适用，保存后列表会给出新的结果。
+const editingInboundWarning = computed(() => {
+  if (!ie.id) return ''
+  const saved = inbounds.value.find((n: any) => n.id === ie.id)
+  if (!saved || saved.tls_id !== ie.tls_id) return ''
+  return saved.tls_warning || ''
+})
+
+// TLS 检测（#118）。QUIC 协议无法用 TCP 握手检测，不显示按钮。
+const TLS_PROBE_QUIC = ['tuic', 'hysteria', 'hysteria2']
+// 入站 options 里内联的 tls（enabled:true）同样是 TLS 入站（#120），也可检测。
+function hasInlineTls(r: any): boolean {
+  try {
+    const o = typeof r.options === 'string' ? JSON.parse(r.options || '{}') : (r.options || {})
+    return !!(o && o.tls && o.tls.enabled === true)
+  } catch { return false }
+}
+const tlsCheck = reactive<Record<number, any>>({})
+const tlsChecking = reactive<Record<number, boolean>>({})
+function tlsStatusText(s: string) {
+  return ({ ok: '正常', warning: '警告', error: '异常', skipped: '已跳过' } as Record<string, string>)[s] || s
+}
+async function runTlsCheck(r: any) {
+  tlsChecking[r.id] = true
+  try {
+    tlsCheck[r.id] = await apiPost('/api/admin/sb/inbounds/' + r.id + '/tls-check', {})
+  } catch (e: any) { message.error(e.message) } finally { tlsChecking[r.id] = false }
+}
 
 function resetIe() {
   Object.assign(ie, {
@@ -1980,4 +2035,9 @@ async function load() {
 }
 .list-card.is-disabled { opacity: 0.72; }
 .inbound-cred { cursor: help; border-bottom: 1px dotted currentColor; }
+.lc-tls-check { margin-top: 6px; padding: 6px 8px; border-radius: 8px; font-size: 12px; line-height: 1.5; background: var(--bg-soft); }
+.lc-tls-check.ok b { color: var(--success, #16a34a); }
+.lc-tls-check.warning b { color: var(--warn, #d97706); }
+.lc-tls-check.error b { color: var(--error, #dc2626); }
+.lc-tls-line { color: var(--text-2); word-break: break-all; }
 </style>

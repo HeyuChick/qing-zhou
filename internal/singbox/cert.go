@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -75,15 +76,53 @@ func IsSelfSignedCert(certPEM string) bool {
 
 // GenerateSelfSignedCert issues a self-signed ECDSA (P-256) certificate for the
 // given server name and returns the certificate and private key as PEM strings.
-//
-// It is intended for the "证书 TLS" mode with protocols whose clients accept a
-// self-signed cert (TUIC / Hysteria2 with insecure or certificate pinning). The
-// SAN is set from serverName: an IP literal becomes an IP SAN, otherwise a DNS
-// SAN (plus its bare apex when serverName is a wildcard). validityDays is
-// clamped to [1, 3650]; 0 means the default of 3650 (≈10 years).
+// It is GenerateSelfSignedCertSANs with a single name.
 func GenerateSelfSignedCert(serverName string, validityDays int) (certPEM, keyPEM string, err error) {
-	serverName = strings.TrimSpace(serverName)
-	if serverName == "" {
+	return GenerateSelfSignedCertSANs([]string{serverName}, validityDays)
+}
+
+// GenerateSelfSignedCertSANs issues a self-signed ECDSA (P-256) certificate
+// valid for every name given (#117): each IP literal (IPv4 or IPv6, bracketed
+// or not) becomes an IP SAN, anything else a DNS SAN (a wildcard also covers
+// its bare apex). Duplicates and blanks are dropped; the first name is the CN.
+// A node reached over both IPv4 and IPv6 — or by IP and by domain — needs all
+// of them, because a client with no SNI override (every HTTPS-proxy client)
+// verifies against the address it dials. validityDays is clamped to [1, 3650];
+// 0 means the default of 3650 (≈10 years).
+func GenerateSelfSignedCertSANs(names []string, validityDays int) (certPEM, keyPEM string, err error) {
+	var dns []string
+	var ips []net.IP
+	seen := map[string]bool{}
+	cn := ""
+	add := func(n string) {
+		key := strings.ToLower(n)
+		if n == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		if ip := net.ParseIP(n); ip != nil {
+			ips = append(ips, ip)
+		} else {
+			dns = append(dns, n)
+		}
+	}
+	for _, raw := range names {
+		n := strings.TrimSpace(raw)
+		if len(n) > 1 && n[0] == '[' && n[len(n)-1] == ']' {
+			n = n[1 : len(n)-1]
+		}
+		if n == "" {
+			continue
+		}
+		if cn == "" {
+			cn = n
+		}
+		add(n)
+		if strings.HasPrefix(n, "*.") {
+			add(strings.TrimPrefix(n, "*."))
+		}
+	}
+	if cn == "" {
 		return "", "", fmt.Errorf("server name is required")
 	}
 	if validityDays <= 0 {
@@ -107,21 +146,14 @@ func GenerateSelfSignedCert(serverName string, validityDays int) (certPEM, keyPE
 	notBefore := time.Now().Add(-1 * time.Hour) // tolerate minor clock skew
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: serverName},
+		Subject:               pkix.Name{CommonName: cn},
 		NotBefore:             notBefore,
 		NotAfter:              notBefore.Add(time.Duration(validityDays) * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-	}
-	if ip := net.ParseIP(serverName); ip != nil {
-		tmpl.IPAddresses = []net.IP{ip}
-	} else {
-		tmpl.DNSNames = []string{serverName}
-		// For a wildcard SNI, also cover the bare apex so both match.
-		if strings.HasPrefix(serverName, "*.") {
-			tmpl.DNSNames = append(tmpl.DNSNames, strings.TrimPrefix(serverName, "*."))
-		}
+		DNSNames:              dns,
+		IPAddresses:           ips,
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
@@ -136,4 +168,108 @@ func GenerateSelfSignedCert(serverName string, validityDays int) (certPEM, keyPE
 	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
 	return certPEM, keyPEM, nil
+}
+
+// trustAnchorMinValidity is how long a self-signed certificate must still be
+// valid for 轻舟 to hand it to clients as a trust anchor. A subscription is
+// cached client-side; embedding a certificate that expires while cached would
+// make sing-box reject a node that `insecure` used to accept.
+const trustAnchorMinValidity = 30 * 24 * time.Hour
+
+// SelfSignedTrustAnchor returns the self-signed leaf as base64url DER (no
+// padding) when a client that trusts exactly this certificate — sing-box's
+// `tls.certificate` — would accept it for serverName right now and for the next
+// 30 days. Empty otherwise (CA-issued, unparseable, SAN-less/CN-only, name not
+// covered, expired or expiring), in which case callers keep today's behavior.
+//
+// This is deliberately a real x509 verification rather than a set of field
+// checks: it is the same decision the client will make, so a certificate that
+// passes here cannot turn a working `insecure` node into a failing one.
+func SelfSignedTrustAnchor(certPEM, serverName string, now time.Time) string {
+	if !IsSelfSignedCert(certPEM) {
+		return ""
+	}
+	c := leafCert(certPEM)
+	serverName = strings.TrimSpace(serverName)
+	if len(serverName) > 1 && serverName[0] == '[' && serverName[len(serverName)-1] == ']' {
+		serverName = serverName[1 : len(serverName)-1]
+	}
+	if c == nil || serverName == "" {
+		return ""
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(c)
+	for _, at := range []time.Time{now, now.Add(trustAnchorMinValidity)} {
+		if _, err := c.Verify(x509.VerifyOptions{Roots: roots, DNSName: serverName, CurrentTime: at}); err != nil {
+			return ""
+		}
+	}
+	return base64.RawURLEncoding.EncodeToString(c.Raw)
+}
+
+// TrustAnchorPEM decodes a base64url DER certificate (the qz-cert link
+// extension) back to PEM. Empty when it is not a parseable certificate.
+func TrustAnchorPEM(b64 string) string {
+	der, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(strings.TrimSpace(b64), "="))
+	if err != nil {
+		return ""
+	}
+	if _, err := x509.ParseCertificate(der); err != nil {
+		return ""
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+// NormalizeCertPin returns a SHA-256 certificate fingerprint as uppercase hex
+// without separators, or "" when it is not exactly 32 bytes of hex. mihomo
+// rejects the whole proxy (and so the whole config) on a malformed
+// `fingerprint`, so an unvalidated value from a third-party link must never
+// reach it.
+func NormalizeCertPin(v string) string {
+	v = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(v), ":", ""))
+	b, err := hex.DecodeString(v)
+	if err != nil || len(b) != sha256.Size {
+		return ""
+	}
+	return v
+}
+
+// ParseLeafCert is the exported form of leafCert: the first CERTIFICATE block
+// of a PEM bundle, or nil when it does not parse.
+func ParseLeafCert(certPEM string) *x509.Certificate {
+	return leafCert(certPEM)
+}
+
+// CertNames lists the names a leaf certificate is valid for, as a client
+// verifying it sees them: DNS SANs, then IP SANs. The subject CN is deliberately
+// absent — Go clients (mihomo, sing-box, Xray) have ignored it since Go 1.15, so
+// listing it would promise a match the client will refuse.
+func CertNames(certPEM string) []string {
+	c := leafCert(certPEM)
+	if c == nil {
+		return nil
+	}
+	out := make([]string, 0, len(c.DNSNames)+len(c.IPAddresses))
+	out = append(out, c.DNSNames...)
+	for _, ip := range c.IPAddresses {
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+// CertCoversHost reports whether a client that verifies the certificate against
+// host (an IP literal, bracketed or not, or a DNS name) would accept it — the
+// check a plain HTTPS-proxy client makes, since it cannot send any other SNI.
+// known is false when the PEM does not parse or host is empty, so callers can
+// avoid warning about something they could not actually check.
+func CertCoversHost(certPEM, host string) (covered, known bool) {
+	host = strings.TrimSpace(host)
+	if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	c := leafCert(certPEM)
+	if c == nil || host == "" {
+		return false, false
+	}
+	return c.VerifyHostname(host) == nil, true
 }

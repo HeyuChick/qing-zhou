@@ -188,7 +188,8 @@ func (a *API) handleAdminCertAcme(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/admin/certs/paste {name, domain?, certificate, key}
-// Stores an externally-issued cert+key. domain defaults to the leaf CN.
+// Stores an externally-issued cert+key. domain defaults to a name the leaf
+// actually covers (CN when listed in the SANs, else the first SAN).
 func (a *API) handleAdminCertPaste(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string `json:"name"`
@@ -209,13 +210,16 @@ func (a *API) handleAdminCertPaste(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Default the domain from the SANs, not blindly from the CN (#119), and
+	// refuse a certificate Go clients will reject anyway: one without SANs, or
+	// one that does not cover the domain it is being filed under.
 	domain := strings.TrimSpace(req.Domain)
 	if domain == "" {
-		if info := certInfoFromPEM(req.Certificate); info != nil {
-			if cn, _ := info["subject"].(string); cn != "" {
-				domain = cn
-			}
-		}
+		domain = singbox.DefaultCertDomain(req.Certificate)
+	}
+	if err := singbox.ValidateCertForName(req.Certificate, domain); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	id, err := a.st.SaveCert(&store.Cert{
 		Name:      name,
@@ -236,9 +240,10 @@ func (a *API) handleAdminCertPaste(w http.ResponseWriter, r *http.Request) {
 // POST /api/admin/certs/self-signed {name, server_name, days?}
 func (a *API) handleAdminCertSelfSigned(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name       string `json:"name"`
-		ServerName string `json:"server_name"`
-		Days       int    `json:"days"`
+		Name       string   `json:"name"`
+		ServerName string   `json:"server_name"`
+		SANs       []string `json:"sans"` // optional extra names (IPs / domains), #117
+		Days       int      `json:"days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -250,7 +255,7 @@ func (a *API) handleAdminCertSelfSigned(w http.ResponseWriter, r *http.Request) 
 		fail(w, http.StatusBadRequest, "名称和 SNI 必填")
 		return
 	}
-	certPEM, keyPEM, err := singbox.GenerateSelfSignedCert(sni, req.Days)
+	certPEM, keyPEM, err := singbox.GenerateSelfSignedCertSANs(append([]string{sni}, req.SANs...), req.Days)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "生成自签证书失败："+err.Error())
 		return

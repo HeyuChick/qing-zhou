@@ -49,8 +49,9 @@ func (a *API) handleAdminRealityKeypair(w http.ResponseWriter, r *http.Request) 
 // 证书 TLS drawer's one-click button; the operator still reviews and saves.
 func (a *API) handleAdminSelfSignedCert(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ServerName string `json:"server_name"`
-		Days       int    `json:"days"`
+		ServerName string   `json:"server_name"`
+		SANs       []string `json:"sans"` // optional extra names (IPs / domains), #117
+		Days       int      `json:"days"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
@@ -60,7 +61,7 @@ func (a *API) handleAdminSelfSignedCert(w http.ResponseWriter, r *http.Request) 
 		fail(w, http.StatusBadRequest, "SNI 域名必填")
 		return
 	}
-	certPEM, keyPEM, err := singbox.GenerateSelfSignedCert(req.ServerName, req.Days)
+	certPEM, keyPEM, err := singbox.GenerateSelfSignedCertSANs(append([]string{req.ServerName}, req.SANs...), req.Days)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "生成自签证书失败："+err.Error())
 		return
@@ -70,36 +71,45 @@ func (a *API) handleAdminSelfSignedCert(w http.ResponseWriter, r *http.Request) 
 
 // handleAdminQuickSelfSignedTls generates a self-signed cert AND saves it as a
 // ready-to-bind TLS entry in one call — the "一键绑定证书" path for mixed
-// (HTTP/SOCKS5) inbounds that want to become HTTPS proxies without a domain. The
-// SNI defaults to the address clients dial for the inbound's server (its host,
-// else the panel's node host), so the cert's SAN matches; it also embeds an IP
-// SAN when that address is an IP. Returns the saved TLS entry (with its id).
+// (HTTP/SOCKS5) inbounds that want to become HTTPS proxies without a domain.
+// The certificate covers every address clients are handed for the server (#117):
+// the optional server_name override, the server's host and its host_v6 (or the
+// panel's node host for the local server), plus any extra `sans`. An HTTPS-proxy
+// client verifies against the address it dials, so the "-v6" entry needs the
+// IPv6 address in the SAN just as much as the main entry needs the IPv4 one.
+// The SNI is the first of those names. Returns the saved TLS entry (with its id).
 func (a *API) handleAdminQuickSelfSignedTls(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ServerID   int64  `json:"server_id"`
-		ServerName string `json:"server_name"` // optional override (domain or IP)
-		Name       string `json:"name"`        // optional TLS entry name
+		ServerID   int64    `json:"server_id"`
+		ServerName string   `json:"server_name"` // optional override (domain or IP)
+		SANs       []string `json:"sans"`        // optional extra names
+		Name       string   `json:"name"`        // optional TLS entry name
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	sni := strings.TrimSpace(req.ServerName)
-	if sni == "" {
-		if req.ServerID != 0 {
-			if sv, _ := a.st.GetServer(req.ServerID); sv != nil {
-				sni = strings.TrimSpace(sv.Host)
-			}
-		}
-		if sni == "" {
-			sni = strings.TrimSpace(a.nodeHost())
+	names := []string{strings.TrimSpace(req.ServerName)}
+	serverHost := ""
+	if req.ServerID != 0 {
+		if sv, _ := a.st.GetServer(req.ServerID); sv != nil {
+			serverHost = strings.TrimSpace(sv.Host)
+			names = append(names, sv.Host, sv.HostV6)
 		}
 	}
-	if sni == "" {
+	if serverHost == "" {
+		// Local server, or a remote one without a host: links advertise the
+		// panel's node host there (BuildUserProxies does the same).
+		names = append(names, a.nodeHost())
+	}
+	names = append(names, req.SANs...)
+	names = quickCertNames(names)
+	if len(names) == 0 {
 		fail(w, http.StatusBadRequest, "无法确定证书域名/IP：请在该服务器或「系统设置 → 面板访问地址」配置 host，或手动填写 SNI")
 		return
 	}
-	certPEM, keyPEM, err := singbox.GenerateSelfSignedCert(sni, 3650)
+	sni := names[0]
+	certPEM, keyPEM, err := singbox.GenerateSelfSignedCertSANs(names, 3650)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "生成自签证书失败："+err.Error())
 		return
@@ -735,9 +745,14 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusBadRequest, "引用的证书不存在")
 			return
 		}
+		// SNI must match the cert: keep the admin's name when the certificate
+		// covers it (e.g. a concrete host under a wildcard), else the cert's
+		// domain wins (#119). Same rule the config builder applies.
 		sni := req.ServerName
-		if cert.Domain != "" {
-			sni = cert.Domain // SNI must match the cert; the cert's domain wins
+		if cert.Domain != "" && !cert.DecryptFailed {
+			sni = singbox.EffectiveServerName(req.ServerName, cert.Domain, cert.CertPEM)
+		} else if cert.Domain != "" {
+			sni = cert.Domain
 		}
 		server := map[string]interface{}{"enabled": true, "server_name": sni}
 		if len(req.ALPN) > 0 {
@@ -749,12 +764,13 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 		if v := tlsVersion(req.MaxVersion); v != "" {
 			server["max_version"] = v
 		}
-		// A real (verified) cert means the client must NOT skip verification;
-		// self-signed certs referenced here still honor the caller's insecure flag.
-		insecure := req.Insecure
-		if cert.Source == "acme" || cert.Source == "paste" {
-			insecure = false
-		}
+		// A CA-issued cert means the client must NOT skip verification; a
+		// self-signed one honors the caller's insecure flag. Ask the certificate,
+		// not the `source` label (#116): a pasted certificate is routinely a
+		// self-signed one shared across nodes, and forcing insecure=false on it
+		// left every URI client unable to connect. Subscriptions additionally pin
+		// self-signed certificates (fingerprint / embedded trust anchor).
+		insecure := managedCertClientInsecure(cert, req.Insecure)
 		client := map[string]interface{}{
 			"insecure": insecure,
 			"utls":     map[string]interface{}{"enabled": true, "fingerprint": fpOrDefault(req.Fingerprint)},
@@ -775,6 +791,14 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// On edit, keep existing cert/key when the form leaves them blank.
+	storedCert := ""
+	if id != 0 {
+		if cur, _ := a.st.GetSbTls(id); cur != nil {
+			var cs map[string]interface{}
+			_ = json.Unmarshal([]byte(cur.ServerJSON), &cs)
+			storedCert, _ = cs["certificate"].(string)
+		}
+	}
 	if id != 0 && (req.Certificate == "" || req.Key == "") {
 		if cur, _ := a.st.GetSbTls(id); cur != nil {
 			var s map[string]interface{}
@@ -796,6 +820,21 @@ func (a *API) handleAdminSaveCertTls(w http.ResponseWriter, r *http.Request) {
 	if err := validateCertKeyPair(req.Certificate, req.Key); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// A newly supplied certificate must carry SANs and cover the SNI (#119).
+	// One kept unchanged from the stored profile is not re-judged, so editing
+	// e.g. the ALPN of an existing legacy profile keeps working.
+	// With insecure the client skips name verification anyway, so only the
+	// SAN presence is enforced there.
+	if storedCert == "" || req.Certificate != storedCert {
+		mustCover := req.ServerName
+		if req.Insecure {
+			mustCover = ""
+		}
+		if err := singbox.ValidateCertForName(req.Certificate, mustCover); err != nil {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	server := map[string]interface{}{
 		"enabled":     true,
@@ -1522,6 +1561,20 @@ func (a *API) handleAdminListSbInbounds(w http.ResponseWriter, r *http.Request) 
 			"account_count":       accounts,
 			"user_count":          credentials,
 		}
+		if n.Type == "mixed" { // InboundTLSInfo is nil unless TLS is effectively on (profile or inline)
+			hosts := []string{}
+			if n.ServerID == 0 {
+				hosts = append(hosts, a.nodeHost())
+			} else if sv, _ := a.st.GetServer(n.ServerID); sv != nil {
+				hosts = append(hosts, sv.Host, sv.HostV6)
+			}
+			if info := a.st.InboundTLSInfo(n); info != nil {
+				m["tls_info"] = info
+				if warn := httpsProxyHostWarning(info, hosts); warn != "" {
+					m["tls_warning"] = warn
+				}
+			}
+		}
 		out = append(out, m)
 	}
 	ok(w, out)
@@ -2028,4 +2081,64 @@ func failRelayTopology(w http.ResponseWriter, err error) bool {
 	}
 	fail(w, http.StatusBadRequest, err.Error())
 	return true
+}
+
+// quickCertNames trims, unbrackets and de-duplicates candidate certificate
+// names, keeping their order (the first becomes the SNI/CN).
+func quickCertNames(in []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, n := range in {
+		n = strings.TrimSpace(n)
+		if len(n) > 1 && n[0] == '[' && n[len(n)-1] == ']' {
+			n = n[1 : len(n)-1]
+		}
+		if n == "" || seen[strings.ToLower(n)] {
+			continue
+		}
+		seen[strings.ToLower(n)] = true
+		out = append(out, n)
+	}
+	return out
+}
+
+// managedCertClientInsecure decides the client-side insecure flag for a TLS
+// profile that references a managed certificate: never for a CA-issued (or
+// unreadable) certificate, the caller's choice for a self-signed one. Decided
+// from the certificate itself, not its `source` label (#116).
+func managedCertClientInsecure(cert *store.Cert, requested bool) bool {
+	if cert == nil || cert.DecryptFailed || !singbox.IsSelfSignedCert(cert.CertPEM) {
+		return false
+	}
+	return requested
+}
+
+// httpsProxyHostWarning explains, for an HTTPS (mixed+TLS) proxy, which of the
+// addresses users are handed the certificate does not cover. A proxy client has
+// no SNI field: it verifies the certificate against the very host it dials, so
+// a certificate shared across nodes (e.g. one domain) fails on every node IP
+// with "doesn't contain any IP SANs" (#115). Empty when everything matches or
+// the certificate could not be inspected — never warn on a guess.
+func httpsProxyHostWarning(info *store.InboundTLSInfo, hosts []string) string {
+	if info == nil || !info.Known {
+		return ""
+	}
+	var bad []string
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if covered, known := info.CoversHost(h); known && !covered {
+			bad = append(bad, h)
+		}
+	}
+	if len(bad) == 0 {
+		return ""
+	}
+	names := strings.Join(info.CertNames, "、")
+	if names == "" {
+		names = "无 SAN（仅 CN " + info.CertDomain + "）"
+	}
+	return fmt.Sprintf("证书只签给 %s，不包含用户连接用的地址 %s：HTTPS 代理客户端只能按地址校验证书，会报「doesn't contain any IP SANs」或主机名不匹配。请改用覆盖该地址的证书（如按节点地址一键自签，或给节点配域名并签对应证书），或告知用户跳过校验。", names, strings.Join(bad, "、"))
 }
