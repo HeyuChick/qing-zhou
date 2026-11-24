@@ -51,35 +51,52 @@ jobs:
           BEFORE=$(git rev-parse HEAD)
           # fork 已删除、上游仍在改的文件（独立登录页架构替代 LoginDialog）只会
           # 产生 modify/delete 冲突；冲突集全部命中时按 fork 的删除自动解决，
+          # .github/workflows/* 的冲突在下面统一钉回合并前状态；
           # 出现其他冲突仍然失败（任务红色），需手动解决。
           KNOWN_DELETED="frontend/src/components/LoginDialog.vue"
-          if ! git merge "$UP_TAG" -m "merge upstream $UP_TAG"; then
-            UNMERGED=$(git diff --name-only --diff-filter=U)
-            AUTO=1
-            for f in $UNMERGED; do
-              case " $KNOWN_DELETED " in
-                *" $f "*) git rm -q -f "$f" ;;
-                *) AUTO=0 ;;
-              esac
-            done
-            if [ "$AUTO" = 1 ]; then
-              git commit --no-edit -m "merge upstream $UP_TAG (fork 删除文件维持删除)"
-            else
-              echo "::error::存在无法自动解决的冲突：$UNMERGED"
+          if git merge-base --is-ancestor "$UP_TAG" HEAD; then
+            echo "已包含 $UP_TAG，无需合并"
+          else
+            # 使用 --no-commit --no-ff，让 .github/workflows 钉回与 KNOWN_DELETED 解冲突
+            # 都落在同一个 merge commit 里：既避免上游改动 .github/workflows/* 触发冲突
+            # 阻塞合并（如 v0.2.99 的 ci.yml），也确保不会产生触碰 .github/workflows 的
+            # 中间提交（GITHUB_TOKEN 无 workflows 权限）。
+            MERGE_OK=1
+            git merge --no-commit --no-ff "$UP_TAG" || MERGE_OK=0
+            if [ "$MERGE_OK" = 0 ] && [ ! -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+              echo "::error::git merge $UP_TAG 失败（未进入合并状态）"
               exit 1
             fi
+            if [ "$MERGE_OK" = 0 ]; then
+              UNMERGED=$(git diff --name-only --diff-filter=U)
+              AUTO=1
+              REAL_CONFLICTS=""
+              while IFS= read -r f; do
+                [ -z "$f" ] && continue
+                case "$f" in
+                  .github/workflows/*)
+                    # .github/workflows 目录整体钉回 $BEFORE，下面统一恢复
+                    ;;
+                  *)
+                    case " $KNOWN_DELETED " in
+                      *" $f "*) git rm -q -f "$f" ;;
+                      *) AUTO=0; REAL_CONFLICTS="${REAL_CONFLICTS}${REAL_CONFLICTS:+ }$f" ;;
+                    esac
+                    ;;
+                esac
+              done <<< "$UNMERGED"
+              if [ "$AUTO" != 1 ]; then
+                echo "::error::存在无法自动解决的冲突：$REAL_CONFLICTS"
+                exit 1
+              fi
+            fi
+            # 本仓库 workflow 目录不跟随上游：GITHUB_TOKEN 无 workflows 权限，推不动
+            # workflow 文件，且 fork 使用自有发布流水线。rm -f -r 先清除上游可能新增
+            # 或处于冲突态的 workflow 文件，再从 $BEFORE 完整恢复后一次性提交。
+            git rm -q -f -r --ignore-unmatch .github/workflows
+            git checkout "$BEFORE" -- .github/workflows
+            git commit -m "merge upstream $UP_TAG"
           fi
-          # 本仓库 workflow 目录不跟随上游：GITHUB_TOKEN（GitHub App 令牌）在 permissions
-          # 里根本没有 workflows 这个键，无论怎么给权限都推不动 workflow 文件——
-          # 上游 release 一旦携带 .github/workflows 改动（如 v0.2.70 的 docker.yml），
-          # Push merge 一步就会被拒："refusing to allow a GitHub App to create or update
-          # workflow ... without workflows permission"（2026-08-26 20:01 UTC 定时任务
-          # 失败根因）。fork 用自己的 build-custom-release 流水线，上游 workflow 变更
-          # 本就不该进来；用 rm+checkout 钉回合并前状态（rm 先行，上游新增的 workflow
-          # 文件也不会留下）。
-          git rm -q -r .github/workflows
-          git checkout "$BEFORE" -- .github/workflows
-          git diff --cached --quiet || git commit -m "chore: workflow 目录钉在 fork 自有版本，不跟随上游"
           echo "MERGED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Decide tag / skip
@@ -103,10 +120,6 @@ jobs:
               echo "SKIP=true" >> "$GITHUB_ENV"
             fi
           fi
-
-      - name: Push merge
-        if: env.SKIP != 'true'
-        run: git push origin heiyu-custom
 
       - uses: actions/setup-node@v4
         if: env.SKIP != 'true'
@@ -140,6 +153,10 @@ jobs:
               -ldflags "-s -w -X qingzhou/internal/version.Version=${TAG}" \
               -o "probe-linux-$arch" ./cmd/probe
           done
+
+      - name: Push merge
+        if: env.SKIP != 'true'
+        run: git push origin heiyu-custom
 
       - name: Create release
         if: env.SKIP != 'true'

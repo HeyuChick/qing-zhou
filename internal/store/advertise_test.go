@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -250,5 +251,33 @@ func TestCFrontedInboundAdvertisesTLS(t *testing.T) {
 	}
 	if strings.Contains(l, "security=none") {
 		t.Errorf("CF-fronted inbound link must not downgrade to security=none: %s", l)
+	}
+}
+
+func TestShareLinkTLSStateWithClient(t *testing.T) {
+	cases := []struct {
+		id                       int64
+		profile, client, options map[string]any
+		enabled, disabled, valid bool
+	}{
+		// 品牌定制：服务端 enabled:false（CF 前置·入站明文）+ client 声明 TLS
+		// ⇒ 链接按 TLS 渲染，不降级 security=none。
+		{1, map[string]any{"enabled": false}, map[string]any{"enabled": true}, map[string]any{}, true, false, true},
+		{1, map[string]any{"enabled": false}, map[string]any{"server_name": "cdn.example.com"}, map[string]any{}, true, false, true},
+		// 服务端明文且 client 无 TLS 线索 ⇒ 维持明文语义。
+		{1, map[string]any{"enabled": false}, map[string]any{}, map[string]any{}, false, true, true},
+		{1, map[string]any{"enabled": false}, nil, map[string]any{}, false, true, true},
+		// 服务端开启 TLS 时保持 TLS（不因内联 tls disabled 降级）。
+		{1, map[string]any{"enabled": true}, nil, map[string]any{"tls": map[string]any{"enabled": false}}, true, false, true},
+		// tls_id=0 时 client 不应覆盖明文/内联判定。
+		{0, nil, map[string]any{"enabled": true}, map[string]any{}, false, true, true},
+	}
+	for i, tc := range cases {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			e, d, _, v := shareLinkTLSStateWithClient(tc.id, tc.profile, tc.client, tc.options)
+			if e != tc.enabled || d != tc.disabled || v != tc.valid {
+				t.Fatalf("got %v/%v/%v, want %v/%v/%v", e, d, v, tc.enabled, tc.disabled, tc.valid)
+			}
+		})
 	}
 }
