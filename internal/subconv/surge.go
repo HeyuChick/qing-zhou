@@ -79,6 +79,16 @@ func surgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) s
 			b.WriteString(grpAIClash + " = fallback, " + strings.Join(sg.aiFallbackOrder(), ", ") +
 				", url = http://www.gstatic.com/generate_204, interval = 300\n")
 		}
+		if sg.hasMediaSplit() {
+			if len(sg.nonAI) > 1 {
+				selMedia := append([]string{grpMediaAutoClash, grpSelectClash}, sg.nonAI...)
+				b.WriteString(grpMediaClash + " = select, " + strings.Join(selMedia, ", ") + "\n")
+				b.WriteString(grpMediaAutoClash + " = fallback, " + strings.Join(sg.nonAIFallbackOrder(), ", ") +
+					", url = http://www.gstatic.com/generate_204, interval = 300\n")
+			} else {
+				b.WriteString(grpMediaClash + " = select, " + sg.nonAI[0] + ", " + grpSelectClash + "\n")
+			}
+		}
 	}
 
 	b.WriteString("\n[Rule]\n")
@@ -95,6 +105,9 @@ func surgeWithProfile(proxies []*Proxy, subURL string, profile RoutingProfile) s
 	// FINAL sends every public destination to the selected proxy policy.
 	if profile == ProfileLegacy || profile == ProfileCNDirect {
 		b.WriteString("GEOIP,CN,DIRECT\n")
+	}
+	if sg.hasMediaSplit() {
+		b.WriteString("RULE-SET," + surgeMediaRuleURL + "," + grpMediaClash + ",update-interval=86400\n")
 	}
 	b.WriteString("FINAL," + grpSelectClash + ",dns-failed\n")
 	return b.String()

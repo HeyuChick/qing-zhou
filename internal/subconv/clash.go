@@ -133,6 +133,9 @@ func clashWithProfile(proxies []*Proxy, template string, profile RoutingProfile,
 	if len(sg.ai) > 0 && !templateGroupsOnly {
 		injectClashAIRoute(doc)
 	}
+	if sg.hasMediaSplit() && !templateGroupsOnly {
+		injectClashMediaRoute(doc)
+	}
 	rules, _ := doc["rules"].([]interface{})
 	if len(catchAll) > 0 {
 		rules = append(rules, catchAll...)
@@ -346,6 +349,21 @@ func clashGroups(sg strategyGroups) []map[string]any {
 	if len(sg.ai) > 0 {
 		groups = append(groups, clashFallback(grpAIClash, sg.aiFallbackOrder()))
 	}
+	if sg.hasMediaSplit() {
+		if len(sg.nonAI) > 1 {
+			mediaProxies := make([]string, 0, 2+len(sg.nonAI))
+			mediaProxies = append(mediaProxies, grpMediaAutoClash, grpSelectClash)
+			mediaProxies = append(mediaProxies, sg.nonAI...)
+			groups = append(groups,
+				map[string]any{"name": grpMediaClash, "type": "select", "proxies": mediaProxies},
+				clashFallback(grpMediaAutoClash, sg.nonAIFallbackOrder()),
+			)
+		} else {
+			groups = append(groups, map[string]any{
+				"name": grpMediaClash, "type": "select", "proxies": []string{sg.nonAI[0], grpSelectClash},
+			})
+		}
+	}
 	return groups
 }
 
@@ -357,12 +375,28 @@ func injectClashAIRoute(doc map[string]any) {
 	providers["qingzhou-ai"] = map[string]any{
 		"type": "http", "behavior": "domain", "format": "mrs",
 		"path": "./ruleset/qingzhou-ai.mrs", "url": clashAIRuleURL,
-		"interval": 86400, "proxy": grpFixedClash,
+		"interval": 86400, "proxy": "DIRECT",
 	}
 	doc["rule-providers"] = providers
 
 	rules, _ := doc["rules"].([]any)
 	doc["rules"] = append([]any{"RULE-SET,qingzhou-ai," + grpAIClash}, rules...)
+}
+
+func injectClashMediaRoute(doc map[string]any) {
+	providers, _ := doc["rule-providers"].(map[string]any)
+	if providers == nil {
+		providers = map[string]any{}
+	}
+	providers["qingzhou-media"] = map[string]any{
+		"type": "http", "behavior": "domain", "format": "text",
+		"path": "./ruleset/qingzhou-media.txt", "url": clashMediaRuleURL,
+		"interval": 86400, "proxy": "DIRECT",
+	}
+	doc["rule-providers"] = providers
+
+	rules, _ := doc["rules"].([]any)
+	doc["rules"] = append(rules, "RULE-SET,qingzhou-media,"+grpMediaClash)
 }
 
 func clashFallback(name string, proxies []string) map[string]any {

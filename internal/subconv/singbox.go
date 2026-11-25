@@ -89,6 +89,12 @@ func singboxWithProfile(proxies []*Proxy, template string, profile RoutingProfil
 	if len(sg.ai) > 0 {
 		generatedTags[tagAI] = true
 	}
+	if sg.hasMediaSplit() {
+		generatedTags[tagMedia] = true
+		if len(sg.nonAI) > 1 {
+			generatedTags[tagMediaAuto] = true
+		}
+	}
 	for _, n := range sg.all {
 		generatedTags[n] = true
 	}
@@ -114,6 +120,24 @@ func singboxWithProfile(proxies []*Proxy, template string, profile RoutingProfil
 		}
 		all = append(all, ai)
 	}
+	if sg.hasMediaSplit() {
+		if len(sg.nonAI) > 1 {
+			mediaOuts := make([]string, 0, 2+len(sg.nonAI))
+			mediaOuts = append(mediaOuts, tagMediaAuto, tagProxy)
+			mediaOuts = append(mediaOuts, sg.nonAI...)
+			all = append(all,
+				map[string]any{"type": "selector", "tag": tagMedia, "outbounds": mediaOuts},
+				map[string]any{
+					"type": "urltest", "tag": tagMediaAuto, "outbounds": append([]string(nil), sg.nonAI...),
+					"url": "https://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 80,
+				},
+			)
+		} else {
+			all = append(all, map[string]any{
+				"type": "selector", "tag": tagMedia, "outbounds": []string{sg.nonAI[0], tagProxy},
+			})
+		}
+	}
 	all = append(all, outs...)
 	all = append(all, map[string]any{"type": "direct", "tag": "direct"})
 	doc["outbounds"] = all
@@ -122,6 +146,9 @@ func singboxWithProfile(proxies []*Proxy, template string, profile RoutingProfil
 	}
 	if len(sg.ai) > 0 {
 		injectSingboxAIRoute(doc)
+	}
+	if sg.hasMediaSplit() {
+		injectSingboxMediaRoute(doc)
 	}
 	// Templates are normalized before generated outbounds exist. Perform this
 	// compatibility cleanup only now, against the final direct outbound, so old
@@ -461,7 +488,40 @@ func injectSingboxAIRoute(doc map[string]any) {
 	}
 	kept = append(kept, map[string]any{
 		"type": "remote", "tag": "qingzhou-ai", "format": "binary",
-		"download_detour": tagProxy, "url": singboxAIRuleURL,
+		"download_detour": "direct", "url": singboxAIRuleURL,
+	})
+	route["rule_set"] = kept
+}
+
+// injectSingboxMediaRoute appends the media & large-download rule at the end of
+// route.rules (after domestic CN direct rules, before route.final).
+func injectSingboxMediaRoute(doc map[string]any) {
+	route, ok := doc["route"].(map[string]any)
+	if !ok {
+		route = map[string]any{}
+		doc["route"] = route
+	}
+	rules := mapSlice(route["rules"])
+	keptRules := make([]map[string]any, 0, len(rules)+1)
+	for _, r := range rules {
+		if r["rule_set"] == "qingzhou-media" && r["outbound"] == tagMedia {
+			continue
+		}
+		keptRules = append(keptRules, r)
+	}
+	keptRules = append(keptRules, map[string]any{"rule_set": "qingzhou-media", "outbound": tagMedia})
+	route["rules"] = keptRules
+
+	ruleSets := mapSlice(route["rule_set"])
+	kept := make([]map[string]any, 0, len(ruleSets)+1)
+	for _, ruleSet := range ruleSets {
+		if tag, _ := ruleSet["tag"].(string); tag != "qingzhou-media" {
+			kept = append(kept, ruleSet)
+		}
+	}
+	kept = append(kept, map[string]any{
+		"type": "remote", "tag": "qingzhou-media", "format": "binary",
+		"download_detour": "direct", "url": singboxMediaRuleURL,
 	})
 	route["rule_set"] = kept
 }
