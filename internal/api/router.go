@@ -234,7 +234,9 @@ func (a *API) Router() http.Handler {
 	r.Use(middleware.Recoverer)
 	// gzip responses (JSON API + the embedded JS/CSS bundle). Cheap CPU for a large
 	// bandwidth win on the small boxes this targets; skips already-compressed types.
-	r.Use(middleware.Compress(5))
+	// /sub/ handles its own gzip negotiation so text/yaml (Clash), application/json
+	// (sing-box), text/plain (base64/Surge), and q=0 are all handled consistently.
+	r.Use(compressExceptSub(5))
 	r.Use(middleware.Timeout(RequestTimeout))
 	// Cap request bodies so an authenticated client can't drive the process into
 	// memory pressure with a multi-GB POST. 8 MiB comfortably covers the largest
@@ -405,6 +407,7 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/sb/tls/quick-selfsigned", a.handleAdminQuickSelfSignedTls)
 		ar.Post("/api/admin/sb/tls/acme", a.handleAdminAcmeCert)
 		ar.Post("/api/admin/sb/tls/cert", a.handleAdminSaveCertTls)
+		ar.Post("/api/admin/sb/tls/ech-keygen", a.handleAdminGenerateECHKeypair)
 		ar.Post("/api/admin/sb/tls/reorder", a.handleAdminReorderSbTls)
 		ar.Put("/api/admin/sb/tls/cert/{id}", a.handleAdminSaveCertTls)
 		ar.Put("/api/admin/sb/tls/{id}", a.handleAdminSaveSbTls)
@@ -417,6 +420,7 @@ func (a *API) Router() http.Handler {
 		ar.Post("/api/admin/certs/paste", a.handleAdminCertPaste)
 		ar.Post("/api/admin/certs/self-signed", a.handleAdminCertSelfSigned)
 		ar.Post("/api/admin/certs/{id}/renew", a.handleAdminCertRenew)
+		ar.Post("/api/admin/certs/{id}/reissue", a.handleAdminCertReissue)
 		ar.Get("/api/admin/certs/{id}/export", a.handleAdminExportCert)
 		ar.Put("/api/admin/certs/{id}", a.handleAdminUpdateCert)
 		ar.Delete("/api/admin/certs/{id}", a.handleAdminDeleteCert)

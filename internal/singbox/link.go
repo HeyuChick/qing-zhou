@@ -62,6 +62,11 @@ type LinkParams struct {
 	// `insecure` into one that fails verification.
 	PinCert string
 
+	// ECHConfig is the bare base64-encoded ECHConfigList (without PEM armour),
+	// carried on TLS share links as `ech=<base64>` (vmess: JSON key `"ech"`),
+	// matching S-UI #1339. Never set for REALITY or plaintext inbounds.
+	ECHConfig string
+
 	// transport (vless/vmess/trojan): Network is ws|grpc|httpupgrade ("" or tcp = none)
 	Network     string
 	Path        string              // ws/httpupgrade path
@@ -147,6 +152,13 @@ func (p LinkParams) pinQuery(esc func(string) string) []string {
 		q = append(q, "qz-cert="+esc(p.PinCert))
 	}
 	return q
+}
+
+func (p LinkParams) echQuery(esc func(string) string) []string {
+	if p.ECHConfig == "" {
+		return nil
+	}
+	return []string{"ech=" + esc(p.ECHConfig)}
 }
 
 // noUDPParam is the query key/value advertising that a node cannot carry UDP.
@@ -307,6 +319,7 @@ func BuildShareLink(p LinkParams) string {
 				q = append(q, "allowInsecure=1")
 			}
 			q = append(q, p.pinQuery(esc)...)
+			q = append(q, p.echQuery(esc)...)
 		}
 		if p.ALPN != "" && !p.TLSDisabled {
 			q = append(q, "alpn="+esc(p.ALPN))
@@ -331,6 +344,7 @@ func BuildShareLink(p LinkParams) string {
 				q = append(q, "allowInsecure=1")
 			}
 			q = append(q, p.pinQuery(esc)...)
+			q = append(q, p.echQuery(esc)...)
 		}
 		if p.ALPN != "" && !p.TLSDisabled {
 			q = append(q, "alpn="+esc(p.ALPN))
@@ -363,6 +377,7 @@ func BuildShareLink(p LinkParams) string {
 		// removes the ambiguity.
 		q = append(q, "udp_relay_mode="+tuicUDPRelayModeNative)
 		q = append(q, p.pinQuery(esc)...)
+		q = append(q, p.echQuery(esc)...)
 		if p.NoUDP {
 			q = append(q, noUDPParam)
 		}
@@ -383,6 +398,7 @@ func BuildShareLink(p LinkParams) string {
 		if p.PinCert != "" {
 			q = append(q, "qz-cert="+esc(p.PinCert))
 		}
+		q = append(q, p.echQuery(esc)...)
 		// obfs must be advertised to clients, otherwise the handshake fails
 		// when the inbound has salamander obfs enabled.
 		if p.Obfs != "" {
@@ -469,6 +485,9 @@ func BuildShareLink(p LinkParams) string {
 			if p.PinCert != "" {
 				m["qz-cert"] = p.PinCert
 			}
+			if p.ECHConfig != "" {
+				m["ech"] = p.ECHConfig
+			}
 		} else {
 			m["tls"] = ""
 		}
@@ -514,6 +533,7 @@ func BuildShareLink(p LinkParams) string {
 			q = append(q, "insecure=1")
 		}
 		q = append(q, p.pinQuery(esc)...)
+		q = append(q, p.echQuery(esc)...)
 		if p.NoUDP {
 			q = append(q, noUDPParam)
 		}
@@ -538,6 +558,7 @@ func BuildShareLink(p LinkParams) string {
 		if p.PinCert != "" {
 			q = append(q, "qz-cert="+esc(p.PinCert))
 		}
+		q = append(q, p.echQuery(esc)...)
 		if p.NoUDP {
 			q = append(q, noUDPParam)
 		}
